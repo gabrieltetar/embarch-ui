@@ -1,0 +1,370 @@
+//! The Study Designer tab's backend (milestone-1.md §4.6): merged action
+//! list, custom-action registry, and build/run/watch — all in-process
+//! authoring via `embarch-study-designer` (pure/offline, no hardware
+//! touched), submission/execution via `embarch-core-client` over HTTP+Bearer
+//! (design.md §3 decision 5). Unlike `study-designer-ui`, which shells out
+//! to `embarch-api`'s CLI for `run-study`/`study-status`, this talks to
+//! `embarch-core` directly through the same shared client the Dashboard/
+//! Topology/Enroll tabs already use.
+//!
+//! Disabled entirely (every route below answers `404`) when `[study_designer]`
+//! isn't set in config — this session resolved via `AskUserQuestion` that a
+//! config field, not a UI picker or cwd search, names the firmware repo.
+
+use crate::config::StudyDesignerConfig;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Json};
+use embarch_core_client::CoreClient;
+use embarch_study_designer::{
+    build_study, merge_actions, ActionRegistry, BuiltInActionKind, ZephyrBleDefExtractor,
+    GattConfigExtractor, GattServiceInfo, RegisteredAction, RoleChoice, RowAction, Study, StudyResult,
+    TableRow,
+};
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+use tokio::sync::watch;
+
+/// How long `POST /api/study-designer/discover` waits for a one-step
+/// `BleConnect`->`GattDiscover` study to reach a terminal state before
+/// giving up — matches `study-designer-ui`'s own precedent
+/// (`embarch-study-designer/milestone-11.md` §3.6).
+const DISCOVER_TIMEOUT: Duration = Duration::from_secs(30);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+struct Inner {
+    config: StudyDesignerConfig,
+    core: Arc<CoreClient>,
+    /// The most recent live `GattDiscover` result, if any — `None` until
+    /// `POST /api/study-designer/discover` has succeeded at least once.
+    live_gatt: Mutex<Option<Vec<GattServiceInfo>>>,
+    /// Computed once, lazily, on first need — the firmware repo's source
+    /// tree doesn't change while this process is running.
+    static_gatt: OnceLock<Option<Vec<GattServiceInfo>>>,
+    run_tx: watch::Sender<RunState>,
+}
+
+#[derive(Clone)]
+pub struct StudyDesigner(Arc<Inner>);
+
+impl StudyDesigner {
+    pub fn new(config: StudyDesignerConfig, core: Arc<CoreClient>) -> StudyDesigner {
+        let (run_tx, _) = watch::channel(RunState::Idle);
+        StudyDesigner(Arc::new(Inner {
+            config,
+            core,
+            live_gatt: Mutex::new(None),
+            static_gatt: OnceLock::new(),
+            run_tx,
+        }))
+    }
+
+    fn registry(&self) -> Result<ActionRegistry, String> {
+        ActionRegistry::load(&self.0.config.firmware_repo_path).map_err(|e| e.to_string())
+    }
+
+    /// Runs the configured `static_extractor` at most once per process.
+    /// An unrecognized name is a named error the first time it's needed,
+    /// not a silent guess — `reference-dut` is the only name this crate
+    /// currently ships an extractor for (design.md §3 decision 33).
+    fn static_gatt(&self) -> Option<Vec<GattServiceInfo>> {
+        self.0
+            .static_gatt
+            .get_or_init(|| match self.0.config.static_extractor.as_deref() {
+                Some("zephyr-ble-def") => ZephyrBleDefExtractor
+                    .extract(&self.0.config.firmware_repo_path)
+                    .map(|services| services.iter().cloned().collect())
+                    .map_err(|e| tracing::warn!("static GATT extraction failed: {e}"))
+                    .ok(),
+                Some(other) => {
+                    tracing::warn!("unrecognized static_extractor '{other}' — only 'reference-dut' exists today");
+                    None
+                }
+                None => None,
+            })
+            .clone()
+    }
+
+    fn live_gatt(&self) -> Option<Vec<GattServiceInfo>> {
+        self.0.live_gatt.lock().unwrap().clone()
+    }
+}
+
+// `StudyResult` is `heapless`-backed with large fixed-capacity buffers
+// (`MAX_STEPS_PER_STUDY` steps' worth of `captured_data`/`gatt_services`/
+// `gatt_activity`) — over a megabyte inline, the same "oversized stack
+// frame" shape `embarch-api/design.md` decision 36 and this crate's own
+// design.md §7 already found real stack-overflow risk in. Boxed here so
+// `RunState` itself stays small regardless.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RunState {
+    Idle,
+    Running { study_id: String, current_step: Option<u32>, total_steps: Option<u32> },
+    Completed { study_id: String, result: Box<StudyResult> },
+    Failed { study_id: Option<String>, reason: String },
+}
+
+fn not_configured() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        "the Study Designer tab needs [study_designer].firmware_repo_path set in embarch-ui's config",
+    )
+        .into_response()
+}
+
+/// A fixed step-count of `MAX_STEPS_PER_STUDY`-independent studies — `Study`
+/// name doesn't matter beyond fitting the length limit, so a literal here is
+/// fine rather than accepting one from the client for this one-click action.
+fn discover_study() -> Result<Study, String> {
+    let rows = vec![
+        TableRow {
+            name: "connect".to_string(),
+            action: RowAction::BuiltIn { which: BuiltInActionKind::BleConnect, role: RoleChoice::Central },
+            timeout_ms: 15_000,
+            continue_on_fail: false,
+        },
+        TableRow {
+            name: "discover".to_string(),
+            action: RowAction::BuiltIn { which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central },
+            timeout_ms: 15_000,
+            continue_on_fail: false,
+        },
+    ];
+    build_study("embarch-ui discover", &rows, &ActionRegistry::default()).map_err(|e| e.to_string())
+}
+
+/// Every submitter recomputes `steps_crc` immediately before sending
+/// (`embarch-study-designer/design.md` §3 decision 26) — the same one-liner
+/// `embarch-api`'s own `study.rs::recompute_steps_crc` uses, inlined here
+/// rather than depending on that crate for it.
+fn seal_crc(study: &mut Study) -> Result<(), String> {
+    study.steps_crc = embarch_study_designer::steps_crc(&study.steps).map_err(|e| format!("{e:?}"))?;
+    Ok(())
+}
+
+fn first_gatt_services(result: &StudyResult) -> Option<Vec<GattServiceInfo>> {
+    result
+        .steps
+        .iter()
+        .find_map(|s| s.gatt_services.as_ref())
+        .map(|v| v.iter().cloned().collect())
+}
+
+/// Polls `GET /study/{id}` until a terminal status or `timeout` elapses.
+/// embarch-ui never consumes Core's own `GET /study/{id}/events` SSE stream
+/// directly — polling server-side and republishing over embarch-ui's own
+/// SSE (the `run` endpoint's `RunState`, or this function's caller for the
+/// synchronous `discover` case) is simpler and gives the same "the browser
+/// never polls" property decision 6 asks for.
+async fn poll_until_terminal(core: &CoreClient, study_id: &str, timeout: Duration) -> Result<StudyResult, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let status = core.get_study_status(study_id).await.map_err(|e| format!("{e:#}"))?;
+        match status.status.as_str() {
+            "completed" => {
+                return status
+                    .result
+                    .ok_or_else(|| "embarch-core reported \"completed\" but returned no result".to_string())
+            }
+            "failed" => {
+                return Err(status.reason.unwrap_or_else(|| "study failed with no reason given".to_string()))
+            }
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("timed out after {}s waiting for study {study_id}", timeout.as_secs()));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ActionsResponse {
+    actions: Vec<embarch_study_designer::MergedAction>,
+    live_gatt_available: bool,
+    static_gatt_available: bool,
+}
+
+/// Shared by the `GET /api/study-designer/actions` handler and `discover`
+/// (which returns the freshly-merged list once its own live result lands).
+fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
+    let registry = match sd.registry() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let live = sd.live_gatt();
+    let static_gatt = sd.static_gatt();
+    let actions = merge_actions(live.as_deref(), static_gatt.as_deref(), &registry);
+    Json(ActionsResponse {
+        actions,
+        live_gatt_available: live.is_some(),
+        static_gatt_available: static_gatt.is_some(),
+    })
+    .into_response()
+}
+
+pub async fn api_actions(State(state): State<crate::AppState>) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    actions_response(&sd)
+}
+
+pub async fn api_registry(State(state): State<crate::AppState>) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    match sd.registry() {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Upserts one `RegisteredAction` by name — never a semantic "what does
+/// this do" field anywhere on this type (`embarch-study-designer/design.md`
+/// §3 decision 35's own non-goal).
+pub async fn api_register_action(
+    State(state): State<crate::AppState>,
+    Json(action): Json<RegisteredAction>,
+) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let mut registry = match sd.registry() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    registry.actions.retain(|a| a.name != action.name);
+    registry.actions.push(action);
+    match registry.save(&sd.0.config.firmware_repo_path) {
+        Ok(()) => Json(registry).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+pub async fn api_discover(State(state): State<crate::AppState>) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let mut study = match discover_study() {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    if let Err(e) = seal_crc(&mut study) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+    let study_id = match sd.0.core.post_study(&study).await {
+        Ok(resp) => resp.study_id,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    };
+    match poll_until_terminal(&sd.0.core, &study_id, DISCOVER_TIMEOUT).await {
+        Ok(result) => {
+            let services = first_gatt_services(&result).unwrap_or_default();
+            *sd.0.live_gatt.lock().unwrap() = Some(services);
+            actions_response(&sd)
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunRequest {
+    name: String,
+    rows: Vec<TableRow>,
+}
+
+pub async fn api_run(
+    State(state): State<crate::AppState>,
+    Json(req): Json<RunRequest>,
+) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let registry = match sd.registry() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let mut study = match build_study(&req.name, &req.rows, &registry) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if let Err(e) = seal_crc(&mut study) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+    let study_id = match sd.0.core.post_study(&study).await {
+        Ok(resp) => resp.study_id,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    };
+
+    let _ = sd.0.run_tx.send(RunState::Running { study_id: study_id.clone(), current_step: None, total_steps: None });
+    let core = sd.0.core.clone();
+    let run_tx = sd.0.run_tx.clone();
+    let watched_id = study_id.clone();
+    tokio::spawn(async move { watch_study(core, watched_id, run_tx).await });
+
+    Json(serde_json::json!({ "study_id": study_id })).into_response()
+}
+
+async fn watch_study(core: Arc<CoreClient>, study_id: String, tx: watch::Sender<RunState>) {
+    let start = tokio::time::Instant::now();
+    // No hard timeout here, unlike `discover` — a real study can legitimately
+    // run far longer than 30s (embarch-study-designer/design.md §3 decision
+    // 9's own "unbounded BLE wait" reasoning); it ends when Core reports a
+    // terminal status, not on a clock this tab invents.
+    loop {
+        match core.get_study_status(&study_id).await {
+            Ok(status) => match status.status.as_str() {
+                "completed" => {
+                    let state = match status.result {
+                        Some(result) => RunState::Completed { study_id, result: Box::new(result) },
+                        None => RunState::Failed {
+                            study_id: Some(study_id),
+                            reason: "embarch-core reported \"completed\" but returned no result".to_string(),
+                        },
+                    };
+                    let _ = tx.send(state);
+                    return;
+                }
+                "failed" => {
+                    let _ = tx.send(RunState::Failed {
+                        study_id: Some(study_id),
+                        reason: status.reason.unwrap_or_else(|| "study failed with no reason given".to_string()),
+                    });
+                    return;
+                }
+                _ => {
+                    let _ = tx.send(RunState::Running {
+                        study_id: study_id.clone(),
+                        current_step: status.current_step,
+                        total_steps: status.total_steps,
+                    });
+                }
+            },
+            Err(e) => {
+                let _ = tx.send(RunState::Failed { study_id: Some(study_id), reason: format!("{e:#}") });
+                return;
+            }
+        }
+        // A host-side backstop, not a protocol timeout — Core's own
+        // watchdog (embarch-study-designer/design.md §3 decision 16) is
+        // what actually bounds a hung study; this just stops embarch-ui
+        // from polling forever if Core itself never resolves it.
+        if start.elapsed() > Duration::from_secs(60 * 30) {
+            let _ = tx.send(RunState::Failed {
+                study_id: Some(study_id),
+                reason: "gave up watching after 30 minutes with no terminal status from embarch-core".to_string(),
+            });
+            return;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+pub async fn api_run_events(State(state): State<crate::AppState>) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let rx = sd.0.run_tx.subscribe();
+    let stream = futures_util::stream::unfold((rx, true), |(mut rx, first)| async move {
+        if !first && rx.changed().await.is_err() {
+            return None;
+        }
+        let run_state = rx.borrow().clone();
+        let payload = serde_json::to_string(&run_state).unwrap_or_else(|_| "{}".to_string());
+        let event = Event::default().event("run").data(payload);
+        Some((Ok::<Event, Infallible>(event), (rx, false)))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}

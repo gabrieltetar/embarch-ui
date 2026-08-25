@@ -1,0 +1,83 @@
+{
+  "name": "embarch-ui-launcher",
+  "displayName": "EmbArch UI Launcher",
+  "description": "Thin launcher for embarch-ui: starts/stops the server as a subprocess and opens it in the system browser. Renders nothing inside the editor.",
+  "version": "0.1.0",
+  "publisher": "embarch",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gabrieltetar/embarch-ui.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "embarchUi.start",
+        "title": "EmbArch UI: Start",
+        "category": "EmbArch UI"
+      },
+      {
+        "command": "embarchUi.stop",
+        "title": "EmbArch UI: Stop",
+        "category": "EmbArch UI"
+      },
+      {
+        "command": "embarchUi.openInBrowser",
+        "title": "EmbArch UI: Open in Browser",
+        "category": "EmbArch UI"
+      }
+    ],
+    "configuration": {
+      "title": "EmbArch UI Launcher",
+      "properties": {
+        "embarchUi.binaryPath": {
+          "type": "string",
+          "default": "embarch-ui",
+          "description": "Path to the embarch-ui binary. Defaults to 'embarch-ui' on PATH — set an absolute path if it isn't installed there."
+        },
+        "embarchUi.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host embarch-ui binds to. Must match embarch-ui's own BIND_ADDR (127.0.0.1 by default, loopback-only)."
+        },
+        "embarchUi.port": {
+          "type": "number",
+          "default": 4890,
+          "description": "Port embarch-ui binds to. Must match embarch-ui's own BIND_PORT."
+        },
+        "embarchUi.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to an embarch-ui TOML config file. Sets EMBARCH_UI_CONFIG for the spawned process; left empty, embarch-ui's own zero-config defaults apply."
+        },
+        "embarchUi.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start embarch-ui automatically when VS Code starts (and stop it when VS Code closes)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
