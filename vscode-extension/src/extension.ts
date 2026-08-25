@@ -52,8 +52,14 @@ async function start(): Promise<void> {
     return;
   }
 
-  const { binaryPath, configPath } = config();
+  const { binaryPath, configPath, host, port } = config();
   const env = { ...process.env };
+  // Forward the configured host/port to the binary. Without this the two
+  // disagreed: the binary bound its own hardcoded 127.0.0.1:4890 while
+  // `serverUrl()` above built the URL to open from these settings, so any
+  // non-default value opened a browser at an address nothing was serving.
+  env.EMBARCH_UI_HOST = host;
+  env.EMBARCH_UI_PORT = String(port);
   if (configPath) {
     env.EMBARCH_UI_CONFIG = configPath;
   }

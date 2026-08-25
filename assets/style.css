@@ -528,3 +528,201 @@ table.data-table {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ---- Study Designer tab (milestone-1.md §4.6) ---------------------------
+ *
+ * Built on the same tokens/components as every other tab -- no new colors,
+ * no new font stacks. The additions here are the shapes the other four tabs
+ * never needed: an editable table (inputs living inside .data-table cells),
+ * a modal dialog, and a form grid.
+ */
+
+.sd-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.sd-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.sd-input {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  min-width: 0;
+}
+
+.sd-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.sd-select-load {
+  min-width: 200px;
+}
+
+/* Inputs sitting inside a data-table cell: no visible chrome until focused,
+ * so a 7-column table of editable fields still reads as a table rather than
+ * as a wall of boxes. */
+.sd-table input[type="text"],
+.sd-table input[type="number"],
+.sd-table select {
+  width: 100%;
+  padding: 5px 7px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.sd-table input:focus,
+.sd-table select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.sd-table td {
+  vertical-align: middle;
+}
+
+.sd-params {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Each parameter control captions itself, since the Parameters column holds
+ * a different set of controls per action kind and one header can't name
+ * them all. */
+.sd-param {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 120px;
+}
+
+.sd-param > span {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.sd-row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.sd-icon-btn {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.sd-icon-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.sd-error {
+  color: var(--danger);
+  font-size: 12.5px;
+  margin-top: 10px;
+  white-space: pre-wrap;
+}
+
+.sd-run-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sd-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.sd-reg-field {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-top: 8px;
+}
+
+.sd-reg-value {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+/* A wide table (parameters, or a long transcript row) scrolls inside its own
+ * container -- the page body itself must never scroll sideways. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: oklch(0% 0 0 / 0.5);
+  z-index: 50;
+}
+
+.dialog {
+  position: fixed;
+  top: 8%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 51;
+  width: min(720px, 92vw);
+  max-height: 84vh;
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+@media (max-width: 720px) {
+  .sd-form-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -39,6 +39,28 @@ use tokio::sync::{watch, Notify};
 const BIND_ADDR: &str = "127.0.0.1";
 const BIND_PORT: u16 = 4890;
 
+/// `EMBARCH_UI_HOST`/`EMBARCH_UI_PORT` override the two constants above.
+///
+/// Added because the VS Code launcher extension already exposed `host`/`port`
+/// settings and built the browser URL it opens from them, while this binary
+/// hardcoded `127.0.0.1:4890` and the extension passed neither through — so
+/// changing that setting opened a URL nothing was listening on. The
+/// extension now forwards both as env vars (the same channel it already used
+/// for `EMBARCH_UI_CONFIG`), rather than growing a CLI flag surface this
+/// binary otherwise has none of.
+///
+/// An unparseable value falls back to the default rather than refusing to
+/// start: a typo'd port shouldn't leave an engineer with no UI at all, and
+/// the address actually bound is logged on every start either way.
+fn bind_address() -> String {
+    let host = std::env::var("EMBARCH_UI_HOST").unwrap_or_else(|_| BIND_ADDR.to_string());
+    let port = std::env::var("EMBARCH_UI_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(BIND_PORT);
+    format!("{host}:{port}")
+}
+
 /// How often the background task re-polls embarch-core. Every connected
 /// browser tab shares this one poll via the `watch` channel below — opening
 /// a second tab doesn't double the load on Core.
@@ -130,11 +152,20 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/study-designer/discover", post(study_designer::api_discover))
         .route("/api/study-designer/run", post(study_designer::api_run))
         .route("/api/study-designer/events", get(study_designer::api_run_events))
+        .route(
+            "/api/study-designer/studies",
+            get(study_designer::api_studies_list).post(study_designer::api_studies_save),
+        )
+        .route(
+            "/api/study-designer/studies/{slug}",
+            get(study_designer::api_studies_load).delete(study_designer::api_studies_delete),
+        )
+        .route("/api/study-designer/gatt/{study_id}", get(study_designer::api_gatt_data))
         .route("/api/logs/recent", get(api_logs_recent))
         .route("/api/logs/events", get(api_logs_events))
         .with_state(state);
 
-    let addr = format!("{BIND_ADDR}:{BIND_PORT}");
+    let addr = bind_address();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("embarch-ui listening on http://{addr}");
     axum::serve(listener, app).await?;

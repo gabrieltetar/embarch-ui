@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Json};
 use embarch_core_client::CoreClient;
 use embarch_study_designer::{
     build_study, merge_actions, ActionRegistry, BuiltInActionKind, ZephyrBleDefExtractor,
+    Requirements,
     GattConfigExtractor, GattServiceInfo, RegisteredAction, RoleChoice, RowAction, Study, StudyResult,
     TableRow,
 };
@@ -123,18 +124,42 @@ fn discover_study() -> Result<Study, String> {
     let rows = vec![
         TableRow {
             name: "connect".to_string(),
-            action: RowAction::BuiltIn { which: BuiltInActionKind::BleConnect, role: RoleChoice::Central },
+            action: RowAction::BuiltIn { which: BuiltInActionKind::BleConnect, role: RoleChoice::Central , target_name: None },
             timeout_ms: 15_000,
             continue_on_fail: false,
+            delay_before_ms: 0,
         },
         TableRow {
             name: "discover".to_string(),
-            action: RowAction::BuiltIn { which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central },
+            action: RowAction::BuiltIn { which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central , target_name: None },
             timeout_ms: 15_000,
             continue_on_fail: false,
+            delay_before_ms: 0,
         },
     ];
-    build_study("embarch-ui discover", &rows, &ActionRegistry::default()).map_err(|e| e.to_string())
+    build_study(
+        "embarch-ui discover",
+        authoring_requirements(),
+        &rows,
+        &ActionRegistry::default(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// What this tab currently declares a study requires
+/// (`embarch-study-designer/design.md` §3 decision 40).
+///
+/// **Explicitly `any` for both, not omitted** — that decision makes both
+/// fields mandatory precisely so "I don't care which build" has to be said
+/// rather than reached by leaving a field out. Saying it here is honest
+/// about today's state: this tab has no fields for a human to state a real
+/// requirement in yet, and prefilling them from live bench state is
+/// Milestone 7 Phase D's work (`embarch-ui/design.md` §3 decision 11,
+/// `embarch-outpost/milestone-1.md` §5). Until those fields exist, a study
+/// authored here genuinely does not constrain the builds it runs against,
+/// and its `StudyResult.provenance` will say `Declared` accordingly.
+fn authoring_requirements() -> Requirements {
+    Requirements::any()
 }
 
 /// Every submitter recomputes `steps_crc` immediately before sending
@@ -278,7 +303,7 @@ pub async fn api_run(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let mut study = match build_study(&req.name, &req.rows, &registry) {
+    let mut study = match build_study(&req.name, authoring_requirements(), &req.rows, &registry) {
         Ok(s) => s,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
@@ -367,4 +392,252 @@ pub async fn api_run_events(State(state): State<crate::AppState>) -> axum::respo
         Some((Ok::<Event, Infallible>(event), (rx, false)))
     });
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+// ---- saved study library (embarch-study-designer/design.md §3 decision 38) --
+//
+// One file per saved study at `<firmware-repo>/embarch/studies/<slug>.json`,
+// sibling to the `study-actions.toml` registry — same per-repo convention,
+// so a study travels with the firmware it was written against.
+//
+// The file *is* a `Study`, so `embarch-api run-study --study-file <path>`
+// re-runs it directly with no conversion step and nothing else installed.
+// The authoring rows ride along in one extra key, `_embarch_ui_rows`, which
+// `Study`'s own deserializer ignores (no `deny_unknown_fields` anywhere in
+// that crate) — that's what lets this tab reload a saved study back into an
+// editable table instead of only being able to re-run an opaque blob.
+
+/// Maps a human study name onto a filename, and refuses anything that isn't
+/// one. Not cosmetic: this string reaches `Path::join`, so `../` or an
+/// absolute path would write outside the studies directory entirely.
+fn study_slug(name: &str) -> Result<String, String> {
+    let slug: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        return Err(format!("'{name}' has no characters usable in a filename"));
+    }
+    Ok(slug)
+}
+
+fn studies_dir(sd: &StudyDesigner) -> std::path::PathBuf {
+    sd.0.config.firmware_repo_path.join("embarch").join("studies")
+}
+
+#[derive(Debug, Serialize)]
+struct SavedStudySummary {
+    slug: String,
+    name: String,
+    steps: usize,
+    /// True when the file still carries `_embarch_ui_rows` — a study saved
+    /// by this tab. A hand-written or agent-generated `Study` file dropped
+    /// into the same directory is still listed and still runnable, it just
+    /// can't be loaded back into the table for editing, and the UI says so
+    /// rather than silently offering a broken Load.
+    editable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveStudyRequest {
+    name: String,
+    rows: Vec<TableRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoadedStudy {
+    name: String,
+    rows: Vec<TableRow>,
+}
+
+pub async fn api_studies_list(State(state): State<crate::AppState>) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let dir = studies_dir(&sd);
+
+    let mut out: Vec<SavedStudySummary> = Vec::new();
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                out.push(SavedStudySummary {
+                    name: value
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or(&slug)
+                        .to_string(),
+                    steps: value.get("steps").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0),
+                    editable: value.get("_embarch_ui_rows").is_some(),
+                    slug,
+                });
+            }
+        }
+        // A missing directory is an empty library, not an error — nothing
+        // creates it until the first save, same posture `ActionRegistry`
+        // takes for a missing `study-actions.toml`.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    out.sort_by_key(|s| s.name.to_lowercase());
+    Json(out).into_response()
+}
+
+pub async fn api_studies_save(
+    State(state): State<crate::AppState>,
+    Json(req): Json<SaveStudyRequest>,
+) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let slug = match study_slug(&req.name) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let registry = match sd.registry() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+
+    // Built (and CRC-sealed) before writing, so a saved file is always a
+    // valid, immediately-runnable `Study` — a save can't quietly persist
+    // rows that would only fail at run time.
+    let mut study = match build_study(&req.name, authoring_requirements(), &req.rows, &registry) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if let Err(e) = seal_crc(&mut study) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+
+    let mut value = match serde_json::to_value(&study) {
+        Ok(serde_json::Value::Object(map)) => map,
+        Ok(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Study didn't serialize as an object").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match serde_json::to_value(&req.rows) {
+        Ok(rows) => {
+            value.insert("_embarch_ui_rows".to_string(), rows);
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    let dir = studies_dir(&sd);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't create {}: {e}", dir.display()))
+            .into_response();
+    }
+    let path = dir.join(format!("{slug}.json"));
+    let text = match serde_json::to_string_pretty(&serde_json::Value::Object(value)) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    if let Err(e) = std::fs::write(&path, text) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't write {}: {e}", path.display()))
+            .into_response();
+    }
+
+    Json(serde_json::json!({
+        "slug": slug,
+        "name": req.name,
+        "path": path.to_string_lossy(),
+        "steps": req.rows.len(),
+    }))
+    .into_response()
+}
+
+pub async fn api_studies_load(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let slug = match study_slug(&slug) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let path = studies_dir(&sd).join(format!("{slug}.json"));
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (StatusCode::NOT_FOUND, format!("no saved study '{slug}'")).into_response()
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("{} isn't valid JSON: {e}", path.display())).into_response(),
+    };
+    let Some(rows_value) = value.get("_embarch_ui_rows") else {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "'{slug}' is a runnable Study but wasn't saved from this table, so it has no rows \
+                 to load back — run it with `embarch-api run-study --study-file {}`",
+                path.display()
+            ),
+        )
+            .into_response();
+    };
+    let rows: Vec<TableRow> = match serde_json::from_value(rows_value.clone()) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("saved rows couldn't be read back: {e}")).into_response(),
+    };
+
+    Json(LoadedStudy {
+        name: value.get("name").and_then(|n| n.as_str()).unwrap_or(&slug).to_string(),
+        rows,
+    })
+    .into_response()
+}
+
+pub async fn api_studies_delete(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    let slug = match study_slug(&slug) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let path = studies_dir(&sd).join(format!("{slug}.json"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Json(serde_json::json!({ "deleted": slug })).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (StatusCode::NOT_FOUND, format!("no saved study '{slug}'")).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ---- GATT transcript passthrough ------------------------------------------
+
+/// Serves a finished study's `gatt.csv` (`embarch-study-designer/design.md`
+/// §3 decision 36) straight through from Core, so the browser downloads it
+/// over embarch-ui's own origin and never needs Core's bearer token — the
+/// same reason `/api/enroll` exists rather than the browser calling Core.
+pub async fn api_gatt_data(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(study_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+    match sd.0.core.get_study_gatt_data(&study_id).await {
+        Ok(bytes) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "text/csv".to_string()),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"gatt-{study_id}.csv\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
 }

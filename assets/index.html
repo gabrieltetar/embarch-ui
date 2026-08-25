@@ -140,9 +140,112 @@
           <h1>Study Designer</h1>
           <p>Build and run a <span class="mono">Study</span> against a connected DUT</p>
         </div>
-        <div class="card">
-          <div class="card-title">Coming next</div>
-          <p class="placeholder-note">The table-based <span class="mono">Study</span> builder and custom-action registry — implemented in <span class="mono">embarch-ui/milestone-1.md</span> §4.6, calling <span class="mono">embarch_study_designer::{registry, merged_actions, study_builder}</span> in-process, submitting to <span class="mono">embarch-core</span> over HTTP+Bearer for execution.</p>
+
+        <div id="sd-disabled" class="card" style="display:none; border-color:var(--warning);">
+          <div class="card-title">Not configured</div>
+          <p class="placeholder-note">This tab needs <span class="mono">[study_designer].firmware_repo_path</span> set in embarch-ui's config file, naming the firmware repo whose <span class="mono">embarch/study-actions.toml</span> registry and <span class="mono">embarch/studies/</span> library this tab reads and writes.</p>
+        </div>
+
+        <div id="sd-body" style="display:none;">
+          <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <label class="sd-field">
+                <span>Study name</span>
+                <input id="sd-name" type="text" class="sd-input" value="untitled-study" spellcheck="false" />
+              </label>
+              <div class="sd-toolbar-actions">
+                <button id="sd-save" class="btn">Save</button>
+                <select id="sd-load-select" class="sd-input sd-select-load"><option value="">Load saved study…</option></select>
+                <button id="sd-delete" class="btn" title="Delete the selected saved study">Delete</button>
+                <button id="sd-discover" class="btn">Discover GATT</button>
+              </div>
+            </div>
+            <p id="sd-toolbar-note" class="placeholder-note" style="margin-top:10px;">Saved studies live in <span class="mono">&lt;firmware-repo&gt;/embarch/studies/</span> as plain <span class="mono">Study</span> JSON — re-runnable straight from the CLI with <span class="mono">embarch-api run-study --study-file</span>, not only from here.</p>
+          </div>
+
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">Steps — run top to bottom</div>
+            <div class="table-scroll">
+              <table class="data-table sd-table">
+                <thead>
+                  <tr>
+                    <th style="width:34px;">#</th>
+                    <th style="width:150px;">Step name</th>
+                    <th style="width:210px;">Action</th>
+                    <th>Parameters</th>
+                    <th style="width:110px;" title="wait this long before starting the step's action — not taken out of its timeout">Wait&nbsp;first&nbsp;(ms)</th>
+                    <th style="width:110px;">Timeout&nbsp;(ms)</th>
+                    <th style="width:80px;">On&nbsp;fail</th>
+                    <th style="width:96px;"></th>
+                  </tr>
+                </thead>
+                <tbody id="sd-rows"></tbody>
+              </table>
+            </div>
+            <div class="sd-row-actions">
+              <button id="sd-add-row" class="btn">+ Add step</button>
+              <button id="sd-add-capture-template" class="btn" title="Insert the connect / open-window / stimulate / close-window shape a stimulate-and-capture study needs">+ Capture-window template</button>
+              <span style="flex:1;"></span>
+              <button id="sd-run" class="btn btn-primary">Run study</button>
+            </div>
+            <p id="sd-build-error" class="sd-error" style="display:none;"></p>
+          </div>
+
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">Detected characteristics — not yet registered</div>
+            <p class="placeholder-note" style="margin-bottom:10px;">Found by live <span class="mono">GattDiscover</span> and/or by reading the firmware repo's own source. Register one to give it a name and a set of clickable values you can pick from a step row. Nothing here invents what a characteristic means — the names and the bytes are yours.</p>
+            <div id="sd-unregistered" class="chip-pool">run <span class="mono">Discover GATT</span> to populate this</div>
+          </div>
+
+          <div id="sd-run-card" class="card" style="display:none;">
+            <div class="card-title">Run</div>
+            <div class="sd-run-head">
+              <span id="sd-run-status" class="badge badge-neutral">idle</span>
+              <span id="sd-run-id" class="mono" style="color:var(--text-secondary);"></span>
+              <span style="flex:1;"></span>
+              <a id="sd-gatt-download" class="btn" style="display:none;" download>Download GATT transcript (CSV)</a>
+            </div>
+            <p id="sd-run-reason" class="sd-error" style="display:none;"></p>
+            <div class="table-scroll" style="margin-top:12px;">
+              <table class="data-table">
+                <thead>
+                  <tr><th style="width:34px;">#</th><th style="width:160px;">Step</th><th style="width:110px;">Outcome</th><th>Captured / discovered</th></tr>
+                </thead>
+                <tbody id="sd-run-rows"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div id="sd-register-backdrop" class="dialog-backdrop" style="display:none;"></div>
+        <div id="sd-register-dialog" class="dialog" style="display:none;">
+          <div class="card-title">Register a custom action</div>
+          <p class="placeholder-note">Give this characteristic a name you'll recognize, and for a write, the exact bytes for each choice. Bytes are yours literally — typed as text or as <span class="mono">0x</span>/decimal tokens — never a number this tool encodes on your behalf.</p>
+          <div class="sd-form-grid">
+            <label class="sd-field"><span>Action name</span><input id="sd-reg-name" type="text" class="sd-input" spellcheck="false" /></label>
+            <label class="sd-field"><span>Operation</span>
+              <select id="sd-reg-op" class="sd-input">
+                <option value="write">Write</option>
+                <option value="read">Read</option>
+                <option value="subscribe">Subscribe</option>
+                <option value="notify">Notify</option>
+                <option value="indicate">Indicate</option>
+              </select>
+            </label>
+            <label class="sd-field"><span>Service UUID</span><input id="sd-reg-service" type="text" class="sd-input mono" spellcheck="false" /></label>
+            <label class="sd-field"><span>Characteristic UUID</span><input id="sd-reg-char" type="text" class="sd-input mono" spellcheck="false" /></label>
+          </div>
+          <div id="sd-reg-fields-wrap">
+            <div class="card-title" style="margin-top:16px;">Fields — one per part of the payload you want to choose</div>
+            <div id="sd-reg-fields"></div>
+            <button id="sd-reg-add-field" class="btn" style="margin-top:8px;">+ Add field</button>
+          </div>
+          <p id="sd-reg-result" class="sd-error" style="display:none;"></p>
+          <div class="sd-row-actions" style="margin-top:16px;">
+            <span style="flex:1;"></span>
+            <button id="sd-reg-cancel" class="btn">Cancel</button>
+            <button id="sd-reg-save" class="btn btn-primary">Register</button>
+          </div>
         </div>
       </section>
 
