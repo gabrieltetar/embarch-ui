@@ -162,12 +162,20 @@ fn authoring_requirements() -> Requirements {
     Requirements::any()
 }
 
-/// Every submitter recomputes `steps_crc` immediately before sending
-/// (`embarch-study-designer/design.md` §3 decision 26) — the same one-liner
-/// `embarch-api`'s own `study.rs::recompute_steps_crc` uses, inlined here
-/// rather than depending on that crate for it.
+/// Every submitter recomputes both of a study's seals immediately before
+/// sending (`embarch-study-designer/design.md` §3 decision 26) — the same
+/// two lines `embarch-api`'s own `study.rs::reseal_study` uses, inlined here
+/// rather than depending on that crate for them.
+///
+/// `streams_crc` is decision 39's 2026-08-25 amendment's sibling seal over
+/// `Study.streams`. This tab authors no taps today, so it always reseals to
+/// the empty-list value — which is genuinely 0, not a placeholder — but it
+/// is computed rather than assumed, so the day this tab does author one
+/// there is nothing to remember to change.
 fn seal_crc(study: &mut Study) -> Result<(), String> {
     study.steps_crc = embarch_study_designer::steps_crc(&study.steps).map_err(|e| format!("{e:?}"))?;
+    study.streams_crc =
+        embarch_study_designer::streams_crc(&study.streams).map_err(|e| format!("{e:?}"))?;
     Ok(())
 }
 
