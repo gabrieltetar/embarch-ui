@@ -135,6 +135,129 @@ pub struct Gap {
     pub row_index: usize,
 }
 
+/// One traced subject's share of the capture window — the "load repartition"
+/// the Trace view exists to produce (`embarch-ui/design.md` §3 decision 10).
+///
+/// **A total here is deliberately not the sum of everything drawn.** Three
+/// classes of span are excluded from `total_cycles` because their extent is
+/// not a duration, and each is counted separately rather than quietly folded
+/// in or quietly dropped:
+///
+/// - a span that **crosses a gap** (`Span::crosses_gap`) spent an unknown part
+///   of its extent doing something nobody recorded;
+/// - a span with **no closing record** (`Span::open_end`) was drawn out to the
+///   next event so it had a shape, which is not the same as having lasted that
+///   long;
+/// - a span with **no opening record** (`Span::open_start`) began before it
+///   became observable.
+///
+/// `entries` counts every span regardless, because "this subject ran N times"
+/// survives all three doubts.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadSubject {
+    /// Mirrors [`Lane::key`], so a row here and a lane there are the same
+    /// subject without the caller matching on labels.
+    pub key: String,
+    pub label: String,
+    /// Same first-class state as [`Lane::unnamed`]: this row's `label` is a
+    /// raw pointer or vector number, and must not render as though it were a
+    /// name.
+    pub unnamed: bool,
+    /// `"thread"`, `"idle"`, or `"isr"`.
+    pub kind: &'static str,
+    /// How many times this subject was entered, counting every span — the one
+    /// figure none of the three exclusions above can invalidate.
+    pub entries: usize,
+    /// Spans that contributed to `total_cycles`.
+    pub measured_spans: usize,
+    /// Summed extent of the measured spans only.
+    pub total_cycles: u64,
+    /// `total_cycles` in microseconds, or `None` when the capture carried no
+    /// header frame. Never computed against a rate nobody reported.
+    pub total_us: Option<f64>,
+    /// `total_cycles` as a fraction of the capture window, in `0.0..=1.0`.
+    /// Of the **window**, not of the accounted time — see
+    /// [`LoadSummary::isr_cycles`] for why these do not sum to 1.
+    pub share: f64,
+    /// Spans left out of `total_cycles`, by reason. A subject whose
+    /// `excluded_spans` rivals its `measured_spans` has a total worth
+    /// distrusting, and these are what let a reader see that.
+    pub excluded_spans: usize,
+    /// Summed extent of the excluded spans. Reported so the time is visible
+    /// as unaccounted rather than absent.
+    pub excluded_cycles: u64,
+    pub gap_crossing_spans: usize,
+    pub open_ended_spans: usize,
+    pub open_started_spans: usize,
+}
+
+/// The whole capture's load repartition, plus everything a reader needs to
+/// know how much of it to believe.
+///
+/// **The headline honesty constraint** (`embarch-ui/design.md` §3 decision
+/// 10): a repartition computed across an interval where records were dropped
+/// is not a measurement. [`Self::gap_fraction`] is what says how much of this
+/// window is in that state, and it is meant to be rendered *beside* the
+/// numbers, not in a footnote.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadSummary {
+    /// `cycles_to - cycles_from`. Zero for a capture too short to have a
+    /// window, in which case every `share` is zero rather than a division by
+    /// zero.
+    pub window_cycles: u64,
+    pub window_us: Option<f64>,
+    /// Cycles covered by at least one gap band, counted as a **union** — two
+    /// overlapping bands cover their union, not the sum of their widths, and
+    /// summing would let `gap_fraction` exceed 1 and read as nonsense.
+    pub gap_cycles: u64,
+    /// `gap_cycles / window_cycles`, in `0.0..=1.0`. **The number that decides
+    /// whether the rest of this struct is a measurement.**
+    pub gap_fraction: f64,
+    /// Total records the firmware itself said it lost, mirroring
+    /// [`TraceView::records_lost`] so a summary row can carry it without the
+    /// caller reaching back out to the view.
+    pub records_lost: u64,
+    /// Whether `*_us` fields here are populated at all. False means every
+    /// share below is a fraction of **cycles**, and must be said as such.
+    pub has_time_base: bool,
+    /// Measured time across **thread lanes only**, which are mutually
+    /// exclusive — exactly one thread is the running context at any instant —
+    /// so this is the one total that is meaningful to compare against the
+    /// window. Zephyr's idle thread is a thread, and is included here.
+    pub thread_cycles: u64,
+    /// The `cpu-idle` lane's measured time — a **corroborating** figure,
+    /// deliberately **not** added to [`Self::thread_cycles`].
+    ///
+    /// Found by asserting the opposite and watching it fail against the
+    /// committed `native_sim` capture: idle is reported twice by construction,
+    /// once as `RecordKind::Idle` records and once as ordinary switch
+    /// in/out of the thread the manifest names `idle`. Adding them claimed
+    /// 1,338,800 cycles of a 760,000-cycle window. They are also allowed to
+    /// *disagree* — in that capture they read 81.42% and 94.58%, because ten
+    /// of the idle-record spans have no closing record — and the disagreement
+    /// is worth seeing rather than averaging away.
+    pub idle_record_cycles: u64,
+    /// ISR time, kept **separate and deliberately not added** to the above: an
+    /// ISR runs *inside* whatever it interrupted, so its cycles are counted
+    /// twice by construction. Adding these would produce a repartition summing
+    /// past 100% and reading as a bug rather than as the nesting it is.
+    ///
+    /// Zero across all 72 ISR spans of the committed `native_sim` capture:
+    /// that simulator's cycle counter does not advance inside an interrupt.
+    /// It is a property of the capture, not of this arithmetic, and real
+    /// silicon is the thing that will say otherwise.
+    pub isr_cycles: u64,
+    /// `window_cycles - thread_cycles`, floored at zero: window time no
+    /// measured thread span accounts for. Large values mean the exclusions
+    /// above ate the picture, not that the CPU was idle — idle is a thread and
+    /// is already counted.
+    pub unaccounted_cycles: u64,
+    /// Per-subject rows, sorted by `total_cycles` descending so the heaviest
+    /// subject is first. Ties break by `key` so the order is stable across
+    /// runs of the same capture.
+    pub subjects: Vec<LoadSubject>,
+}
+
 /// A study's outpost tap, decoded into something drawable.
 #[derive(Debug, Clone, Serialize)]
 pub struct TraceView {
@@ -166,6 +289,10 @@ pub struct TraceView {
     pub gaps: Vec<Gap>,
     pub lanes: Vec<Lane>,
     pub markers: Vec<PointEvent>,
+    /// The load repartition over `lanes` (§3 decision 10). Arithmetic over the
+    /// spans above, not a second decode — every doubt it reports is one the
+    /// spans already carried.
+    pub summary: LoadSummary,
 }
 
 /// The `idle` record's own lane. Zephyr traces idle **entry only** — there is
@@ -215,6 +342,127 @@ fn split_row(line: &str) -> Vec<String> {
     }
     out.push(field);
     out
+}
+
+/// Merges gap bands into a set of disjoint intervals clamped to the capture
+/// window, so overlapping bands are counted once. Summing raw band widths
+/// instead would let `gap_fraction` exceed 1 — and gap bands really do
+/// overlap: they are placed by the timestamp the losses *started*, which a
+/// FIFO ring cannot keep in stream order.
+fn merged_gap_cycles(gaps: &[Gap], from: u64, to: u64) -> u64 {
+    let mut bands: Vec<(u64, u64)> = gaps
+        .iter()
+        .filter_map(|g| {
+            let lo = g.from.max(from);
+            let hi = g.to.min(to);
+            (lo < hi).then_some((lo, hi))
+        })
+        .collect();
+    bands.sort_unstable();
+    let mut total = 0u64;
+    let mut cur: Option<(u64, u64)> = None;
+    for (lo, hi) in bands {
+        match cur {
+            Some((clo, chi)) if lo <= chi => cur = Some((clo, chi.max(hi))),
+            Some((clo, chi)) => {
+                total += chi - clo;
+                cur = Some((lo, hi));
+            }
+            None => cur = Some((lo, hi)),
+        }
+    }
+    if let Some((clo, chi)) = cur {
+        total += chi - clo;
+    }
+    total
+}
+
+/// Computes the load repartition. Pure arithmetic over already-built lanes —
+/// it re-derives nothing about the trace, which is why every caveat it reports
+/// is one [`Span`] already carried.
+fn summarize(
+    lanes: &[Lane],
+    gaps: &[Gap],
+    cycles_from: u64,
+    cycles_to: u64,
+    has_time_base: bool,
+    us_per_cycle: Option<f64>,
+    records_lost: u64,
+) -> LoadSummary {
+    let window_cycles = cycles_to.saturating_sub(cycles_from);
+    let to_us = |c: u64| us_per_cycle.map(|r| c as f64 * r);
+    // Guarded rather than assumed non-zero: a capture of one record has a
+    // zero-width window, and a share of 0.0 is the honest answer there.
+    let share_of = |c: u64| if window_cycles == 0 { 0.0 } else { c as f64 / window_cycles as f64 };
+
+    let mut subjects: Vec<LoadSubject> = lanes
+        .iter()
+        .map(|lane| {
+            let mut total_cycles = 0u64;
+            let mut excluded_cycles = 0u64;
+            let (mut measured, mut excluded) = (0usize, 0usize);
+            let (mut crossing, mut open_end, mut open_start) = (0usize, 0usize, 0usize);
+            for span in &lane.spans {
+                let extent = span.to.saturating_sub(span.from);
+                if span.crosses_gap {
+                    crossing += 1;
+                }
+                if span.open_end {
+                    open_end += 1;
+                }
+                if span.open_start {
+                    open_start += 1;
+                }
+                if span.crosses_gap || span.open_end || span.open_start {
+                    excluded += 1;
+                    excluded_cycles += extent;
+                } else {
+                    measured += 1;
+                    total_cycles += extent;
+                }
+            }
+            LoadSubject {
+                key: lane.key.clone(),
+                label: lane.label.clone(),
+                unnamed: lane.unnamed,
+                kind: lane.kind,
+                entries: lane.spans.len(),
+                measured_spans: measured,
+                total_cycles,
+                total_us: to_us(total_cycles),
+                share: share_of(total_cycles),
+                excluded_spans: excluded,
+                excluded_cycles,
+                gap_crossing_spans: crossing,
+                open_ended_spans: open_end,
+                open_started_spans: open_start,
+            }
+        })
+        .collect();
+    subjects.sort_by(|a, b| b.total_cycles.cmp(&a.total_cycles).then_with(|| a.key.cmp(&b.key)));
+
+    // Threads only. The `idle` *lane* is the same time seen a second way, so
+    // adding it double-counts — see `LoadSummary::idle_record_cycles`.
+    let thread_cycles: u64 =
+        subjects.iter().filter(|s| s.kind == "thread").map(|s| s.total_cycles).sum();
+    let idle_record_cycles: u64 =
+        subjects.iter().filter(|s| s.kind == "idle").map(|s| s.total_cycles).sum();
+    let isr_cycles: u64 = subjects.iter().filter(|s| s.kind == "isr").map(|s| s.total_cycles).sum();
+    let gap_cycles = merged_gap_cycles(gaps, cycles_from, cycles_to);
+
+    LoadSummary {
+        window_cycles,
+        window_us: to_us(window_cycles),
+        gap_cycles,
+        gap_fraction: share_of(gap_cycles),
+        records_lost,
+        has_time_base,
+        thread_cycles,
+        idle_record_cycles,
+        isr_cycles,
+        unaccounted_cycles: window_cycles.saturating_sub(thread_cycles),
+        subjects,
+    }
 }
 
 /// Parses a rendered `*.trace.csv` into a drawable view.
@@ -539,6 +787,8 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
         }
     }
 
+    let summary = summarize(&lanes, &gaps, cycles_from, cycles_to, has_time_base, us_per_cycle, records_lost);
+
     Ok(TraceView {
         study_id: study_id.to_string(),
         tap: tap.to_string(),
@@ -555,6 +805,7 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
         gaps,
         lanes,
         markers,
+        summary,
     })
 }
 
@@ -581,7 +832,7 @@ mod tests {
     /// against each other here.
     const REAL_TRACE: &str = include_str!("../tests/fixtures/outpost-native-sim.trace.csv");
 
-    fn real() -> TraceView {
+    pub(super) fn real() -> TraceView {
         parse("study-1", "outpost", REAL_TRACE, true, None).expect("the real trace parses")
     }
 
@@ -754,5 +1005,177 @@ mod tests {
         assert_eq!(kind_of("thread_switch_in"), Some(RecordKind::ThreadSwitchIn));
         assert_eq!(kind_of("gap"), Some(RecordKind::Gap));
         assert_eq!(kind_of("unknown_42"), None);
+    }
+}
+
+#[cfg(test)]
+mod load_summary_tests {
+    use super::tests::real;
+    use super::*;
+
+    /// The summary is arithmetic over the same spans the timeline draws, so
+    /// every subject the view has a lane for has a row here — no filtering,
+    /// no top-N.
+    #[test]
+    fn every_lane_gets_a_row() {
+        let view = real();
+        assert_eq!(view.summary.subjects.len(), view.lanes.len());
+        for lane in &view.lanes {
+            let row = view
+                .summary
+                .subjects
+                .iter()
+                .find(|s| s.key == lane.key)
+                .expect("every lane has a summary row");
+            assert_eq!(row.label, lane.label);
+            assert_eq!(row.unnamed, lane.unnamed);
+            assert_eq!(row.kind, lane.kind);
+            assert_eq!(row.entries, lane.spans.len());
+        }
+    }
+
+    /// §3 decision 10's headline constraint: this capture really did lose
+    /// records, so the summary must report the affected fraction rather than
+    /// present its totals as a clean measurement.
+    #[test]
+    fn a_lossy_capture_reports_its_gap_fraction() {
+        let view = real();
+        assert_eq!(view.records_lost, 20_057, "the committed capture lost 20,057 records");
+        assert_eq!(view.summary.records_lost, view.records_lost);
+        assert!(view.summary.gap_cycles > 0, "four gap bands cover a non-zero span");
+        assert!(
+            view.summary.gap_fraction > 0.0 && view.summary.gap_fraction <= 1.0,
+            "a fraction of the window, never more than all of it: {}",
+            view.summary.gap_fraction
+        );
+    }
+
+    /// Overlapping bands are counted once. Summing raw widths instead is the
+    /// bug that lets a fraction exceed 1.
+    #[test]
+    fn overlapping_gap_bands_are_counted_as_a_union() {
+        let gaps = vec![
+            Gap { from: 100, to: 200, records_lost: 1, row_index: 0 },
+            Gap { from: 150, to: 250, records_lost: 1, row_index: 1 },
+            Gap { from: 400, to: 450, records_lost: 1, row_index: 2 },
+        ];
+        // Union is 100..250 (150) plus 400..450 (50), not 100+100+50.
+        assert_eq!(merged_gap_cycles(&gaps, 0, 1_000), 200);
+        // And it clamps to the window rather than counting outside it.
+        assert_eq!(merged_gap_cycles(&gaps, 0, 120), 20);
+    }
+
+    /// An extent is not a duration. A span that is open at either end, or that
+    /// crosses a gap, must not contribute its drawn width to a total — but it
+    /// must still be counted, because "this ran" is not in doubt.
+    #[test]
+    fn untrustworthy_spans_are_excluded_but_still_counted() {
+        let view = real();
+        for s in &view.summary.subjects {
+            assert_eq!(s.entries, s.measured_spans + s.excluded_spans);
+            assert!(
+                s.total_cycles <= view.summary.window_cycles,
+                "{} claims more measured time than the window holds",
+                s.label
+            );
+        }
+        let with_exclusions: Vec<&LoadSubject> =
+            view.summary.subjects.iter().filter(|s| s.excluded_spans > 0).collect();
+        assert!(
+            !with_exclusions.is_empty(),
+            "this capture has gaps and open spans, so something must be excluded"
+        );
+    }
+
+    /// Threads are mutually exclusive, so their measured time cannot exceed
+    /// the window. Idle records and ISRs both overlap that set and are
+    /// deliberately kept out of the sum.
+    #[test]
+    fn thread_time_fits_the_window_and_overlapping_kinds_stay_separate() {
+        let view = real();
+        let s = &view.summary;
+        assert!(
+            s.thread_cycles <= s.window_cycles,
+            "{} thread cycles in a {} cycle window",
+            s.thread_cycles,
+            s.window_cycles
+        );
+        assert_eq!(s.unaccounted_cycles, s.window_cycles - s.thread_cycles);
+        let isr_sum: u64 =
+            s.subjects.iter().filter(|x| x.kind == "isr").map(|x| x.total_cycles).sum();
+        assert_eq!(s.isr_cycles, isr_sum);
+    }
+
+    /// The double count this design exists to avoid: idle is reported both as
+    /// `RecordKind::Idle` records and as switches of the thread the manifest
+    /// names `idle`. Adding the two claims more time than the window holds.
+    #[test]
+    fn idle_is_not_counted_twice() {
+        let view = real();
+        let s = &view.summary;
+        assert!(s.idle_record_cycles > 0, "this capture has an idle lane");
+        let idle_thread = s
+            .subjects
+            .iter()
+            .find(|x| x.kind == "thread" && x.label == "idle")
+            .expect("this capture's manifest names an idle thread");
+        assert!(idle_thread.total_cycles > 0);
+        assert!(
+            s.idle_record_cycles + s.thread_cycles > s.window_cycles,
+            "if these no longer overlap, this test is guarding nothing"
+        );
+        // The kept total is the one that fits.
+        assert!(s.thread_cycles <= s.window_cycles);
+    }
+
+    /// Sorted heaviest-first, so the load repartition reads as one.
+    #[test]
+    fn subjects_are_sorted_by_measured_time() {
+        let view = real();
+        let totals: Vec<u64> = view.summary.subjects.iter().map(|s| s.total_cycles).collect();
+        let mut sorted = totals.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(totals, sorted);
+    }
+
+    /// No header frame means no clock rate, so a share is a fraction of
+    /// **cycles** and every `us` field is absent rather than invented.
+    #[test]
+    fn a_capture_with_no_time_base_reports_no_microseconds() {
+        let header = outpost::csv_header();
+        let csv = format!(
+            "{header}\n\
+             100,,thread_switched_in,4096,0,worker\n\
+             200,,thread_switched_in,8192,0,other\n\
+             300,,thread_switched_in,4096,0,worker\n"
+        );
+        let view = parse("s", "outpost", &csv, true, None).expect("parses");
+        assert!(!view.has_time_base);
+        assert!(view.summary.window_us.is_none());
+        for s in &view.summary.subjects {
+            assert!(s.total_us.is_none(), "{} invented a microsecond value", s.label);
+            assert!(s.share >= 0.0 && s.share <= 1.0);
+        }
+    }
+
+    /// An unnamed subject stays unnamed in the summary too. A load table is
+    /// exactly where a raw pointer is most tempting to dress up.
+    #[test]
+    fn unnamed_subjects_stay_unnamed_in_the_summary() {
+        let view = real();
+        let unnamed: Vec<&LoadSubject> = view.summary.subjects.iter().filter(|s| s.unnamed).collect();
+        assert!(!unnamed.is_empty(), "this capture has unnamed threads");
+        for s in unnamed {
+            if s.kind == "thread" {
+                assert_eq!(s.label, s.key, "an unnamed thread must render as the pointer it is");
+                assert!(s.label.starts_with("0x"));
+            } else {
+                // The one non-pointer unnamed subject: a vector the firmware
+                // could not report at all. Its label says exactly that and
+                // names nothing.
+                assert_eq!(s.key, "isr-unidentified");
+                assert_eq!(s.label, "ISR (vector not reported)");
+            }
+        }
     }
 }

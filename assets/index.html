@@ -483,6 +483,19 @@
             </div>
           </div>
 
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">Load repartition</div>
+            <p class="placeholder-note" style="margin-top:0;">Where the CPU's time went, per traced subject. <strong>Read the coverage line first:</strong> a repartition computed across an interval where records were dropped is not a measurement, and this capture's own losses are stated rather than smoothed over.</p>
+            <div id="trace-load-coverage" style="margin:12px 0;"></div>
+            <div class="table-scroll" style="max-height:420px;">
+              <table class="data-table">
+                <thead><tr><th>Subject</th><th>Kind</th><th style="text-align:right;">Entries</th><th style="text-align:right;">Measured spans</th><th style="text-align:right;">Total</th><th style="text-align:right;">Share of window</th><th style="text-align:right;">Not counted</th></tr></thead>
+                <tbody id="trace-load"></tbody>
+              </table>
+            </div>
+            <p class="placeholder-note" style="margin-top:10px;">Three kinds of span are left out of a total and counted in <em>Not counted</em> instead, because their drawn width is an extent and not a duration: one that crosses a gap, one with no closing record, and one with no opening record. <em>Entries</em> counts every span regardless — &ldquo;this subject ran N times&rdquo; survives all three doubts. Shares are of the whole window and <strong>deliberately do not sum to 100%</strong>: an ISR runs inside whatever it interrupted, and Zephyr's idle thread is reported both as a thread and as idle records.</p>
+          </div>
+
           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
             <div class="card">
               <div class="card-title">Gaps — what was lost, and where</div>

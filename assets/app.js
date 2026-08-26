@@ -2561,6 +2561,87 @@
     );
   }
 
+  // A percentage rendered from a 0..1 fraction, with enough precision that a
+  // small-but-real share does not round to "0%".
+  function fmtShare(f) {
+    var pct = f * 100;
+    if (pct > 0 && pct < 0.01) return "<0.01%";
+    return pct.toFixed(2) + "%";
+  }
+
+  // The load repartition (`src/trace.rs`'s `LoadSummary`). Arithmetic done in
+  // Rust against the shared crate's own vocabulary; this only lays it out.
+  //
+  // **Coverage is rendered above the table, not under it.** The number that
+  // decides whether the rest of the card is a measurement is the fraction of
+  // the window the firmware said it lost records across, so it is not a
+  // footnote.
+  function renderTraceLoad(view) {
+    var s = view.summary;
+    var lossy = s.gap_fraction > 0 || s.records_lost > 0;
+    var coverage = trEl("trace-load-coverage");
+    var basis = s.has_time_base
+      ? "Totals are the DUT's own clock."
+      : "This capture carried no header frame, so there is no clock rate: every total below is " +
+        "raw cycles and every share is a fraction of cycles, not of time.";
+    coverage.innerHTML =
+      '<div class="card" style="border-color:' + (lossy ? "var(--warning)" : "var(--border)") +
+      '; padding:12px 14px;">' +
+      '<div style="font-weight:650; color:' + (lossy ? "var(--warning)" : "var(--success)") + ';">' +
+      (lossy
+        ? fmtShare(s.gap_fraction) + " of this window is covered by a reported-loss band"
+        : "The firmware reported no losses in this window") +
+      "</div>" +
+      '<div class="stat-sub" style="margin-top:6px;">' +
+      escapeHtml(
+        s.records_lost + " record(s) lost across " + view.gaps.length + " band(s). " +
+        "Window " + fmtCycles(view, s.window_cycles) + "; " +
+        fmtCycles(view, s.thread_cycles) + " of it accounted for by measured thread spans, " +
+        fmtCycles(view, s.unaccounted_cycles) + " not. " + basis
+      ) +
+      "</div>" +
+      (s.idle_record_cycles > 0
+        ? '<div class="stat-sub" style="margin-top:6px;">' +
+          escapeHtml(
+            "Cross-check: the cpu-idle records account for " +
+            fmtCycles(view, s.idle_record_cycles) + " (" + fmtShare(s.idle_record_cycles / Math.max(1, s.window_cycles)) +
+            "), reported independently of the idle thread's own switch records. The two measure " +
+            "the same time two ways and are not added together; where they disagree, the " +
+            "disagreement is the finding."
+          ) + "</div>"
+        : "") +
+      "</div>";
+
+    trEl("trace-load").innerHTML = s.subjects.length
+      ? s.subjects
+          .map(function (x) {
+            var nameCell = x.unnamed
+              ? '<td class="mono" style="font-style:italic; color:var(--text-tertiary);" ' +
+                'title="the manifest resolved no name for this subject — this is the number the ' +
+                'firmware reported">' + escapeHtml(x.label) + "</td>"
+              : "<td>" + escapeHtml(x.label) + "</td>";
+            var excluded = x.excluded_spans
+              ? '<td style="text-align:right;" title="' +
+                escapeHtml(
+                  x.gap_crossing_spans + " crossing a gap, " + x.open_ended_spans +
+                  " with no closing record, " + x.open_started_spans + " with no opening record" +
+                  " — " + fmtCycles(view, x.excluded_cycles) + " of extent, not counted as duration"
+                ) + '"><span style="color:var(--warning);">' + x.excluded_spans + " span(s)</span></td>"
+              : '<td style="text-align:right; color:var(--text-tertiary);">&mdash;</td>';
+            return (
+              "<tr>" + nameCell +
+              '<td class="mono">' + escapeHtml(x.kind) + "</td>" +
+              '<td class="mono" style="text-align:right;">' + x.entries + "</td>" +
+              '<td class="mono" style="text-align:right;">' + x.measured_spans + "</td>" +
+              '<td class="mono" style="text-align:right;">' + escapeHtml(fmtCycles(view, x.total_cycles)) + "</td>" +
+              '<td class="mono" style="text-align:right;">' + escapeHtml(fmtShare(x.share)) + "</td>" +
+              excluded + "</tr>"
+            );
+          })
+          .join("")
+      : '<tr><td colspan="7" class="placeholder-note">No traced subjects in this capture.</td></tr>';
+  }
+
   function renderTrace() {
     var view = traceView;
     if (!view) return;
@@ -2627,8 +2708,11 @@
             );
           })
           .join("")
-      : '<tr><td colspan="3" class="placeholder-note">No markers in this capture.</td></tr>';
+      : '<tr><td colspan="3" class="placeholder-note">No markers in this capture. Markers are ' +
+        "opt-in: an application registers them with OUTPOST_MARKERS(X), and an image that " +
+        "declares none has nothing to report here. This is not a missing measurement.</td></tr>";
 
+    renderTraceLoad(view);
     drawTraceChart(view);
   }
 
