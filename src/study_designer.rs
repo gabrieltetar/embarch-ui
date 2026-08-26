@@ -16,7 +16,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json};
-use embarch_core_client::CoreClient;
+use embarch_core_client::{CoreClient, StudyRunOptions};
 use embarch_study_designer::{
     build_study, merge_actions, ActionRegistry, BuiltInActionKind, ZephyrBleDefExtractor,
     Requirements,
@@ -282,7 +282,13 @@ pub async fn api_discover(State(state): State<crate::AppState>) -> axum::respons
     if let Err(e) = seal_crc(&mut study) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
-    let study_id = match sd.0.core.post_study(&study).await {
+    // `StudyRunOptions::default()` deliberately, and stated rather than
+    // implied: this UI never builds or flashes anything (design.md §3
+    // decision 5's amendment routes every hardware-adjacent operation through
+    // Core), so it has nothing it could honestly claim to have flashed this
+    // run and no standing to wave a version requirement through. Core's gate
+    // applies to it exactly as before.
+    let study_id = match sd.0.core.post_study(&study, &StudyRunOptions::default()).await {
         Ok(resp) => resp.study_id,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     };
@@ -318,7 +324,7 @@ pub async fn api_run(
     if let Err(e) = seal_crc(&mut study) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
-    let study_id = match sd.0.core.post_study(&study).await {
+    let study_id = match sd.0.core.post_study(&study, &StudyRunOptions::default()).await {
         Ok(resp) => resp.study_id,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     };
