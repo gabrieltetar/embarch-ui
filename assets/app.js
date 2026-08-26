@@ -40,6 +40,17 @@
     }
   }
 
+  // A `#<tab>` fragment names a tab directly, so a link from outside can
+  // land on a specific one. embarch-topology's `fix_it_url` is the real
+  // caller (embarch-topology/design.md §3 decision 19): a topology mismatch
+  // relayed by embarch-api points a human at `#topology` rather than at
+  // whichever tab that browser happened to have open last. Unknown or absent
+  // fragment -> null, and the stored/default tab wins as before.
+  function tabFromHash() {
+    const name = (location.hash || "").replace(/^#/, "");
+    return document.querySelector(`.nav-item[data-tab="${CSS.escape(name)}"]`) ? name : null;
+  }
+
   function initNav() {
     document.querySelectorAll(".nav-item").forEach((el) => {
       el.addEventListener("click", () => showTab(el.dataset.tab));
@@ -51,7 +62,16 @@
     } catch (_) {
       /* best effort */
     }
-    showTab(initial);
+    // The fragment outranks the remembered tab — it was typed or clicked
+    // just now, the stored one is from some previous session.
+    showTab(tabFromHash() || initial);
+    // Following the same link twice in one already-open tab changes only the
+    // fragment, which fires no navigation — without this, the second click
+    // does nothing at all.
+    window.addEventListener("hashchange", () => {
+      const name = tabFromHash();
+      if (name) showTab(name);
+    });
   }
 
   function escapeHtml(value) {
