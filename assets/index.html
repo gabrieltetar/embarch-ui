@@ -47,6 +47,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M6 8h12l-1 4a5 5 0 0 1-10 0Z"/><path d="M18 18h3M19.5 16.5v3"/></svg>
         <span class="nav-label">Enroll</span>
       </button>
+      <button class="nav-item" data-tab="trace">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h3.2l1.6-6 2 10 2.2-8 1.6 4H21"/></svg>
+        <span class="nav-label">Trace</span>
+      </button>
       <button class="nav-item" data-tab="debug">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
         <span class="nav-label">Debug</span>
@@ -120,6 +124,32 @@
         <div class="card" style="margin-bottom:16px; padding:26px 30px;">
           <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
         </div>
+        <div class="card" style="margin-bottom:16px;">
+          <div class="sd-toolbar">
+            <div class="card-title" style="margin:0;">DUT signals</div>
+            <div class="sd-toolbar-actions">
+              <button id="sig-declare" class="btn btn-primary">+ Declare a signal</button>
+            </div>
+          </div>
+          <p class="placeholder-note" style="margin:8px 0 12px;">A wire between two headers is invisible to software, so a signal's route can only ever be <em>stated</em>. Declaring is idempotent by name — re-declaring is how a route moves, and no saved study has to change, because a study names the signal and never the carrier. This tab is the only place a signal route can be declared; there is deliberately no CLI for it.</p>
+          <div id="signals-error" class="sd-error" style="display:none;"></div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:170px;">Signal</th>
+                  <th style="width:80px;">Origin</th>
+                  <th style="width:120px;">Direction</th>
+                  <th style="width:130px;">Route</th>
+                  <th>Carrier</th>
+                  <th style="width:220px;"></th>
+                </tr>
+              </thead>
+              <tbody id="signals-table-body"><tr><td colspan="6" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
         <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap:16px;">
           <div class="card">
             <div class="card-title">Boards</div>
@@ -164,6 +194,31 @@
           </div>
 
           <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Requires — which builds this study is for</div>
+              <div class="sd-toolbar-actions">
+                <button id="sd-req-refresh" class="btn" title="Re-read what the bench currently reports">Re-read bench</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin:8px 0 12px;">Both fields are mandatory, and <span class="mono">any</span> is a real answer that has to be given rather than reached by leaving a field blank. Prefilled from what is in front of you right now; a study is the experiment, so this travels with the saved file.</p>
+            <div class="req-grid">
+              <div class="req-row">
+                <div class="req-label">dev-bench</div>
+                <label class="req-any"><input id="sd-req-bench-any" type="checkbox" /> <span>any build</span></label>
+                <input id="sd-req-bench" type="text" class="sd-input mono" spellcheck="false" />
+                <div id="sd-req-bench-live" class="req-live">reading…</div>
+              </div>
+              <div class="req-row">
+                <div class="req-label">DUT firmware</div>
+                <label class="req-any"><input id="sd-req-dut-any" type="checkbox" /> <span>any build</span></label>
+                <input id="sd-req-dut" type="text" class="sd-input mono" spellcheck="false" />
+                <div id="sd-req-dut-live" class="req-live">reading…</div>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin-top:10px;">dev-bench's version is read back off the bench itself over <span class="mono">HelloAck</span> — the one version string in this suite genuinely reported by the thing it describes. The DUT's is what the configured firmware repo's own <span class="mono">git describe</span> says, which is an assertion about the tree, not a reading off the board: a run against it is recorded as <span class="mono">Declared</span>.</p>
+          </div>
+
+          <div class="card" style="margin-bottom:16px;">
             <div class="card-title">Steps — run top to bottom</div>
             <div class="table-scroll">
               <table class="data-table sd-table">
@@ -192,6 +247,31 @@
           </div>
 
           <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Streams — what this study records alongside its steps</div>
+              <div class="sd-toolbar-actions">
+                <button id="sd-add-tap" class="btn">+ Outpost trace tap</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin:8px 0 12px;">A tap names a <em>signal</em>, never a carrier — so the identical saved study runs unchanged after the bench is rewired. Routes are declared in the <a href="#topology" class="mono">Topology</a> tab, and embarch-core rejects a study whose tap names a signal nothing has declared.</p>
+            <div class="table-scroll">
+              <table class="data-table sd-table">
+                <thead>
+                  <tr>
+                    <th style="width:34px;">#</th>
+                    <th style="width:200px;">Output name</th>
+                    <th style="width:230px;">Signal</th>
+                    <th>Encoding / scope</th>
+                    <th style="width:60px;"></th>
+                  </tr>
+                </thead>
+                <tbody id="sd-taps"></tbody>
+              </table>
+            </div>
+            <p id="sd-taps-empty" class="placeholder-note" style="margin-top:10px;">No taps — this study records its steps and nothing else.</p>
+          </div>
+
+          <div class="card" style="margin-bottom:16px;">
             <div class="card-title">Detected characteristics — not yet registered</div>
             <p class="placeholder-note" style="margin-bottom:10px;">Found by live <span class="mono">GattDiscover</span> and/or by reading the firmware repo's own source. Register one to give it a name and a set of clickable values you can pick from a step row. Nothing here invents what a characteristic means — the names and the bytes are yours.</p>
             <div id="sd-unregistered" class="chip-pool">run <span class="mono">Discover GATT</span> to populate this</div>
@@ -206,6 +286,8 @@
               <a id="sd-gatt-download" class="btn" style="display:none;" download>Download GATT transcript (CSV)</a>
             </div>
             <p id="sd-run-reason" class="sd-error" style="display:none;"></p>
+            <div id="sd-provenance" style="display:none; margin-top:12px;"></div>
+            <div id="sd-run-streams" style="display:none; margin-top:12px;"></div>
             <div class="table-scroll" style="margin-top:12px;">
               <table class="data-table">
                 <thead>
@@ -214,6 +296,23 @@
                 <tbody id="sd-run-rows"></tbody>
               </table>
             </div>
+          </div>
+        </div>
+
+        <div id="sd-runcheck-backdrop" class="dialog-backdrop" style="display:none;"></div>
+        <div id="sd-runcheck-dialog" class="dialog" style="display:none;">
+          <div class="card-title">Before this run</div>
+          <p class="placeholder-note">What this study requires, against what the bench actually has. Shown before the run so the choice is made against the real discrepancy rather than in the abstract.</p>
+          <div id="sd-runcheck-body"></div>
+          <label id="sd-runcheck-allow-wrap" class="req-any" style="margin-top:14px; display:none;">
+            <input id="sd-runcheck-allow" type="checkbox" />
+            <span>Run anyway. embarch-core records the override in the result, with both strings — it is never silently honoured.</span>
+          </label>
+          <p class="placeholder-note" style="margin-top:10px;">Reflashing is deliberately not offered here — see <span class="mono">embarch-ui/design.md</span> §3 decision 11. Build and flash through <span class="mono">embarch-api run-study --reflash</span>, which owns the project config and the build machinery.</p>
+          <div class="sd-row-actions" style="margin-top:16px;">
+            <span style="flex:1;"></span>
+            <button id="sd-runcheck-cancel" class="btn">Cancel</button>
+            <button id="sd-runcheck-go" class="btn btn-primary">Run study</button>
           </div>
         </div>
 
@@ -279,6 +378,45 @@
         </div>
       </section>
 
+      <div id="sig-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
+      <div id="sig-dialog" class="dialog" style="display:none;">
+        <div class="card-title">Declare a signal's route</div>
+        <p class="placeholder-note">The <span class="mono">name</span> is what a study taps this signal by (<span class="mono">StreamSource::Signal</span>). Declaring the same name again moves the route — that is the migration path, not a mistake.</p>
+        <div class="sd-form-grid">
+          <label class="sd-field"><span>Signal name</span><input id="sig-name" type="text" class="sd-input mono" spellcheck="false" placeholder="outpost-uart" /></label>
+          <label class="sd-field"><span>Origin role</span><input id="sig-origin" type="text" class="sd-input mono" spellcheck="false" value="dut" /></label>
+          <label class="sd-field"><span>Direction</span>
+            <select id="sig-direction" class="sd-input">
+              <option value="dut-to-host">dut-to-host</option>
+              <option value="host-to-dut">host-to-dut</option>
+              <option value="bidirectional">bidirectional</option>
+            </select>
+          </label>
+          <label class="sd-field"><span>Route</span>
+            <select id="sig-route" class="sd-input">
+              <option value="direct">direct — a serial port on Core's machine, bypassing dev-bench</option>
+              <option value="via-dev-bench">via dev-bench — terminates on declared pins</option>
+            </select>
+          </label>
+        </div>
+        <div id="sig-direct-fields" class="sd-form-grid" style="margin-top:12px;">
+          <label class="sd-field" style="grid-column:1 / -1;"><span>Carrier — a port from embarch-core's own enumeration</span>
+            <select id="sig-port" class="sd-input mono"></select>
+          </label>
+        </div>
+        <div id="sig-bench-fields" class="sd-form-grid" style="margin-top:12px; display:none;">
+          <label class="sd-field"><span>dev-bench RX pin</span><input id="sig-rx" type="text" class="sd-input mono" spellcheck="false" placeholder="P0.04" /></label>
+          <label class="sd-field"><span>dev-bench TX pin</span><input id="sig-tx" type="text" class="sd-input mono" spellcheck="false" placeholder="P0.05" /></label>
+        </div>
+        <p id="sig-note" class="placeholder-note" style="margin-top:10px;"></p>
+        <p id="sig-result" class="sd-error" style="display:none;"></p>
+        <div class="sd-row-actions" style="margin-top:16px;">
+          <span style="flex:1;"></span>
+          <button id="sig-cancel" class="btn">Cancel</button>
+          <button id="sig-save" class="btn btn-primary">Declare</button>
+        </div>
+      </div>
+
       <div id="assign-dialog-backdrop" style="display:none; position:fixed; inset:0; background:oklch(0% 0 0 / 0.5); z-index:50;"></div>
       <div id="assign-dialog" class="card" style="display:none; position:fixed; top:30%; left:50%; transform:translateX(-50%); z-index:51; width:340px;">
         <div class="card-title">Enroll <span id="assign-probe-label" class="mono"></span> as <span id="assign-role-label" class="mono"></span></div>
@@ -295,6 +433,80 @@
           <button type="button" class="btn btn-primary" id="assign-confirm">Enroll</button>
         </div>
       </div>
+
+      <section class="tab-panel" data-tab="trace">
+        <div class="page-head">
+          <h1>Trace</h1>
+          <p>A completed study's recorded MCU-load timeline — post-hoc, because outpost capture has no live feed</p>
+        </div>
+
+        <div class="card" style="margin-bottom:16px;">
+          <div class="sd-toolbar">
+            <label class="sd-field" style="flex:1; min-width:280px;">
+              <span>Study ID</span>
+              <input id="trace-study" type="text" class="sd-input mono" spellcheck="false" placeholder="the study_id a run reported" />
+            </label>
+            <label class="sd-field" style="min-width:220px;">
+              <span>Tap</span>
+              <select id="trace-tap" class="sd-input mono" disabled><option value="">load a study first…</option></select>
+            </label>
+            <div class="sd-toolbar-actions">
+              <button id="trace-load" class="btn btn-primary">Load</button>
+            </div>
+          </div>
+          <p class="placeholder-note" style="margin-top:10px;">Nothing here is live. An outpost trace is recorded for the duration of a study and drawn afterwards (<span class="mono">embarch-outpost/design.md</span> §3 decision 10) — the one view in this UI that is not push-driven, and the honest shape for the data rather than an omission.</p>
+          <p id="trace-error" class="sd-error" style="display:none;"></p>
+        </div>
+
+        <div id="trace-refusal" class="card" style="display:none; margin-bottom:16px; border-color:var(--warning);"></div>
+
+        <div id="trace-body" style="display:none;">
+          <div id="trace-stats" style="display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:16px; margin-bottom:16px;"></div>
+
+          <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Timeline</div>
+              <div class="sd-toolbar-actions">
+                <span id="trace-axis-note" class="placeholder-note" style="margin:0;"></span>
+              </div>
+            </div>
+            <div class="trace-legend">
+              <span class="trace-key"><i class="sw-run"></i>ran</span>
+              <span class="trace-key"><i class="sw-open"></i>no closing record — extent only</span>
+              <span class="trace-key"><i class="sw-gapcross"></i>overlaps a gap — continuity not established</span>
+              <span class="trace-key"><i class="sw-gap"></i>records lost</span>
+              <span class="trace-key"><i class="sw-marker"></i>marker</span>
+              <span class="trace-key trace-key-unnamed">italic, dotted = no name in the manifest; the number is the answer</span>
+            </div>
+            <div class="trace-scroll">
+              <svg id="trace-chart" width="100%" style="display:block;"></svg>
+            </div>
+          </div>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+            <div class="card">
+              <div class="card-title">Gaps — what was lost, and where</div>
+              <div class="table-scroll">
+                <table class="data-table">
+                  <thead><tr><th>From</th><th>To</th><th>Records lost</th><th>Row</th></tr></thead>
+                  <tbody id="trace-gaps"></tbody>
+                </table>
+              </div>
+              <p class="placeholder-note" style="margin-top:10px;">A gap is stamped when the losses <em>began</em> and emitted when the ring next had room, so it is placed by its timestamp and not by its position in the stream — which is why the row column can look out of order. A gap band is not an empty interval either: records that survived inside it are still drawn.</p>
+            </div>
+            <div class="card">
+              <div class="card-title">Markers</div>
+              <div class="table-scroll" style="max-height:320px;">
+                <table class="data-table">
+                  <thead><tr><th>Cycles</th><th>Marker</th><th>Arg</th></tr></thead>
+                  <tbody id="trace-markers"></tbody>
+                </table>
+              </div>
+              <p class="placeholder-note" style="margin-top:10px;">A marker's <span class="mono">arg</span> is the engineer's own value, passed through as the number it is. Nothing here interprets it.</p>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section class="tab-panel" data-tab="debug">
         <div class="page-head" style="display:flex; align-items:flex-end; justify-content:space-between; flex-wrap:wrap; gap:12px;">

@@ -17,12 +17,20 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json};
 use embarch_core_client::{CoreClient, StudyRunOptions};
-use embarch_study_designer::{
-    build_study, merge_actions, ActionRegistry, BuiltInActionKind, ZephyrBleDefExtractor,
-    Requirements,
-    GattConfigExtractor, GattServiceInfo, RegisteredAction, RoleChoice, RowAction, Study, StudyResult,
-    TableRow,
+use embarch_study_designer::limits::{
+    MAX_FIRMWARE_VERSION_LEN, MAX_SIGNAL_NAME_LEN, MAX_STREAMS_PER_STUDY, MAX_STREAM_NAME_LEN,
 };
+use embarch_study_designer::{
+    build_study, merge_actions, requirement_satisfied, validate_taps, ActionRegistry,
+    BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattServiceInfo, Provenance,
+    RegisteredAction, Requirements, RoleChoice, RowAction, StreamEncoding, StreamScope,
+    StreamSource, StreamTap, Study, StudyResult, TableRow, VersionSource, REQUIREMENT_ANY,
+};
+use heapless::String as HString;
+use heapless::Vec as HVec;
+
+/// `Study.streams`' own type, named once rather than spelled out at each use.
+type StreamList = HVec<StreamTap, MAX_STREAMS_PER_STUDY>;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -105,7 +113,18 @@ impl StudyDesigner {
 pub enum RunState {
     Idle,
     Running { study_id: String, current_step: Option<u32>, total_steps: Option<u32> },
-    Completed { study_id: String, result: Box<StudyResult> },
+    Completed {
+        study_id: String,
+        result: Box<StudyResult>,
+        /// The result's own provenance, flattened with the one judgement the
+        /// browser must not make itself: whether each version was *verified*
+        /// or merely `Declared` (`VersionSource::is_verified`). Redundant with
+        /// `result.provenance` on purpose — rendering `Declared` visibly
+        /// weaker is decision 11's requirement, and "the easiest place to
+        /// accidentally reintroduce" the defect decision 40 closes is a UI
+        /// deciding for itself which variants count.
+        provenance: ProvenanceView,
+    },
     Failed { study_id: Option<String>, reason: String },
 }
 
@@ -137,29 +156,143 @@ fn discover_study() -> Result<Study, String> {
             delay_before_ms: 0,
         },
     ];
+    // `Requirements::any()`, and said out loud rather than defaulted: this is
+    // a fixed one-click read of whatever DUT is in front of the operator, not
+    // an authored experiment, so there is no build it could honestly
+    // constrain. Every *authored* study now carries what a human stated
+    // (`RequirementsInput`).
     build_study(
         "embarch-ui discover",
-        authoring_requirements(),
+        RequirementsInput::any().build()?,
         &rows,
         &ActionRegistry::default(),
     )
     .map_err(|e| e.to_string())
 }
 
-/// What this tab currently declares a study requires
-/// (`embarch-study-designer/design.md` §3 decision 40).
+/// What a study authored in this tab requires
+/// (`embarch-study-designer/design.md` §3 decision 40), as the browser stated
+/// it — **built 2026-08-26, Milestone 7 Phase D** (`embarch-ui/design.md` §3
+/// decision 11). Until then this function returned `Requirements::any()`
+/// unconditionally, honestly, because the tab had no fields to say anything
+/// else in.
 ///
-/// **Explicitly `any` for both, not omitted** — that decision makes both
-/// fields mandatory precisely so "I don't care which build" has to be said
-/// rather than reached by leaving a field out. Saying it here is honest
-/// about today's state: this tab has no fields for a human to state a real
-/// requirement in yet, and prefilling them from live bench state is
-/// Milestone 7 Phase D's work (`embarch-ui/design.md` §3 decision 11,
-/// `embarch-outpost/milestone-1.md` §5). Until those fields exist, a study
-/// authored here genuinely does not constrain the builds it runs against,
-/// and its `StudyResult.provenance` will say `Declared` accordingly.
-fn authoring_requirements() -> Requirements {
-    Requirements::any()
+/// Both fields are still mandatory and `"any"` is still an explicit legal
+/// value — that is the decision's whole point, and the UI expresses it as a
+/// checkbox rather than as an empty field that happens to validate, so
+/// "I don't care which build" is a thing an operator said rather than a thing
+/// they skipped.
+///
+/// A blank field is refused here rather than quietly turned into `any`:
+/// `Requirements::validate` treats blank as the not-thought-about case, and
+/// silently upgrading it to a deliberate answer would erase the distinction
+/// the whole decision rests on.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequirementsInput {
+    dev_bench_version: String,
+    firmware_version: String,
+}
+
+impl RequirementsInput {
+    /// `Requirements::any()`, for the one caller that genuinely has no
+    /// operator behind it (`discover`, a fixed one-click probe of the DUT's
+    /// GATT table that is not an authored study).
+    fn any() -> RequirementsInput {
+        RequirementsInput {
+            dev_bench_version: REQUIREMENT_ANY.to_string(),
+            firmware_version: REQUIREMENT_ANY.to_string(),
+        }
+    }
+
+    fn build(&self) -> Result<Requirements, String> {
+        let field = |raw: &str, what: &str| -> Result<HString<MAX_FIRMWARE_VERSION_LEN>, String> {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Err(format!(
+                    "requires.{what} is blank; state the build this study needs, or tick \
+                     \"any build\" if it genuinely doesn't matter"
+                ));
+            }
+            HString::try_from(raw).map_err(|_| {
+                format!(
+                    "requires.{what} is {} characters and the wire allows {MAX_FIRMWARE_VERSION_LEN}",
+                    raw.chars().count()
+                )
+            })
+        };
+        let requires = Requirements {
+            dev_bench_version: field(&self.dev_bench_version, "dev_bench_version")?,
+            firmware_version: field(&self.firmware_version, "firmware_version")?,
+        };
+        requires.validate().map_err(|e| e.to_string())?;
+        Ok(requires)
+    }
+}
+
+/// One outpost-trace tap, as this tab authors it
+/// (`embarch-study-designer/design.md` §3 decision 39,
+/// `embarch-outpost/design.md` §3 decisions 11/12).
+///
+/// **The tap names the signal, never the carrier**, which is why this input
+/// has no port and no pins in it: those live in the signal's declared route
+/// (Topology tab), so the identical saved study runs unchanged across a
+/// rewiring of the bench.
+///
+/// `OutpostTrace`/`WholeStudy` are not choices offered here. An outpost
+/// capture is study-scoped with no live feed by design, and its encoding is
+/// the one thing a trace tap can be — offering a menu whose other entries are
+/// all wrong would be worse than offering none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TapInput {
+    /// The output file's name under the study's `streams/` directory, and what
+    /// `GET /study/{id}/stream/{name}` takes.
+    name: String,
+    /// The declared signal this taps (`SignalLink::name`). Core's `POST /study`
+    /// pre-flight rejects a tap naming an undeclared signal with a `400`,
+    /// which is why the Topology tab's routes come first.
+    signal: String,
+}
+
+/// Turns authored tap rows into `Study.streams`, sealed by the caller.
+///
+/// `id` is assigned here as the tap's own index, because that is what `id`
+/// *is* — the wire handle every `StreamOpen`/`StreamChunkBatch`/`StreamClose`
+/// carries — and `validate_taps` rejects any other value. Nothing about that
+/// is a choice for an author to make or get wrong.
+fn build_taps(taps: &[TapInput], step_count: usize) -> Result<StreamList, String> {
+    let mut out: StreamList = StreamList::new();
+    for (index, tap) in taps.iter().enumerate() {
+        let name = tap.name.trim();
+        let signal = tap.signal.trim();
+        if signal.is_empty() {
+            return Err(format!("stream tap {} names no signal", index + 1));
+        }
+        let id = u8::try_from(index)
+            .map_err(|_| format!("more than {} stream taps", u8::MAX))?;
+        let built = StreamTap {
+            id,
+            name: HString::try_from(name).map_err(|_| {
+                format!("tap name '{name}' is longer than the wire's {MAX_STREAM_NAME_LEN} characters")
+            })?,
+            source: StreamSource::Signal {
+                name: HString::try_from(signal).map_err(|_| {
+                    format!(
+                        "signal name '{signal}' is longer than the wire's \
+                         {MAX_SIGNAL_NAME_LEN} characters"
+                    )
+                })?,
+            },
+            encoding: StreamEncoding::OutpostTrace,
+            scope: StreamScope::WholeStudy,
+        };
+        out.push(built).map_err(|_| {
+            format!("more than {MAX_STREAMS_PER_STUDY} stream taps in one study")
+        })?;
+    }
+    // The same pre-flight Core runs on submit, run here so an authoring
+    // mistake is a message in this tab rather than a `400` from a round trip.
+    validate_taps(&out, step_count as u32).map_err(|e| format!("{e:?}"))?;
+    Ok(out)
 }
 
 /// Every submitter recomputes both of a study's seals immediately before
@@ -306,6 +439,39 @@ pub async fn api_discover(State(state): State<crate::AppState>) -> axum::respons
 pub struct RunRequest {
     name: String,
     rows: Vec<TableRow>,
+    requires: RequirementsInput,
+    #[serde(default)]
+    taps: Vec<TapInput>,
+    /// Proceed past a version requirement this run does not satisfy
+    /// (`embarch-study-designer/design.md` §3 decision 40). Ticked in the run
+    /// dialog against the actual discrepancy, which decision 11 is explicit
+    /// about: the mismatch is shown *before* the run, with both strings, so
+    /// the choice is made against the real gap rather than in the abstract.
+    ///
+    /// Never silently honoured — Core records it in
+    /// `StudyResult.provenance.overrides` with both strings, and this tab
+    /// renders that.
+    #[serde(default)]
+    allow_version_mismatch: bool,
+}
+
+/// Builds, taps, and seals one authored study — everything `run` and `save`
+/// do identically, so a saved file and a submitted study can never disagree
+/// about what the rows meant.
+fn build_authored(
+    req_name: &str,
+    rows: &[TableRow],
+    requires: &RequirementsInput,
+    taps: &[TapInput],
+    registry: &ActionRegistry,
+) -> Result<Study, (StatusCode, String)> {
+    let requires = requires.build().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let mut study = build_study(req_name, requires, rows, registry)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    study.streams =
+        build_taps(taps, rows.len()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    seal_crc(&mut study).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(study)
 }
 
 pub async fn api_run(
@@ -317,14 +483,21 @@ pub async fn api_run(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let mut study = match build_study(&req.name, authoring_requirements(), &req.rows, &registry) {
+    let study = match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err((code, e)) => return (code, e).into_response(),
     };
-    if let Err(e) = seal_crc(&mut study) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
-    }
-    let study_id = match sd.0.core.post_study(&study, &StudyRunOptions::default()).await {
+    // `flashed_firmware_version` stays `None`, and that is not an omission:
+    // this UI never builds or flashes anything (design.md §3 decision 5's
+    // amendment routes every hardware-adjacent operation through Core), so it
+    // has nothing it could honestly claim to have put on the DUT. Claiming
+    // otherwise is exactly what would turn `VersionSource::FlashedThisRun`
+    // from a fact into an assertion.
+    let options = StudyRunOptions {
+        allow_version_mismatch: req.allow_version_mismatch,
+        flashed_firmware_version: None,
+    };
+    let study_id = match sd.0.core.post_study(&study, &options).await {
         Ok(resp) => resp.study_id,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     };
@@ -349,7 +522,11 @@ async fn watch_study(core: Arc<CoreClient>, study_id: String, tx: watch::Sender<
             Ok(status) => match status.status.as_str() {
                 "completed" => {
                     let state = match status.result {
-                        Some(result) => RunState::Completed { study_id, result: Box::new(result) },
+                        Some(result) => RunState::Completed {
+                            provenance: provenance_view(&result.provenance),
+                            study_id,
+                            result: Box::new(result),
+                        },
                         None => RunState::Failed {
                             study_id: Some(study_id),
                             reason: "embarch-core reported \"completed\" but returned no result".to_string(),
@@ -458,12 +635,36 @@ struct SavedStudySummary {
 pub struct SaveStudyRequest {
     name: String,
     rows: Vec<TableRow>,
+    requires: RequirementsInput,
+    #[serde(default)]
+    taps: Vec<TapInput>,
 }
 
 #[derive(Debug, Serialize)]
 struct LoadedStudy {
     name: String,
     rows: Vec<TableRow>,
+    /// Read back out of the saved `Study` itself, not out of a sidecar key —
+    /// `requires` is a real field of the thing that runs, so the file is its
+    /// own source of truth for it.
+    requires: RequirementsOut,
+    /// From the sidecar `_embarch_ui_taps`, falling back to reconstructing
+    /// what can be reconstructed from `Study.streams`: a study saved before
+    /// this key existed, or written by hand, still loads its taps rather than
+    /// silently dropping them on the next save.
+    taps: Vec<LoadedTap>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequirementsOut {
+    dev_bench_version: String,
+    firmware_version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LoadedTap {
+    name: String,
+    signal: String,
 }
 
 pub async fn api_studies_list(State(state): State<crate::AppState>) -> axum::response::Response {
@@ -520,14 +721,17 @@ pub async fn api_studies_save(
 
     // Built (and CRC-sealed) before writing, so a saved file is always a
     // valid, immediately-runnable `Study` — a save can't quietly persist
-    // rows that would only fail at run time.
-    let mut study = match build_study(&req.name, authoring_requirements(), &req.rows, &registry) {
+    // rows that would only fail at run time. Same path `run` takes, so the two
+    // cannot disagree.
+    //
+    // **No reflash and no `allow_version_mismatch` reaches this file.** Both
+    // are run parameters, not study fields (decision 11: "reflash lives in the
+    // run dialog, never in the saved study"), so a saved study cannot carry a
+    // waiver into every later re-read of its own results.
+    let study = match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err((code, e)) => return (code, e).into_response(),
     };
-    if let Err(e) = seal_crc(&mut study) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
-    }
 
     let mut value = match serde_json::to_value(&study) {
         Ok(serde_json::Value::Object(map)) => map,
@@ -537,6 +741,15 @@ pub async fn api_studies_save(
     match serde_json::to_value(&req.rows) {
         Ok(rows) => {
             value.insert("_embarch_ui_rows".to_string(), rows);
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+    // The authored tap rows ride alongside for the same reason the step rows
+    // do: `Study.streams` is what runs, and this is what loads back into the
+    // table. `Study`'s own deserializer ignores both keys.
+    match serde_json::to_value(&req.taps) {
+        Ok(taps) => {
+            value.insert("_embarch_ui_taps".to_string(), taps);
         }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -603,11 +816,234 @@ pub async fn api_studies_load(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("saved rows couldn't be read back: {e}")).into_response(),
     };
 
+    let requires = RequirementsOut {
+        dev_bench_version: version_field(&value, "dev_bench_version"),
+        firmware_version: version_field(&value, "firmware_version"),
+    };
+
+    let taps = match value.get("_embarch_ui_taps") {
+        Some(saved) => serde_json::from_value::<Vec<LoadedTap>>(saved.clone()).unwrap_or_default(),
+        None => taps_from_streams(&value),
+    };
+
     Json(LoadedStudy {
         name: value.get("name").and_then(|n| n.as_str()).unwrap_or(&slug).to_string(),
         rows,
+        requires,
+        taps,
     })
     .into_response()
+}
+
+/// Reads one `requires` field back out of a saved `Study`.
+///
+/// A saved study always has both — `Requirements::validate` refuses a blank
+/// one on the way in, so the file cannot hold one. A file that somehow lacks
+/// the field loads as `"any"`, which is the reading that matches what such a
+/// study would actually have done: nothing constrained it.
+fn version_field(value: &serde_json::Value, field: &str) -> String {
+    value
+        .get("requires")
+        .and_then(|r| r.get(field))
+        .and_then(|v| v.as_str())
+        .unwrap_or(REQUIREMENT_ANY)
+        .to_string()
+}
+
+/// Recovers authored tap rows from a saved `Study.streams`, for a file with no
+/// `_embarch_ui_taps` sidecar — one saved before that key existed, or written
+/// by hand.
+///
+/// Only `StreamSource::Signal` taps come back, because those are the only ones
+/// this tab authors. A study carrying a `PowerFrontEnd` or `GattTranscript`
+/// tap loads with its steps and *not* its taps, which is the same honest
+/// limitation `editable` already reports for a hand-written study's rows —
+/// better than presenting a row this table cannot faithfully round-trip.
+fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
+    let Some(streams) = value.get("streams").and_then(|s| s.as_array()) else {
+        return Vec::new();
+    };
+    streams
+        .iter()
+        .filter_map(|tap| {
+            let name = tap.get("name")?.as_str()?.to_string();
+            let signal = tap
+                .get("source")?
+                .get("Signal")?
+                .get("name")?
+                .as_str()?
+                .to_string();
+            Some(LoadedTap { name, signal })
+        })
+        .collect()
+}
+
+/// What this bench currently has in front of the operator, for decision 11's
+/// prefill — **read live, on request, never cached into an authored study**.
+///
+/// Prefilling is what makes a mandatory field a help rather than a tax: the
+/// common case is "the builds currently in front of me", and typing a hash by
+/// hand to express that would guarantee people paste `any` to get past it,
+/// defeating the decision.
+///
+/// Each half fails independently and reports why, because each is unavailable
+/// for its own ordinary reason and neither should hide the other: the bench's
+/// version needs the bench plugged in and answering a `Hello`, and the DUT's
+/// needs a configured firmware repo `git describe` can run in.
+///
+/// `dev_bench` is the only version string in this suite genuinely read back
+/// off the thing it describes. `dut` is not — it is what the working tree
+/// says, which is why a study that runs against it gets
+/// `VersionSource::Declared` and this tab renders that visibly weaker.
+#[derive(Debug, Serialize)]
+struct BenchStateResponse {
+    dev_bench: Option<String>,
+    dev_bench_error: Option<String>,
+    dut: Option<String>,
+    dut_error: Option<String>,
+    /// The literal `"any"`, handed to the browser rather than written there,
+    /// so the one string that means "deliberately unconstrained" has exactly
+    /// one definition in the suite.
+    any: &'static str,
+}
+
+pub async fn api_bench_state(State(state): State<crate::AppState>) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+
+    let hello = sd.0.core.dev_bench_hello().await;
+    let dut = embarch_core_client::version::derive_version(
+        &sd.0.config.firmware_repo_path,
+        &embarch_core_client::version::default_version_command(),
+    )
+    .await;
+
+    Json(BenchStateResponse {
+        dev_bench: hello.as_ref().ok().map(|h| h.firmware_version.clone()),
+        dev_bench_error: hello.as_ref().err().map(|e| format!("{e:#}")),
+        dut: dut.as_ref().ok().cloned(),
+        dut_error: dut.as_ref().err().map(|e| format!("{e:#}")),
+        any: REQUIREMENT_ANY,
+    })
+    .into_response()
+}
+
+/// Whether a `requires` field is satisfied by what the bench currently
+/// reports, computed through `embarch-study-designer`'s own
+/// `requirement_satisfied` so this tab holds no copy of the comparison rule
+/// Core's gate uses.
+///
+/// Reported rather than enforced: Core's gate is the enforcement point, and
+/// showing the discrepancy here — with both strings, before the run — is what
+/// decision 11 asks for. A UI that refused the run itself would be a second
+/// implementation of a rule Core already owns.
+#[derive(Debug, Deserialize)]
+pub struct MismatchQuery {
+    dev_bench_version: String,
+    firmware_version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MismatchResponse {
+    dev_bench: MismatchField,
+    dut: MismatchField,
+}
+
+#[derive(Debug, Serialize)]
+struct MismatchField {
+    required: String,
+    actual: Option<String>,
+    /// `None` when the actual version could not be read at all — which is not
+    /// the same as a mismatch, and must not be rendered as one.
+    satisfied: Option<bool>,
+    unavailable: Option<String>,
+}
+
+pub async fn api_version_check(
+    State(state): State<crate::AppState>,
+    axum::extract::Query(q): axum::extract::Query<MismatchQuery>,
+) -> axum::response::Response {
+    let Some(sd) = state.study_designer else { return not_configured() };
+
+    let hello = sd.0.core.dev_bench_hello().await;
+    let dut = embarch_core_client::version::derive_version(
+        &sd.0.config.firmware_repo_path,
+        &embarch_core_client::version::default_version_command(),
+    )
+    .await;
+
+    let field = |required: &str, actual: Result<String, String>| MismatchField {
+        required: required.to_string(),
+        satisfied: actual.as_ref().ok().map(|a| requirement_satisfied(required, a)),
+        actual: actual.as_ref().ok().cloned(),
+        unavailable: actual.err(),
+    };
+
+    Json(MismatchResponse {
+        dev_bench: field(
+            q.dev_bench_version.trim(),
+            hello.map(|h| h.firmware_version).map_err(|e| format!("{e:#}")),
+        ),
+        dut: field(q.firmware_version.trim(), dut.map_err(|e| format!("{e:#}"))),
+    })
+    .into_response()
+}
+
+/// How a run's two versions were established, flattened for the browser.
+///
+/// `verified` comes from `VersionSource::is_verified()` rather than from a
+/// string comparison here: `Declared` must look weaker than
+/// `ReportedByDevBench`/`ReportedByOutpost`/`FlashedThisRun`, and which
+/// variants count as verified is that enum's own business — a UI re-deriving
+/// it is the easiest place to accidentally reintroduce the exact defect
+/// decision 40 exists to close (`embarch-ui/design.md` §3 decision 11).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProvenanceView {
+    dev_bench_version: String,
+    dev_bench_source: &'static str,
+    dev_bench_verified: bool,
+    firmware_version: String,
+    firmware_source: &'static str,
+    firmware_verified: bool,
+    /// Every requirement this run was allowed to proceed in spite of, with
+    /// both strings — the whole content of an override is the gap between
+    /// them.
+    overrides: Vec<OverrideView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OverrideView {
+    subject: &'static str,
+    required: String,
+    actual: String,
+}
+
+fn source_label(source: VersionSource) -> &'static str {
+    match source {
+        VersionSource::ReportedByDevBench => "reported by dev-bench",
+        VersionSource::ReportedByOutpost => "reported by the outpost stream",
+        VersionSource::FlashedThisRun => "flashed this run",
+        VersionSource::Declared => "declared",
+    }
+}
+
+pub fn provenance_view(p: &Provenance) -> ProvenanceView {
+    ProvenanceView {
+        dev_bench_version: p.dev_bench_version.as_str().to_string(),
+        dev_bench_source: source_label(p.dev_bench_source),
+        dev_bench_verified: p.dev_bench_source.is_verified(),
+        firmware_version: p.firmware_version.as_str().to_string(),
+        firmware_source: source_label(p.firmware_source),
+        firmware_verified: p.firmware_source.is_verified(),
+        overrides: p
+            .overrides
+            .iter()
+            .map(|o| OverrideView {
+                subject: o.subject.field_name(),
+                required: o.required.as_str().to_string(),
+                actual: o.actual.as_str().to_string(),
+            })
+            .collect(),
+    }
 }
 
 pub async fn api_studies_delete(
@@ -653,5 +1089,162 @@ pub async fn api_gatt_data(
         )
             .into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(dev_bench: &str, firmware: &str) -> RequirementsInput {
+        RequirementsInput {
+            dev_bench_version: dev_bench.to_string(),
+            firmware_version: firmware.to_string(),
+        }
+    }
+
+    /// The distinction decision 40 rests on: `"any"` is a deliberate answer
+    /// and blank is the not-thought-about case. Turning blank into `"any"`
+    /// here would erase it, so blank is refused with the message the UI shows.
+    #[test]
+    fn a_blank_requirement_is_refused_rather_than_read_as_any() {
+        assert_eq!(
+            input(REQUIREMENT_ANY, REQUIREMENT_ANY).build().unwrap(),
+            Requirements::any()
+        );
+        for bad in [input("", "v1"), input("v1", ""), input("v1", "   ")] {
+            let err = bad.build().expect_err("blank must be refused");
+            assert!(err.contains("blank"), "{err}");
+            assert!(err.contains("any build"), "the message must name the checkbox: {err}");
+        }
+    }
+
+    #[test]
+    fn a_stated_version_survives_intact() {
+        let requires = input("v9-dirty", "g1a2b3c4-dirty").build().unwrap();
+        assert_eq!(requires.dev_bench_version.as_str(), "v9-dirty");
+        assert_eq!(requires.firmware_version.as_str(), "g1a2b3c4-dirty");
+    }
+
+    #[test]
+    fn a_version_too_long_for_the_wire_says_so_here() {
+        let long = "x".repeat(MAX_FIRMWARE_VERSION_LEN + 1);
+        let err = input(&long, REQUIREMENT_ANY).build().expect_err("must refuse");
+        assert!(err.contains(&MAX_FIRMWARE_VERSION_LEN.to_string()), "{err}");
+    }
+
+    fn tap(name: &str, signal: &str) -> TapInput {
+        TapInput { name: name.to_string(), signal: signal.to_string() }
+    }
+
+    /// `id` is the wire handle every `StreamOpen`/`StreamChunkBatch`/
+    /// `StreamClose` carries, and it must equal the tap's own index. Assigning
+    /// it here rather than accepting it is what makes that unfailable.
+    #[test]
+    fn authored_taps_get_their_index_as_their_wire_handle() {
+        let taps = build_taps(&[tap("outpost", "outpost-uart"), tap("second", "other")], 3).unwrap();
+        assert_eq!(taps.len(), 2);
+        assert_eq!(taps[0].id, 0);
+        assert_eq!(taps[1].id, 1);
+        assert_eq!(taps[0].name.as_str(), "outpost");
+        assert!(matches!(taps[0].encoding, StreamEncoding::OutpostTrace));
+        assert!(matches!(taps[0].scope, StreamScope::WholeStudy));
+        match &taps[0].source {
+            StreamSource::Signal { name } => assert_eq!(name.as_str(), "outpost-uart"),
+            other => panic!("a trace tap must name a signal, got {other:?}"),
+        }
+    }
+
+    /// The pre-flight Core runs on submit, run here so an authoring mistake is
+    /// a message in this tab rather than a `400` from a round trip.
+    #[test]
+    fn the_taps_core_would_reject_are_rejected_here() {
+        // Two taps naming the same output file would interleave into one.
+        assert!(build_taps(&[tap("outpost", "a"), tap("outpost", "b")], 1).is_err());
+        // An unnamed tap has no output file to write to.
+        assert!(build_taps(&[tap("  ", "a")], 1).is_err());
+        // And a tap that names no signal has no source at all.
+        assert!(build_taps(&[tap("outpost", "")], 1).is_err());
+    }
+
+    #[test]
+    fn no_taps_is_a_valid_study() {
+        assert!(build_taps(&[], 2).unwrap().is_empty());
+    }
+
+    /// `Declared` has to render visibly weaker than a verified reading, and
+    /// which variants count as verified is `VersionSource`'s own business —
+    /// re-deriving it in JavaScript is the easiest place to reintroduce the
+    /// defect decision 40 closes.
+    #[test]
+    fn declared_is_the_only_unverified_source() {
+        use embarch_study_designer::{VersionOverride, VersionSubject};
+        let mut p = Provenance {
+            dev_bench_version: HString::try_from("v9").unwrap(),
+            firmware_version: HString::try_from("g1a2b3c4").unwrap(),
+            dev_bench_source: VersionSource::ReportedByDevBench,
+            firmware_source: VersionSource::Declared,
+            overrides: HVec::new(),
+        };
+        let view = provenance_view(&p);
+        assert!(view.dev_bench_verified);
+        assert_eq!(view.dev_bench_source, "reported by dev-bench");
+        assert!(!view.firmware_verified, "Declared must not read as verified");
+        assert_eq!(view.firmware_source, "declared");
+        assert!(view.overrides.is_empty());
+
+        // An override carries both strings, because the whole content of an
+        // override is the gap between them.
+        p.overrides
+            .push(VersionOverride {
+                subject: VersionSubject::Firmware,
+                required: HString::try_from("g9999999").unwrap(),
+                actual: HString::try_from("g1a2b3c4").unwrap(),
+            })
+            .unwrap();
+        let view = provenance_view(&p);
+        assert_eq!(view.overrides.len(), 1);
+        assert_eq!(view.overrides[0].subject, "firmware_version");
+        assert_eq!(view.overrides[0].required, "g9999999");
+        assert_eq!(view.overrides[0].actual, "g1a2b3c4");
+
+        for source in [VersionSource::ReportedByOutpost, VersionSource::FlashedThisRun] {
+            assert!(source.is_verified(), "{source:?} reads as unverified");
+        }
+    }
+
+    /// A study saved before `_embarch_ui_taps` existed, or written by hand,
+    /// still loads its taps back rather than silently dropping them on the
+    /// next save.
+    #[test]
+    fn taps_load_back_from_a_study_with_no_sidecar() {
+        let study = serde_json::json!({
+            "name": "trace run",
+            "streams": [
+                { "id": 0, "name": "outpost", "source": { "Signal": { "name": "outpost-uart" } },
+                  "encoding": "OutpostTrace", "scope": "WholeStudy" },
+                // Not a signal tap: this table does not author one, so it does
+                // not come back as an editable row rather than coming back
+                // wrong.
+                { "id": 1, "name": "power", "source": { "PowerFrontEnd": { "sample_hz": 1000 } },
+                  "encoding": "Raw", "scope": "WholeStudy" }
+            ]
+        });
+        let taps = taps_from_streams(&study);
+        assert_eq!(taps.len(), 1);
+        assert_eq!(taps[0].name, "outpost");
+        assert_eq!(taps[0].signal, "outpost-uart");
+    }
+
+    #[test]
+    fn a_saved_studys_requirements_come_from_the_study_itself() {
+        let study = serde_json::json!({
+            "requires": { "dev_bench_version": "v9", "firmware_version": "any" }
+        });
+        assert_eq!(version_field(&study, "dev_bench_version"), "v9");
+        assert_eq!(version_field(&study, "firmware_version"), "any");
+        // A file with no `requires` at all reads as unconstrained, which is
+        // what such a study would in fact have done.
+        assert_eq!(version_field(&serde_json::json!({}), "firmware_version"), REQUIREMENT_ANY);
     }
 }

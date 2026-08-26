@@ -14,6 +14,7 @@ mod config;
 mod logs;
 mod snapshot;
 mod study_designer;
+mod trace;
 
 use axum::extract::State;
 use axum::http::{header, StatusCode};
@@ -156,7 +157,13 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/events", get(events))
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/enroll", post(api_enroll))
+        .route("/api/signals", post(api_declare_signal))
+        .route("/api/signals/{name}", axum::routing::delete(api_remove_signal))
+        .route("/api/trace/{study_id}", get(api_trace_taps))
+        .route("/api/trace/{study_id}/{name}", get(api_trace_view))
         .route("/api/study-designer/actions", get(study_designer::api_actions))
+        .route("/api/study-designer/bench-state", get(study_designer::api_bench_state))
+        .route("/api/study-designer/version-check", get(study_designer::api_version_check))
         .route("/api/study-designer/registry", get(study_designer::api_registry).post(study_designer::api_register_action))
         .route("/api/study-designer/discover", post(study_designer::api_discover))
         .route("/api/study-designer/run", post(study_designer::api_run))
@@ -274,6 +281,165 @@ async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest
             (StatusCode::OK, Json(resp)).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+// ---- signal routes (design.md §3 decision 10) -------------------------------
+
+/// Declares (or re-declares) where a named DUT signal goes, through Core's
+/// `POST /signals`.
+///
+/// A proxy rather than a browser-to-Core call, for the same two reasons
+/// `/api/enroll` is one: this handler already holds a live `CoreClient`, so
+/// the browser never sees Core's bearer token, and Core owns the write.
+///
+/// `declare_signal` is idempotent by name, so this is both "add a route" and
+/// "move a route" — and the move is the whole reason `SignalLink` records a
+/// declared route rather than the wiring that happens to be in place: a saved
+/// `Study` names the signal and never the carrier, so nothing it authored has
+/// to be re-authored the day a cable moves.
+async fn api_declare_signal(
+    State(state): State<AppState>,
+    Json(link): Json<embarch_core_client::SignalLink>,
+) -> impl IntoResponse {
+    match state.core.declare_signal(&link).await {
+        Ok(()) => {
+            state.poke.notify_one();
+            (StatusCode::OK, Json(serde_json::json!({ "declared": link.name }))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+/// Un-declares a signal, through Core's `DELETE /signals/{name}`.
+///
+/// Exists because decision 10's own consequence demands it: this tab is the
+/// only human surface for signal routes, and without a removal the one place
+/// that can state a wire could never retract one.
+///
+/// A name nothing was declared under answers `404` rather than a silent
+/// success — a row this tab thought existed and did not is worth learning
+/// about.
+async fn api_remove_signal(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match state.core.remove_signal(&name).await {
+        Ok(true) => {
+            state.poke.notify_one();
+            (StatusCode::OK, Json(serde_json::json!({ "removed": name }))).into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            format!("no signal is declared under the name '{name}'"),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+// ---- the Trace view (design.md §3 decision 10's second half) ----------------
+
+/// Which of a study's taps are outpost traces, and what Core has to say about
+/// each — read from Core's `GET /study/{id}/streams`.
+///
+/// **This is the call that makes an unnamed trace visible as one.** Nothing
+/// else on Core's HTTP surface carries the reason: `GET /study/{id}` returns a
+/// `StreamRef` with no room for it, and the stream route serves the rendered
+/// CSV either way. A Trace view that skipped this would be structurally
+/// incapable of telling a named trace from a refused one, which is the exact
+/// confusion decision 10 exists to prevent.
+async fn api_trace_taps(
+    State(state): State<AppState>,
+    axum::extract::Path(study_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match state.core.study_streams(&study_id).await {
+        Ok(Some(index)) => {
+            let taps: Vec<serde_json::Value> = index
+                .streams
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "name": e.name,
+                        // Serialized rather than matched on: which encodings
+                        // this view can draw is this tab's business, and the
+                        // vocabulary is the shared crate's.
+                        "encoding": e.encoding,
+                        "is_outpost_trace": matches!(
+                            e.encoding,
+                            embarch_study_designer::StreamEncoding::OutpostTrace
+                        ),
+                        "rendered": e.rendered,
+                        "note": e.note,
+                        "named": e.is_fully_resolved(),
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!({ "study_id": study_id, "taps": taps })))
+                .into_response()
+        }
+        // No `streams/` at all: a study that predates it, or one that never
+        // got far enough to write it. An expected state, said plainly.
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            format!("study '{study_id}' recorded no streams"),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+/// One tap's recorded timeline, decoded server-side into lanes and gaps.
+///
+/// Two calls to Core, and both are needed: the stream index says whether the
+/// trace is named and why not, and the stream route hands back the rendered
+/// CSV. Decoding happens in `trace.rs` through `embarch-study-designer`'s own
+/// `outpost` module rather than in the browser, so no trace knowledge — column
+/// order, record kinds, `IRQ_UNKNOWN` — lives in `app.js`.
+async fn api_trace_view(
+    State(state): State<AppState>,
+    axum::extract::Path((study_id, name)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    let index = match state.core.study_streams(&study_id).await {
+        Ok(Some(index)) => index,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("study '{study_id}' recorded no streams"))
+                .into_response()
+        }
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    };
+    let Some(entry) = index.streams.iter().find(|e| e.name == name) else {
+        let declared: Vec<&str> = index.streams.iter().map(|e| e.name.as_str()).collect();
+        return (
+            StatusCode::NOT_FOUND,
+            format!("study '{study_id}' declared no tap named '{name}' — it declared: {}",
+                if declared.is_empty() { "(none)".to_string() } else { declared.join(", ") }),
+        )
+            .into_response();
+    };
+    if !entry.rendered {
+        // Without a rendering there is nothing decoded to draw, and drawing
+        // the raw bytes as if they were a timeline is the one thing this view
+        // must not do. Core's own note usually says why.
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "tap '{name}' has no decoded rendering, so there is no timeline to draw. {}",
+                entry.note.clone().unwrap_or_else(|| "Core recorded no reason.".to_string())
+            ),
+        )
+            .into_response();
+    }
+
+    let bytes = match state.core.get_study_stream(&study_id, &name, false).await {
+        Ok(bytes) => bytes,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    };
+    let csv = String::from_utf8_lossy(&bytes);
+
+    match trace::parse(&study_id, &name, &csv, entry.is_fully_resolved(), entry.note.clone()) {
+        Ok(view) => (StatusCode::OK, Json(view)).into_response(),
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
     }
 }
 

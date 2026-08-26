@@ -295,6 +295,7 @@ dependencies = [
  "embarch-core-client",
  "embarch-study-designer",
  "futures-util",
+ "heapless",
  "serde",
  "serde_json",
  "tokio",

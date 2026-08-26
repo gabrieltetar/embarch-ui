@@ -726,3 +726,230 @@ table.data-table {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- Phase D: signal-route rows, `requires` fields, the Trace view -------
+ *
+ * embarch-ui/design.md §3 decisions 10 and 11. Unlike the classes above,
+ * these were not lifted from a reviewed mockup — decision 10 deferred what a
+ * timeline looks like to the first real capture, and these were designed
+ * against one: the committed `native_sim` capture (848 records, 7 threads of
+ * which 3 resolve to no name, 72 unidentified ISR pairs, 4 gaps). That is
+ * closer to real data than a mockup and is not a DUT; see design.md.
+ */
+
+/* `requires` — a checkbox that is a visible, deliberate choice, not an empty
+ * field that happens to validate (decision 11). */
+.req-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.req-row {
+  display: grid;
+  grid-template-columns: 110px auto minmax(160px, 1fr) minmax(0, 1.3fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.req-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.req-any {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.req-any input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+/* One line, clipped, with the whole thing on hover. An unreachable bench
+ * returns a paragraph-long explanation (Core's own `/dev-bench/port` message
+ * names every VID it looked for), and letting that wrap turned the hint into
+ * the largest thing on the card — found in the first real render against a
+ * bench that was not plugged in. Clipping loses nothing: the text is on the
+ * element's `title`, and the colour already says which of the two states it
+ * is. */
+.req-live {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
+.req-live.req-live-bad {
+  color: var(--warning);
+}
+
+/* An input the "any build" checkbox has taken over. Disabled *and* visibly
+ * so — a greyed field a human can still read is what makes the checkbox the
+ * statement rather than a way of hiding the field. */
+.sd-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Provenance: `Declared` must not look like a verified reading (decision 11,
+ * and the exact defect decision 40 exists to close). */
+.prov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.prov-cell {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: var(--bg-surface-2);
+}
+
+.prov-what {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.prov-version {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.prov-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.prov-verified .prov-source {
+  color: var(--success);
+  background: var(--success-soft-bg);
+}
+
+/* Unverified: dashed, muted, and italic — three separate signals, because one
+ * that a reader can miss is the same as none. */
+.prov-unverified {
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+.prov-unverified .prov-version {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.prov-unverified .prov-source {
+  color: var(--warning);
+  background: var(--warning-soft-bg);
+}
+
+/* ---- Trace view --------------------------------------------------------- */
+
+.trace-scroll {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.trace-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.trace-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.trace-key i {
+  width: 22px;
+  height: 11px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.trace-key i.sw-run {
+  background: var(--accent);
+}
+
+/* Matches how an open-ended span is actually drawn: the same fill at the same
+ * reduced opacity, with the dashed edge that says a closing record is missing.
+ * A legend swatch that does not match the mark it explains is worse than no
+ * legend. */
+.trace-key i.sw-open {
+  background: var(--accent);
+  opacity: 0.62;
+  border-right: 2px dashed var(--warning);
+  border-radius: 3px 0 0 3px;
+}
+
+/* Markers are a bright tick in their own strip plus a very faint full-height
+ * rule; the swatch shows the tick, which is the part a reader looks for. */
+.trace-key i.sw-marker-rule {
+  width: 22px;
+  height: 11px;
+  background: linear-gradient(
+    to right,
+    transparent 0 9px,
+    var(--warning) 9px 11px,
+    transparent 11px 22px
+  );
+}
+
+.trace-key i.sw-gapcross {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--accent) 0 3px,
+    var(--bg-surface-inset) 3px 6px
+  );
+}
+
+.trace-key i.sw-gap {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--danger) 0 3px,
+    transparent 3px 6px
+  );
+  border: 1px solid var(--danger);
+}
+
+.trace-key i.sw-marker {
+  width: 3px;
+  height: 13px;
+  border-radius: 1px;
+  background: var(--warning);
+}
+
+.trace-key-unnamed {
+  font-style: italic;
+  color: var(--text-tertiary);
+  border-bottom: 1px dotted var(--text-tertiary);
+}

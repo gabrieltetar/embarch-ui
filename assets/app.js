@@ -46,9 +46,17 @@
   // relayed by embarch-api points a human at `#topology` rather than at
   // whichever tab that browser happened to have open last. Unknown or absent
   // fragment -> null, and the stored/default tab wins as before.
+  // The fragment may carry parameters of its own — `#trace?study=…&tap=…`
+  // (see `traceDeepLink`) — so the tab name is everything up to the first `?`.
   function tabFromHash() {
-    const name = (location.hash || "").replace(/^#/, "");
+    const name = (location.hash || "").replace(/^#/, "").split("?")[0];
     return document.querySelector(`.nav-item[data-tab="${CSS.escape(name)}"]`) ? name : null;
+  }
+
+  /// Parameters carried in the fragment, if any.
+  function hashParams() {
+    const raw = (location.hash || "").split("?")[1] || "";
+    return new URLSearchParams(raw);
   }
 
   function initNav() {
@@ -211,6 +219,24 @@
     document.getElementById("dashboard-alerts-list").innerHTML = alertsListHtml(snapshot.alerts);
   }
 
+  // Every declared signal gets its own lane **below** the three nodes, and the
+  // lane is where decision 10's requirement lives: a `direct` signal's line
+  // runs the full width, past and underneath the dev-bench box, and comes back
+  // up into "this machine"; a `via dev-bench` signal's line stops at the bench
+  // and goes no further. The bypass is therefore a shape a reader sees at a
+  // glance rather than a label they have to read — "the picture matches the
+  // wiring, including when the wiring is deliberately unusual."
+  //
+  // Below the nodes rather than between them, found the hard way: an earlier
+  // version drew the `via dev-bench` edge at the nodes' own y, which put the
+  // line straight through both boxes it was meant to connect.
+  const SIGNAL_LANE_TOP = 184;
+  const SIGNAL_LANE_STEP = 30;
+  const NODE_BOTTOM = 160;
+  const DUT_CENTRE = 840;
+  const BENCH_CENTRE = 490;
+  const HOST_CENTRE = 140;
+
   function renderTopologyDiagram(snapshot) {
     const svg = document.getElementById("topology-diagram");
     if (!svg) return;
@@ -248,13 +274,146 @@
       '<text x="320" y="108" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">serial</text>' +
 
       '<line x1="590" y1="120" x2="740" y2="120" stroke="' + bleColor + '" stroke-width="2" stroke-dasharray="6 5"/>' +
-      '<text x="665" y="108" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">BLE</text>';
+      '<text x="665" y="108" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">BLE</text>' +
+      signalEdges(snapshot);
+
+    // The picture grows with the wiring rather than clipping it: every declared
+    // signal takes its own lane under the nodes.
+    const laneCount = (snapshot.signals || []).length;
+    const height = Math.max(230, SIGNAL_LANE_TOP + laneCount * SIGNAL_LANE_STEP + 10);
+    svg.setAttribute("viewBox", "0 0 1000 " + height);
+    svg.setAttribute("height", String(height));
+  }
+
+  function isDirect(sig) {
+    return sig && sig.route && sig.route.kind === "direct";
+  }
+
+  // A signal drawn from the same data the rows below are drawn from — one
+  // source, two renderings, which is what stops the picture and the table
+  // from ever disagreeing.
+  function signalEdges(snapshot) {
+    const signals = snapshot.signals || [];
+    let out = "";
+    let lane = 0;
+
+    signals.forEach((sig) => {
+      const direct = isDirect(sig);
+      const viaBench = sig.route && sig.route.kind === "via-dev-bench";
+      if (!direct && !viaBench) return;
+
+      const y = SIGNAL_LANE_TOP + lane * SIGNAL_LANE_STEP;
+      lane += 1;
+      // Where the line comes back up decides what a reader concludes, so it is
+      // the one geometric fact here that is not cosmetic: a direct signal
+      // reaches the host, a bench-mediated one does not.
+      const endX = direct ? HOST_CENTRE : BENCH_CENTRE;
+      const colour = direct ? "var(--warning)" : "var(--accent)";
+      const detail = direct
+        ? "direct — bypasses dev-bench" +
+          (sig.route.port_serial ? " · " + sig.route.port_serial : "")
+        : "via dev-bench · rx " + (sig.route.rx_pin || "?") + " / tx " + (sig.route.tx_pin || "?");
+
+      out +=
+        '<path d="M' + DUT_CENTRE + " " + NODE_BOTTOM + " L" + DUT_CENTRE + " " + y +
+        " L" + endX + " " + y + " L" + endX + " " + NODE_BOTTOM + '" fill="none" stroke="' + colour +
+        '" stroke-width="2" stroke-linejoin="round"/>' +
+        '<circle cx="' + endX + '" cy="' + NODE_BOTTOM + '" r="3.2" fill="' + colour + '"/>' +
+        '<text x="' + (DUT_CENTRE - 20) + '" y="' + (y - 8) + '" text-anchor="end" fill="' + colour +
+        '" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">' +
+        escapeHtml(sig.name) + " · " + escapeHtml(detail) + "</text>";
+    });
+    return out;
+  }
+
+  function routeCell(sig) {
+    if (isDirect(sig)) {
+      return '<span class="badge badge-warning">direct</span>';
+    }
+    if (sig.route && sig.route.kind === "via-dev-bench") {
+      return '<span class="badge badge-success">via dev-bench</span>';
+    }
+    return '<span class="badge badge-neutral">—</span>';
+  }
+
+  function carrierCell(snapshot, sig) {
+    if (isDirect(sig)) {
+      const serial = (sig.route && sig.route.port_serial) || "";
+      const port = (snapshot.serial_ports || []).find((p) => p.serial_number === serial);
+      if (!port) {
+        // A declared carrier that is not currently enumerated. Said as what it
+        // is — a declared serial nothing on Core's machine answers to right
+        // now — rather than as a port name this tab does not have.
+        return (
+          '<span class="mono">' + escapeHtml(serial) + "</span> " +
+          '<span class="badge badge-warning">not enumerated on Core right now</span>'
+        );
+      }
+      return (
+        '<span class="mono">' + escapeHtml(port.port_name) + "</span> " +
+        '<span class="placeholder-note">' + escapeHtml(port.product || "") + "</span>"
+      );
+    }
+    if (sig.route && sig.route.kind === "via-dev-bench") {
+      return (
+        '<span class="mono">rx ' + escapeHtml(sig.route.rx_pin || "?") +
+        " / tx " + escapeHtml(sig.route.tx_pin || "?") + "</span> " +
+        '<span class="placeholder-note">relayed over dev-bench\'s own Core link</span>'
+      );
+    }
+    return '<span class="placeholder-note">—</span>';
+  }
+
+  function signalsTableRows(snapshot) {
+    const signals = snapshot.signals || [];
+    if (!signals.length) {
+      return (
+        '<tr><td colspan="6" class="placeholder-note">No signal declared. A wire between two ' +
+        "headers is invisible to software — declare one to put it on the diagram.</td></tr>"
+      );
+    }
+    return signals
+      .map(
+        (sig) =>
+          '<tr><td class="mono">' + escapeHtml(sig.name) + "</td>" +
+          '<td class="mono">' + escapeHtml(sig.origin_role) + "</td>" +
+          '<td class="mono">' + escapeHtml(sig.direction) + "</td>" +
+          "<td>" + routeCell(sig) + "</td>" +
+          "<td>" + carrierCell(snapshot, sig) + "</td>" +
+          '<td style="text-align:right; white-space:nowrap;">' +
+          '<button class="btn" data-signal-edit=""' + escapeHtml(sig.name) + '">Move route</button> ' +
+          '<button class="btn" data-signal-remove="' + escapeHtml(sig.name) + '">Remove</button>' +
+          "</td></tr>"
+      )
+      .join("");
   }
 
   function renderTopology(snapshot) {
     renderTopologyDiagram(snapshot);
     document.getElementById("topology-table-body").innerHTML = boardsTableRows(snapshot);
     document.getElementById("topology-alerts-list").innerHTML = alertsListHtml(snapshot.alerts);
+    document.getElementById("signals-table-body").innerHTML = signalsTableRows(snapshot);
+
+    // **An empty signal list and an unanswerable one are different states.**
+    // A Core older than `GET /signals` answers 404, and rendering that as
+    // "nothing declared" would state a fact about the bench that this tab
+    // never established. `signals_error` is set only when Core itself
+    // answered, so this never duplicates the unreachable banner.
+    const err = document.getElementById("signals-error");
+    if (snapshot.signals_error) {
+      err.style.display = "block";
+      err.textContent =
+        "embarch-core did not answer GET /signals, so this list is not a statement about the " +
+        "bench: " + snapshot.signals_error;
+    } else {
+      err.style.display = "none";
+    }
+
+    // A declared-but-wrong signal shows up in this tab or nowhere: a
+    // SignalMismatch is deliberately not written to the alert log rendered
+    // beside it (`embarch-topology/design.md` §3 decision 18's amendment —
+    // Alert's shape is board-specific and a wire has none of those fields).
+    // `carrierCell` is where that shows, per row.
   }
 
   // --- Enroll tab (milestone-1.md §4.5) ---------------------------------
@@ -1341,7 +1500,7 @@
     var resp = await fetch("/api/study-designer/studies", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name, rows: rows }),
+      body: JSON.stringify({ name: name, rows: rows, requires: sdRequiresPayload(), taps: sdTaps }),
     });
     var text = await resp.text();
     if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
@@ -1361,6 +1520,9 @@
     if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
     var loaded = JSON.parse(text);
     sdEl("sd-name").value = loaded.name;
+    if (loaded.requires) sdApplyRequires(loaded.requires);
+    sdTaps = loaded.taps || [];
+    renderSdTaps();
     sdRows = loaded.rows.map(function (r) {
       var base = sdNewRow({
         name: r.name,
@@ -1635,6 +1797,86 @@
     return parts.length ? escapeHtml(parts.join(" · ")) : '<span class="placeholder-note">—</span>';
   }
 
+  // Decision 11: a result renders **how** each version was established, not
+  // just what it was. `verified` is decided server-side by
+  // `VersionSource::is_verified` — re-deriving it here is the easiest place to
+  // accidentally reintroduce the exact defect decision 40 exists to close, so
+  // this file never looks at which variant it is, only at the boolean.
+  function provCell(what, version, source, verified) {
+    return (
+      '<div class="prov-cell ' + (verified ? "prov-verified" : "prov-unverified") + '">' +
+      '<div class="prov-what">' + escapeHtml(what) + "</div>" +
+      '<div class="prov-version">' + escapeHtml(version || "—") + "</div>" +
+      '<div class="prov-source">' + escapeHtml(source || "") +
+      (verified ? "" : " · unverified") + "</div></div>"
+    );
+  }
+
+  function renderProvenance(prov) {
+    var el = sdEl("sd-provenance");
+    if (!prov) {
+      el.style.display = "none";
+      return;
+    }
+    var overrides = prov.overrides || [];
+    el.style.display = "block";
+    el.innerHTML =
+      '<div class="card-title" style="margin-bottom:8px;">What this run actually ran against</div>' +
+      '<div class="prov-grid">' +
+      provCell("dev-bench", prov.dev_bench_version, prov.dev_bench_source, prov.dev_bench_verified) +
+      provCell("DUT firmware", prov.firmware_version, prov.firmware_source, prov.firmware_verified) +
+      "</div>" +
+      (overrides.length
+        ? '<div class="sd-error" style="margin-top:12px;">' +
+          overrides
+            .map(function (o) {
+              // Both strings, because the whole content of an override is the
+              // gap between them.
+              return (
+                "This run was allowed past <span class=\"mono\">" + escapeHtml(o.subject) +
+                '</span>: it required <span class="mono">' + escapeHtml(o.required) +
+                '</span> and ran against <span class="mono">' + escapeHtml(o.actual) + "</span>."
+              );
+            })
+            .join("<br>") +
+          "</div>"
+        : "");
+  }
+
+  // A completed run's taps, with a link straight into the Trace view for an
+  // outpost one — the Trace tab is post-hoc and takes a study_id, so handing
+  // it over from here is the difference between a view somebody can reach and
+  // one they have to copy a UUID into.
+  function renderRunStreams(studyId, streams) {
+    var el = sdEl("sd-run-streams");
+    if (!streams || !streams.length) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "block";
+    el.innerHTML =
+      '<div class="card-title" style="margin-bottom:8px;">Captured streams</div>' +
+      '<table class="data-table"><thead><tr><th>Tap</th><th>Bytes</th><th>Complete</th><th></th>' +
+      "</tr></thead><tbody>" +
+      streams
+        .map(function (ref) {
+          return (
+            '<tr><td class="mono">' + escapeHtml(ref.name) + "</td>" +
+            '<td class="mono">' + ref.bytes_written + "</td>" +
+            "<td>" +
+            (ref.truncated
+              ? '<span class="badge badge-warning">short of what the source produced</span>'
+              : '<span class="badge badge-success">complete</span>') +
+            "</td>" +
+            '<td style="text-align:right;"><button class="btn" data-open-trace="' +
+            escapeHtml(ref.name) + '" data-open-study="' + escapeHtml(studyId || "") +
+            '">Open in Trace</button></td></tr>'
+          );
+        })
+        .join("") +
+      "</tbody></table>";
+  }
+
   function renderRunState(state) {
     var card = sdEl("sd-run-card");
     var badge = sdEl("sd-run-status");
@@ -1652,6 +1894,8 @@
     reason.style.display = "none";
     rows.innerHTML = "";
     download.style.display = "none";
+    sdEl("sd-provenance").style.display = "none";
+    sdEl("sd-run-streams").style.display = "none";
 
     if (state.study_id) {
       sdLastStudyId = state.study_id;
@@ -1686,6 +1930,8 @@
     badge.className = "badge badge-success";
     badge.textContent = "completed";
     var result = state.result || {};
+    renderProvenance(state.provenance);
+    renderRunStreams(state.study_id, result.streams);
     (result.steps || []).forEach(function (step, i) {
       var tr = document.createElement("tr");
       tr.innerHTML =
@@ -1699,9 +1945,246 @@
     download.style.display = "inline-flex";
   }
 
+  // --- decision 11: `requires`, taps, and the mismatch shown before a run --
+  //
+  // The one string that means "deliberately unconstrained" is not written
+  // here: it comes from the server (`REQUIREMENT_ANY`), so the suite has one
+  // definition of it rather than a copy in JavaScript that could drift.
+  var sdAnyLiteral = "any";
+  var sdTaps = [];
+
+  function sdReqFields() {
+    return [
+      { any: "sd-req-bench-any", input: "sd-req-bench", live: "sd-req-bench-live", key: "dev_bench" },
+      { any: "sd-req-dut-any", input: "sd-req-dut", live: "sd-req-dut-live", key: "dut" },
+    ];
+  }
+
+  // An "any build" tick takes the field over, visibly: the input keeps showing
+  // the literal and goes disabled rather than being cleared or hidden, so the
+  // checkbox *is* the statement instead of a way of not making one.
+  function sdSyncReqAny() {
+    sdReqFields().forEach(function (f) {
+      var checked = sdEl(f.any).checked;
+      var input = sdEl(f.input);
+      input.disabled = checked;
+      if (checked) {
+        input.dataset.stated = input.dataset.stated || input.value;
+        input.value = sdAnyLiteral;
+      } else if (input.value === sdAnyLiteral) {
+        input.value = input.dataset.stated || "";
+      }
+    });
+  }
+
+  function sdRequiresPayload() {
+    return {
+      dev_bench_version: sdEl("sd-req-bench").value.trim(),
+      firmware_version: sdEl("sd-req-dut").value.trim(),
+    };
+  }
+
+  function sdApplyRequires(requires) {
+    var pairs = [
+      ["sd-req-bench", "sd-req-bench-any", requires.dev_bench_version],
+      ["sd-req-dut", "sd-req-dut-any", requires.firmware_version],
+    ];
+    pairs.forEach(function (pair) {
+      var isAny = pair[2] === sdAnyLiteral;
+      sdEl(pair[1]).checked = isAny;
+      var input = sdEl(pair[0]);
+      input.value = pair[2] || "";
+      if (!isAny) input.dataset.stated = pair[2] || "";
+    });
+    sdSyncReqAny();
+  }
+
+  // Prefilling is what makes a mandatory field a help rather than a tax: the
+  // common case is "the builds currently in front of me", and typing a hash by
+  // hand to say that would guarantee people paste `any` to get past it,
+  // defeating the decision this field exists for.
+  async function sdLoadBenchState(prefill) {
+    var resp = await fetch("/api/study-designer/bench-state");
+    if (!resp.ok) return;
+    var state = await resp.json();
+    if (state.any) sdAnyLiteral = state.any;
+
+    var rows = [
+      { live: "sd-req-bench-live", input: "sd-req-bench", any: "sd-req-bench-any",
+        value: state.dev_bench, error: state.dev_bench_error,
+        how: "read back off the bench over HelloAck" },
+      { live: "sd-req-dut-live", input: "sd-req-dut", any: "sd-req-dut-any",
+        value: state.dut, error: state.dut_error,
+        how: "what the firmware repo's git describe says" },
+    ];
+    rows.forEach(function (row) {
+      var el = sdEl(row.live);
+      if (row.value) {
+        el.classList.remove("req-live-bad");
+        el.textContent = "live: " + row.value + " — " + row.how;
+        el.title = row.how;
+        if (prefill && !sdEl(row.any).checked && !sdEl(row.input).value.trim()) {
+          sdEl(row.input).value = row.value;
+          sdEl(row.input).dataset.stated = row.value;
+        }
+      } else {
+        // Unavailable is not the same as "any", and must not prefill as one.
+        el.classList.add("req-live-bad");
+        el.textContent = "unavailable: " + (row.error || "no reason given");
+        el.title = row.error || "";
+      }
+    });
+  }
+
+  // --- tap rows -----------------------------------------------------------
+
+  function sdSignalNames() {
+    return ((latestSnapshot && latestSnapshot.signals) || []).map(function (sig) {
+      return sig.name;
+    });
+  }
+
+  function renderSdTaps() {
+    var tbody = sdEl("sd-taps");
+    if (!tbody) return;
+    var signals = sdSignalNames();
+    tbody.innerHTML = sdTaps
+      .map(function (tap, i) {
+        var options = signals.length
+          ? signals
+              .map(function (name) {
+                return (
+                  '<option value="' + escapeHtml(name) + '"' +
+                  (name === tap.signal ? " selected" : "") + ">" + escapeHtml(name) + "</option>"
+                );
+              })
+              .join("")
+          : "";
+        // A tap whose signal is no longer declared keeps showing the name it
+        // was authored against rather than silently snapping to another one —
+        // Core will reject the study, and the row is where a human sees why.
+        if (tap.signal && signals.indexOf(tap.signal) === -1) {
+          options =
+            '<option value="' + escapeHtml(tap.signal) + '" selected>' + escapeHtml(tap.signal) +
+            " — not declared</option>" + options;
+        }
+        return (
+          "<tr><td>" + (i + 1) + "</td>" +
+          '<td><input class="sd-input mono" data-tap-name="' + i + '" value="' +
+          escapeHtml(tap.name) + '" spellcheck="false" /></td>' +
+          '<td><select class="sd-input mono" data-tap-signal="' + i + '">' +
+          (signals.length || tap.signal ? options : '<option value="">no signal declared — declare one in Topology</option>') +
+          "</select></td>" +
+          '<td class="mono placeholder-note">OutpostTrace · WholeStudy — an outpost capture is ' +
+          "study-scoped with no live feed, and this is the one thing a trace tap can be</td>" +
+          '<td style="text-align:right;"><button class="sd-icon-btn" data-tap-remove="' + i +
+          '" title="Remove this tap">✕</button></td></tr>'
+        );
+      })
+      .join("");
+    sdEl("sd-taps-empty").style.display = sdTaps.length ? "none" : "block";
+  }
+
+  function initSdTaps() {
+    var tbody = sdEl("sd-taps");
+    if (!tbody) return;
+    sdEl("sd-add-tap").addEventListener("click", function () {
+      var signals = sdSignalNames();
+      sdTaps.push({ name: "outpost", signal: signals.length ? signals[0] : "" });
+      renderSdTaps();
+    });
+    tbody.addEventListener("input", function (ev) {
+      var i = ev.target.getAttribute("data-tap-name");
+      if (i !== null) sdTaps[Number(i)].name = ev.target.value;
+    });
+    tbody.addEventListener("change", function (ev) {
+      var i = ev.target.getAttribute("data-tap-signal");
+      if (i !== null) sdTaps[Number(i)].signal = ev.target.value;
+    });
+    tbody.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("[data-tap-remove]");
+      if (!btn) return;
+      sdTaps.splice(Number(btn.getAttribute("data-tap-remove")), 1);
+      renderSdTaps();
+    });
+  }
+
+  // --- the pre-run check --------------------------------------------------
+
+  function mismatchRow(what, field) {
+    if (field.satisfied === null || field.satisfied === undefined) {
+      // Unreadable is not a mismatch, and rendering it as one would be a
+      // claim about a discrepancy nobody established.
+      return (
+        '<div class="prov-cell prov-unverified"><div class="prov-what">' + escapeHtml(what) +
+        '</div><div class="prov-version">requires ' + escapeHtml(field.required) + "</div>" +
+        '<div class="prov-source">actual version unreadable</div>' +
+        '<p class="placeholder-note" style="margin:6px 0 0;">' +
+        escapeHtml(field.unavailable || "no reason given") + "</p></div>"
+      );
+    }
+    var ok = field.satisfied;
+    return (
+      '<div class="prov-cell ' + (ok ? "prov-verified" : "prov-unverified") + '">' +
+      '<div class="prov-what">' + escapeHtml(what) + "</div>" +
+      '<div class="prov-version">requires ' + escapeHtml(field.required) + "</div>" +
+      '<div class="prov-version">actual&nbsp;&nbsp; ' + escapeHtml(field.actual || "") + "</div>" +
+      '<div class="prov-source">' + (ok ? "satisfied" : "does not match") + "</div></div>"
+    );
+  }
+
+  function closeRunCheck() {
+    sdEl("sd-runcheck-backdrop").style.display = "none";
+    sdEl("sd-runcheck-dialog").style.display = "none";
+  }
+
+  // Decision 11: the mismatch is shown *before* the run, with both strings, so
+  // the choice is made against the actual discrepancy rather than in the
+  // abstract. Core's gate is still the enforcement point — this reports, it
+  // does not decide.
+  async function sdOpenRunCheck() {
+    var requires = sdRequiresPayload();
+    var params = new URLSearchParams(requires).toString();
+    var resp = await fetch("/api/study-designer/version-check?" + params);
+    if (!resp.ok) {
+      // No pre-flight read available: run and let Core's own gate answer,
+      // rather than blocking on a check this tab could not perform.
+      return sdSubmitRun(false);
+    }
+    var check = await resp.json();
+    var mismatched = check.dev_bench.satisfied === false || check.dut.satisfied === false;
+    sdEl("sd-runcheck-body").innerHTML =
+      '<div class="prov-grid" style="margin-top:12px;">' +
+      mismatchRow("dev-bench", check.dev_bench) +
+      mismatchRow("DUT firmware", check.dut) +
+      "</div>";
+    var allowWrap = sdEl("sd-runcheck-allow-wrap");
+    allowWrap.style.display = mismatched ? "flex" : "none";
+    sdEl("sd-runcheck-allow").checked = false;
+    sdEl("sd-runcheck-backdrop").style.display = "block";
+    sdEl("sd-runcheck-dialog").style.display = "block";
+  }
+
   async function sdRunStudy() {
     sdShowBuildError("");
     if (!sdRows.length) return sdShowBuildError("a study needs at least one step");
+    try {
+      sdCollectRows();
+    } catch (e) {
+      return sdShowBuildError(e.message);
+    }
+    var requires = sdRequiresPayload();
+    if (!requires.dev_bench_version || !requires.firmware_version) {
+      return sdShowBuildError(
+        "state the builds this study is for, or tick \"any build\" — a blank field is the " +
+        "not-thought-about case, which is exactly what these fields exist to rule out"
+      );
+    }
+    return sdOpenRunCheck();
+  }
+
+  async function sdSubmitRun(allowMismatch) {
+    closeRunCheck();
     var rows;
     try {
       rows = sdCollectRows();
@@ -1714,7 +2197,15 @@
       var resp = await fetch("/api/study-designer/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: sdEl("sd-name").value.trim() || "untitled-study", rows: rows }),
+        body: JSON.stringify({
+          name: sdEl("sd-name").value.trim() || "untitled-study",
+          rows: rows,
+          requires: sdRequiresPayload(),
+          taps: sdTaps,
+          // A run parameter, never a study field: a saved study must not carry
+          // a waiver into every later re-read of its own results.
+          allow_version_mismatch: !!allowMismatch,
+        }),
       });
       var text = await resp.text();
       if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
@@ -1760,6 +2251,34 @@
         renderSdRows();
       });
       sdEl("sd-run").addEventListener("click", sdRunStudy);
+      sdReqFields().forEach(function (f) {
+        sdEl(f.any).addEventListener("change", sdSyncReqAny);
+      });
+      sdEl("sd-req-refresh").addEventListener("click", function () {
+        sdLoadBenchState(false);
+      });
+      sdEl("sd-runcheck-cancel").addEventListener("click", closeRunCheck);
+      sdEl("sd-runcheck-backdrop").addEventListener("click", closeRunCheck);
+      sdEl("sd-runcheck-go").addEventListener("click", function () {
+        sdSubmitRun(sdEl("sd-runcheck-allow").checked);
+      });
+      initSdTaps();
+      renderSdTaps();
+      // Prefilled from live bench state on first paint, which is what makes a
+      // mandatory field a help rather than a tax.
+      sdLoadBenchState(true);
+      sdEl("sd-run-streams").addEventListener("click", function (ev) {
+        var btn = ev.target.closest("[data-open-trace]");
+        if (!btn) return;
+        // Sets the address as well as the field, so what the button does and
+        // what a shared link does are the same one thing.
+        location.hash =
+          "trace?study=" + encodeURIComponent(btn.getAttribute("data-open-study")) +
+          "&tap=" + encodeURIComponent(btn.getAttribute("data-open-trace"));
+        document.getElementById("trace-study").value = btn.getAttribute("data-open-study");
+        showTab("trace");
+        document.getElementById("trace-load").click();
+      });
       sdEl("sd-save").addEventListener("click", sdSaveStudy);
       sdEl("sd-delete").addEventListener("click", sdDeleteStudy);
       sdEl("sd-discover").addEventListener("click", sdDiscover);
@@ -1792,10 +2311,532 @@
     });
   }
 
+  // --- signal routes (design.md §3 decision 10, first half) --------------
+  //
+  // Every write goes through embarch-ui's own `/api/signals`, which proxies
+  // Core over HTTP+Bearer — never `embarch_topology::hardware::declare_signal`
+  // in-process (decision 5), and never the browser holding Core's token.
+
+  function sigEl(id) {
+    return document.getElementById(id);
+  }
+
+  function sigSyncRouteFields() {
+    var direct = sigEl("sig-route").value === "direct";
+    sigEl("sig-direct-fields").style.display = direct ? "" : "none";
+    sigEl("sig-bench-fields").style.display = direct ? "none" : "";
+    sigEl("sig-note").textContent = direct
+      ? "A direct route bypasses dev-bench entirely, which is what the outpost uses today — for a hardware reason (the bench has no spare pins or pass-through firmware yet), not a design preference. The port list is embarch-core's own enumeration, because a port on this machine is not a port on Core's."
+      : "A via-dev-bench route terminates on declared pins and is relayed over dev-bench's existing Core link, passing bytes through and interpreting nothing. Nothing on this bench has the pins for it yet.";
+  }
+
+  function sigFillPorts(snapshot) {
+    var select = sigEl("sig-port");
+    var ports = (snapshot && snapshot.serial_ports) || [];
+    var previous = select.value;
+    if (!ports.length) {
+      // A carrier is declared by USB serial and resolved by it later, so a
+      // port with no serial could never be declared as one. Saying that is
+      // better than offering a choice nothing could act on.
+      select.innerHTML =
+        '<option value="">' +
+        (snapshot && snapshot.serial_ports_error
+          ? "embarch-core did not answer GET /serial-ports"
+          : "no USB serial port is enumerated on embarch-core's machine") +
+        "</option>";
+      return;
+    }
+    select.innerHTML = ports
+      .map(function (p) {
+        var serial = p.serial_number || "";
+        var label = p.port_name + (p.product ? " — " + p.product : "") +
+          (serial ? " · " + serial : " · (no USB serial — cannot be declared)");
+        return (
+          '<option value="' + escapeHtml(serial) + '"' + (serial ? "" : " disabled") + ">" +
+          escapeHtml(label) + "</option>"
+        );
+      })
+      .join("");
+    if (previous) select.value = previous;
+  }
+
+  function openSignalDialog(existing) {
+    sigEl("sig-result").style.display = "none";
+    sigEl("sig-name").value = existing ? existing.name : "";
+    sigEl("sig-name").readOnly = !!existing;
+    sigEl("sig-origin").value = existing ? existing.origin_role : "dut";
+    sigEl("sig-direction").value = existing ? existing.direction : "dut-to-host";
+    sigEl("sig-route").value = existing && existing.route ? existing.route.kind : "direct";
+    sigEl("sig-rx").value = (existing && existing.route && existing.route.rx_pin) || "";
+    sigEl("sig-tx").value = (existing && existing.route && existing.route.tx_pin) || "";
+    sigFillPorts(latestSnapshot);
+    if (existing && existing.route && existing.route.port_serial) {
+      sigEl("sig-port").value = existing.route.port_serial;
+    }
+    sigSyncRouteFields();
+    sigEl("sig-save").textContent = existing ? "Move route" : "Declare";
+    sigEl("sig-dialog-backdrop").style.display = "block";
+    sigEl("sig-dialog").style.display = "block";
+  }
+
+  function closeSignalDialog() {
+    sigEl("sig-dialog-backdrop").style.display = "none";
+    sigEl("sig-dialog").style.display = "none";
+  }
+
+  async function submitSignal() {
+    var result = sigEl("sig-result");
+    var name = sigEl("sig-name").value.trim();
+    if (!name) {
+      result.style.display = "block";
+      result.textContent = "a signal needs the name a study will tap it by";
+      return;
+    }
+    var route;
+    if (sigEl("sig-route").value === "direct") {
+      var serial = sigEl("sig-port").value;
+      if (!serial) {
+        result.style.display = "block";
+        result.textContent =
+          "pick the port carrying this signal. Without a USB serial nothing could resolve the " +
+          "route later, which is why a port that reports none cannot be declared.";
+        return;
+      }
+      route = { kind: "direct", port_serial: serial };
+    } else {
+      var rx = sigEl("sig-rx").value.trim();
+      var tx = sigEl("sig-tx").value.trim();
+      if (!rx || !tx) {
+        result.style.display = "block";
+        result.textContent = "name both dev-bench pins this signal terminates on";
+        return;
+      }
+      route = { kind: "via-dev-bench", rx_pin: rx, tx_pin: tx };
+    }
+
+    var body = {
+      name: name,
+      origin_role: sigEl("sig-origin").value.trim() || "dut",
+      direction: sigEl("sig-direction").value,
+      route: route,
+    };
+    var resp = await fetch("/api/signals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    var text = await resp.text();
+    if (!resp.ok) {
+      result.style.display = "block";
+      result.textContent = resp.status + " " + text;
+      return;
+    }
+    closeSignalDialog();
+  }
+
+  async function removeSignal(name) {
+    var resp = await fetch("/api/signals/" + encodeURIComponent(name), { method: "DELETE" });
+    if (!resp.ok) {
+      var err = document.getElementById("signals-error");
+      err.style.display = "block";
+      err.textContent = resp.status + " " + (await resp.text());
+    }
+  }
+
+  function initSignals() {
+    var table = document.getElementById("signals-table-body");
+    if (!table) return;
+    document.getElementById("sig-declare").addEventListener("click", function () {
+      openSignalDialog(null);
+    });
+    sigEl("sig-cancel").addEventListener("click", closeSignalDialog);
+    sigEl("sig-dialog-backdrop").addEventListener("click", closeSignalDialog);
+    sigEl("sig-route").addEventListener("change", sigSyncRouteFields);
+    sigEl("sig-save").addEventListener("click", submitSignal);
+    table.addEventListener("click", function (ev) {
+      var edit = ev.target.closest("[data-signal-edit]");
+      if (edit) {
+        var name = edit.getAttribute("data-signal-edit");
+        var sig = ((latestSnapshot && latestSnapshot.signals) || []).find(function (x) {
+          return x.name === name;
+        });
+        // Re-declaring the same name *is* the migration path the decision
+        // promises: one call moves the route, and no saved study changes.
+        openSignalDialog(sig || { name: name, origin_role: "dut", direction: "dut-to-host" });
+        return;
+      }
+      var remove = ev.target.closest("[data-signal-remove]");
+      if (remove) removeSignal(remove.getAttribute("data-signal-remove"));
+    });
+  }
+
+  // --- Trace view (design.md §3 decision 10, second half) ----------------
+  //
+  // Every number drawn here was decoded server-side, through
+  // `embarch-study-designer`'s own `outpost` module (src/trace.rs). No trace
+  // knowledge lives in this file: not the column order, not the record kinds,
+  // not what `IRQ_UNKNOWN` means. What lives here is the drawing.
+
+  var traceView = null;
+
+  function trEl(id) {
+    return document.getElementById(id);
+  }
+
+  function traceShowError(message) {
+    var el = trEl("trace-error");
+    if (!message) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = message;
+  }
+
+  async function traceLoadTaps() {
+    var studyId = trEl("trace-study").value.trim();
+    var select = trEl("trace-tap");
+    if (!studyId) return traceShowError("give the study_id a run reported");
+    traceShowError("");
+    var resp = await fetch("/api/trace/" + encodeURIComponent(studyId));
+    var text = await resp.text();
+    if (!resp.ok) {
+      select.disabled = true;
+      select.innerHTML = '<option value="">—</option>';
+      return traceShowError(resp.status + " " + text);
+    }
+    var data = JSON.parse(text);
+    var taps = (data.taps || []).filter(function (t) { return t.is_outpost_trace; });
+    if (!taps.length) {
+      select.disabled = true;
+      select.innerHTML = '<option value="">no outpost trace tap in this study</option>';
+      return traceShowError(
+        "this study declared " + (data.taps || []).length + " tap(s), none of them an outpost " +
+        "trace. Author one in the Study Designer's Streams card."
+      );
+    }
+    select.disabled = false;
+    select.innerHTML = taps
+      .map(function (t) {
+        return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.name) +
+          (t.named ? "" : " — unnamed") + "</option>";
+      })
+      .join("");
+    return traceLoadView();
+  }
+
+  async function traceLoadView() {
+    var studyId = trEl("trace-study").value.trim();
+    var tap = trEl("trace-tap").value;
+    if (!studyId || !tap) return;
+    traceShowError("");
+    var resp = await fetch(
+      "/api/trace/" + encodeURIComponent(studyId) + "/" + encodeURIComponent(tap)
+    );
+    var text = await resp.text();
+    if (!resp.ok) {
+      trEl("trace-body").style.display = "none";
+      trEl("trace-refusal").style.display = "none";
+      return traceShowError(resp.status + " " + text);
+    }
+    traceView = JSON.parse(text);
+    renderTrace();
+  }
+
+  function fmtCycles(view, cycles) {
+    if (!view.has_time_base || !view.us_per_cycle) return String(cycles) + " cyc";
+    var us = cycles * view.us_per_cycle;
+    if (us >= 1000) return (us / 1000).toFixed(3) + " ms";
+    return us.toFixed(1) + " µs";
+  }
+
+  function statCard(label, value, sub, tone) {
+    return (
+      '<div class="card"><div class="card-title"><span style="font-size:10.5px; font-weight:650; ' +
+      'letter-spacing:0.06em; text-transform:uppercase; color:var(--text-tertiary);">' +
+      escapeHtml(label) + "</span></div>" +
+      '<div class="stat-value"' + (tone ? ' style="color:' + tone + ';"' : "") + ">" +
+      escapeHtml(value) + "</div>" +
+      '<div class="stat-sub">' + escapeHtml(sub) + "</div></div>"
+    );
+  }
+
+  function renderTrace() {
+    var view = traceView;
+    if (!view) return;
+    trEl("trace-body").style.display = "block";
+
+    // **The refusal banner, and it is not a warning decorating a named
+    // trace.** Decision 10 says an unnamed trace must never read as a named
+    // one, so this says the trace is unnamed, says Core's reason verbatim, and
+    // the lanes below render as the numbers they are.
+    var refusal = trEl("trace-refusal");
+    if (!view.named) {
+      refusal.style.display = "block";
+      refusal.innerHTML =
+        '<div class="card-title" style="color:var(--warning);">This trace has no names</div>' +
+        '<p class="placeholder-note">embarch-core decoded the capture into a real timeline but did ' +
+        "not apply a manifest to it, so every thread, vector and marker below is the number the " +
+        "firmware reported and nothing more. The structure is real; the labels are absent, not " +
+        "guessed.</p>" +
+        '<p class="mono" style="font-size:12px; color:var(--text-secondary);">' +
+        escapeHtml(view.note || "embarch-core recorded no reason.") + "</p>";
+    } else {
+      refusal.style.display = "none";
+    }
+
+    var lostTone = view.records_lost > 0 ? "var(--warning)" : "var(--success)";
+    trEl("trace-stats").innerHTML =
+      statCard("Records", String(view.rows),
+        view.rows_dropped_by_cap > 0
+          ? view.rows_dropped_by_cap + " more not read — this view caps at 250,000"
+          : "every row in the capture") +
+      statCard("Records lost", String(view.records_lost),
+        view.gaps.length + " gap(s) reported by the firmware", lostTone) +
+      statCard("Span", fmtCycles(view, view.cycles_to - view.cycles_from),
+        view.has_time_base ? "DUT's own clock" : "no header frame — cycles only, no time base") +
+      statCard("Lanes", String(view.lanes.length),
+        view.lanes.filter(function (l) { return l.unnamed; }).length + " with no name in the manifest");
+
+    trEl("trace-axis-note").textContent = view.has_time_base
+      ? "time from the DUT's own cycle counter"
+      : "no header frame in this capture, so no clock rate — the axis is raw cycles";
+
+    trEl("trace-gaps").innerHTML = view.gaps.length
+      ? view.gaps
+          .map(function (g) {
+            return (
+              "<tr><td>" + fmtCycles(view, g.from - view.cycles_from) + "</td>" +
+              "<td>" + fmtCycles(view, g.to - view.cycles_from) + "</td>" +
+              '<td class="mono">' + g.records_lost + "</td>" +
+              '<td class="mono">' + g.row_index + "</td></tr>"
+            );
+          })
+          .join("")
+      : '<tr><td colspan="4" class="placeholder-note">The firmware reported no losses.</td></tr>';
+
+    trEl("trace-markers").innerHTML = view.markers.length
+      ? view.markers
+          .map(function (m) {
+            return (
+              "<tr><td>" + fmtCycles(view, m.cycles - view.cycles_from) + "</td>" +
+              '<td class="' + (m.unnamed ? "mono" : "") + '"' +
+              (m.unnamed ? ' style="font-style:italic; color:var(--text-tertiary);"' : "") + ">" +
+              escapeHtml(m.label) + "</td>" +
+              '<td class="mono">' + m.arg + "</td></tr>"
+            );
+          })
+          .join("")
+      : '<tr><td colspan="3" class="placeholder-note">No markers in this capture.</td></tr>';
+
+    drawTraceChart(view);
+  }
+
+  var TRACE_GUTTER = 230;
+  var TRACE_AXIS_H = 30;
+  var TRACE_ROW_H = 24;
+  var TRACE_BAR_H = 13;
+
+  function drawTraceChart(view) {
+    var svg = trEl("trace-chart");
+    var width = Math.max(640, svg.clientWidth || svg.parentElement.clientWidth || 900);
+    var height = TRACE_AXIS_H + view.lanes.length * TRACE_ROW_H + 18;
+    svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+    svg.setAttribute("height", String(height));
+
+    var span = Math.max(1, view.cycles_to - view.cycles_from);
+    var plotLeft = TRACE_GUTTER;
+    var plotRight = width - 14;
+    function x(cycles) {
+      return plotLeft + ((cycles - view.cycles_from) / span) * (plotRight - plotLeft);
+    }
+
+    var parts = [];
+    // Two hatches, and they mean different things: a span the data cannot
+    // vouch for the continuity of, and an interval the firmware said it lost
+    // records in.
+    parts.push(
+      '<defs>' +
+      '<pattern id="tr-gap" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
+      '<rect width="8" height="8" fill="var(--danger-soft-bg)"/>' +
+      '<line x1="0" y1="0" x2="0" y2="8" stroke="var(--danger)" stroke-width="2"/></pattern>' +
+      '<pattern id="tr-cross" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
+      '<rect width="7" height="7" fill="var(--accent-soft-bg)"/>' +
+      '<line x1="0" y1="0" x2="0" y2="7" stroke="var(--accent)" stroke-width="2.4"/></pattern>' +
+      "</defs>"
+    );
+
+    // Axis.
+    var ticks = 6;
+    for (var t = 0; t <= ticks; t += 1) {
+      var cyc = view.cycles_from + (span * t) / ticks;
+      var tx = x(cyc);
+      parts.push(
+        '<line x1="' + tx + '" y1="' + TRACE_AXIS_H + '" x2="' + tx + '" y2="' + (height - 14) +
+        '" stroke="var(--border)" stroke-width="1" opacity="0.7"/>' +
+        '<text x="' + tx + '" y="' + (TRACE_AXIS_H - 10) + '" text-anchor="middle" ' +
+        'fill="var(--text-tertiary)" font-size="10.5" font-family="IBM Plex Mono, monospace">' +
+        escapeHtml(fmtCycles(view, cyc - view.cycles_from)) + "</text>"
+      );
+    }
+
+    // Gap bands, drawn first so records that survived inside one stay visible
+    // on top of it. A gap is "records were lost across this span", not
+    // "nothing happened here" — the committed native_sim capture has 16
+    // surviving records inside its first band, and erasing them to make the
+    // picture tidier would be its own lie.
+    view.gaps.forEach(function (g) {
+      var gx = x(g.from);
+      var gw = Math.max(2, x(g.to) - gx);
+      parts.push(
+        '<rect x="' + gx + '" y="' + TRACE_AXIS_H + '" width="' + gw + '" height="' +
+        (height - 14 - TRACE_AXIS_H) + '" fill="url(#tr-gap)" stroke="var(--danger)" ' +
+        'stroke-width="1" stroke-dasharray="3 3"><title>' +
+        escapeHtml(g.records_lost + " records lost across " + fmtCycles(view, g.to - g.from) +
+          " — what is drawn inside this band is what survived, not what happened") +
+        "</title></rect>"
+      );
+    });
+
+    view.lanes.forEach(function (lane, i) {
+      var top = TRACE_AXIS_H + i * TRACE_ROW_H;
+      var mid = top + TRACE_ROW_H / 2;
+      var barTop = mid - TRACE_BAR_H / 2;
+
+      parts.push(
+        '<text x="' + (TRACE_GUTTER - 12) + '" y="' + (mid + 4) + '" text-anchor="end" ' +
+        'fill="' + (lane.unnamed ? "var(--text-tertiary)" : "var(--text-primary)") + '" ' +
+        'font-size="11.5" font-family="IBM Plex Mono, monospace"' +
+        (lane.unnamed ? ' font-style="italic"' : "") + ">" +
+        escapeHtml(lane.label) + "</text>"
+      );
+      if (lane.unnamed) {
+        parts.push(
+          '<line x1="' + (TRACE_GUTTER - 12 - Math.min(200, lane.label.length * 6.6)) + '" y1="' +
+          (mid + 7) + '" x2="' + (TRACE_GUTTER - 12) + '" y2="' + (mid + 7) +
+          '" stroke="var(--text-tertiary)" stroke-width="1" stroke-dasharray="2 2"/>'
+        );
+      }
+      parts.push(
+        '<line x1="' + plotLeft + '" y1="' + mid + '" x2="' + plotRight + '" y2="' + mid +
+        '" stroke="var(--border)" stroke-width="1" stroke-dasharray="2 4"/>'
+      );
+
+      lane.spans.forEach(function (sp) {
+        var sx = x(sp.from);
+        // A zero-length span still happened, so it is drawn at a minimum
+        // width to stay visible. That width is a visibility floor, not a
+        // duration — which is what the tooltip's own numbers are for.
+        var sw = Math.max(1.5, x(sp.to) - sx);
+        var fill = sp.crosses_gap ? "url(#tr-cross)" : "var(--accent)";
+        var title =
+          fmtCycles(view, sp.from - view.cycles_from) + " → " +
+          fmtCycles(view, sp.to - view.cycles_from) +
+          " (" + fmtCycles(view, sp.to - sp.from) + ")" +
+          (sp.open_start ? " · no switch-in record: this run was already going when it became observable" : "") +
+          (sp.open_end ? " · no closing record: the bar ends at the next traced event, which is not when it ended" : "") +
+          (sp.crosses_gap ? " · overlaps a gap: events inside it were lost, so continuity is not established" : "");
+        parts.push(
+          '<rect x="' + sx + '" y="' + barTop + '" width="' + sw + '" height="' + TRACE_BAR_H +
+          '" rx="2" fill="' + fill + '"' +
+          (sp.open_end || sp.open_start ? ' opacity="0.62"' : "") +
+          "><title>" + escapeHtml(title) + "</title></rect>"
+        );
+        // Ragged edges: dashed where a record is missing, so an extent never
+        // reads as a measurement.
+        if (sp.open_start) {
+          parts.push(
+            '<line x1="' + sx + '" y1="' + barTop + '" x2="' + sx + '" y2="' + (barTop + TRACE_BAR_H) +
+            '" stroke="var(--warning)" stroke-width="2" stroke-dasharray="2 2"/>'
+          );
+        }
+        if (sp.open_end) {
+          parts.push(
+            '<line x1="' + (sx + sw) + '" y1="' + barTop + '" x2="' + (sx + sw) + '" y2="' +
+            (barTop + TRACE_BAR_H) + '" stroke="var(--warning)" stroke-width="2" stroke-dasharray="2 2"/>'
+          );
+        }
+      });
+
+      lane.points.forEach(function (pt) {
+        var px = x(pt.cycles);
+        parts.push(
+          '<path d="M' + px + " " + (mid - 6) + " L" + (px + 5) + " " + mid + " L" + px + " " +
+          (mid + 6) + " L" + (px - 5) + " " + mid + ' Z" fill="var(--info)"><title>' +
+          escapeHtml(pt.kind + " · " + pt.label) + "</title></path>"
+        );
+      });
+    });
+
+    // Markers last, over everything: they are the engineer's own annotations
+    // and the reason a trace is worth reading against a specific run.
+    //
+    // A bright tick in a strip of their own, plus a **very** faint full-height
+    // rule. Both halves earn their place, and the split was forced by real
+    // data: the committed capture carries 132 markers across 760 ms, and at
+    // the opacity the first version used they swamped every span on the chart
+    // — a legend of vertical lines with a timeline somewhere behind it. The
+    // tick is what makes a marker locatable; the rule is what lets a reader
+    // line one up against the lane that was running, which is the whole reason
+    // a marker is worth drawing on a timeline at all.
+    view.markers.forEach(function (m) {
+      var mx = x(m.cycles);
+      var title =
+        escapeHtml(m.label + " (arg " + m.arg + ") at " + fmtCycles(view, m.cycles - view.cycles_from));
+      parts.push(
+        '<line x1="' + mx + '" y1="' + TRACE_AXIS_H + '" x2="' + mx + '" y2="' + (height - 14) +
+        '" stroke="var(--warning)" stroke-width="1" opacity="0.16"/>' +
+        '<line x1="' + mx + '" y1="' + TRACE_AXIS_H + '" x2="' + mx + '" y2="' + (TRACE_AXIS_H + 8) +
+        '" stroke="var(--warning)" stroke-width="1.6"><title>' + title + "</title></line>"
+      );
+    });
+
+    svg.innerHTML = parts.join("");
+  }
+
+  function initTraceTab() {
+    if (!trEl("trace-chart")) return;
+    trEl("trace-load").addEventListener("click", traceLoadTaps);
+    // `#trace?study=<id>&tap=<name>` opens a specific trace directly — the
+    // same deep-link shape `#topology` already gives `embarch-topology`'s
+    // `fix_it_url` (decision 19). A trace is the one thing in this UI worth
+    // sending somebody a link to: it is post-hoc and belongs to one run.
+    //
+    // In the **fragment**, not the query string, for two reasons: the fragment
+    // already selects the tab here, so the whole address stays one mechanism;
+    // and a fragment never reaches the server, so a link to a trace costs no
+    // round trip and leaks no study id into a log. A `?study=` query is
+    // honoured too, for a link somebody hand-writes that way.
+    var params = hashParams();
+    var study = params.get("study") || new URLSearchParams(location.search).get("study");
+    if (study) {
+      trEl("trace-study").value = study;
+      var wantedTap = params.get("tap") || new URLSearchParams(location.search).get("tap");
+      traceLoadTaps().then(function () {
+        if (wantedTap && trEl("trace-tap").querySelector('[value="' + CSS.escape(wantedTap) + '"]')) {
+          trEl("trace-tap").value = wantedTap;
+          traceLoadView();
+        }
+      });
+    }
+    trEl("trace-study").addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") traceLoadTaps();
+    });
+    trEl("trace-tap").addEventListener("change", traceLoadView);
+    var pending = null;
+    window.addEventListener("resize", function () {
+      if (!traceView) return;
+      clearTimeout(pending);
+      pending = setTimeout(function () { drawTraceChart(traceView); }, 120);
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     initNav();
     initEnrollTab();
+    initSignals();
     initStudyDesignerTab();
+    initTraceTab();
     initDebugTab();
     initEvents();
     const toggle = document.querySelector(".theme-toggle");
