@@ -7,9 +7,18 @@
 //! `embarch-core` directly through the same shared client the Dashboard/
 //! Topology/Enroll tabs already use.
 //!
-//! Disabled entirely (every route below answers `404`) when `[study_designer]`
-//! isn't set in config — this session resolved via `AskUserQuestion` that a
-//! config field, not a UI picker or cwd search, names the firmware repo.
+//! **A project can be opened at runtime** (`embarch-ui/design.md` §3
+//! decision 14) — this used to say the tab was "disabled entirely (every
+//! route below answers `404`) when `[study_designer]` isn't set in config",
+//! because milestone-1.md §4.6 resolved via `AskUserQuestion` that a config
+//! field, not a UI picker or cwd search, names the firmware repo.
+//!
+//! That reasoning stands and is not being reversed: the thing it rejected was
+//! *guessing* which repo was meant, and it was right that a wrong guess is
+//! worse than a clear "not configured" state. An explicit human pick is not a
+//! guess, so "Open project" satisfies that reasoning rather than contradicting
+//! it. The config field is kept as the zero-click default for a single-repo
+//! bench; what changed is that its absence no longer leaves the tab dead.
 
 use crate::config::StudyDesignerConfig;
 use axum::extract::State;
@@ -33,7 +42,7 @@ use heapless::Vec as HVec;
 type StreamList = HVec<StreamTap, MAX_STREAMS_PER_STUDY>;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -45,14 +54,35 @@ const DISCOVER_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 struct Inner {
-    config: StudyDesignerConfig,
+    /// The project currently open — `None` when neither config named one nor
+    /// anybody has opened one yet (`embarch-ui/design.md` §3 decision 14).
+    ///
+    /// A `Mutex`, not a plain field, and that is the whole shape of decision
+    /// 14: `firmware_repo_path` is read by three different things (the saved
+    /// studies directory, the action registry, the static GATT extractor), so
+    /// switching projects has to move all three together or the tab shows one
+    /// repo's studies beside another repo's registry. Holding it in one place
+    /// is what makes that a single assignment instead of three that can
+    /// disagree.
+    project: Mutex<Option<StudyDesignerConfig>>,
     core: Arc<CoreClient>,
     /// The most recent live `GattDiscover` result, if any — `None` until
     /// `POST /api/study-designer/discover` has succeeded at least once.
+    /// **Cleared when the project changes**: a GATT table discovered against
+    /// one repo's DUT says nothing about another's.
     live_gatt: Mutex<Option<Vec<GattServiceInfo>>>,
-    /// Computed once, lazily, on first need — the firmware repo's source
-    /// tree doesn't change while this process is running.
-    static_gatt: OnceLock<Option<Vec<GattServiceInfo>>>,
+    /// Cached per project, computed lazily on first need — a repo's source
+    /// tree doesn't change while this process is running, but the repo
+    /// itself now can. `None` means "not computed for the current project";
+    /// `Some(None)` means "computed, and there is no extraction" (no
+    /// extractor configured, or it failed), which is a different fact and
+    /// must not be recomputed on every request.
+    ///
+    /// This was a `OnceLock`, which was exactly right while the project was
+    /// fixed for the process's lifetime and is exactly wrong now: a
+    /// `OnceLock` that has been set cannot be un-set, so the first project's
+    /// extraction would have been served for every project after it.
+    static_gatt: Mutex<Option<Option<Vec<GattServiceInfo>>>>,
     run_tx: watch::Sender<RunState>,
 }
 
@@ -60,19 +90,49 @@ struct Inner {
 pub struct StudyDesigner(Arc<Inner>);
 
 impl StudyDesigner {
-    pub fn new(config: StudyDesignerConfig, core: Arc<CoreClient>) -> StudyDesigner {
+    /// Constructed unconditionally, with or without a configured project —
+    /// the tab's routes now answer for "no project open" instead of the
+    /// process having no Study Designer at all (`embarch-ui/design.md` §3
+    /// decision 14).
+    pub fn new(config: Option<StudyDesignerConfig>, core: Arc<CoreClient>) -> StudyDesigner {
         let (run_tx, _) = watch::channel(RunState::Idle);
         StudyDesigner(Arc::new(Inner {
-            config,
+            project: Mutex::new(config),
             core,
             live_gatt: Mutex::new(None),
-            static_gatt: OnceLock::new(),
+            static_gatt: Mutex::new(None),
             run_tx,
         }))
     }
 
+    /// The open project, cloned rather than borrowed: every caller wants a
+    /// path to read a file with, and holding the lock across a filesystem
+    /// call would serialise requests behind each other for no reason.
+    fn project(&self) -> Option<StudyDesignerConfig> {
+        self.0.project.lock().unwrap().clone()
+    }
+
+    fn repo_path(&self) -> Option<std::path::PathBuf> {
+        self.project().map(|p| p.firmware_repo_path)
+    }
+
+    /// Switches every project-derived piece of state at once — the point of
+    /// decision 14's single `Mutex`. Nothing is cached across the switch:
+    /// both the live and the static GATT tables described the *previous*
+    /// repo's DUT, and serving either against a new project is the
+    /// one-repo's-studies-beside-another's-registry failure in a different
+    /// costume.
+    fn open_project(&self, config: StudyDesignerConfig) {
+        *self.0.project.lock().unwrap() = Some(config);
+        *self.0.live_gatt.lock().unwrap() = None;
+        *self.0.static_gatt.lock().unwrap() = None;
+    }
+
     fn registry(&self) -> Result<ActionRegistry, String> {
-        ActionRegistry::load(&self.0.config.firmware_repo_path).map_err(|e| e.to_string())
+        let Some(repo) = self.repo_path() else {
+            return Err(NO_PROJECT.to_string());
+        };
+        ActionRegistry::load(&repo).map_err(|e| e.to_string())
     }
 
     /// Runs the configured `static_extractor` at most once per process.
@@ -80,21 +140,30 @@ impl StudyDesigner {
     /// not a silent guess — `reference-dut` is the only name this crate
     /// currently ships an extractor for (design.md §3 decision 33).
     fn static_gatt(&self) -> Option<Vec<GattServiceInfo>> {
-        self.0
-            .static_gatt
-            .get_or_init(|| match self.0.config.static_extractor.as_deref() {
-                Some("zephyr-ble-def") => ZephyrBleDefExtractor
-                    .extract(&self.0.config.firmware_repo_path)
-                    .map(|services| services.iter().cloned().collect())
-                    .map_err(|e| tracing::warn!("static GATT extraction failed: {e}"))
-                    .ok(),
-                Some(other) => {
-                    tracing::warn!("unrecognized static_extractor '{other}' — only 'reference-dut' exists today");
-                    None
-                }
-                None => None,
-            })
-            .clone()
+        let mut cached = self.0.static_gatt.lock().unwrap();
+        if let Some(computed) = cached.as_ref() {
+            return computed.clone();
+        }
+        let Some(project) = self.project() else {
+            // Deliberately not cached: with no project there is nothing to
+            // have computed, and caching "no" here would then be served to
+            // the project opened a moment later.
+            return None;
+        };
+        let computed = match project.static_extractor.as_deref() {
+            Some("zephyr-ble-def") => ZephyrBleDefExtractor
+                .extract(&project.firmware_repo_path)
+                .map(|services| services.iter().cloned().collect())
+                .map_err(|e| tracing::warn!("static GATT extraction failed: {e}"))
+                .ok(),
+            Some(other) => {
+                tracing::warn!("unrecognized static_extractor '{other}' — only 'reference-dut' exists today");
+                None
+            }
+            None => None,
+        };
+        *cached = Some(computed.clone());
+        computed
     }
 
     fn live_gatt(&self) -> Option<Vec<GattServiceInfo>> {
@@ -128,12 +197,19 @@ pub enum RunState {
     Failed { study_id: Option<String>, reason: String },
 }
 
+/// Said in one place, because it is both an HTTP body and (via
+/// [`StudyDesigner::registry`]) an error string a different layer renders.
+const NO_PROJECT: &str = "no project is open — open a firmware repo, or set \
+     [study_designer].firmware_repo_path in embarch-ui's config";
+
+/// The answer for a route that needs an open project and hasn't got one.
+///
+/// Still a `404`, and still the "clear not-configured state" milestone-1.md
+/// §4.6 chose over guessing — but it is no longer a dead end, because
+/// `POST /api/study-designer/project` is now the way out of it (design.md §3
+/// decision 14).
 fn not_configured() -> axum::response::Response {
-    (
-        StatusCode::NOT_FOUND,
-        "the Study Designer tab needs [study_designer].firmware_repo_path set in embarch-ui's config",
-    )
-        .into_response()
+    (StatusCode::NOT_FOUND, NO_PROJECT).into_response()
 }
 
 /// A fixed step-count of `MAX_STEPS_PER_STUDY`-independent studies — `Study`
@@ -143,14 +219,14 @@ fn discover_study() -> Result<Study, String> {
     let rows = vec![
         TableRow {
             name: "connect".to_string(),
-            action: RowAction::BuiltIn { which: BuiltInActionKind::BleConnect, role: RoleChoice::Central , target_name: None },
+            action: RowAction::BuiltIn { which: BuiltInActionKind::BleConnect, role: RoleChoice::Central , target_name: None, security_level: None },
             timeout_ms: 15_000,
             continue_on_fail: false,
             delay_before_ms: 0,
         },
         TableRow {
             name: "discover".to_string(),
-            action: RowAction::BuiltIn { which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central , target_name: None },
+            action: RowAction::BuiltIn { which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central , target_name: None, security_level: None },
             timeout_ms: 15_000,
             continue_on_fail: false,
             delay_before_ms: 0,
@@ -374,12 +450,22 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
 }
 
 pub async fn api_actions(State(state): State<crate::AppState>) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    // A project is a precondition rather than an input here — this route
+    // reads nothing off it, but it has nothing to answer about without one.
+    if sd.project().is_none() {
+        return not_configured();
+    }
     actions_response(&sd)
 }
 
 pub async fn api_registry(State(state): State<crate::AppState>) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    // A project is a precondition rather than an input here — this route
+    // reads nothing off it, but it has nothing to answer about without one.
+    if sd.project().is_none() {
+        return not_configured();
+    }
     match sd.registry() {
         Ok(r) => Json(r).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -393,21 +479,27 @@ pub async fn api_register_action(
     State(state): State<crate::AppState>,
     Json(action): Json<RegisteredAction>,
 ) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
     let mut registry = match sd.registry() {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
     registry.actions.retain(|a| a.name != action.name);
     registry.actions.push(action);
-    match registry.save(&sd.0.config.firmware_repo_path) {
+    match registry.save(&project.firmware_repo_path) {
         Ok(()) => Json(registry).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 
 pub async fn api_discover(State(state): State<crate::AppState>) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    // A project is a precondition rather than an input here — this route
+    // reads nothing off it, but it has nothing to answer about without one.
+    if sd.project().is_none() {
+        return not_configured();
+    }
     let mut study = match discover_study() {
         Ok(s) => s,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -478,7 +570,12 @@ pub async fn api_run(
     State(state): State<crate::AppState>,
     Json(req): Json<RunRequest>,
 ) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    // A project is a precondition rather than an input here — this route
+    // reads nothing off it, but it has nothing to answer about without one.
+    if sd.project().is_none() {
+        return not_configured();
+    }
     let registry = match sd.registry() {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -571,7 +668,12 @@ async fn watch_study(core: Arc<CoreClient>, study_id: String, tx: watch::Sender<
 }
 
 pub async fn api_run_events(State(state): State<crate::AppState>) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    // A project is a precondition rather than an input here — this route
+    // reads nothing off it, but it has nothing to answer about without one.
+    if sd.project().is_none() {
+        return not_configured();
+    }
     let rx = sd.0.run_tx.subscribe();
     let stream = futures_util::stream::unfold((rx, true), |(mut rx, first)| async move {
         if !first && rx.changed().await.is_err() {
@@ -614,8 +716,12 @@ fn study_slug(name: &str) -> Result<String, String> {
     Ok(slug)
 }
 
-fn studies_dir(sd: &StudyDesigner) -> std::path::PathBuf {
-    sd.0.config.firmware_repo_path.join("embarch").join("studies")
+/// `<firmware repo>/embarch/studies` (`embarch-study-designer/design.md` §3
+/// decision 38) — taken from the *open project* rather than from config, so
+/// switching projects moves the studies list with it (`embarch-ui/design.md`
+/// §3 decision 14).
+fn studies_dir(project: &StudyDesignerConfig) -> std::path::PathBuf {
+    project.firmware_repo_path.join("embarch").join("studies")
 }
 
 #[derive(Debug, Serialize)]
@@ -668,8 +774,9 @@ struct LoadedTap {
 }
 
 pub async fn api_studies_list(State(state): State<crate::AppState>) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
-    let dir = studies_dir(&sd);
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    let dir = studies_dir(&project);
 
     let mut out: Vec<SavedStudySummary> = Vec::new();
     match std::fs::read_dir(&dir) {
@@ -709,7 +816,8 @@ pub async fn api_studies_save(
     State(state): State<crate::AppState>,
     Json(req): Json<SaveStudyRequest>,
 ) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
     let slug = match study_slug(&req.name) {
         Ok(s) => s,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
@@ -754,7 +862,7 @@ pub async fn api_studies_save(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
-    let dir = studies_dir(&sd);
+    let dir = studies_dir(&project);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't create {}: {e}", dir.display()))
             .into_response();
@@ -782,12 +890,13 @@ pub async fn api_studies_load(
     State(state): State<crate::AppState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
     let slug = match study_slug(&slug) {
         Ok(s) => s,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let path = studies_dir(&sd).join(format!("{slug}.json"));
+    let path = studies_dir(&project).join(format!("{slug}.json"));
 
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -908,11 +1017,12 @@ struct BenchStateResponse {
 }
 
 pub async fn api_bench_state(State(state): State<crate::AppState>) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
 
     let hello = sd.0.core.dev_bench_hello().await;
     let dut = embarch_core_client::version::derive_version(
-        &sd.0.config.firmware_repo_path,
+        &project.firmware_repo_path,
         &embarch_core_client::version::default_version_command(),
     )
     .await;
@@ -962,11 +1072,12 @@ pub async fn api_version_check(
     State(state): State<crate::AppState>,
     axum::extract::Query(q): axum::extract::Query<MismatchQuery>,
 ) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
 
     let hello = sd.0.core.dev_bench_hello().await;
     let dut = embarch_core_client::version::derive_version(
-        &sd.0.config.firmware_repo_path,
+        &project.firmware_repo_path,
         &embarch_core_client::version::default_version_command(),
     )
     .await;
@@ -1050,12 +1161,13 @@ pub async fn api_studies_delete(
     State(state): State<crate::AppState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
     let slug = match study_slug(&slug) {
         Ok(s) => s,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let path = studies_dir(&sd).join(format!("{slug}.json"));
+    let path = studies_dir(&project).join(format!("{slug}.json"));
     match std::fs::remove_file(&path) {
         Ok(()) => Json(serde_json::json!({ "deleted": slug })).into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1075,7 +1187,12 @@ pub async fn api_gatt_data(
     State(state): State<crate::AppState>,
     axum::extract::Path(study_id): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    let Some(sd) = state.study_designer else { return not_configured() };
+    let sd = state.study_designer;
+    // A project is a precondition rather than an input here — this route
+    // reads nothing off it, but it has nothing to answer about without one.
+    if sd.project().is_none() {
+        return not_configured();
+    }
     match sd.0.core.get_study_gatt_data(&study_id).await {
         Ok(bytes) => (
             [
@@ -1095,6 +1212,212 @@ pub async fn api_gatt_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch directory under the system temp dir, unique per test. No
+    /// `tempfile` dev-dependency for four lines, matching this crate's
+    /// existing posture of spelling small things out.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("embarch-ui-test-{}-{tag}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The distinction the whole "Open project" validation rests on
+    /// (design.md §3 decision 14): a firmware repo with no `embarch/`
+    /// directory yet is a legitimate first-time state, and must read as
+    /// *this repo has no studies yet* rather than *this is not a repo*.
+    #[test]
+    fn a_repo_with_no_embarch_dir_is_a_repo_with_no_studies() {
+        let scratch = Scratch::new("fresh-repo");
+        std::fs::create_dir_all(scratch.0.join(".git")).unwrap();
+        std::fs::write(scratch.0.join("west.yml"), "manifest:\n").unwrap();
+
+        let survey = survey_project(&scratch.0);
+        assert!(survey.is_git_repo);
+        assert!(survey.looks_like_firmware);
+        assert!(!survey.has_embarch_dir);
+        assert!(!survey.has_embarch_config);
+        assert!(!survey.has_action_registry);
+        assert_eq!(survey.saved_studies, 0);
+    }
+
+    /// **Found live, not reasoned about.** The first version of the
+    /// acceptance rule treated a bare `embarch/` subdirectory as evidence,
+    /// and on this bench that accepted `$HOME` — because the suite's own
+    /// parent folder is `~/embarch`, which contains every sub-project and no
+    /// firmware. A directory called `embarch` says nothing about its
+    /// contents; something `embarch init` or this tab wrote inside it does.
+    #[test]
+    fn a_bare_embarch_subdirectory_is_not_evidence_of_a_project() {
+        let scratch = Scratch::new("suite-parent");
+        // What `~/embarch` looks like: an `embarch` directory holding
+        // sibling checkouts, none of which is this repo's config.
+        std::fs::create_dir_all(scratch.0.join("embarch").join("embarch-core")).unwrap();
+
+        let survey = survey_project(&scratch.0);
+        assert!(survey.has_embarch_dir, "the directory is there");
+        assert!(!survey.has_embarch_config, "but nothing embarch wrote is in it");
+        assert!(!survey.is_git_repo);
+        assert!(!survey.looks_like_firmware);
+    }
+
+    /// The other side of the same rule: a repo whose only signal is a real
+    /// `embarch/` config must still open — that is a project this tab (or
+    /// `embarch init`) created, checked out somewhere without a `.git`.
+    #[test]
+    fn an_embarch_config_alone_is_enough() {
+        let scratch = Scratch::new("config-only");
+        std::fs::create_dir_all(scratch.0.join("embarch")).unwrap();
+        std::fs::write(scratch.0.join("embarch").join("study-actions.toml"), "").unwrap();
+
+        let survey = survey_project(&scratch.0);
+        assert!(survey.has_embarch_config);
+        assert!(!survey.is_git_repo);
+        assert!(!survey.looks_like_firmware);
+    }
+
+    #[test]
+    fn a_worktree_whose_dot_git_is_a_file_still_counts_as_a_repo() {
+        // Checked as an *entry*, not a directory: a git worktree or submodule
+        // has `.git` as a plain file, and treating that as "not a repo" would
+        // refuse a perfectly ordinary checkout.
+        let scratch = Scratch::new("worktree");
+        std::fs::write(scratch.0.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert!(survey_project(&scratch.0).is_git_repo);
+    }
+
+    #[test]
+    fn a_project_with_studies_counts_only_the_json_ones() {
+        let scratch = Scratch::new("with-studies");
+        let studies = scratch.0.join("embarch").join("studies");
+        std::fs::create_dir_all(&studies).unwrap();
+        std::fs::write(scratch.0.join("embarch").join("study-actions.toml"), "").unwrap();
+        std::fs::write(studies.join("one.json"), "{}").unwrap();
+        std::fs::write(studies.join("two.json"), "{}").unwrap();
+        // Not a study: an editor backup, a README, anything else that lands
+        // in a directory a human can open.
+        std::fs::write(studies.join("one.json.bak"), "{}").unwrap();
+        std::fs::write(studies.join("README.md"), "notes").unwrap();
+
+        let survey = survey_project(&scratch.0);
+        assert!(survey.has_embarch_dir);
+        assert!(survey.has_embarch_config);
+        assert!(survey.has_action_registry);
+        assert_eq!(survey.saved_studies, 2);
+    }
+
+    /// A directory with none of the four signals is almost certainly a
+    /// mis-typed path — this is the case the refusal exists for, and the one
+    /// it must not confuse with the fresh-repo case above.
+    #[test]
+    fn a_directory_with_no_signal_at_all_looks_like_nothing() {
+        let scratch = Scratch::new("not-a-repo");
+        std::fs::write(scratch.0.join("holiday.jpg"), "not source").unwrap();
+
+        let survey = survey_project(&scratch.0);
+        assert!(!survey.is_git_repo);
+        assert!(!survey.looks_like_firmware);
+        assert!(!survey.has_embarch_dir);
+        assert!(!survey.has_embarch_config);
+    }
+
+    /// Decision 14's actual invariant: `firmware_repo_path` is read by the
+    /// studies directory, the action registry *and* the static extractor, so
+    /// a switch has to move all of them. This asserts the part that can
+    /// silently fail to move — the per-project cache — since a stale cache is
+    /// how one repo's studies come to sit beside another repo's GATT table.
+    #[test]
+    fn switching_projects_drops_every_per_project_cache() {
+        let core = Arc::new(
+            embarch_core_client::CoreClient::new(
+                &toml::from_str("base_url = \"http://127.0.0.1:1\"\n").unwrap(),
+            )
+            .unwrap(),
+        );
+        let first = Scratch::new("first");
+        let second = Scratch::new("second");
+        let sd = StudyDesigner::new(
+            Some(StudyDesignerConfig {
+                firmware_repo_path: first.0.clone(),
+                static_extractor: None,
+            }),
+            core,
+        );
+
+        // Stand in for a completed `discover` and a completed static
+        // extraction against the first project.
+        *sd.0.live_gatt.lock().unwrap() = Some(Vec::new());
+        *sd.0.static_gatt.lock().unwrap() = Some(Some(Vec::new()));
+        assert!(sd.live_gatt().is_some());
+
+        sd.open_project(StudyDesignerConfig {
+            firmware_repo_path: second.0.clone(),
+            static_extractor: None,
+        });
+
+        assert_eq!(sd.repo_path().as_deref(), Some(second.0.as_path()));
+        assert!(sd.live_gatt().is_none(), "a GATT table from the old project must not survive");
+        assert!(
+            sd.0.static_gatt.lock().unwrap().is_none(),
+            "the static-extraction cache must be recomputed for the new project"
+        );
+        assert_eq!(studies_dir(&sd.project().unwrap()), second.0.join("embarch").join("studies"));
+    }
+
+    /// `None` means "not computed yet" and `Some(None)` means "computed, and
+    /// there is nothing" — two different facts. Conflating them is what a
+    /// `OnceLock` could not express once the project became switchable.
+    #[test]
+    fn no_configured_extractor_caches_the_absence_rather_than_recomputing() {
+        let core = Arc::new(
+            embarch_core_client::CoreClient::new(
+                &toml::from_str("base_url = \"http://127.0.0.1:1\"\n").unwrap(),
+            )
+            .unwrap(),
+        );
+        let scratch = Scratch::new("no-extractor");
+        let sd = StudyDesigner::new(
+            Some(StudyDesignerConfig {
+                firmware_repo_path: scratch.0.clone(),
+                static_extractor: None,
+            }),
+            core,
+        );
+        assert!(sd.0.static_gatt.lock().unwrap().is_none());
+        assert!(sd.static_gatt().is_none());
+        assert_eq!(*sd.0.static_gatt.lock().unwrap(), Some(None));
+    }
+
+    /// With no project open there is nothing to have computed, so the absence
+    /// must *not* be cached — otherwise the "no" gets served to the project
+    /// opened a moment later.
+    #[test]
+    fn with_no_project_the_static_extraction_absence_is_not_cached() {
+        let core = Arc::new(
+            embarch_core_client::CoreClient::new(
+                &toml::from_str("base_url = \"http://127.0.0.1:1\"\n").unwrap(),
+            )
+            .unwrap(),
+        );
+        let sd = StudyDesigner::new(None, core);
+        assert!(sd.static_gatt().is_none());
+        assert!(sd.0.static_gatt.lock().unwrap().is_none());
+        assert!(sd.registry().is_err(), "no project means no registry to load");
+    }
 
     fn input(dev_bench: &str, firmware: &str) -> RequirementsInput {
         RequirementsInput {
@@ -1247,4 +1570,367 @@ mod tests {
         // what such a study would in fact have done.
         assert_eq!(version_field(&serde_json::json!({}), "firmware_version"), REQUIREMENT_ANY);
     }
+}
+
+// ---- projects (design.md §3 decision 14) ------------------------------------
+
+/// One entry of the recent-projects list, and one row of the "Open project"
+/// panel. `static_extractor` rides along so reopening a project restores the
+/// whole `StudyDesignerConfig`, not just the path — a repo whose GATT table
+/// only exists in source is useless without it, and re-typing it every time
+/// would be the busywork this list exists to remove.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentProject {
+    path: String,
+    #[serde(default)]
+    static_extractor: Option<String>,
+}
+
+/// How many recent projects are kept. Small on purpose: this is a
+/// convenience list an engineer scans, not a history to search.
+const MAX_RECENT_PROJECTS: usize = 8;
+
+/// `<per-user data dir>/embarch/ui/recent-projects.json`, or whatever
+/// `EMBARCH_UI_STATE` names.
+///
+/// **Not the config file.** `EMBARCH_UI_CONFIG` is a file an engineer writes
+/// and this process only reads; writing a recent-projects list into it would
+/// mean rewriting a human's own file (comments and all) to record a UI
+/// convenience. The per-user data directory is where this suite already keeps
+/// process-written state (`embarch-core-client::user_dirs`, shared with
+/// `embarch-api`'s logfile), so it goes there.
+fn recent_projects_path() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("EMBARCH_UI_STATE") {
+        return Some(std::path::PathBuf::from(explicit));
+    }
+    embarch_core_client::user_dirs::user_data_dir()
+        .map(|dir| dir.join("ui").join("recent-projects.json"))
+        .map_err(|e| tracing::warn!("no per-user data dir for the recent-projects list: {e:#}"))
+        .ok()
+}
+
+/// An unreadable or unparseable file is an empty list, logged, never an
+/// error: a convenience list that can refuse to start the tab would be worse
+/// than no list at all.
+fn load_recent_projects() -> Vec<RecentProject> {
+    let Some(path) = recent_projects_path() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    match serde_json::from_str::<Vec<RecentProject>>(&text) {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!("ignoring unreadable recent-projects list at {}: {e}", path.display());
+            Vec::new()
+        }
+    }
+}
+
+/// Most-recent-first, deduplicated by path, capped. Failure is logged and
+/// swallowed for the same reason `load_recent_projects` tolerates a bad file:
+/// a project that opened fine must not report failure because a convenience
+/// list could not be written.
+fn remember_recent_project(entry: &RecentProject) {
+    let Some(path) = recent_projects_path() else { return };
+    let mut list = load_recent_projects();
+    list.retain(|e| e.path != entry.path);
+    list.insert(0, entry.clone());
+    list.truncate(MAX_RECENT_PROJECTS);
+
+    let write = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = serde_json::to_string_pretty(&list)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        std::fs::write(&path, text)
+    };
+    if let Err(e) = write() {
+        tracing::warn!("couldn't write the recent-projects list at {}: {e}", path.display());
+    }
+}
+
+/// What a directory looks like from the Study Designer's point of view — the
+/// answer to "is this a firmware repo, and does it have any studies yet".
+///
+/// **The two questions are separate, and conflating them was the trap.** A
+/// firmware repo with no `embarch/` directory is a completely legitimate
+/// first-time state — `api_studies_list` already tolerates a missing studies
+/// directory and `api_studies_save` creates it on first save — so "no
+/// `embarch/` here" must read as *this repo has no studies yet*, never as
+/// *this is not a repo*.
+#[derive(Debug, Serialize)]
+pub struct ProjectSurvey {
+    /// A `.git` entry is present. Checked as an *entry*, not as a directory:
+    /// a git worktree or a submodule has `.git` as a plain file.
+    is_git_repo: bool,
+    /// Something a firmware build would recognise (`west.yml`,
+    /// `CMakeLists.txt`, `prj.conf`, `Cargo.toml`). Not required, and not
+    /// exhaustive — it is one of several signals that a directory is a
+    /// source repo rather than someone's home directory.
+    looks_like_firmware: bool,
+    /// `<repo>/embarch` exists. Absence is a first-time state, not a fault.
+    ///
+    /// **On its own this is not evidence of anything**, which a live run
+    /// found the hard way: pointing "Open project" at `$HOME` was accepted,
+    /// because this bench's own suite parent folder is `~/embarch` and a
+    /// directory called `embarch` is not a claim about its contents. It is
+    /// reported, and it is *not* one of the signals that makes a directory
+    /// acceptable — `has_embarch_config` below is.
+    has_embarch_dir: bool,
+    /// `<repo>/embarch` holds something this tab or `embarch init` actually
+    /// put there: `study-actions.toml`, `studies/`, or `embarch.toml`. This
+    /// *is* a signal, where the bare directory is not.
+    has_embarch_config: bool,
+    /// `<repo>/embarch/study-actions.toml` exists
+    /// (`embarch-study-designer/design.md` §3 decision 34's registry).
+    has_action_registry: bool,
+    /// How many `*.json` files `<repo>/embarch/studies` holds. `0` with
+    /// `has_embarch_dir: false` is the first-time state; `0` with it true is
+    /// a project whose studies were all deleted.
+    saved_studies: usize,
+}
+
+fn survey_project(repo: &std::path::Path) -> ProjectSurvey {
+    let embarch = repo.join("embarch");
+    let studies = embarch.join("studies");
+    ProjectSurvey {
+        is_git_repo: repo.join(".git").exists(),
+        looks_like_firmware: ["west.yml", "CMakeLists.txt", "prj.conf", "Cargo.toml"]
+            .iter()
+            .any(|f| repo.join(f).exists()),
+        has_embarch_dir: embarch.is_dir(),
+        has_embarch_config: ["study-actions.toml", "studies", "embarch.toml"]
+            .iter()
+            .any(|f| embarch.join(f).exists()),
+        has_action_registry: embarch.join("study-actions.toml").is_file(),
+        saved_studies: std::fs::read_dir(&studies)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .count()
+            })
+            .unwrap_or(0),
+    }
+}
+
+/// What the "Open project" panel renders. `project` is `None` when nothing is
+/// open, which is a state the panel exists to get *out of* rather than a
+/// failure to report.
+#[derive(Debug, Serialize)]
+pub struct ProjectState {
+    path: Option<String>,
+    static_extractor: Option<String>,
+    /// `<repo>/embarch/studies`, spelled out rather than left for the browser
+    /// to join — one definition of the layout
+    /// (`embarch-study-designer/design.md` §3 decision 38), server-side.
+    studies_dir: Option<String>,
+    survey: Option<ProjectSurvey>,
+    recents: Vec<RecentProject>,
+}
+
+pub async fn api_project(State(state): State<crate::AppState>) -> axum::response::Response {
+    let sd = state.study_designer;
+    let project = sd.project();
+    let body = ProjectState {
+        path: project.as_ref().map(|p| p.firmware_repo_path.to_string_lossy().into_owned()),
+        static_extractor: project.as_ref().and_then(|p| p.static_extractor.clone()),
+        studies_dir: project
+            .as_ref()
+            .map(|p| studies_dir(p).to_string_lossy().into_owned()),
+        survey: project.as_ref().map(|p| survey_project(&p.firmware_repo_path)),
+        recents: load_recent_projects(),
+    };
+    Json(body).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenProjectRequest {
+    path: String,
+    #[serde(default)]
+    static_extractor: Option<String>,
+}
+
+/// Opens a firmware repo by path, after checking it is one.
+///
+/// **A typed path, validated server-side, is the honest shape here** and not
+/// a compromise. A browser has no directory picker that yields a usable path
+/// — a `<input type="file" webkitdirectory>` hands back file *names* with no
+/// directory, and even a real path would still have to be resolved on the
+/// server, because the server is what reads the files. So the choice was
+/// between a typed path with a real check plus a recents list, and a picker
+/// that looks better and cannot work. This is the first.
+pub async fn api_open_project(
+    State(state): State<crate::AppState>,
+    Json(req): Json<OpenProjectRequest>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let raw = req.path.trim();
+    if raw.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no path given").into_response();
+    }
+    let repo = std::path::PathBuf::from(raw);
+    if !repo.exists() {
+        return (StatusCode::BAD_REQUEST, format!("{} doesn't exist", repo.display()))
+            .into_response();
+    }
+    if !repo.is_dir() {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("{} is a file, not a directory", repo.display()),
+        )
+            .into_response();
+    }
+
+    let survey = survey_project(&repo);
+    // Refused only when *nothing* says "source repo". A repo with no
+    // `embarch/` yet passes on `.git` alone, which is the first-time state
+    // this must not reject; a directory with none of these signals is almost
+    // certainly a mis-typed path, and naming what was looked for is more
+    // useful than "invalid".
+    //
+    // **`has_embarch_dir` is deliberately not in this list, and a live run
+    // is why.** The first version accepted any directory containing an
+    // `embarch/` subdirectory — and on this bench that accepted `$HOME`,
+    // because the suite's own parent folder is `~/embarch`. A directory
+    // called `embarch` is not a statement about its contents;
+    // `has_embarch_config` (something this tab or `embarch init` actually
+    // wrote there) is.
+    if !survey.is_git_repo && !survey.looks_like_firmware && !survey.has_embarch_config {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} doesn't look like a firmware repo — no .git, nothing under embarch/ that \
+                 embarch put there, and none of west.yml / CMakeLists.txt / prj.conf / \
+                 Cargo.toml. A repo with no embarch/ directory yet is fine (it gets created on \
+                 the first save); a directory with none of these probably isn't the one you \
+                 meant.",
+                repo.display()
+            ),
+        )
+            .into_response();
+    }
+
+    // Canonicalised so the recents list doesn't accumulate three spellings of
+    // the same repo. Falls back to what was typed if canonicalisation fails,
+    // which it can on a path behind a broken symlink — refusing an otherwise
+    // usable directory over that would be worse.
+    let repo = std::fs::canonicalize(&repo).unwrap_or(repo);
+    let static_extractor = req
+        .static_extractor
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    sd.open_project(StudyDesignerConfig {
+        firmware_repo_path: repo.clone(),
+        static_extractor: static_extractor.clone(),
+    });
+    let entry = RecentProject {
+        path: repo.to_string_lossy().into_owned(),
+        static_extractor: static_extractor.clone(),
+    };
+    remember_recent_project(&entry);
+
+    let survey = survey_project(&repo);
+    Json(ProjectState {
+        path: Some(entry.path.clone()),
+        static_extractor,
+        studies_dir: Some(
+            repo.join("embarch").join("studies").to_string_lossy().into_owned(),
+        ),
+        survey: Some(survey),
+        recents: load_recent_projects(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewStudyRequest {
+    name: String,
+}
+
+/// Creates a new, empty, **immediately valid and immediately runnable**
+/// saved study in the open project.
+///
+/// Everything a `Study` needs in order to round-trip is supplied here rather
+/// than left for the author to discover on their first save: `requires` is
+/// mandatory with no serde default, so it is written as an explicit
+/// `REQUIREMENT_ANY` on both fields (`embarch-study-designer/design.md` §3
+/// decision 40 — "I don't care which build" is a real answer that has to be
+/// *said*); both CRCs are sealed by the same `build_authored` a save uses, so
+/// the file cannot be a shape only this route produces. A new study with no
+/// steps is legal and does nothing, which is what "new" means.
+///
+/// Refuses to overwrite: a name whose slug already exists is a `409`, not a
+/// silent replacement of somebody's work.
+pub async fn api_new_study(
+    State(state): State<crate::AppState>,
+    Json(req): Json<NewStudyRequest>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    let slug = match study_slug(&req.name) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let dir = studies_dir(&project);
+    let path = dir.join(format!("{slug}.json"));
+    if path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            format!("'{slug}' already exists — open it, or pick another name"),
+        )
+            .into_response();
+    }
+    let registry = match sd.registry() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let study = match build_authored(&req.name, &[], &RequirementsInput::any(), &[], &registry) {
+        Ok(s) => s,
+        Err((code, e)) => return (code, e).into_response(),
+    };
+
+    let mut value = match serde_json::to_value(&study) {
+        Ok(serde_json::Value::Object(map)) => map,
+        Ok(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Study didn't serialize as an object")
+                .into_response()
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    // The same two sidecar keys `api_studies_save` writes, empty — so the new
+    // file is `editable` in `api_studies_list`'s sense from the moment it
+    // exists, and Load works on it rather than reporting it as a runnable
+    // study this table can't edit.
+    value.insert("_embarch_ui_rows".to_string(), serde_json::json!([]));
+    value.insert("_embarch_ui_taps".to_string(), serde_json::json!([]));
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("couldn't create {}: {e}", dir.display()),
+        )
+            .into_response();
+    }
+    let text = match serde_json::to_string_pretty(&serde_json::Value::Object(value)) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    if let Err(e) = std::fs::write(&path, text) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("couldn't write {}: {e}", path.display()),
+        )
+            .into_response();
+    }
+
+    Json(serde_json::json!({
+        "slug": slug,
+        "name": req.name,
+        "path": path.to_string_lossy(),
+        "steps": 0,
+    }))
+    .into_response()
 }

@@ -80,10 +80,15 @@ pub(crate) struct AppState {
     /// Dashboard/Topology tabs reflect it within roughly one round trip,
     /// not up to 5 seconds later.
     poke: Arc<Notify>,
-    /// `None` when `[study_designer]` isn't set in config — the Study
-    /// Designer tab's own routes answer `404` rather than guessing which
-    /// firmware repo was meant (config.rs's own doc comment).
-    study_designer: Option<StudyDesigner>,
+    /// Always present, with or without a configured firmware repo
+    /// (design.md §3 decision 14). It used to be `Option`, `None` whenever
+    /// `[study_designer]` was absent from config, which made the whole tab
+    /// unreachable — including the one route that could have fixed that.
+    /// Whether a *project is open* is now the `StudyDesigner`'s own state,
+    /// and a route that needs one still answers `404`; the difference is
+    /// that `POST /api/study-designer/project` is a way out of it rather
+    /// than another `404`.
+    study_designer: StudyDesigner,
     /// New-lines-only batches from `logs::poll_loop` — the Debug tab's own
     /// SSE stream (`api/logs/events`). Deliberately separate from
     /// `snapshot_rx`: this channel only carries genuinely new log lines, so
@@ -140,7 +145,11 @@ async fn async_main() -> anyhow::Result<()> {
     let poke = Arc::new(Notify::new());
     tokio::spawn(poll_loop(core.clone(), tx, poke.clone()));
 
-    let study_designer = config.study_designer.map(|sd_config| StudyDesigner::new(sd_config, core.clone()));
+    // Seeded from config when it names a repo — the zero-click default for a
+    // single-repo bench that milestone-1.md §4.6 chose, kept exactly as it
+    // was. What is new is that `None` is now an *openable* state rather than
+    // a dead tab (design.md §3 decision 14).
+    let study_designer = StudyDesigner::new(config.study_designer, core.clone());
 
     let (logs_tx, logs_rx) = watch::channel(Vec::new());
     tokio::spawn(logs::poll_loop(core.clone(), logs_tx));
@@ -161,6 +170,14 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/signals/{name}", axum::routing::delete(api_remove_signal))
         .route("/api/trace/{study_id}", get(api_trace_taps))
         .route("/api/trace/{study_id}/{name}", get(api_trace_view))
+        .route(
+            "/api/study-designer/project",
+            get(study_designer::api_project).post(study_designer::api_open_project),
+        )
+        // Deliberately *not* `/studies/new`: `study_slug` would accept
+        // "new" as a perfectly good slug, so that path would be ambiguous
+        // with a real study named "new" on the sibling `{slug}` route.
+        .route("/api/study-designer/new-study", post(study_designer::api_new_study))
         .route("/api/study-designer/actions", get(study_designer::api_actions))
         .route("/api/study-designer/bench-state", get(study_designer::api_bench_state))
         .route("/api/study-designer/version-check", get(study_designer::api_version_check))

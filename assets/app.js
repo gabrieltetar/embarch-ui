@@ -822,6 +822,12 @@
 
   var SD_BUILT_INS = [
     { value: "ble_connect", label: "BleConnect — connect to the DUT" },
+    // embarch-study-designer/design.md §3 decisions 50/51. Listed right
+    // after BleConnect because that is where they belong in a study: a DUT
+    // that requires an encrypted link needs security established before the
+    // first GATT step, not after it.
+    { value: "ble_security", label: "BleSecurity — establish encryption/pairing" },
+    { value: "ble_unbond", label: "BleUnbond — drop the bond (disconnects)" },
     { value: "gatt_discover", label: "GattDiscover — walk the GATT table" },
     { value: "gatt_monitor_all", label: "GattMonitorAll — subscribe + capture for this step" },
     { value: "gatt_monitor_start", label: "GattMonitorStart — open a capture window" },
@@ -971,6 +977,11 @@
       // Blank means "whichever peripheral advertises first", which on a
       // bench with any other BLE device in range is a coin toss.
       targetName: "",
+      // Only meaningful for a `ble_security` row (decision 44). L4 is the
+      // level that decision was written for; L1 *is* offered, because
+      // decision 44 makes it the honest way to say "this DUT needs none"
+      // rather than leaving the step out and hoping.
+      securityLevel: "l4",
       rawService: "",
       rawChar: "",
       // Vendor-defined selection (decision 39): ids, never UUIDs — the
@@ -1085,6 +1096,36 @@
 
   function sdParamsHtml(row) {
     if (row.kind === "built_in") {
+      if (row.which === "ble_security") {
+        // The labels say what each level actually *is*, because "L2" alone
+        // tells an engineer nothing about whether it satisfies a DUT that
+        // demands authentication. L1 is listed last rather than omitted:
+        // decision 44 makes it a real answer, and one an author has to be
+        // able to give in the UI or the decision is only half implemented.
+        var levels = [
+          ["l4", "L4 — authenticated LE Secure Connections, 128-bit key"],
+          ["l3", "L3 — encrypted + authenticated"],
+          ["l2", "L2 — encrypted, unauthenticated (Just Works)"],
+          ["l1", "L1 — none needed (said out loud, not skipped)"],
+        ];
+        var opts = levels
+          .map(function (l) {
+            var sel = row.securityLevel === l[0] ? " selected" : "";
+            return '<option value="' + l[0] + '"' + sel + ">" + escapeHtml(l[1]) + "</option>";
+          })
+          .join("");
+        return (
+          '<div class="sd-params"><label class="sd-param" style="flex:1 1 320px;">' +
+          "<span>Level</span>" +
+          '<select data-field="securityLevel" ' +
+          'title="the step fails if the level actually reached is lower — set continue-on-fail to ' +
+          'attempt it without aborting the study">' + opts + "</select>" +
+          "</label></div>"
+        );
+      }
+      if (row.which === "ble_unbond") {
+        return '<span class="placeholder-note">no parameters — this drops the link</span>';
+      }
       if (row.which !== "ble_connect") {
         return '<span class="placeholder-note">no parameters</span>';
       }
@@ -1316,6 +1357,7 @@
     }
     if (field === "continue_on_fail") { row.continue_on_fail = ev.target.checked; return; }
     if (field === "role") { row.role = ev.target.value; return; }
+    if (field === "securityLevel") { row.securityLevel = ev.target.value; return; }
     if (field === "targetName") {
       var wasBlank = !row.targetName.trim();
       row.targetName = ev.target.value;
@@ -1366,6 +1408,10 @@
           which: row.which,
           role: row.role,
           target_name: row.targetName.trim() || null,
+          // Sent for every built-in row, not only a security one: the
+          // server ignores it for the rest, exactly as it already ignores
+          // `role` and `target_name` outside `ble_connect`.
+          security_level: row.securityLevel || null,
         };
       } else if (row.kind === "registered") {
         action = { kind: "registered", name: row.registeredName, field_choices: row.fieldChoices };
@@ -1794,6 +1840,16 @@
     if (step.captured_data && step.captured_data.length) {
       parts.push(step.captured_data.length + " bytes captured");
     }
+    // The link's security level at the end of this step
+    // (embarch-study-designer/design.md §3 decision 44). Shown on *every*
+    // step, not only a security one, and that is the point: the same
+    // failure at L1 and at L4 are different findings, and this column is
+    // the only place a reader can tell them apart. Rendered verbatim from
+    // the server's own value — this file never maps a level to a claim
+    // about it.
+    if (step.security_level) {
+      parts.push(String(step.security_level).toUpperCase());
+    }
     return parts.length ? escapeHtml(parts.join(" · ")) : '<span class="placeholder-note">—</span>';
   }
 
@@ -2216,99 +2272,279 @@
     }
   }
 
+  // --- projects (design.md §3 decision 14) -------------------------------
+  //
+  // The tab used to decide once, at first paint, whether it was usable at
+  // all: `[study_designer]` absent in config meant every route answered 404
+  // and this file rendered a "Not configured" card and stopped. That was the
+  // right call over *guessing* which firmware repo was meant, and it is not
+  // being reversed — an explicit pick is not a guess. What changed is that
+  // "no project" is now a state with a way out of it.
+
+  // Listeners are wired exactly once, on the first project opened. Re-wiring
+  // them on every switch would leave one live handler per project opened this
+  // session, so a click would fire N times — the class of bug a
+  // re-initialisable panel invites and the reason this flag exists rather
+  // than the wiring living inside the load path.
+  var sdWired = false;
+
+  function sdProjectSummary(state) {
+    if (!state.path) {
+      return "No project open. Open a firmware repo above, or set " +
+        "[study_designer].firmware_repo_path in embarch-ui's config.";
+    }
+    var s = state.survey || {};
+    var bits = [];
+    // "no studies yet" and "not a repo" are deliberately different sentences:
+    // an empty `embarch/` is a first-time state, and reading it as a fault is
+    // exactly the confusion the server's own survey exists to prevent.
+    if (!s.has_embarch_config) {
+      bits.push("no embarch/ config yet — the first save creates it");
+    } else {
+      bits.push(s.saved_studies + (s.saved_studies === 1 ? " saved study" : " saved studies"));
+      bits.push(s.has_action_registry ? "action registry present" : "no action registry yet");
+    }
+    if (!s.is_git_repo) bits.push("not a git checkout");
+    if (state.static_extractor) bits.push("static extractor: " + state.static_extractor);
+    return state.path + " — " + bits.join(" · ");
+  }
+
+  function sdRenderProject(state) {
+    var current = sdEl("sd-project-current");
+    current.textContent = sdProjectSummary(state);
+    current.className = state.path ? "placeholder-note mono" : "sd-error";
+
+    var select = sdEl("sd-project-recents");
+    select.innerHTML = '<option value="">Recent projects…</option>';
+    (state.recents || []).forEach(function (r) {
+      var opt = document.createElement("option");
+      opt.value = r.path;
+      opt.textContent = r.path + (r.static_extractor ? " (" + r.static_extractor + ")" : "");
+      opt.dataset.extractor = r.static_extractor || "";
+      select.appendChild(opt);
+    });
+
+    // Opened straight away when nothing is open, so the first thing an
+    // engineer sees on a fresh machine is the field they need rather than a
+    // button they have to find.
+    sdEl("sd-project-picker").style.display = state.path ? "none" : "";
+    if (state.path && !sdEl("sd-project-path").value) {
+      sdEl("sd-project-path").value = state.path;
+      sdEl("sd-project-extractor").value = state.static_extractor || "";
+    }
+  }
+
+  async function sdLoadProject() {
+    try {
+      var resp = await fetch("/api/study-designer/project");
+      var state = await resp.json();
+      sdRenderProject(state);
+      if (state.path) {
+        await sdEnterProject();
+      } else {
+        sdEl("sd-body").style.display = "none";
+      }
+    } catch (e) {
+      sdEl("sd-project-current").textContent = "couldn't read the project state: " + String(e);
+      sdEl("sd-project-current").className = "sd-error";
+    }
+  }
+
+  async function sdOpenProject(path, extractor) {
+    var err = sdEl("sd-project-error");
+    err.style.display = "none";
+    var body = {
+      path: path !== undefined ? path : sdEl("sd-project-path").value,
+      static_extractor: (extractor !== undefined ? extractor : sdEl("sd-project-extractor").value) || null,
+    };
+    var btn = sdEl("sd-project-open");
+    btn.disabled = true;
+    try {
+      var resp = await fetch("/api/study-designer/project", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      var text = await resp.text();
+      if (!resp.ok) {
+        err.textContent = text;
+        err.style.display = "block";
+        return;
+      }
+      var state = JSON.parse(text);
+      sdRenderProject(state);
+      // Everything the previous project put on screen is about the previous
+      // project: the table, the taps, the saved-study list and the last run.
+      // The server drops its own per-project caches on the same switch.
+      sdRows = [];
+      sdTaps = [];
+      sdLastStudyId = null;
+      await sdEnterProject();
+    } catch (e) {
+      err.textContent = String(e);
+      err.style.display = "block";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function sdNewStudy() {
+    var name = (sdEl("sd-name").value || "").trim();
+    if (!name) return sdShowBuildError("give the study a name first");
+    var btn = sdEl("sd-new-study");
+    btn.disabled = true;
+    try {
+      var resp = await fetch("/api/study-designer/new-study", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name }),
+      });
+      var text = await resp.text();
+      if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
+      // The file the server wrote is already a valid, runnable, loadable
+      // `Study` — so the table is reset to empty rather than to the
+      // capture-window template, and what is on screen matches what is on
+      // disk.
+      sdRows = [];
+      sdTaps = [];
+      renderSdRows();
+      renderSdTaps();
+      sdShowBuildError("");
+      await loadSdStudies();
+      sdEl("sd-load-select").value = JSON.parse(text).slug;
+    } catch (e) {
+      sdShowBuildError(String(e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* Everything that depends on a project being open, run again on every
+   * switch. `sdWireStudyDesigner` is the half that must not be. */
+  async function sdEnterProject() {
+    var body = sdEl("sd-body");
+    var resp;
+    try {
+      resp = await fetch("/api/study-designer/actions");
+    } catch (e) {
+      body.style.display = "none";
+      return;
+    }
+    if (!resp.ok) {
+      body.style.display = "none";
+      return;
+    }
+    body.style.display = "block";
+    var data = await resp.json();
+    sdActions = data.actions || [];
+    sdRegistry = sdRegisteredActions();
+    if (!sdWired) {
+      sdWireStudyDesigner();
+      sdWired = true;
+    }
+    if (!sdRows.length) sdRows = sdCaptureTemplate();
+    renderSdRows();
+    renderSdUnregistered();
+    loadSdStudies();
+    renderSdTaps();
+    // Prefilled from live bench state on first paint, which is what makes a
+    // mandatory field a help rather than a tax.
+    sdLoadBenchState(true);
+  }
+
+  function sdWireStudyDesigner() {
+    var tbody = sdEl("sd-rows");
+    tbody.addEventListener("input", onSdRowInput);
+    tbody.addEventListener("change", onSdRowInput);
+    tbody.addEventListener("click", onSdRowClick);
+
+    sdEl("sd-add-row").addEventListener("click", function () {
+      sdRows.push(sdNewRow({ name: "step-" + (sdRows.length + 1) }));
+      renderSdRows();
+    });
+    sdEl("sd-add-capture-template").addEventListener("click", function () {
+      sdRows = sdRows.concat(sdCaptureTemplate());
+      renderSdRows();
+    });
+    sdEl("sd-run").addEventListener("click", sdRunStudy);
+    sdReqFields().forEach(function (f) {
+      sdEl(f.any).addEventListener("change", sdSyncReqAny);
+    });
+    sdEl("sd-req-refresh").addEventListener("click", function () {
+      sdLoadBenchState(false);
+    });
+    sdEl("sd-runcheck-cancel").addEventListener("click", closeRunCheck);
+    sdEl("sd-runcheck-backdrop").addEventListener("click", closeRunCheck);
+    sdEl("sd-runcheck-go").addEventListener("click", function () {
+      sdSubmitRun(sdEl("sd-runcheck-allow").checked);
+    });
+    initSdTaps();
+    sdEl("sd-run-streams").addEventListener("click", function (ev) {
+      var btn = ev.target.closest("[data-open-trace]");
+      if (!btn) return;
+      // Sets the address as well as the field, so what the button does and
+      // what a shared link does are the same one thing.
+      location.hash =
+        "trace?study=" + encodeURIComponent(btn.getAttribute("data-open-study")) +
+        "&tap=" + encodeURIComponent(btn.getAttribute("data-open-trace"));
+      document.getElementById("trace-study").value = btn.getAttribute("data-open-study");
+      showTab("trace");
+      document.getElementById("trace-load").click();
+    });
+    sdEl("sd-new-study").addEventListener("click", sdNewStudy);
+    sdEl("sd-save").addEventListener("click", sdSaveStudy);
+    sdEl("sd-delete").addEventListener("click", sdDeleteStudy);
+    sdEl("sd-discover").addEventListener("click", sdDiscover);
+    sdEl("sd-load-select").addEventListener("change", function (ev) {
+      sdLoadStudy(ev.target.value);
+    });
+
+    sdEl("sd-reg-op").addEventListener("change", syncRegFieldsVisibility);
+    sdEl("sd-reg-add-field").addEventListener("click", function (ev) {
+      ev.preventDefault();
+      addRegField();
+    });
+    sdEl("sd-register-dialog").addEventListener("click", onRegisterDialogClick);
+    sdEl("sd-reg-cancel").addEventListener("click", closeRegisterDialog);
+    sdEl("sd-reg-save").addEventListener("click", submitRegistration);
+    sdEl("sd-register-backdrop").addEventListener("click", closeRegisterDialog);
+
+    // Run progress arrives by push, never by client-side polling —
+    // design.md §3 decision 6's suite-wide SSE convergence. One stream for
+    // the process's lifetime: `RunState` is the server's, not a project's,
+    // so switching projects doesn't reopen it.
+    sdRunSource = new EventSource("/api/study-designer/events");
+    sdRunSource.addEventListener("run", function (ev) {
+      try {
+        renderRunState(JSON.parse(ev.data));
+      } catch (e) {
+        /* a malformed frame shouldn't kill the stream */
+      }
+    });
+  }
+
   function initStudyDesignerTab() {
     var body = sdEl("sd-body");
     if (!body) return;
 
-    // One probe decides whether this tab is usable at all: every route
-    // answers 404 when `[study_designer]` isn't configured, so asking once
-    // is more honest than rendering a table that can't submit.
-    fetch("/api/study-designer/actions").then(async function (resp) {
-      if (!resp.ok) {
-        sdEl("sd-disabled").style.display = "block";
-        return;
-      }
-      body.style.display = "block";
-      var data = await resp.json();
-      sdActions = data.actions || [];
-      sdRegistry = sdRegisteredActions();
-      sdRows = sdCaptureTemplate();
-      renderSdRows();
-      renderSdUnregistered();
-      loadSdStudies();
-
-      var tbody = sdEl("sd-rows");
-      tbody.addEventListener("input", onSdRowInput);
-      tbody.addEventListener("change", onSdRowInput);
-      tbody.addEventListener("click", onSdRowClick);
-
-      sdEl("sd-add-row").addEventListener("click", function () {
-        sdRows.push(sdNewRow({ name: "step-" + (sdRows.length + 1) }));
-        renderSdRows();
-      });
-      sdEl("sd-add-capture-template").addEventListener("click", function () {
-        sdRows = sdRows.concat(sdCaptureTemplate());
-        renderSdRows();
-      });
-      sdEl("sd-run").addEventListener("click", sdRunStudy);
-      sdReqFields().forEach(function (f) {
-        sdEl(f.any).addEventListener("change", sdSyncReqAny);
-      });
-      sdEl("sd-req-refresh").addEventListener("click", function () {
-        sdLoadBenchState(false);
-      });
-      sdEl("sd-runcheck-cancel").addEventListener("click", closeRunCheck);
-      sdEl("sd-runcheck-backdrop").addEventListener("click", closeRunCheck);
-      sdEl("sd-runcheck-go").addEventListener("click", function () {
-        sdSubmitRun(sdEl("sd-runcheck-allow").checked);
-      });
-      initSdTaps();
-      renderSdTaps();
-      // Prefilled from live bench state on first paint, which is what makes a
-      // mandatory field a help rather than a tax.
-      sdLoadBenchState(true);
-      sdEl("sd-run-streams").addEventListener("click", function (ev) {
-        var btn = ev.target.closest("[data-open-trace]");
-        if (!btn) return;
-        // Sets the address as well as the field, so what the button does and
-        // what a shared link does are the same one thing.
-        location.hash =
-          "trace?study=" + encodeURIComponent(btn.getAttribute("data-open-study")) +
-          "&tap=" + encodeURIComponent(btn.getAttribute("data-open-trace"));
-        document.getElementById("trace-study").value = btn.getAttribute("data-open-study");
-        showTab("trace");
-        document.getElementById("trace-load").click();
-      });
-      sdEl("sd-save").addEventListener("click", sdSaveStudy);
-      sdEl("sd-delete").addEventListener("click", sdDeleteStudy);
-      sdEl("sd-discover").addEventListener("click", sdDiscover);
-      sdEl("sd-load-select").addEventListener("change", function (ev) {
-        sdLoadStudy(ev.target.value);
-      });
-
-      sdEl("sd-reg-op").addEventListener("change", syncRegFieldsVisibility);
-      sdEl("sd-reg-add-field").addEventListener("click", function (ev) {
-        ev.preventDefault();
-        addRegField();
-      });
-      sdEl("sd-register-dialog").addEventListener("click", onRegisterDialogClick);
-      sdEl("sd-reg-cancel").addEventListener("click", closeRegisterDialog);
-      sdEl("sd-reg-save").addEventListener("click", submitRegistration);
-      sdEl("sd-register-backdrop").addEventListener("click", closeRegisterDialog);
-
-      // Run progress arrives by push, never by client-side polling —
-      // design.md §3 decision 6's suite-wide SSE convergence.
-      sdRunSource = new EventSource("/api/study-designer/events");
-      sdRunSource.addEventListener("run", function (ev) {
-        try {
-          renderRunState(JSON.parse(ev.data));
-        } catch (e) {
-          /* a malformed frame shouldn't kill the stream */
-        }
-      });
-    }).catch(function () {
-      sdEl("sd-disabled").style.display = "block";
+    sdEl("sd-project-toggle").addEventListener("click", function () {
+      var picker = sdEl("sd-project-picker");
+      picker.style.display = picker.style.display === "none" ? "" : "none";
     });
+    sdEl("sd-project-open").addEventListener("click", function () {
+      sdOpenProject();
+    });
+    sdEl("sd-project-recents").addEventListener("change", function (ev) {
+      var opt = ev.target.selectedOptions[0];
+      if (!opt || !opt.value) return;
+      sdEl("sd-project-path").value = opt.value;
+      sdEl("sd-project-extractor").value = opt.dataset.extractor || "";
+      // Picking a recent project opens it: an extra click on Open would be
+      // asking twice for the same decision.
+      sdOpenProject(opt.value, opt.dataset.extractor || "");
+    });
+
+    sdLoadProject();
   }
 
   // --- signal routes (design.md §3 decision 10, first half) --------------

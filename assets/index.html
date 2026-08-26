@@ -171,9 +171,39 @@
           <p>Build and run a <span class="mono">Study</span> against a connected DUT</p>
         </div>
 
-        <div id="sd-disabled" class="card" style="display:none; border-color:var(--warning);">
-          <div class="card-title">Not configured</div>
-          <p class="placeholder-note">This tab needs <span class="mono">[study_designer].firmware_repo_path</span> set in embarch-ui's config file, naming the firmware repo whose <span class="mono">embarch/study-actions.toml</span> registry and <span class="mono">embarch/studies/</span> library this tab reads and writes.</p>
+        <!-- design.md §3 decision 14. This card replaces the old
+             "Not configured" dead end: the config field is still the
+             zero-click default, and an explicit human pick is now the way in
+             when it is absent. A typed path rather than a file picker, on
+             purpose — a browser directory picker yields no usable path, and
+             the path has to be resolved server-side anyway, because the
+             server is what reads the files. -->
+        <div id="sd-project" class="card" style="margin-bottom:16px;">
+          <div class="sd-toolbar">
+            <div class="card-title" style="margin:0;">Project — the firmware repo this tab reads and writes</div>
+            <div class="sd-toolbar-actions">
+              <button id="sd-project-toggle" class="btn" title="Open a different firmware repo">Open project…</button>
+            </div>
+          </div>
+          <p id="sd-project-current" class="placeholder-note" style="margin:8px 0 0;">reading…</p>
+          <div id="sd-project-picker" style="display:none; margin-top:12px;">
+            <div class="sd-toolbar" style="align-items:flex-end;">
+              <label class="sd-field" style="flex:1 1 380px;">
+                <span>Firmware repo path</span>
+                <input id="sd-project-path" type="text" class="sd-input mono" spellcheck="false" placeholder="/home/you/src/your-firmware" />
+              </label>
+              <label class="sd-field" style="flex:0 1 190px;">
+                <span>Static GATT extractor</span>
+                <input id="sd-project-extractor" type="text" class="sd-input mono" spellcheck="false" placeholder="(none)" title="name of a registered GattConfigExtractor, e.g. reference-dut; leave blank to skip static extraction" />
+              </label>
+              <div class="sd-toolbar-actions">
+                <select id="sd-project-recents" class="sd-input"><option value="">Recent projects…</option></select>
+                <button id="sd-project-open" class="btn btn-primary">Open</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin-top:8px;">Studies are read from and written to <span class="mono">&lt;repo&gt;/embarch/studies/</span>, and the custom-action registry from <span class="mono">&lt;repo&gt;/embarch/study-actions.toml</span>. A repo with no <span class="mono">embarch/</span> directory yet is fine — it gets created on the first save.</p>
+            <p id="sd-project-error" class="sd-error" style="display:none;"></p>
+          </div>
         </div>
 
         <div id="sd-body" style="display:none;">
@@ -184,6 +214,7 @@
                 <input id="sd-name" type="text" class="sd-input" value="untitled-study" spellcheck="false" />
               </label>
               <div class="sd-toolbar-actions">
+                <button id="sd-new-study" class="btn" title="Start a new, empty, immediately-saveable study in this project">New study</button>
                 <button id="sd-save" class="btn">Save</button>
                 <select id="sd-load-select" class="sd-input sd-select-load"><option value="">Load saved study…</option></select>
                 <button id="sd-delete" class="btn" title="Delete the selected saved study">Delete</button>
