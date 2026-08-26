@@ -300,9 +300,11 @@
         <div class="page-head" style="display:flex; align-items:flex-end; justify-content:space-between; flex-wrap:wrap; gap:12px;">
           <div>
             <h1>Debug</h1>
-            <p>Live-tailed embarch-core log — embarch-api's own logs aren't included yet (design.md §5)</p>
+            <p id="debug-subtitle">Live-tailed embarch-core log</p>
           </div>
           <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <div class="chip active-filter" data-log-source="core">embarch-core</div>
+            <div class="chip" data-log-source="api">embarch-api</div>
             <div class="search-box">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.5-4.5"/></svg>
               <input id="log-search" type="text" placeholder="search logs…">

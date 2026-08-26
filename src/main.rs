@@ -90,6 +90,12 @@ pub(crate) struct AppState {
     /// `events()`'s `Snapshot` stream does — backlog comes from
     /// `/api/logs/recent` instead.
     logs_rx: watch::Receiver<Vec<String>>,
+    /// The same, for `embarch-api`'s own rolling logfile (design.md §3
+    /// decision 13). A separate channel rather than one merged stream: the
+    /// two sources rotate independently and a merged view would interleave
+    /// them by arrival order, not by the timestamps on the lines — the Debug
+    /// tab picks a source instead.
+    api_logs_rx: watch::Receiver<Vec<String>>,
 }
 
 /// `main` spawns the whole tokio runtime on a dedicated big-stack thread
@@ -138,7 +144,10 @@ async fn async_main() -> anyhow::Result<()> {
     let (logs_tx, logs_rx) = watch::channel(Vec::new());
     tokio::spawn(logs::poll_loop(core.clone(), logs_tx));
 
-    let state = AppState { snapshot_rx: rx, core, poke, study_designer, logs_rx };
+    let (api_logs_tx, api_logs_rx) = watch::channel(Vec::new());
+    tokio::spawn(logs::api_poll_loop(api_logs_tx));
+
+    let state = AppState { snapshot_rx: rx, core, poke, study_designer, logs_rx, api_logs_rx };
 
     let app = Router::new()
         .route("/", get(index))
@@ -163,6 +172,8 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/study-designer/gatt/{study_id}", get(study_designer::api_gatt_data))
         .route("/api/logs/recent", get(api_logs_recent))
         .route("/api/logs/events", get(api_logs_events))
+        .route("/api/api-logs/recent", get(api_api_logs_recent))
+        .route("/api/api-logs/events", get(api_api_logs_events))
         .with_state(state);
 
     let addr = bind_address();
@@ -286,6 +297,31 @@ async fn api_logs_recent(
     }
 }
 
+/// `api_logs_recent`'s counterpart for `embarch-api`'s own rolling logfile
+/// (design.md §3 decision 13) — a direct file read rather than a proxy,
+/// because `embarch-api` is not a service to proxy to. See `logs.rs`'s
+/// module comment for why that does not reopen decision 7's argument.
+///
+/// A machine where `embarch-api` has never run returns `{"lines": []}` and
+/// a `200`, not an error: nothing logged is a real answer.
+async fn api_api_logs_recent(
+    axum::extract::Query(q): axum::extract::Query<LogsRecentQuery>,
+) -> impl IntoResponse {
+    let tail = q.tail.unwrap_or(200);
+    match tokio::task::spawn_blocking(move || embarch_core_client::api_log::read_recent(tail)).await {
+        Ok(Ok(lines)) => (StatusCode::OK, Json(serde_json::json!({ "lines": lines }))).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+/// `api_logs_events`'s counterpart, over `logs::api_poll_loop`'s channel.
+async fn api_api_logs_events(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    sse_lines(state.api_logs_rx.clone())
+}
+
 /// Live tail: one SSE event per non-empty batch `logs::poll_loop` publishes
 /// — unlike `events()` above, a freshly-connected subscriber does **not**
 /// get sent the channel's current value first (`/api/logs/recent` is the
@@ -295,7 +331,25 @@ async fn api_logs_recent(
 async fn api_logs_events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.logs_rx.clone();
+    sse_lines(state.logs_rx.clone())
+}
+
+/// Shared by both log streams: relay each new batch a `watch` channel
+/// publishes as one `lines` SSE event.
+///
+/// **`mark_unchanged` is load-bearing, and its absence was a real defect**
+/// (found 2026-08-25 while adding the second stream, present since the
+/// first shipped). A `watch::Receiver` cloned from one whose `changed()` was
+/// never awaited inherits that receiver's version — which is still the
+/// channel's initial version — so the very first `changed()` on the clone
+/// returns immediately with whatever batch was published most recently.
+/// Every browser opening the Debug tab therefore got the last batch
+/// replayed on top of its own `/recent` backlog fetch, as duplicate lines.
+/// Marking the current value seen at subscribe time is what the comment on
+/// `api_logs_events` always claimed the code did.
+fn sse_lines(rx: watch::Receiver<Vec<String>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut rx = rx;
+    rx.mark_unchanged();
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
         if rx.changed().await.is_err() {
             return None;

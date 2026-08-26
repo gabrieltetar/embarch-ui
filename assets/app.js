@@ -440,15 +440,53 @@
   }
 
   // --- Debug tab (milestone-1.md §4.7) ----------------------------------
-  // Backlog via one `/api/logs/recent` fetch on load, then live lines over
-  // their own `/api/logs/events` SSE stream (never re-fetching `/recent`
-  // on a timer — design.md §3 decision 6). `embarch-ui` never reads Core's
-  // logfile directly; every line arrives already mediated through Core's
-  // own HTTP+Bearer surface.
+  // Backlog via one `/recent` fetch on load, then live lines over a `/events`
+  // SSE stream (never re-fetching `/recent` on a timer — design.md §3
+  // decision 6).
+  //
+  // Two sources, one viewer (design.md §3 decision 13). embarch-core's lines
+  // are proxied from its own HTTP surface; embarch-api's come from the
+  // rolling file it writes, because it is spawned per session and gone —
+  // there is no service to proxy to. Switching source is a full reset of the
+  // console, not a merge: the two files rotate independently, and
+  // interleaving them by arrival order would put lines in an order the
+  // timestamps contradict.
   const MAX_LOG_LINES = 2000;
+  const LOG_SOURCES = {
+    core: {
+      recent: "/api/logs/recent?tail=200",
+      events: "/api/logs/events",
+      subtitle: "Live-tailed embarch-core log",
+      errorTitle: "embarch-core unreachable",
+      empty: "waiting for embarch-core…",
+    },
+    api: {
+      recent: "/api/api-logs/recent?tail=200",
+      events: "/api/api-logs/events",
+      subtitle: "Live-tailed embarch-api log — every MCP session and one-shot CLI run on this machine, pid- and mode-tagged",
+      errorTitle: "embarch-api log unreadable",
+      // Not an error state: embarch-api may simply never have run here.
+      empty: "nothing logged by embarch-api yet",
+    },
+  };
+  let logSource = "core";
+  let logStream = null;
   let logFilterLevel = "all";
   let logSearchText = "";
   let logPaused = false;
+
+  // embarch-core's logfile carries the same SGR escape sequences its stderr
+  // does — its writer tees one ANSI-colored stream to both, so every line in
+  // the file is wrapped in `\x1b[…m`. Rendered raw, those show up as literal
+  // garbage around every level and target. Stripped here rather than fixed
+  // only at the writer, because this viewer has to stay readable against the
+  // deployed Core as well as a future one. (embarch-api's own file is
+  // already clean — it writes a separate un-colored layer for exactly this
+  // reason, embarch-api/design.md §3 decision 43.)
+  function stripAnsi(line) {
+    // eslint-disable-next-line no-control-regex
+    return String(line).replace(/\x1b\[[0-9;]*m/g, "");
+  }
 
   // tracing_subscriber's default formatter writes the level as an
   // upper-case word (`INFO`/`WARN`/`ERROR`/`DEBUG`/`TRACE`) — matched as a
@@ -461,7 +499,8 @@
     return "other";
   }
 
-  function logLineElement(line) {
+  function logLineElement(rawLine) {
+    const line = stripAnsi(rawLine);
     const level = detectLevel(line);
     const el = document.createElement("div");
     el.className = "log-line";
@@ -508,13 +547,14 @@
       return;
     }
     el.style.display = "block";
-    el.innerHTML = '<div class="card-title" style="color:var(--danger);">embarch-core unreachable</div><p class="placeholder-note"></p>';
+    el.innerHTML = '<div class="card-title" style="color:var(--danger);"></div><p class="placeholder-note"></p>';
+    el.querySelector(".card-title").textContent = LOG_SOURCES[logSource].errorTitle;
     el.querySelector("p").textContent = message;
   }
 
   async function loadLogBacklog() {
     try {
-      const resp = await fetch("/api/logs/recent?tail=200");
+      const resp = await fetch(LOG_SOURCES[logSource].recent);
       const text = await resp.text();
       if (!resp.ok) {
         renderLogsError(text);
@@ -528,12 +568,29 @@
     }
   }
 
-  function initDebugTab() {
-    loadLogBacklog();
+  // Tears down whatever was streaming, resets the console to the new
+  // source's placeholder, then reloads backlog and reopens the stream. Kept
+  // in this order so a slow backlog fetch can never land lines into a
+  // console the user has since switched away from.
+  function attachLogSource() {
+    const config = LOG_SOURCES[logSource];
+    if (logStream) {
+      logStream.close();
+      logStream = null;
+    }
+    const console_ = document.getElementById("log-console");
+    if (console_) {
+      console_.innerHTML = '<p class="placeholder-note"></p>';
+      console_.querySelector("p").textContent = config.empty;
+    }
+    const subtitle = document.getElementById("debug-subtitle");
+    if (subtitle) subtitle.textContent = config.subtitle;
+    renderLogsError(null);
 
+    loadLogBacklog();
     try {
-      const source = new EventSource("/api/logs/events");
-      source.addEventListener("lines", (evt) => {
+      logStream = new EventSource(config.events);
+      logStream.addEventListener("lines", (evt) => {
         if (logPaused) return;
         try {
           appendLogLines(JSON.parse(evt.data));
@@ -544,6 +601,20 @@
     } catch (_) {
       // EventSource unsupported or blocked — backlog still loaded once.
     }
+  }
+
+  function initDebugTab() {
+    attachLogSource();
+
+    document.querySelectorAll(".chip[data-log-source]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        if (chip.dataset.logSource === logSource) return;
+        document.querySelectorAll(".chip[data-log-source]").forEach((c) => c.classList.remove("active-filter"));
+        chip.classList.add("active-filter");
+        logSource = chip.dataset.logSource;
+        attachLogSource();
+      });
+    });
 
     document.querySelectorAll(".chip[data-level]").forEach((chip) => {
       chip.addEventListener("click", () => {

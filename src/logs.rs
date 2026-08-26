@@ -10,6 +10,26 @@
 //! genuinely new lines since the last poll over a `tokio::sync::watch`
 //! channel, so a client's own `/api/logs/events` SSE stream sees each new
 //! line exactly once, not the whole tail window every tick.
+//!
+//! **`embarch-api`'s logs arrive by a different route, and have to**
+//! (design.md §3 decision 13, `embarch-api/design.md` §3 decision 43).
+//! `embarch-api` is not a service — it is spawned per Claude Code session
+//! as an MCP server, or run once as a CLI and gone — so there is no
+//! `/logs/recent` to call and, in the case that motivated this, no process
+//! left to call it on. It appends to a rolling file instead, and this reads
+//! that file directly.
+//!
+//! That is a real exception to decision 7's "never read a logfile, always
+//! go over HTTP," and it is worth being precise about why it does not
+//! reopen that argument. Decision 7's reasoning is that **Core** can run on
+//! a different machine than `embarch-ui` — a real, supported topology. Not
+//! so for `embarch-api`: it is spawned by the MCP client sitting in front of
+//! the engineer, on the engineer's machine, which is the same machine this
+//! UI is opened on. Reading its file locally is correct for the same reason
+//! reading Core's was not.
+//!
+//! Both halves share `poll_new_lines`/`diff_new_lines` — only the fetch
+//! differs.
 
 use embarch_core_client::CoreClient;
 use std::sync::Arc;
@@ -32,13 +52,7 @@ pub async fn poll_loop(core: Arc<CoreClient>, tx: watch::Sender<Vec<String>>) {
     let mut previous: Vec<String> = Vec::new();
     loop {
         match core.logs_recent(POLL_TAIL).await {
-            Ok(latest) => {
-                let fresh = diff_new_lines(&previous, &latest);
-                if !fresh.is_empty() {
-                    let _ = tx.send(fresh);
-                }
-                previous = latest;
-            }
+            Ok(latest) => publish_new_lines(&mut previous, latest, &tx),
             Err(e) => {
                 // Core being unreachable is an ordinary, expected state
                 // here too (design.md §3 decision 5's own "confirmed"
@@ -50,6 +64,44 @@ pub async fn poll_loop(core: Arc<CoreClient>, tx: watch::Sender<Vec<String>>) {
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// The same loop against `embarch-api`'s rolling file instead of Core's HTTP
+/// surface (design.md §3 decision 13). The path comes from
+/// `embarch_core_client::api_log`, which is also what `embarch-api` itself
+/// writes through — one definition, so the writer and the reader cannot
+/// drift apart.
+///
+/// **An empty result is the ordinary case, not a failure**: on a machine
+/// where `embarch-api` has never run, the file simply isn't there, and
+/// `api_log::read_recent` says so with `Ok(vec![])` rather than an error.
+/// This tab shows nothing, which is the truth.
+pub async fn api_poll_loop(tx: watch::Sender<Vec<String>>) {
+    let mut previous: Vec<String> = Vec::new();
+    loop {
+        // A blocking read on the runtime's worker threads would be fine at
+        // this size, but `spawn_blocking` costs nothing here and keeps the
+        // rule intact.
+        match tokio::task::spawn_blocking(|| embarch_core_client::api_log::read_recent(POLL_TAIL)).await {
+            Ok(Ok(latest)) => publish_new_lines(&mut previous, latest, &tx),
+            Ok(Err(e)) => tracing::debug!("embarch-api logs poll failed: {e:#}"),
+            Err(e) => tracing::debug!("embarch-api logs poll task failed: {e:#}"),
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Diff against the previous window and publish only what's genuinely new,
+/// updating `previous` in place. Never sends an empty batch — an SSE client
+/// that has been open a while shouldn't see empty ticks, and a client that
+/// just connected gets its own one-shot backlog fetch instead of whatever
+/// happened to be the channel's last value.
+fn publish_new_lines(previous: &mut Vec<String>, latest: Vec<String>, tx: &watch::Sender<Vec<String>>) {
+    let fresh = diff_new_lines(previous, &latest);
+    if !fresh.is_empty() {
+        let _ = tx.send(fresh);
+    }
+    *previous = latest;
 }
 
 /// `previous`/`new` are both "last `POLL_TAIL` lines of the same
