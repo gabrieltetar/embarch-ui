@@ -1,6 +1,6 @@
 //! The Trace view's backend (`embarch-ui/design.md` §3 decision 10's second
 //! half): turning a completed study's recorded outpost timeline into
-//! something a browser can draw, **without any of the four lies a timeline
+//! something a browser can draw, **without any of the five lies a timeline
 //! makes easy**.
 //!
 //! Post-hoc, deliberately: outpost capture is study-scoped with no live feed
@@ -9,62 +9,80 @@
 //!
 //! # What this reads, and why it isn't the raw bytes
 //!
-//! Core writes two files per outpost tap (`embarch-outpost/design.md` §4):
-//! `<tap>.bin`, the framed stream verbatim, and `<tap>.trace.csv`, the decoded
-//! rows with names resolved **through the manifest the flash bound**. This
-//! reads the CSV.
+//! Core writes three files per outpost tap (`embarch-outpost/design.md` §4):
+//! `<tap>.bin`, the framed stream verbatim; `<tap>.arrival.csv`, Core's own
+//! receipt time per frame; and `<tap>.trace.csv`, the decoded rows with names
+//! resolved **through the manifest the flash bound** and those receipt times
+//! joined on. This reads the CSV.
 //!
 //! Decoding the raw bytes here instead was the other option, and it is worse
-//! for one reason: the manifest lives on Core's side (it arrived with the
+//! for two reasons now. The manifest lives on Core's side (it arrived with the
 //! flash, and the study snapshotted its own copy beside its results), so a
-//! decode done here would have no manifest at all and would produce an
-//! *unnamed* trace every single time — strictly less true than the one Core
-//! already produced. The build-ID check belongs where the manifest is.
+//! decode done here would produce an *unnamed* trace every single time — and
+//! the arrival stamps live on Core's side too, for the same structural reason:
+//! **Core is the process that received the bytes**, so Core is the only one
+//! that could have timed them. A decode here would be unnamed *and* untimed.
 //!
 //! What this deliberately does **not** do is re-derive trace knowledge: the
 //! column list is checked against
 //! [`embarch_study_designer::outpost::csv_header`] and refused if it differs,
 //! the kind vocabulary is read out of [`RecordKind`] rather than written out
-//! here, and `IRQ_UNKNOWN` comes from that crate too. That is the same "column
-//! knowledge lives in one crate" rule Core follows — see
-//! `embarch-outpost/milestone-1.md` §4's note on reading a trace through that
-//! crate rather than parsing it in JavaScript. Parsing happens here, in Rust,
-//! against the shared crate's own vocabulary; nothing about a trace's shape is
-//! known to `app.js`.
+//! here, and `IRQ_UNKNOWN` comes from that crate too.
 //!
-//! # The four lies
+//! # The clock, and what it can and cannot say
+//!
+//! **An outpost record carries no timestamp at all** (`embarch-outpost`'s §3
+//! decision 4, reworked 2026-08-26: reading the DUT's cycle counter inside the
+//! context switch and inside `_isr_wrapper()` was the instrument charging its
+//! cost to the code it measures). The only time a trace has is the arrival
+//! stamp of the **frame** that carried each record, which means:
+//!
+//! - Every record in a frame has the same time. A frame is this view's
+//!   resolution, [`TraceView::resolution_ms`] says how coarse that is in
+//!   milliseconds, and **nothing here spreads a frame's records across an
+//!   interval** to make a smoother picture (decision 17).
+//! - A span whose two ends are in the same frame has **no measurable
+//!   duration** — [`Span::same_frame`] — and is excluded from every total. Most
+//!   ISR spans are this, and saying so is the honest answer for a wire whose
+//!   frames are milliseconds and whose ISRs are microseconds.
+//! - The axis is milliseconds only when **every** row is stamped. One
+//!   unstamped frame drops the whole view to [`TraceView::unit`] `"frame"` —
+//!   frame index, a complete and real coordinate — rather than drawing two
+//!   different axes as one.
+//!
+//! # The five lies
 //!
 //! 1. **A dropped-record gap is drawn as a gap, never bridged.** Every
-//!    `Gap` record becomes a [`Gap`] band placed *by its own timestamp*, which
-//!    is not its position in the stream: a gap is stamped when the losses
-//!    started and emitted when the ring next had room, and a FIFO ring cannot
-//!    make those the same moment (`embarch-outpost/src/outpost_priv.h`'s own
-//!    note on `OUTPOST_KIND_GAP`). Confirmed against the committed
-//!    `native_sim` capture, where all four gap rows step backwards relative to
-//!    their neighbours and are the *only* rows that do.
+//!    `Gap` record becomes a [`Gap`] band, and the band is **a bound, not a
+//!    measurement**: a gap record is always the first record of its frame, so
+//!    the losses fall somewhere between the previous frame's arrival and its
+//!    own. That is one frame wide, and it is drawn as one frame wide.
 //!
-//!    A gap band is **not** an empty interval, and that surprised this
-//!    implementation: 16 surviving records fall inside the first band of that
-//!    real capture. A gap says *records were lost across this span*, not
-//!    *nothing happened here* — so the band is drawn as an overlay over the
-//!    records that survived, never as a hole punched through them. Erasing
-//!    real records to make the picture tidier would be its own lie.
+//!    A gap band is **not** an empty interval: the records at both its ends
+//!    survived. It is drawn as an overlay over what survived, never as a hole
+//!    punched through it — erasing real records to make the picture tidier
+//!    would be its own lie.
 //!
 //! 2. **A trace whose manifest did not apply is never presented as a named
-//!    one.** [`TraceView::named`] comes from Core's own
-//!    `streams/index.json` note (`GET /study/{id}/streams`), not from
-//!    inspecting whether the rows happen to carry names.
+//!    one**, and **a trace nobody timed is never presented as a timed one.**
+//!    Both come from Core's own `streams/index.json` — `named` and `timed` on
+//!    `GET /study/{id}/streams` — not from inspecting whether the rows happen
+//!    to carry names or times. Two facts, carried as two, because a trace can
+//!    be either without the other.
 //!
 //! 3. **An unnamed thread or vector renders as the number it is.** No
 //!    interpolation, no "probably the worker thread". Most of a real build's
 //!    threads have no distinguishing symbol and resolve to raw pointers
-//!    (`embarch-outpost/design.md` §3 decision 8) — three of the seven in the
-//!    `native_sim` capture, and the majority on the real reference-dut image —
-//!    so [`Lane::unnamed`] is a first-class state, not an error path.
+//!    (`embarch-outpost/design.md` §3 decision 8), so [`Lane::unnamed`] is a
+//!    first-class state, not an error path.
 //!
 //! 4. **A span with no closing record is open-ended and says so.** It is
 //!    drawn out to the next traced event because a shape needs an extent, and
 //!    [`Span::open_end`] is what stops that extent reading as a measurement.
+//!
+//! 5. **An extent below the capture's resolution is not a duration.** See
+//!    `same_frame` above. This is the lie the timestamp change introduced, and
+//!    it is the one a reader of a load table would otherwise never suspect.
 
 use embarch_study_designer::outpost::{self, RecordKind};
 use serde::Serialize;
@@ -95,7 +113,7 @@ pub struct Lane {
     pub points: Vec<PointEvent>,
 }
 
-/// One interval a subject was running.
+/// One interval a subject was running, in [`TraceView::unit`]s.
 #[derive(Debug, Clone, Serialize)]
 pub struct Span {
     pub from: u64,
@@ -109,12 +127,25 @@ pub struct Span {
     /// This interval overlaps a [`Gap`], so events inside it were dropped.
     /// Drawn hatched: the span is real, its continuity is not established.
     pub crosses_gap: bool,
+    /// Both ends arrived in the **same frame**, so this span is real and its
+    /// duration is below what the capture can resolve. `to == from`, and the
+    /// span contributes nothing to any total.
+    ///
+    /// The normal state of an ISR span: a frame is milliseconds and an
+    /// interrupt is microseconds. A view that quietly totalled these as zero
+    /// would report an ISR load of 0% and look like a measurement.
+    pub same_frame: bool,
 }
 
 /// A record with no duration — a marker, a thread creation, a name-set.
 #[derive(Debug, Clone, Serialize)]
 pub struct PointEvent {
-    pub cycles: u64,
+    /// Position on the axis, in [`TraceView::unit`]s.
+    pub t: u64,
+    /// Which frame carried it. Two point events sharing a `t` and a
+    /// `frame_index` are simultaneous *as far as this capture knows*, which is
+    /// not the same as simultaneous.
+    pub frame_index: u64,
     pub kind: String,
     pub label: String,
     pub unnamed: bool,
@@ -123,36 +154,55 @@ pub struct PointEvent {
     pub arg: u32,
 }
 
-/// Records the firmware itself reported dropping, over the cycle span it
-/// reported losing them across.
+/// Records the firmware itself reported dropping, and the interval they were
+/// lost somewhere inside.
+///
+/// **A bound, and sometimes a loose one.** The band reaches back to the
+/// previous frame *this file carries*, and the file carries only frames that
+/// held records — a header frame arriving in between is a real arrival that
+/// would have narrowed the bound, and it is not in the rendered CSV to be
+/// seen. So a band can be two or three frame intervals wide where the true
+/// bound was one. Too wide is still a bound; too narrow would be a claim.
 #[derive(Debug, Clone, Serialize)]
 pub struct Gap {
+    /// The previous record-carrying frame's arrival — the earliest the losses
+    /// can have begun.
     pub from: u64,
+    /// The arrival of the frame reporting them — the latest they can have
+    /// ended.
     pub to: u64,
     pub records_lost: u32,
-    /// Where this record sat in the stream, which is *not* where it sits in
-    /// time. Surfaced so the view can say so rather than look inconsistent.
+    /// Which frame reported the loss, and where that row sat in the file.
+    /// Surfaced so the view can say a band is a bound rather than look
+    /// inconsistent.
+    pub frame_index: u64,
     pub row_index: usize,
+    /// The gap was reported by the first frame in the capture, so there is no
+    /// earlier arrival to bound it with: `from == to`, and its extent is
+    /// unknown rather than zero.
+    pub unbounded_start: bool,
 }
 
 /// One traced subject's share of the capture window — the "load repartition"
 /// the Trace view exists to produce (`embarch-ui/design.md` §3 decision 10).
 ///
-/// **A total here is deliberately not the sum of everything drawn.** Three
-/// classes of span are excluded from `total_cycles` because their extent is
+/// **A total here is deliberately not the sum of everything drawn.** Four
+/// classes of span are excluded from `total_extent` because their extent is
 /// not a duration, and each is counted separately rather than quietly folded
 /// in or quietly dropped:
 ///
-/// - a span that **crosses a gap** (`Span::crosses_gap`) spent an unknown part
-///   of its extent doing something nobody recorded;
-/// - a span with **no closing record** (`Span::open_end`) was drawn out to the
-///   next event so it had a shape, which is not the same as having lasted that
-///   long;
-/// - a span with **no opening record** (`Span::open_start`) began before it
-///   became observable.
+/// - a span that **crosses a gap** ([`Span::crosses_gap`]) spent an unknown
+///   part of its extent doing something nobody recorded;
+/// - a span with **no closing record** ([`Span::open_end`]) was drawn out to
+///   the next event so it had a shape, which is not the same as having lasted
+///   that long;
+/// - a span with **no opening record** ([`Span::open_start`]) began before it
+///   became observable;
+/// - a span **inside one frame** ([`Span::same_frame`]) is shorter than the
+///   capture can resolve, so its extent is zero and its duration is unknown.
 ///
 /// `entries` counts every span regardless, because "this subject ran N times"
-/// survives all three doubts.
+/// survives all four doubts.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadSubject {
     /// Mirrors [`Lane::key`], so a row here and a lane there are the same
@@ -166,29 +216,29 @@ pub struct LoadSubject {
     /// `"thread"`, `"idle"`, or `"isr"`.
     pub kind: &'static str,
     /// How many times this subject was entered, counting every span — the one
-    /// figure none of the three exclusions above can invalidate.
+    /// figure none of the four exclusions above can invalidate.
     pub entries: usize,
-    /// Spans that contributed to `total_cycles`.
+    /// Spans that contributed to `total_extent`.
     pub measured_spans: usize,
-    /// Summed extent of the measured spans only.
-    pub total_cycles: u64,
-    /// `total_cycles` in microseconds, or `None` when the capture carried no
-    /// header frame. Never computed against a rate nobody reported.
-    pub total_us: Option<f64>,
-    /// `total_cycles` as a fraction of the capture window, in `0.0..=1.0`.
+    /// Summed extent of the measured spans only, in [`LoadSummary::unit`]s.
+    pub total_extent: u64,
+    /// `total_extent` as a fraction of the capture window, in `0.0..=1.0`.
     /// Of the **window**, not of the accounted time — see
-    /// [`LoadSummary::isr_cycles`] for why these do not sum to 1.
+    /// [`LoadSummary::isr_extent`] for why these do not sum to 1.
     pub share: f64,
-    /// Spans left out of `total_cycles`, by reason. A subject whose
+    /// Spans left out of `total_extent`, by reason. A subject whose
     /// `excluded_spans` rivals its `measured_spans` has a total worth
     /// distrusting, and these are what let a reader see that.
     pub excluded_spans: usize,
     /// Summed extent of the excluded spans. Reported so the time is visible
     /// as unaccounted rather than absent.
-    pub excluded_cycles: u64,
+    pub excluded_extent: u64,
     pub gap_crossing_spans: usize,
     pub open_ended_spans: usize,
     pub open_started_spans: usize,
+    /// Spans wholly inside one frame. On a wire whose frames are
+    /// milliseconds, this is where an ISR's entire life goes.
+    pub same_frame_spans: usize,
 }
 
 /// The whole capture's load repartition, plus everything a reader needs to
@@ -196,63 +246,70 @@ pub struct LoadSubject {
 ///
 /// **The headline honesty constraint** (`embarch-ui/design.md` §3 decision
 /// 10): a repartition computed across an interval where records were dropped
-/// is not a measurement. [`Self::gap_fraction`] is what says how much of this
-/// window is in that state, and it is meant to be rendered *beside* the
-/// numbers, not in a footnote.
+/// is not a measurement, and neither is one whose subjects live below the
+/// capture's resolution. [`Self::gap_fraction`] and
+/// [`Self::same_frame_spans`] are what say how much of this window is in each
+/// state, and both are meant to be rendered *beside* the numbers, not in a
+/// footnote.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadSummary {
-    /// `cycles_to - cycles_from`. Zero for a capture too short to have a
-    /// window, in which case every `share` is zero rather than a division by
-    /// zero.
-    pub window_cycles: u64,
-    pub window_us: Option<f64>,
-    /// Cycles covered by at least one gap band, counted as a **union** — two
+    /// `"ms"` or `"frame"` — mirrors [`TraceView::unit`], so a caller
+    /// formatting this table needs nothing else.
+    pub unit: &'static str,
+    /// `t_to - t_from`. Zero for a capture too short to have a window, in
+    /// which case every `share` is zero rather than a division by zero.
+    pub window_extent: u64,
+    /// Extent covered by at least one gap band, counted as a **union** — two
     /// overlapping bands cover their union, not the sum of their widths, and
     /// summing would let `gap_fraction` exceed 1 and read as nonsense.
-    pub gap_cycles: u64,
-    /// `gap_cycles / window_cycles`, in `0.0..=1.0`. **The number that decides
+    pub gap_extent: u64,
+    /// `gap_extent / window_extent`, in `0.0..=1.0`. **The number that decides
     /// whether the rest of this struct is a measurement.**
     pub gap_fraction: f64,
     /// Total records the firmware itself said it lost, mirroring
     /// [`TraceView::records_lost`] so a summary row can carry it without the
     /// caller reaching back out to the view.
     pub records_lost: u64,
-    /// Whether `*_us` fields here are populated at all. False means every
-    /// share below is a fraction of **cycles**, and must be said as such.
+    /// Whether the extents here are milliseconds at all. False means every
+    /// number below counts **frames**, and must be said as such.
     pub has_time_base: bool,
-    /// Measured time across **thread lanes only**, which are mutually
+    /// Measured extent across **thread lanes only**, which are mutually
     /// exclusive — exactly one thread is the running context at any instant —
     /// so this is the one total that is meaningful to compare against the
     /// window. Zephyr's idle thread is a thread, and is included here.
-    pub thread_cycles: u64,
-    /// The `cpu-idle` lane's measured time — a **corroborating** figure,
-    /// deliberately **not** added to [`Self::thread_cycles`].
+    pub thread_extent: u64,
+    /// The `cpu-idle` lane's measured extent — a **corroborating** figure,
+    /// deliberately **not** added to [`Self::thread_extent`].
     ///
-    /// Found by asserting the opposite and watching it fail against the
-    /// committed `native_sim` capture: idle is reported twice by construction,
-    /// once as `RecordKind::Idle` records and once as ordinary switch
-    /// in/out of the thread the manifest names `idle`. Adding them claimed
-    /// 1,338,800 cycles of a 760,000-cycle window. They are also allowed to
-    /// *disagree* — in that capture they read 81.42% and 94.58%, because ten
-    /// of the idle-record spans have no closing record — and the disagreement
-    /// is worth seeing rather than averaging away.
-    pub idle_record_cycles: u64,
-    /// ISR time, kept **separate and deliberately not added** to the above: an
-    /// ISR runs *inside* whatever it interrupted, so its cycles are counted
-    /// twice by construction. Adding these would produce a repartition summing
-    /// past 100% and reading as a bug rather than as the nesting it is.
+    /// Found by asserting the opposite and watching it fail against a real
+    /// capture: idle is reported twice by construction, once as
+    /// `RecordKind::Idle` records and once as ordinary switch in/out of the
+    /// thread the manifest names `idle`. Adding them claimed nearly twice the
+    /// window. They are also allowed to *disagree*, and the disagreement is
+    /// worth seeing rather than averaging away.
+    pub idle_record_extent: u64,
+    /// ISR extent, kept **separate and deliberately not added** to the above:
+    /// an ISR runs *inside* whatever it interrupted, so its extent is counted
+    /// twice by construction. Adding these would produce a repartition
+    /// summing past 100% and reading as a bug rather than as the nesting it
+    /// is.
     ///
-    /// Zero across all 72 ISR spans of the committed `native_sim` capture:
-    /// that simulator's cycle counter does not advance inside an interrupt.
-    /// It is a property of the capture, not of this arithmetic, and real
-    /// silicon is the thing that will say otherwise.
-    pub isr_cycles: u64,
-    /// `window_cycles - thread_cycles`, floored at zero: window time no
+    /// Expect **zero**, and expect that to stay true on real silicon: an
+    /// interrupt begins and ends inside one frame, so almost every ISR span is
+    /// [`Span::same_frame`] and excluded. That is a property of what this wire
+    /// can resolve, not of this arithmetic — the count in
+    /// [`LoadSubject::same_frame_spans`] is where an ISR's activity shows up.
+    pub isr_extent: u64,
+    /// `window_extent - thread_extent`, floored at zero: window time no
     /// measured thread span accounts for. Large values mean the exclusions
     /// above ate the picture, not that the CPU was idle — idle is a thread and
     /// is already counted.
-    pub unaccounted_cycles: u64,
-    /// Per-subject rows, sorted by `total_cycles` descending so the heaviest
+    pub unaccounted_extent: u64,
+    /// Spans excluded across every subject for being inside one frame. A large
+    /// number against a small `thread_extent` is the signature of a capture
+    /// whose activity is finer than its frames.
+    pub same_frame_spans: usize,
+    /// Per-subject rows, sorted by `total_extent` descending so the heaviest
     /// subject is first. Ties break by `key` so the order is stable across
     /// runs of the same capture.
     pub subjects: Vec<LoadSubject>,
@@ -263,28 +320,52 @@ pub struct LoadSummary {
 pub struct TraceView {
     pub study_id: String,
     pub tap: String,
-    /// Whether Core resolved names for this trace: it rendered, and Core had
-    /// nothing to say about why it might not be what it looks like.
+    /// Whether Core resolved names for this trace. Core's finding, from
+    /// `streams/index.json`, never re-derived here.
     pub named: bool,
+    /// Whether Core's arrival stamps reached this trace's frames. Also Core's
+    /// finding — and note it is **not** the same as [`Self::has_time_base`]:
+    /// Core can have stamped some frames and not others, which this view will
+    /// not draw as milliseconds (see [`Self::unstamped_rows`]).
+    pub timed: bool,
     /// Core's own reason, verbatim, when it had one. Rendered as given — this
     /// tab does not paraphrase a refusal.
     pub note: Option<String>,
     pub rows: usize,
     /// Rows past [`MAX_ROWS`], never silently discarded.
     pub rows_dropped_by_cap: usize,
-    pub cycles_from: u64,
-    pub cycles_to: u64,
-    /// False when every row's `us` column was empty, which means the capture
-    /// carried **no header frame** and therefore no clock rate. The axis is
-    /// then cycles, labelled as having no time base — not microseconds
-    /// computed against a rate nobody reported.
+    /// `"ms"` when every row carries an arrival stamp, `"frame"` otherwise.
+    /// Every `t`, `from`, `to` and extent in this struct is in these units.
+    pub unit: &'static str,
+    pub t_from: u64,
+    pub t_to: u64,
+    /// True when [`Self::unit`] is `"ms"`. The axis is then Core's own wall
+    /// clock — the same one `core_rx_utc_ms` carries on a sample or transcript
+    /// row, which is what makes laying a trace beside a power capture an
+    /// alignment rather than a guess.
     pub has_time_base: bool,
-    pub us_per_cycle: Option<f64>,
+    /// Rows whose frame carried no arrival stamp. Non-zero forces `unit` to
+    /// `"frame"` for the whole view: a timeline drawn half in milliseconds and
+    /// half in frame indices is one axis pretending to be another.
+    pub unstamped_rows: usize,
+    /// How many frames this capture holds — the number of distinct arrival
+    /// instants, and so the number of distinguishable moments in it.
+    pub frames: usize,
+    /// Median milliseconds between consecutive record-carrying frames, when
+    /// there is a time base. **This is the resolution of everything above**:
+    /// two records this far apart may be adjacent, and two records in one frame
+    /// are indistinguishable in time.
+    ///
+    /// Median rather than mean, and over the frames this file has rather than
+    /// every frame that arrived — a header frame carries no records and so
+    /// leaves a double-width interval here, which the median absorbs and a
+    /// mean would not.
+    pub resolution_ms: Option<f64>,
     pub records_lost: u64,
-    /// Non-gap rows that stepped backwards. Expected to be zero: gap records
-    /// are the only ones allowed to, and they are excluded. A non-zero count
-    /// means this view's span pairing saw a stream it cannot reason about, and
-    /// it says so instead of drawing confidently.
+    /// Rows whose arrival stamp went backwards. Expected to be zero — frames
+    /// are stamped in arrival order — so a non-zero count means the host clock
+    /// stepped backwards mid-capture (an NTP correction is the realistic
+    /// cause), and it says so instead of drawing confidently.
     pub out_of_order_rows: usize,
     pub gaps: Vec<Gap>,
     pub lanes: Vec<Lane>,
@@ -313,12 +394,14 @@ fn kind_of(name: &str) -> Option<RecordKind> {
 }
 
 struct Row {
-    cycles: u64,
-    us: Option<f64>,
+    frame_index: u64,
+    rx_utc_ms: Option<u64>,
     kind: Option<RecordKind>,
     a: u32,
     b: u32,
     name: String,
+    /// Filled in once the axis unit is known: `rx_utc_ms` or `frame_index`.
+    t: u64,
 }
 
 /// Splits one CSV line, honouring the double-quoting `name` may carry: a
@@ -346,10 +429,10 @@ fn split_row(line: &str) -> Vec<String> {
 
 /// Merges gap bands into a set of disjoint intervals clamped to the capture
 /// window, so overlapping bands are counted once. Summing raw band widths
-/// instead would let `gap_fraction` exceed 1 — and gap bands really do
-/// overlap: they are placed by the timestamp the losses *started*, which a
-/// FIFO ring cannot keep in stream order.
-fn merged_gap_cycles(gaps: &[Gap], from: u64, to: u64) -> u64 {
+/// instead would let `gap_fraction` exceed 1 — and gap bands can overlap: two
+/// consecutive frames can each report losses, and each band reaches back to
+/// its predecessor's arrival.
+fn merged_gap_extent(gaps: &[Gap], from: u64, to: u64) -> u64 {
     let mut bands: Vec<(u64, u64)> = gaps
         .iter()
         .filter_map(|g| {
@@ -383,25 +466,25 @@ fn merged_gap_cycles(gaps: &[Gap], from: u64, to: u64) -> u64 {
 fn summarize(
     lanes: &[Lane],
     gaps: &[Gap],
-    cycles_from: u64,
-    cycles_to: u64,
-    has_time_base: bool,
-    us_per_cycle: Option<f64>,
+    unit: &'static str,
+    t_from: u64,
+    t_to: u64,
     records_lost: u64,
 ) -> LoadSummary {
-    let window_cycles = cycles_to.saturating_sub(cycles_from);
-    let to_us = |c: u64| us_per_cycle.map(|r| c as f64 * r);
-    // Guarded rather than assumed non-zero: a capture of one record has a
+    let window_extent = t_to.saturating_sub(t_from);
+    // Guarded rather than assumed non-zero: a capture of one frame has a
     // zero-width window, and a share of 0.0 is the honest answer there.
-    let share_of = |c: u64| if window_cycles == 0 { 0.0 } else { c as f64 / window_cycles as f64 };
+    let share_of =
+        |c: u64| if window_extent == 0 { 0.0 } else { c as f64 / window_extent as f64 };
 
     let mut subjects: Vec<LoadSubject> = lanes
         .iter()
         .map(|lane| {
-            let mut total_cycles = 0u64;
-            let mut excluded_cycles = 0u64;
+            let mut total_extent = 0u64;
+            let mut excluded_extent = 0u64;
             let (mut measured, mut excluded) = (0usize, 0usize);
-            let (mut crossing, mut open_end, mut open_start) = (0usize, 0usize, 0usize);
+            let (mut crossing, mut open_end, mut open_start, mut same_frame) =
+                (0usize, 0usize, 0usize, 0usize);
             for span in &lane.spans {
                 let extent = span.to.saturating_sub(span.from);
                 if span.crosses_gap {
@@ -413,12 +496,15 @@ fn summarize(
                 if span.open_start {
                     open_start += 1;
                 }
-                if span.crosses_gap || span.open_end || span.open_start {
+                if span.same_frame {
+                    same_frame += 1;
+                }
+                if span.crosses_gap || span.open_end || span.open_start || span.same_frame {
                     excluded += 1;
-                    excluded_cycles += extent;
+                    excluded_extent += extent;
                 } else {
                     measured += 1;
-                    total_cycles += extent;
+                    total_extent += extent;
                 }
             }
             LoadSubject {
@@ -428,50 +514,59 @@ fn summarize(
                 kind: lane.kind,
                 entries: lane.spans.len(),
                 measured_spans: measured,
-                total_cycles,
-                total_us: to_us(total_cycles),
-                share: share_of(total_cycles),
+                total_extent,
+                share: share_of(total_extent),
                 excluded_spans: excluded,
-                excluded_cycles,
+                excluded_extent,
                 gap_crossing_spans: crossing,
                 open_ended_spans: open_end,
                 open_started_spans: open_start,
+                same_frame_spans: same_frame,
             }
         })
         .collect();
-    subjects.sort_by(|a, b| b.total_cycles.cmp(&a.total_cycles).then_with(|| a.key.cmp(&b.key)));
+    subjects.sort_by(|a, b| b.total_extent.cmp(&a.total_extent).then_with(|| a.key.cmp(&b.key)));
 
     // Threads only. The `idle` *lane* is the same time seen a second way, so
-    // adding it double-counts — see `LoadSummary::idle_record_cycles`.
-    let thread_cycles: u64 =
-        subjects.iter().filter(|s| s.kind == "thread").map(|s| s.total_cycles).sum();
-    let idle_record_cycles: u64 =
-        subjects.iter().filter(|s| s.kind == "idle").map(|s| s.total_cycles).sum();
-    let isr_cycles: u64 = subjects.iter().filter(|s| s.kind == "isr").map(|s| s.total_cycles).sum();
-    let gap_cycles = merged_gap_cycles(gaps, cycles_from, cycles_to);
+    // adding it double-counts — see `LoadSummary::idle_record_extent`.
+    let thread_extent: u64 =
+        subjects.iter().filter(|s| s.kind == "thread").map(|s| s.total_extent).sum();
+    let idle_record_extent: u64 =
+        subjects.iter().filter(|s| s.kind == "idle").map(|s| s.total_extent).sum();
+    let isr_extent: u64 = subjects.iter().filter(|s| s.kind == "isr").map(|s| s.total_extent).sum();
+    let same_frame_spans: usize = subjects.iter().map(|s| s.same_frame_spans).sum();
+    let gap_extent = merged_gap_extent(gaps, t_from, t_to);
 
     LoadSummary {
-        window_cycles,
-        window_us: to_us(window_cycles),
-        gap_cycles,
-        gap_fraction: share_of(gap_cycles),
+        unit,
+        window_extent,
+        gap_extent,
+        gap_fraction: share_of(gap_extent),
         records_lost,
-        has_time_base,
-        thread_cycles,
-        idle_record_cycles,
-        isr_cycles,
-        unaccounted_cycles: window_cycles.saturating_sub(thread_cycles),
+        has_time_base: unit == "ms",
+        thread_extent,
+        idle_record_extent,
+        isr_extent,
+        unaccounted_extent: window_extent.saturating_sub(thread_extent),
+        same_frame_spans,
         subjects,
     }
 }
 
 /// Parses a rendered `*.trace.csv` into a drawable view.
 ///
-/// `note` and `named` come from the caller (Core's own stream index), never
-/// from these bytes: whether a manifest applied is Core's finding, and
-/// re-deriving it from whether the `name` column happens to be populated would
-/// be a guess dressed as a check.
-pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<String>) -> Result<TraceView, String> {
+/// `note`, `named` and `timed` come from the caller (Core's own stream index),
+/// never from these bytes: whether a manifest applied and whether the frames
+/// were stamped are Core's findings, and re-deriving either from whether a
+/// column happens to be populated would be a guess dressed as a check.
+pub fn parse(
+    study_id: &str,
+    tap: &str,
+    csv: &str,
+    named: bool,
+    timed: bool,
+    note: Option<String>,
+) -> Result<TraceView, String> {
     let mut lines = csv.split('\n');
     let header = lines.next().unwrap_or_default().trim_end_matches('\r');
     if header != outpost::csv_header() {
@@ -494,60 +589,105 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
             continue;
         }
         let f = split_row(line);
-        if f.len() < 6 {
+        if f.len() < 7 {
             // A short line is a truncated write, not a row shape to interpret.
             continue;
         }
-        let Ok(cycles) = f[0].parse::<u64>() else { continue };
+        let Ok(frame_index) = f[0].parse::<u64>() else { continue };
         rows.push(Row {
-            cycles,
-            us: if f[1].is_empty() { None } else { f[1].parse::<f64>().ok() },
-            kind: kind_of(&f[2]),
-            a: f[3].parse::<u32>().unwrap_or(0),
-            b: f[4].parse::<u32>().unwrap_or(0),
-            name: f[5].clone(),
+            frame_index,
+            rx_utc_ms: if f[2].is_empty() { None } else { f[2].parse::<u64>().ok() },
+            kind: kind_of(&f[3]),
+            a: f[4].parse::<u32>().unwrap_or(0),
+            b: f[5].parse::<u32>().unwrap_or(0),
+            name: f[6].clone(),
+            t: 0,
         });
     }
 
-    let has_time_base = rows.iter().any(|r| r.us.is_some());
-    // Derived from the data rather than asked for: `us` is already the DUT's
-    // own clock applied by the crate that owns the column, and one ratio is
-    // all a browser needs to label an axis without recomputing anything.
-    let us_per_cycle = rows
-        .iter()
-        .find(|r| r.cycles > 0 && r.us.is_some_and(|us| us > 0.0))
-        .and_then(|r| r.us.map(|us| us / r.cycles as f64));
+    // The axis unit, decided once for the whole view. Milliseconds require
+    // *every* row to be stamped: a mixed axis is the one thing worse than a
+    // coarse one.
+    let unstamped_rows = rows.iter().filter(|r| r.rx_utc_ms.is_none()).count();
+    let unit = if !rows.is_empty() && unstamped_rows == 0 { "ms" } else { "frame" };
+    for row in &mut rows {
+        row.t = match (unit, row.rx_utc_ms) {
+            ("ms", Some(ms)) => ms,
+            _ => row.frame_index,
+        };
+    }
 
-    // Gaps first: they are the only rows whose timestamp disagrees with their
-    // position, and taking them out is what makes the rest a stream this can
-    // pair switch-ins against.
+    // Frames, in the order the file mentions them. This is both the count of
+    // distinguishable instants in the capture and what a gap band reaches back
+    // through — a gap is bounded by the frame *before* the one reporting it.
+    //
+    // Deliberately **not** treating a jump in `frame_index` as a lost frame:
+    // header frames carry no records, so they occupy an index and contribute
+    // no row. A hole here is usually a header, not a loss. Frames the wire
+    // actually lost are Core's finding, from the `seq` bytes, and are in the
+    // note.
+    let mut frame_order: Vec<(u64, u64)> = Vec::new();
+    let mut frame_pos: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for r in &rows {
+        if let std::collections::hash_map::Entry::Vacant(slot) = frame_pos.entry(r.frame_index) {
+            slot.insert(frame_order.len());
+            frame_order.push((r.frame_index, r.t));
+        }
+    }
+
+    // Median inter-frame interval: the capture's own statement of how finely
+    // it can place anything. Median rather than mean because one long pause in
+    // a study — a step waiting on a DUT — would drag a mean and misreport the
+    // resolution of everything else.
+    let resolution_ms = (unit == "ms" && frame_order.len() > 1).then(|| {
+        let mut deltas: Vec<u64> =
+            frame_order.windows(2).map(|w| w[1].1.saturating_sub(w[0].1)).collect();
+        deltas.sort_unstable();
+        let mid = deltas.len() / 2;
+        if deltas.len().is_multiple_of(2) {
+            (deltas[mid - 1] + deltas[mid]) as f64 / 2.0
+        } else {
+            deltas[mid] as f64
+        }
+    });
+
+    // Gaps first: a gap row is the only one whose extent comes from somewhere
+    // other than its own record, and taking them out is what makes the rest a
+    // stream this can pair switch-ins against.
     let mut gaps: Vec<Gap> = Vec::new();
     let mut records_lost = 0u64;
     for (i, r) in rows.iter().enumerate() {
-        if r.kind == Some(RecordKind::Gap) {
-            records_lost += u64::from(r.a);
-            gaps.push(Gap {
-                from: r.cycles,
-                to: r.cycles.saturating_add(u64::from(r.b)),
-                records_lost: r.a,
-                row_index: i,
-            });
+        if r.kind != Some(RecordKind::Gap) {
+            continue;
         }
+        records_lost += u64::from(r.a);
+        // A gap record is always the first record of its frame, so the losses
+        // happened after the previous frame arrived and before this one did.
+        // "The previous frame" here is the previous one *with records* — a
+        // header frame in between is an arrival this file cannot see, so the
+        // band is occasionally wider than the true bound and never narrower.
+        let pos = frame_pos.get(&r.frame_index).copied().unwrap_or(0);
+        let from = if pos == 0 { r.t } else { frame_order[pos - 1].1 };
+        gaps.push(Gap {
+            from,
+            to: r.t,
+            records_lost: r.a,
+            frame_index: r.frame_index,
+            row_index: i,
+            unbounded_start: pos == 0,
+        });
     }
     gaps.sort_by_key(|g| g.from);
 
     let timeline: Vec<&Row> = rows.iter().filter(|r| r.kind != Some(RecordKind::Gap)).collect();
-    let out_of_order_rows = timeline
-        .windows(2)
-        .filter(|w| w[1].cycles < w[0].cycles)
-        .count();
+    let out_of_order_rows = timeline.windows(2).filter(|w| w[1].t < w[0].t).count();
 
-    let cycles_from = timeline.first().map(|r| r.cycles).unwrap_or(0);
-    let cycles_to = timeline
+    let t_from = timeline.first().map(|r| r.t).unwrap_or(0);
+    let t_to = timeline
         .iter()
-        .map(|r| r.cycles)
+        .map(|r| r.t)
         .max()
-        .unwrap_or(cycles_from)
+        .unwrap_or(t_from)
         .max(gaps.iter().map(|g| g.to).max().unwrap_or(0));
 
     // ---- lanes ------------------------------------------------------------
@@ -558,7 +698,8 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
     // sorting by a number a reader has no reason to care about.
     struct Building {
         lane: Lane,
-        open: Vec<(u64, bool)>,
+        /// `(t, frame_index, open_start)` for each currently-open span.
+        open: Vec<(u64, u64, bool)>,
     }
     let mut order: Vec<String> = Vec::new();
     let mut building: std::collections::HashMap<String, Building> = std::collections::HashMap::new();
@@ -591,6 +732,20 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
         }
     };
 
+    /// One closed span. `same_frame` is computed here, in the one place that
+    /// knows both ends' frames, so no caller can forget it.
+    fn close(from: (u64, u64, bool), to_t: u64, to_frame: u64, open_end: bool) -> Span {
+        let (from_t, from_frame, open_start) = from;
+        Span {
+            from: from_t,
+            to: to_t,
+            open_start,
+            open_end,
+            crosses_gap: false,
+            same_frame: from_frame == to_frame,
+        }
+    }
+
     let thread_key = |a: u32| format!("0x{a:08x}");
 
     for r in timeline.iter() {
@@ -600,7 +755,8 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
             // has no lane, so it lands as a point event nobody has to
             // interpret.
             markers.push(PointEvent {
-                cycles: r.cycles,
+                t: r.t,
+                frame_index: r.frame_index,
                 kind: "unknown".to_string(),
                 label: String::new(),
                 unnamed: true,
@@ -616,19 +772,13 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
                 let label = if named_here { r.name.clone() } else { key.clone() };
                 ensure(&mut building, &mut order, key.clone(), label, !named_here, "thread");
                 if let Some(b) = building.get_mut(&key) {
-                    b.open.push((r.cycles, false));
+                    b.open.push((r.t, r.frame_index, false));
                 }
                 // A switch-in is also what ends idle, per the firmware's own
                 // note: there is no idle-exit hook to define.
                 if let Some(idle) = building.get_mut(IDLE_LANE) {
-                    if let Some((from, open_start)) = idle.open.pop() {
-                        idle.lane.spans.push(Span {
-                            from,
-                            to: r.cycles,
-                            open_start,
-                            open_end: false,
-                            crosses_gap: false,
-                        });
+                    if let Some(open) = idle.open.pop() {
+                        idle.lane.spans.push(close(open, r.t, r.frame_index, false));
                     }
                 }
             }
@@ -639,22 +789,19 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
                 ensure(&mut building, &mut order, key.clone(), label, !named_here, "thread");
                 if let Some(b) = building.get_mut(&key) {
                     match b.open.pop() {
-                        Some((from, open_start)) => b.lane.spans.push(Span {
-                            from,
-                            to: r.cycles,
-                            open_start,
-                            open_end: false,
-                            crosses_gap: false,
-                        }),
+                        Some(open) => {
+                            b.lane.spans.push(close(open, r.t, r.frame_index, false));
+                        }
                         // Its switch-in was among the losses. The run is real
                         // and its start is not known, which is exactly what
                         // `open_start` says.
                         None => b.lane.spans.push(Span {
-                            from: r.cycles,
-                            to: r.cycles,
+                            from: r.t,
+                            to: r.t,
                             open_start: true,
                             open_end: false,
                             crosses_gap: false,
+                            same_frame: true,
                         }),
                     }
                 }
@@ -686,22 +833,19 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
                 );
                 if let Some(b) = building.get_mut(&key) {
                     if kind == RecordKind::IsrEnter {
-                        b.open.push((r.cycles, false));
+                        b.open.push((r.t, r.frame_index, false));
                     } else {
                         match b.open.pop() {
-                            Some((from, open_start)) => b.lane.spans.push(Span {
-                                from,
-                                to: r.cycles,
-                                open_start,
-                                open_end: false,
-                                crosses_gap: false,
-                            }),
+                            Some(open) => {
+                                b.lane.spans.push(close(open, r.t, r.frame_index, false));
+                            }
                             None => b.lane.spans.push(Span {
-                                from: r.cycles,
-                                to: r.cycles,
+                                from: r.t,
+                                to: r.t,
                                 open_start: true,
                                 open_end: false,
                                 crosses_gap: false,
+                                same_frame: true,
                             }),
                         }
                     }
@@ -721,16 +865,10 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
                     // that closes it was lost. Close the old one where it
                     // stopped being observable rather than nesting idle
                     // inside itself.
-                    if let Some((from, open_start)) = b.open.pop() {
-                        b.lane.spans.push(Span {
-                            from,
-                            to: r.cycles,
-                            open_start,
-                            open_end: true,
-                            crosses_gap: false,
-                        });
+                    if let Some(open) = b.open.pop() {
+                        b.lane.spans.push(close(open, r.t, r.frame_index, true));
                     }
-                    b.open.push((r.cycles, false));
+                    b.open.push((r.t, r.frame_index, false));
                 }
             }
             RecordKind::ThreadCreate | RecordKind::ThreadName => {
@@ -740,7 +878,8 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
                 ensure(&mut building, &mut order, key.clone(), label.clone(), !named_here, "thread");
                 if let Some(b) = building.get_mut(&key) {
                     b.lane.points.push(PointEvent {
-                        cycles: r.cycles,
+                        t: r.t,
+                        frame_index: r.frame_index,
                         kind: kind.as_str().to_string(),
                         label,
                         unnamed: !named_here,
@@ -751,7 +890,8 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
             RecordKind::Marker => {
                 let named_here = !r.name.is_empty();
                 markers.push(PointEvent {
-                    cycles: r.cycles,
+                    t: r.t,
+                    frame_index: r.frame_index,
                     kind: kind.as_str().to_string(),
                     // A marker with no name in the manifest is its ID. The ID
                     // is a real answer; a made-up name would not be.
@@ -770,13 +910,19 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
     let mut lanes: Vec<Lane> = Vec::new();
     for key in order {
         if let Some(mut b) = building.remove(&key) {
-            for (from, open_start) in b.open.drain(..) {
+            let open: Vec<(u64, u64, bool)> = b.open.drain(..).collect();
+            // `_from_frame` goes unused on purpose: an open span has no closing
+            // frame to compare against, so `same_frame` is not the reason it is
+            // excluded — `open_end` is. Claiming both would double-count it in
+            // the reason columns a reader uses to judge a total.
+            for (from_t, _from_frame, open_start) in open {
                 b.lane.spans.push(Span {
-                    from,
-                    to: cycles_to,
+                    from: from_t,
+                    to: t_to,
                     open_start,
                     open_end: true,
                     crosses_gap: false,
+                    same_frame: false,
                 });
             }
             b.lane.spans.sort_by_key(|s| s.from);
@@ -787,19 +933,23 @@ pub fn parse(study_id: &str, tap: &str, csv: &str, named: bool, note: Option<Str
         }
     }
 
-    let summary = summarize(&lanes, &gaps, cycles_from, cycles_to, has_time_base, us_per_cycle, records_lost);
+    let summary = summarize(&lanes, &gaps, unit, t_from, t_to, records_lost);
 
     Ok(TraceView {
         study_id: study_id.to_string(),
         tap: tap.to_string(),
         named,
+        timed,
         note,
         rows: rows.len(),
         rows_dropped_by_cap,
-        cycles_from,
-        cycles_to,
-        has_time_base,
-        us_per_cycle,
+        unit,
+        t_from,
+        t_to,
+        has_time_base: unit == "ms",
+        unstamped_rows,
+        frames: frame_order.len(),
+        resolution_ms,
         records_lost,
         out_of_order_rows,
         gaps,
@@ -814,40 +964,120 @@ mod tests {
     use super::*;
 
     /// The real `native_sim` capture, run through **Core's own renderer**
-    /// against the manifest its own build produced — generated by
-    /// `embarch-core`'s `outpost_manifest::render` from
-    /// `embarch-core/tests/fixtures/outpost-native-sim.bin`, whose bytes came
-    /// out of the firmware encoder rather than out of anything in Rust.
+    /// against the manifest its own build produced — regenerated by
+    /// `embarch-core`'s `outpost_manifest::regenerate_the_ui_trace_fixtures`
+    /// from `embarch-core/tests/fixtures/outpost-native-sim.bin`, whose bytes
+    /// came out of the firmware encoder rather than out of anything in Rust.
     ///
     /// Committed as the rendered CSV rather than as the raw stream on purpose:
     /// this module's job *starts* at Core's output, so a fixture that went
     /// through the firmware encoder and then Core's decoder exercises the
-    /// actual seam. See this module's own header for why the raw bytes are
-    /// Core's to decode and not this crate's.
+    /// actual seam.
     ///
-    /// A useful side finding while producing it: Core's Rust renderer and
-    /// `embarch-outpost/scripts/decode_outpost.py` agree on every column of
-    /// all 848 rows, differing only in how many decimals they print for `us`.
-    /// Three independent implementations of this wire, two of them checked
-    /// against each other here.
+    /// **This half carries no arrival stamps, and could not.** That capture
+    /// went to a `native_sim` process's stdout; no receiver ever saw it, and
+    /// no outpost byte has crossed a real UART on any board. So it is the
+    /// fixture for the untimed axis, which is a state the product will really
+    /// produce (a study whose arrival log failed to write, or a `--raw` file
+    /// decoded by hand).
     const REAL_TRACE: &str = include_str!("../tests/fixtures/outpost-native-sim.trace.csv");
 
+    /// The same real frames with **synthesised** 20 ms arrival stamps — real
+    /// frame boundaries, invented pacing, said out loud here because that is
+    /// the only way a stamped fixture can exist until the wire has run on
+    /// hardware.
+    ///
+    /// It is worth having anyway: everything about the millisecond axis — the
+    /// resolution figure, `same_frame` exclusion, a gap band bounded by two
+    /// arrivals — is arithmetic over frame stamps, and this exercises all of
+    /// it against frames a DUT really produced.
+    const STAMPED_TRACE: &str =
+        include_str!("../tests/fixtures/outpost-native-sim-stamped.trace.csv");
+
     pub(super) fn real() -> TraceView {
-        parse("study-1", "outpost", REAL_TRACE, true, None).expect("the real trace parses")
+        parse("study-1", "outpost", REAL_TRACE, true, false, None).expect("the real trace parses")
+    }
+
+    pub(super) fn stamped() -> TraceView {
+        parse("study-1", "outpost", STAMPED_TRACE, true, true, None)
+            .expect("the stamped trace parses")
     }
 
     #[test]
     fn a_real_capture_decodes_into_lanes() {
         let view = real();
-        assert_eq!(view.rows, 848, "the committed capture is 848 records");
+        assert_eq!(view.rows, 941, "the committed capture is 941 records");
         assert_eq!(view.rows_dropped_by_cap, 0);
-        assert!(view.has_time_base, "this capture has a header frame, so it has a clock rate");
-        assert_eq!(view.out_of_order_rows, 0, "only gap rows may step backwards, and they are excluded");
+        assert_eq!(view.frames, 32, "32 of its 41 frames carry records");
+        assert_eq!(view.out_of_order_rows, 0);
 
         let threads: Vec<&Lane> = view.lanes.iter().filter(|l| l.kind == "thread").collect();
         assert_eq!(threads.len(), 7, "this capture mentions seven distinct thread pointers");
         assert!(view.lanes.iter().any(|l| l.kind == "idle"));
         assert!(view.lanes.iter().any(|l| l.kind == "isr"));
+    }
+
+    /// **An unstamped capture is drawn against frames, and says so.** The
+    /// alternative — millisecond labels over frame indices — is the one lie
+    /// this axis can tell.
+    #[test]
+    fn an_unstamped_capture_is_drawn_against_frames() {
+        let view = real();
+        assert_eq!(view.unit, "frame");
+        assert!(!view.has_time_base);
+        assert!(!view.timed, "Core said it stamped nothing");
+        assert_eq!(view.unstamped_rows, view.rows, "no row in this capture has a time");
+        assert_eq!(view.resolution_ms, None, "a resolution in ms with no ms to measure");
+        // And the axis is still a real coordinate: frame indices, in order.
+        assert!(view.t_to > view.t_from);
+        assert_eq!(view.summary.unit, "frame");
+        assert!(!view.summary.has_time_base);
+    }
+
+    /// The stamped half: every extent is milliseconds of Core's own wall
+    /// clock, which is the clock every other stream in the study is on.
+    #[test]
+    fn a_stamped_capture_is_drawn_against_core_s_own_clock() {
+        let view = stamped();
+        assert_eq!(view.unit, "ms");
+        assert!(view.has_time_base && view.timed);
+        assert_eq!(view.unstamped_rows, 0);
+        assert_eq!(view.rows, 941, "the same records, differently placed");
+        // Absolute UTC milliseconds, so a row here and a `core_rx_utc_ms` on a
+        // power sample are directly comparable.
+        assert!(view.t_from >= 1_700_000_000_000);
+        // 20 ms per *frame*, and the median interval between record-carrying
+        // frames is still 20: header frames repeat every ~100 ms, so only a few
+        // intervals are double-width.
+        assert_eq!(view.resolution_ms, Some(20.0));
+        // The span is 38 frame intervals, not 31: this capture's 32
+        // record-carrying frames sit at indices 1..=39, with nine header frames
+        // interleaved. The axis is arrival time, so the headers' 20 ms each are
+        // part of it.
+        assert_eq!(view.t_to - view.t_from, 20 * 38);
+    }
+
+    /// **The resolution claim, tested where it actually bites.** Records in
+    /// one frame share a time, so a view must not present them as ordered in
+    /// time — only as ordered.
+    #[test]
+    fn records_in_one_frame_share_one_instant() {
+        let view = stamped();
+        let mut by_t: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+        for lane in &view.lanes {
+            for p in &lane.points {
+                *by_t.entry(p.t).or_default() += 1;
+            }
+        }
+        for m in &view.markers {
+            *by_t.entry(m.t).or_default() += 1;
+        }
+        assert!(
+            by_t.values().any(|n| *n > 1),
+            "no two events share an instant, which cannot be true of a frame-stamped capture"
+        );
+        // Distinct instants can never exceed the number of frames.
+        assert!(by_t.len() <= view.frames);
     }
 
     /// The requirement most of a real build depends on: three of this
@@ -882,36 +1112,64 @@ mod tests {
         assert!(isr.unnamed);
         assert!(isr.label.contains("not reported"), "{}", isr.label);
         assert!(!isr.label.contains("4294967295"));
-        assert_eq!(isr.spans.len(), 72, "72 enter/exit pairs");
+        assert_eq!(isr.spans.len(), 77, "77 enter/exit pairs");
     }
 
-    /// **Gaps are placed by timestamp, not by position**, and this capture is
-    /// what proves the distinction is real: all four of its gap rows sit
-    /// between neighbours with *lower* timestamps, because a gap is stamped
-    /// when the losses began and emitted when the ring next had room.
+    /// **An ISR lives and dies inside one frame**, so its extent is not a
+    /// duration. This is the concrete consequence of taking the DUT's clock
+    /// off the wire, and the view has to state it rather than report an ISR
+    /// load of zero as though it had measured one.
     #[test]
-    fn gaps_are_placed_by_their_own_timestamp() {
-        let view = real();
-        assert_eq!(view.gaps.len(), 4);
-        assert_eq!(view.records_lost, 20_009 + 15 + 16 + 17);
-        for gap in &view.gaps {
-            assert!(gap.to > gap.from, "a gap must span the cycles it reports losing");
-            assert!(gap.records_lost > 0);
-        }
-        // The first gap is stamped at 410000 and the row after it is at
-        // 370000 — the whole reason position is not time.
-        assert_eq!(view.gaps[0].from, 410_000);
-        assert_eq!(view.gaps[0].to, 420_000);
-        assert!(view.gaps.windows(2).all(|w| w[0].from <= w[1].from), "gaps come out in time order");
+    fn an_isr_span_is_below_the_captures_resolution_and_says_so() {
+        let view = stamped();
+        let isr: &Lane = view.lanes.iter().find(|l| l.kind == "isr").expect("an isr lane");
+        assert!(
+            isr.spans.iter().all(|s| s.same_frame),
+            "an ISR span crossed a frame boundary, which would be worth knowing"
+        );
+        assert!(isr.spans.iter().all(|s| s.to == s.from));
+
+        let row = view.summary.subjects.iter().find(|s| s.kind == "isr").expect("an isr row");
+        assert_eq!(row.entries, isr.spans.len(), "every ISR span is still counted");
+        assert_eq!(row.measured_spans, 0);
+        assert_eq!(row.same_frame_spans, isr.spans.len());
+        assert_eq!(row.total_extent, 0);
+        assert_eq!(view.summary.isr_extent, 0);
+        assert!(view.summary.same_frame_spans >= isr.spans.len());
     }
 
-    /// The finding that changed this module's design: a gap band is **not** an
-    /// empty interval. Sixteen surviving records fall inside the first band of
-    /// this real capture, so drawing the band as a hole would erase real data.
-    /// The band is an overlay, and every span it touches is flagged instead.
+    /// **A gap band is a bound, not a measurement**: a gap record is the first
+    /// record of its frame, so the losses fall between the previous frame's
+    /// arrival and its own.
+    #[test]
+    fn a_gap_is_bounded_by_the_frames_around_it() {
+        let view = stamped();
+        assert_eq!(view.gaps.len(), 1, "this capture overflowed its ring once");
+        let gap = &view.gaps[0];
+        assert_eq!(gap.records_lost, 19_990);
+        assert!(!gap.unbounded_start);
+        // 40 ms, not 20: a header frame arrived between the two record frames
+        // bracketing this gap, and the rendered CSV does not carry header
+        // frames — so the band is two frame intervals wide where the true bound
+        // was one. Wider than necessary, never narrower, and that asymmetry is
+        // the point.
+        assert_eq!(gap.to - gap.from, 40);
+        assert_eq!(view.records_lost, 19_990);
+
+        // The untimed half draws the identical bound in frame indices: the
+        // same two-index reach, for the same reason.
+        let untimed = real();
+        assert_eq!(untimed.gaps.len(), 1);
+        assert_eq!(untimed.gaps[0].to - untimed.gaps[0].from, 2);
+    }
+
+    /// The finding that survived the reshape: a gap band is **not** an empty
+    /// interval. The records at both its ends survived, so drawing it as a
+    /// hole would erase real data. The band is an overlay, and every span it
+    /// touches is flagged instead.
     #[test]
     fn a_gap_marks_spans_incomplete_rather_than_erasing_them() {
-        let view = real();
+        let view = stamped();
         let crossing: usize = view
             .lanes
             .iter()
@@ -920,7 +1178,7 @@ mod tests {
             .count();
         assert!(
             crossing > 0,
-            "this capture has spans overlapping its gaps; none were flagged, so the view would \
+            "this capture has spans overlapping its gap; none were flagged, so the view would \
              present an interrupted run as a continuous one"
         );
     }
@@ -928,7 +1186,7 @@ mod tests {
     #[test]
     fn markers_keep_the_engineers_own_argument_and_name() {
         let view = real();
-        assert_eq!(view.markers.len(), 132);
+        assert_eq!(view.markers.len(), 163);
         let names: std::collections::BTreeSet<&str> =
             view.markers.iter().map(|m| m.label.as_str()).collect();
         assert!(names.contains("WORK_BEGIN"), "{names:?}");
@@ -950,8 +1208,8 @@ mod tests {
                     line.to_string()
                 } else {
                     let mut f = split_row(line);
-                    if f.len() >= 6 {
-                        f[5] = String::new();
+                    if f.len() >= 7 {
+                        f[6] = String::new();
                     }
                     f.join(",")
                 }
@@ -963,6 +1221,7 @@ mod tests {
             "study-1",
             "outpost",
             &stripped,
+            false,
             false,
             Some("decoded but NOT named: manifest build_id \"a\" != firmware build_id \"b\"".to_string()),
         )
@@ -976,28 +1235,81 @@ mod tests {
         );
         assert!(view.markers.iter().all(|m| m.unnamed));
         // And it is still a real timeline: the structure survives the refusal.
-        assert_eq!(view.rows, 848);
-        assert_eq!(view.gaps.len(), 4);
+        assert_eq!(view.rows, 941);
+        assert_eq!(view.gaps.len(), 1);
+    }
+
+    /// Named and timed are independent, and a trace can be named and untimed —
+    /// which is exactly what the committed unstamped fixture is.
+    #[test]
+    fn named_and_timed_are_reported_separately() {
+        let view = parse(
+            "s",
+            "outpost",
+            REAL_TRACE,
+            true,
+            false,
+            Some("decoded but NOT timed: no arrival stamps were recorded for this capture."
+                .to_string()),
+        )
+        .expect("parses");
+        assert!(view.named, "an untimed trace is still a named one");
+        assert!(!view.timed);
+        assert!(view.note.as_deref().is_some_and(|n| n.contains("NOT timed")));
     }
 
     /// Columns this build does not recognize are refused rather than guessed
-    /// at — the same posture as a manifest from another record layout.
+    /// at — the same posture as a manifest from another record layout. The
+    /// layout-1 column list is the case that matters: it is a real shape this
+    /// code will meet in old results directories.
     #[test]
     fn an_unfamiliar_column_list_is_refused() {
-        let err = parse("s", "t", "cycles,us,kind,a,b\n0,0,idle,0,0\n", true, None)
+        let err = parse("s", "t", "cycles,us,kind,a,b,name\n0,0,idle,0,0,\n", true, true, None)
             .expect_err("must refuse");
         assert!(err.contains("refusing to guess"), "{err}");
     }
 
-    /// A capture with no header frame has no clock rate, so its rows have no
-    /// microseconds. Saying so is the answer; computing microseconds against a
-    /// rate nobody reported is not.
+    /// One unstamped frame drops the whole view to the frame axis. Half a
+    /// timeline in milliseconds and half in frame indices is one axis
+    /// pretending to be another.
     #[test]
-    fn a_capture_with_no_time_base_says_so() {
-        let csv = format!("{}\n0,,idle,0,0,\n1000,,thread_switch_in,16,0,\n", outpost::csv_header());
-        let view = parse("s", "t", &csv, true, None).unwrap();
+    fn a_partly_stamped_capture_falls_back_to_frames_rather_than_mixing_axes() {
+        let header = outpost::csv_header();
+        let csv = format!(
+            "{header}\n\
+             0,0,1700000000000,thread_switch_in,4096,0,worker\n\
+             1,1,,thread_switch_out,4096,0,worker\n"
+        );
+        let view = parse("s", "t", &csv, true, true, None).expect("parses");
+        assert_eq!(view.unit, "frame");
         assert!(!view.has_time_base);
-        assert_eq!(view.us_per_cycle, None);
+        assert_eq!(view.unstamped_rows, 1);
+        assert!(view.timed, "Core did stamp some of it, and that is worth reporting");
+        assert_eq!(view.t_from, 0);
+        assert_eq!(view.t_to, 1);
+    }
+
+    /// Dumps a parsed view as the JSON `assets/app.js` actually receives, so
+    /// the browser half can be driven against real data instead of a
+    /// hand-written object.
+    ///
+    /// `#[ignore]`d: it writes a file, and its only consumer is a manual
+    /// check. There is no `node` on this bench, so the render path is exercised
+    /// by re-evaluating `app.js`'s IIFE body in headless Firefox against these
+    /// bytes — the alternative being to change 300 lines of chart code and
+    /// hope.
+    ///
+    /// ```text
+    /// EMBARCH_TRACE_VIEW_JSON=$HOME/.embarch-uicheck/view.json \
+    ///     cargo test dump_a_view_for_the_browser_harness -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "writes a JSON file for the manual browser check"]
+    fn dump_a_view_for_the_browser_harness() {
+        let path = std::env::var("EMBARCH_TRACE_VIEW_JSON")
+            .expect("set EMBARCH_TRACE_VIEW_JSON to an output path");
+        let json = serde_json::to_string(&stamped()).expect("serializes");
+        std::fs::write(&path, json).expect("writes");
     }
 
     #[test]
@@ -1010,7 +1322,7 @@ mod tests {
 
 #[cfg(test)]
 mod load_summary_tests {
-    use super::tests::real;
+    use super::tests::{real, stamped};
     use super::*;
 
     /// The summary is arithmetic over the same spans the timeline draws, so
@@ -1039,10 +1351,10 @@ mod load_summary_tests {
     /// present its totals as a clean measurement.
     #[test]
     fn a_lossy_capture_reports_its_gap_fraction() {
-        let view = real();
-        assert_eq!(view.records_lost, 20_057, "the committed capture lost 20,057 records");
+        let view = stamped();
+        assert_eq!(view.records_lost, 19_990, "the committed capture lost 19,990 records");
         assert_eq!(view.summary.records_lost, view.records_lost);
-        assert!(view.summary.gap_cycles > 0, "four gap bands cover a non-zero span");
+        assert!(view.summary.gap_extent > 0, "the gap band covers a non-zero interval");
         assert!(
             view.summary.gap_fraction > 0.0 && view.summary.gap_fraction <= 1.0,
             "a fraction of the window, never more than all of it: {}",
@@ -1054,27 +1366,32 @@ mod load_summary_tests {
     /// bug that lets a fraction exceed 1.
     #[test]
     fn overlapping_gap_bands_are_counted_as_a_union() {
-        let gaps = vec![
-            Gap { from: 100, to: 200, records_lost: 1, row_index: 0 },
-            Gap { from: 150, to: 250, records_lost: 1, row_index: 1 },
-            Gap { from: 400, to: 450, records_lost: 1, row_index: 2 },
-        ];
+        let gap = |from, to, row_index| Gap {
+            from,
+            to,
+            records_lost: 1,
+            frame_index: row_index as u64,
+            row_index,
+            unbounded_start: false,
+        };
+        let gaps = vec![gap(100, 200, 0), gap(150, 250, 1), gap(400, 450, 2)];
         // Union is 100..250 (150) plus 400..450 (50), not 100+100+50.
-        assert_eq!(merged_gap_cycles(&gaps, 0, 1_000), 200);
+        assert_eq!(merged_gap_extent(&gaps, 0, 1_000), 200);
         // And it clamps to the window rather than counting outside it.
-        assert_eq!(merged_gap_cycles(&gaps, 0, 120), 20);
+        assert_eq!(merged_gap_extent(&gaps, 0, 120), 20);
     }
 
-    /// An extent is not a duration. A span that is open at either end, or that
-    /// crosses a gap, must not contribute its drawn width to a total — but it
-    /// must still be counted, because "this ran" is not in doubt.
+    /// An extent is not a duration. A span that is open at either end, that
+    /// crosses a gap, or that lives inside one frame must not contribute its
+    /// drawn width to a total — but it must still be counted, because "this
+    /// ran" is not in doubt.
     #[test]
     fn untrustworthy_spans_are_excluded_but_still_counted() {
-        let view = real();
+        let view = stamped();
         for s in &view.summary.subjects {
             assert_eq!(s.entries, s.measured_spans + s.excluded_spans);
             assert!(
-                s.total_cycles <= view.summary.window_cycles,
+                s.total_extent <= view.summary.window_extent,
                 "{} claims more measured time than the window holds",
                 s.label
             );
@@ -1083,7 +1400,7 @@ mod load_summary_tests {
             view.summary.subjects.iter().filter(|s| s.excluded_spans > 0).collect();
         assert!(
             !with_exclusions.is_empty(),
-            "this capture has gaps and open spans, so something must be excluded"
+            "this capture has a gap, open spans and sub-frame spans, so something must be excluded"
         );
     }
 
@@ -1092,68 +1409,66 @@ mod load_summary_tests {
     /// deliberately kept out of the sum.
     #[test]
     fn thread_time_fits_the_window_and_overlapping_kinds_stay_separate() {
-        let view = real();
+        let view = stamped();
         let s = &view.summary;
         assert!(
-            s.thread_cycles <= s.window_cycles,
-            "{} thread cycles in a {} cycle window",
-            s.thread_cycles,
-            s.window_cycles
+            s.thread_extent <= s.window_extent,
+            "{} ms of threads in a {} ms window",
+            s.thread_extent,
+            s.window_extent
         );
-        assert_eq!(s.unaccounted_cycles, s.window_cycles - s.thread_cycles);
+        assert_eq!(s.unaccounted_extent, s.window_extent - s.thread_extent);
         let isr_sum: u64 =
-            s.subjects.iter().filter(|x| x.kind == "isr").map(|x| x.total_cycles).sum();
-        assert_eq!(s.isr_cycles, isr_sum);
+            s.subjects.iter().filter(|x| x.kind == "isr").map(|x| x.total_extent).sum();
+        assert_eq!(s.isr_extent, isr_sum);
     }
 
     /// The double count this design exists to avoid: idle is reported both as
     /// `RecordKind::Idle` records and as switches of the thread the manifest
-    /// names `idle`. Adding the two claims more time than the window holds.
+    /// names `idle`. The two are kept apart, and the `idle` lane is never
+    /// added to the thread total.
     #[test]
     fn idle_is_not_counted_twice() {
-        let view = real();
+        let view = stamped();
         let s = &view.summary;
-        assert!(s.idle_record_cycles > 0, "this capture has an idle lane");
         let idle_thread = s
             .subjects
             .iter()
             .find(|x| x.kind == "thread" && x.label == "idle")
             .expect("this capture's manifest names an idle thread");
-        assert!(idle_thread.total_cycles > 0);
+        assert!(idle_thread.total_extent > 0, "the idle thread ran and was measured");
         assert!(
-            s.idle_record_cycles + s.thread_cycles > s.window_cycles,
-            "if these no longer overlap, this test is guarding nothing"
+            s.subjects.iter().any(|x| x.kind == "idle"),
+            "the idle *record* lane exists as its own subject"
+        );
+        assert!(
+            !s.subjects.iter().filter(|x| x.kind == "thread").any(|x| x.key == "cpu-idle"),
+            "the idle record lane leaked into the thread total"
         );
         // The kept total is the one that fits.
-        assert!(s.thread_cycles <= s.window_cycles);
+        assert!(s.thread_extent <= s.window_extent);
     }
 
     /// Sorted heaviest-first, so the load repartition reads as one.
     #[test]
     fn subjects_are_sorted_by_measured_time() {
-        let view = real();
-        let totals: Vec<u64> = view.summary.subjects.iter().map(|s| s.total_cycles).collect();
+        let view = stamped();
+        let totals: Vec<u64> = view.summary.subjects.iter().map(|s| s.total_extent).collect();
         let mut sorted = totals.clone();
         sorted.sort_unstable_by(|a, b| b.cmp(a));
         assert_eq!(totals, sorted);
     }
 
-    /// No header frame means no clock rate, so a share is a fraction of
-    /// **cycles** and every `us` field is absent rather than invented.
+    /// With no arrival stamps there is no time base, so every extent counts
+    /// **frames** and the summary says which unit it is in rather than letting
+    /// a caller assume milliseconds.
     #[test]
-    fn a_capture_with_no_time_base_reports_no_microseconds() {
-        let header = outpost::csv_header();
-        let csv = format!(
-            "{header}\n\
-             100,,thread_switched_in,4096,0,worker\n\
-             200,,thread_switched_in,8192,0,other\n\
-             300,,thread_switched_in,4096,0,worker\n"
-        );
-        let view = parse("s", "outpost", &csv, true, None).expect("parses");
-        assert!(!view.has_time_base);
-        assert!(view.summary.window_us.is_none());
+    fn an_untimed_capture_reports_its_totals_in_frames() {
+        let view = real();
+        assert_eq!(view.summary.unit, "frame");
+        assert!(!view.summary.has_time_base);
+        assert!(view.summary.window_extent > 0);
         for s in &view.summary.subjects {
-            assert!(s.total_us.is_none(), "{} invented a microsecond value", s.label);
             assert!(s.share >= 0.0 && s.share <= 1.0);
         }
     }

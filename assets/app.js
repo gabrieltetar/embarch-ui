@@ -2779,11 +2779,26 @@
     renderTrace();
   }
 
-  function fmtCycles(view, cycles) {
-    if (!view.has_time_base || !view.us_per_cycle) return String(cycles) + " cyc";
-    var us = cycles * view.us_per_cycle;
-    if (us >= 1000) return (us / 1000).toFixed(3) + " ms";
-    return us.toFixed(1) + " µs";
+  // An axis value, in whatever unit the view is actually in.
+  //
+  // **There is no DUT clock to format.** An outpost record carries no
+  // timestamp (`embarch-outpost/design.md` §3 decision 4); the axis is either
+  // Core's own receipt time per frame, in milliseconds, or — when a row went
+  // unstamped — frame indices, which are a real coordinate and are labelled as
+  // one. Nothing here converts between the two.
+  function fmtT(view, t) {
+    if (view.unit !== "ms") return "frame " + String(t);
+    if (Math.abs(t) >= 1000) return (t / 1000).toFixed(3) + " s";
+    return String(t) + " ms";
+  }
+
+  // A width or duration, same units. Split from fmtT because "frame 3" is a
+  // position and "3 frames" is a length, and a tooltip that says the first
+  // where it means the second is how a bound gets read as a measurement.
+  function fmtSpanLen(view, t) {
+    if (view.unit !== "ms") return String(t) + " frame(s)";
+    if (t >= 1000) return (t / 1000).toFixed(3) + " s";
+    return String(t) + " ms";
   }
 
   function statCard(label, value, sub, tone) {
@@ -2817,9 +2832,18 @@
     var lossy = s.gap_fraction > 0 || s.records_lost > 0;
     var coverage = trEl("trace-load-coverage");
     var basis = s.has_time_base
-      ? "Totals are the DUT's own clock."
-      : "This capture carried no header frame, so there is no clock rate: every total below is " +
-        "raw cycles and every share is a fraction of cycles, not of time.";
+      ? "Totals are milliseconds of embarch-core's own receipt clock — the same clock every other " +
+        "stream in this study is stamped with. A frame is " +
+        (view.resolution_ms == null ? "this capture's" : view.resolution_ms + " ms") +
+        " wide and nothing inside one frame has a measurable duration."
+      : "No arrival stamps reached this capture, so it has no clock at all: every total below " +
+        "counts frames, and every share is a fraction of frames rather than of time. The order " +
+        "is real; the durations are not available.";
+    var subFrame = s.same_frame_spans > 0
+      ? " " + s.same_frame_spans + " span(s) began and ended inside one frame, so their duration " +
+        "is below what this capture can resolve — they are counted as entries and excluded from " +
+        "every total. Most ISR spans are this by construction."
+      : "";
     coverage.innerHTML =
       '<div class="card" style="border-color:' + (lossy ? "var(--warning)" : "var(--border)") +
       '; padding:12px 14px;">' +
@@ -2831,16 +2855,16 @@
       '<div class="stat-sub" style="margin-top:6px;">' +
       escapeHtml(
         s.records_lost + " record(s) lost across " + view.gaps.length + " band(s). " +
-        "Window " + fmtCycles(view, s.window_cycles) + "; " +
-        fmtCycles(view, s.thread_cycles) + " of it accounted for by measured thread spans, " +
-        fmtCycles(view, s.unaccounted_cycles) + " not. " + basis
+        "Window " + fmtSpanLen(view, s.window_extent) + "; " +
+        fmtSpanLen(view, s.thread_extent) + " of it accounted for by measured thread spans, " +
+        fmtSpanLen(view, s.unaccounted_extent) + " not. " + basis + subFrame
       ) +
       "</div>" +
-      (s.idle_record_cycles > 0
+      (s.idle_record_extent > 0
         ? '<div class="stat-sub" style="margin-top:6px;">' +
           escapeHtml(
             "Cross-check: the cpu-idle records account for " +
-            fmtCycles(view, s.idle_record_cycles) + " (" + fmtShare(s.idle_record_cycles / Math.max(1, s.window_cycles)) +
+            fmtSpanLen(view, s.idle_record_extent) + " (" + fmtShare(s.idle_record_extent / Math.max(1, s.window_extent)) +
             "), reported independently of the idle thread's own switch records. The two measure " +
             "the same time two ways and are not added together; where they disagree, the " +
             "disagreement is the finding."
@@ -2848,7 +2872,11 @@
         : "") +
       "</div>";
 
-    trEl("trace-load").innerHTML = s.subjects.length
+    // `trace-load-rows`, not `trace-load`: the Load *button* held that id
+    // first, so this wrote every summary row into the button and the table
+    // stayed empty — invisible to a Rust test, obvious the first time the tab
+    // was rendered in a browser.
+    trEl("trace-load-rows").innerHTML = s.subjects.length
       ? s.subjects
           .map(function (x) {
             var nameCell = x.unnamed
@@ -2860,8 +2888,9 @@
               ? '<td style="text-align:right;" title="' +
                 escapeHtml(
                   x.gap_crossing_spans + " crossing a gap, " + x.open_ended_spans +
-                  " with no closing record, " + x.open_started_spans + " with no opening record" +
-                  " — " + fmtCycles(view, x.excluded_cycles) + " of extent, not counted as duration"
+                  " with no closing record, " + x.open_started_spans + " with no opening record, " +
+                  x.same_frame_spans + " inside a single frame" +
+                  " — " + fmtSpanLen(view, x.excluded_extent) + " of extent, not counted as duration"
                 ) + '"><span style="color:var(--warning);">' + x.excluded_spans + " span(s)</span></td>"
               : '<td style="text-align:right; color:var(--text-tertiary);">&mdash;</td>';
             return (
@@ -2869,7 +2898,7 @@
               '<td class="mono">' + escapeHtml(x.kind) + "</td>" +
               '<td class="mono" style="text-align:right;">' + x.entries + "</td>" +
               '<td class="mono" style="text-align:right;">' + x.measured_spans + "</td>" +
-              '<td class="mono" style="text-align:right;">' + escapeHtml(fmtCycles(view, x.total_cycles)) + "</td>" +
+              '<td class="mono" style="text-align:right;">' + escapeHtml(fmtSpanLen(view, x.total_extent)) + "</td>" +
               '<td class="mono" style="text-align:right;">' + escapeHtml(fmtShare(x.share)) + "</td>" +
               excluded + "</tr>"
             );
@@ -2910,21 +2939,38 @@
           : "every row in the capture") +
       statCard("Records lost", String(view.records_lost),
         view.gaps.length + " gap(s) reported by the firmware", lostTone) +
-      statCard("Span", fmtCycles(view, view.cycles_to - view.cycles_from),
-        view.has_time_base ? "DUT's own clock" : "no header frame — cycles only, no time base") +
-      statCard("Lanes", String(view.lanes.length),
-        view.lanes.filter(function (l) { return l.unnamed; }).length + " with no name in the manifest");
+      statCard("Span", fmtSpanLen(view, view.t_to - view.t_from),
+        view.has_time_base
+          ? "embarch-core's receipt clock, " + view.frames + " frames"
+          : "no arrival stamps — " + view.frames + " frames, no time base") +
+      statCard("Resolution",
+        view.has_time_base ? view.resolution_ms + " ms" : "1 frame",
+        "one frame; nothing inside one is measurable");
 
-    trEl("trace-axis-note").textContent = view.has_time_base
-      ? "time from the DUT's own cycle counter"
-      : "no header frame in this capture, so no clock rate — the axis is raw cycles";
+    // A backwards arrival stamp means the host clock stepped mid-capture (an
+    // NTP correction is the realistic cause). It was unreportable while the
+    // axis was the DUT's own monotonic counter; on a wall clock it is a real
+    // failure mode, so it is said out loud rather than drawn over.
+    var clockNote = view.out_of_order_rows > 0
+      ? " · " + view.out_of_order_rows + " row(s) arrived with a stamp earlier than the row " +
+        "before them, which means this host's clock stepped backwards during the capture — " +
+        "positions across that step are not comparable"
+      : "";
+    trEl("trace-axis-note").textContent = (view.has_time_base
+      ? "embarch-core's own receipt time per frame — a frame is " + view.resolution_ms +
+        " ms wide, and every record in one shares its instant"
+      : view.unstamped_rows > 0 && view.timed
+        ? view.unstamped_rows + " of " + view.rows + " rows carried no arrival stamp, so the " +
+          "axis is frame index rather than half a millisecond axis"
+        : "nothing stamped this capture, so the axis is frame index: order without duration") +
+      clockNote;
 
     trEl("trace-gaps").innerHTML = view.gaps.length
       ? view.gaps
           .map(function (g) {
             return (
-              "<tr><td>" + fmtCycles(view, g.from - view.cycles_from) + "</td>" +
-              "<td>" + fmtCycles(view, g.to - view.cycles_from) + "</td>" +
+              "<tr><td>" + fmtT(view, g.from - view.t_from) + "</td>" +
+              "<td>" + fmtT(view, g.to - view.t_from) + "</td>" +
               '<td class="mono">' + g.records_lost + "</td>" +
               '<td class="mono">' + g.row_index + "</td></tr>"
             );
@@ -2936,7 +2982,7 @@
       ? view.markers
           .map(function (m) {
             return (
-              "<tr><td>" + fmtCycles(view, m.cycles - view.cycles_from) + "</td>" +
+              "<tr><td>" + fmtT(view, m.t - view.t_from) + "</td>" +
               '<td class="' + (m.unnamed ? "mono" : "") + '"' +
               (m.unnamed ? ' style="font-style:italic; color:var(--text-tertiary);"' : "") + ">" +
               escapeHtml(m.label) + "</td>" +
@@ -2964,11 +3010,11 @@
     svg.setAttribute("viewBox", "0 0 " + width + " " + height);
     svg.setAttribute("height", String(height));
 
-    var span = Math.max(1, view.cycles_to - view.cycles_from);
+    var span = Math.max(1, view.t_to - view.t_from);
     var plotLeft = TRACE_GUTTER;
     var plotRight = width - 14;
-    function x(cycles) {
-      return plotLeft + ((cycles - view.cycles_from) / span) * (plotRight - plotLeft);
+    function x(t) {
+      return plotLeft + ((t - view.t_from) / span) * (plotRight - plotLeft);
     }
 
     var parts = [];
@@ -2989,22 +3035,24 @@
     // Axis.
     var ticks = 6;
     for (var t = 0; t <= ticks; t += 1) {
-      var cyc = view.cycles_from + (span * t) / ticks;
-      var tx = x(cyc);
+      var at = view.t_from + (span * t) / ticks;
+      var tx = x(at);
       parts.push(
         '<line x1="' + tx + '" y1="' + TRACE_AXIS_H + '" x2="' + tx + '" y2="' + (height - 14) +
         '" stroke="var(--border)" stroke-width="1" opacity="0.7"/>' +
         '<text x="' + tx + '" y="' + (TRACE_AXIS_H - 10) + '" text-anchor="middle" ' +
         'fill="var(--text-tertiary)" font-size="10.5" font-family="IBM Plex Mono, monospace">' +
-        escapeHtml(fmtCycles(view, cyc - view.cycles_from)) + "</text>"
+        escapeHtml(fmtSpanLen(view, Math.round(at - view.t_from))) + "</text>"
       );
     }
 
-    // Gap bands, drawn first so records that survived inside one stay visible
-    // on top of it. A gap is "records were lost across this span", not
-    // "nothing happened here" — the committed native_sim capture has 16
-    // surviving records inside its first band, and erasing them to make the
-    // picture tidier would be its own lie.
+    // Gap bands, drawn first so records that survived at their edges stay
+    // visible on top of them. A gap is "records were lost somewhere in here",
+    // not "nothing happened here": the records at both ends of the band
+    // survived, and the band itself is a **bound** — a gap record is the first
+    // record of its frame, so the losses fall between the previous frame's
+    // arrival and its own. Erasing what survived to make the picture tidier
+    // would be its own lie.
     view.gaps.forEach(function (g) {
       var gx = x(g.from);
       var gw = Math.max(2, x(g.to) - gx);
@@ -3012,8 +3060,13 @@
         '<rect x="' + gx + '" y="' + TRACE_AXIS_H + '" width="' + gw + '" height="' +
         (height - 14 - TRACE_AXIS_H) + '" fill="url(#tr-gap)" stroke="var(--danger)" ' +
         'stroke-width="1" stroke-dasharray="3 3"><title>' +
-        escapeHtml(g.records_lost + " records lost across " + fmtCycles(view, g.to - g.from) +
-          " — what is drawn inside this band is what survived, not what happened") +
+        escapeHtml(g.records_lost + " records lost somewhere inside " +
+          fmtSpanLen(view, g.to - g.from) +
+          (g.unbounded_start
+            ? " — reported by the first frame in the capture, so there is no earlier arrival to " +
+              "bound it with: its extent is unknown, not zero"
+            : " — a bound between two frame arrivals, not a measurement") +
+          ". What is drawn at this band's edges is what survived, not what happened") +
         "</title></rect>"
       );
     });
@@ -3046,20 +3099,24 @@
         var sx = x(sp.from);
         // A zero-length span still happened, so it is drawn at a minimum
         // width to stay visible. That width is a visibility floor, not a
-        // duration — which is what the tooltip's own numbers are for.
+        // duration — which is what the tooltip's own numbers are for, and it
+        // is now the *common* case rather than an edge one: a span that begins
+        // and ends inside one frame has no measurable length at all.
         var sw = Math.max(1.5, x(sp.to) - sx);
         var fill = sp.crosses_gap ? "url(#tr-cross)" : "var(--accent)";
         var title =
-          fmtCycles(view, sp.from - view.cycles_from) + " → " +
-          fmtCycles(view, sp.to - view.cycles_from) +
-          " (" + fmtCycles(view, sp.to - sp.from) + ")" +
+          fmtT(view, sp.from - view.t_from) + " → " +
+          fmtT(view, sp.to - view.t_from) +
+          (sp.same_frame
+            ? " (one frame: duration below this capture's resolution)"
+            : " (" + fmtSpanLen(view, sp.to - sp.from) + ")") +
           (sp.open_start ? " · no switch-in record: this run was already going when it became observable" : "") +
           (sp.open_end ? " · no closing record: the bar ends at the next traced event, which is not when it ended" : "") +
           (sp.crosses_gap ? " · overlaps a gap: events inside it were lost, so continuity is not established" : "");
         parts.push(
           '<rect x="' + sx + '" y="' + barTop + '" width="' + sw + '" height="' + TRACE_BAR_H +
           '" rx="2" fill="' + fill + '"' +
-          (sp.open_end || sp.open_start ? ' opacity="0.62"' : "") +
+          (sp.open_end || sp.open_start || sp.same_frame ? ' opacity="0.62"' : "") +
           "><title>" + escapeHtml(title) + "</title></rect>"
         );
         // Ragged edges: dashed where a record is missing, so an extent never
@@ -3079,7 +3136,7 @@
       });
 
       lane.points.forEach(function (pt) {
-        var px = x(pt.cycles);
+        var px = x(pt.t);
         parts.push(
           '<path d="M' + px + " " + (mid - 6) + " L" + (px + 5) + " " + mid + " L" + px + " " +
           (mid + 6) + " L" + (px - 5) + " " + mid + ' Z" fill="var(--info)"><title>' +
@@ -3093,16 +3150,17 @@
     //
     // A bright tick in a strip of their own, plus a **very** faint full-height
     // rule. Both halves earn their place, and the split was forced by real
-    // data: the committed capture carries 132 markers across 760 ms, and at
+    // data: the committed capture carries 163 markers across 32 frames, and at
     // the opacity the first version used they swamped every span on the chart
     // — a legend of vertical lines with a timeline somewhere behind it. The
     // tick is what makes a marker locatable; the rule is what lets a reader
     // line one up against the lane that was running, which is the whole reason
     // a marker is worth drawing on a timeline at all.
     view.markers.forEach(function (m) {
-      var mx = x(m.cycles);
+      var mx = x(m.t);
       var title =
-        escapeHtml(m.label + " (arg " + m.arg + ") at " + fmtCycles(view, m.cycles - view.cycles_from));
+        escapeHtml(m.label + " (arg " + m.arg + ") in frame " + m.frame_index + ", at " +
+          fmtT(view, m.t - view.t_from));
       parts.push(
         '<line x1="' + mx + '" y1="' + TRACE_AXIS_H + '" x2="' + mx + '" y2="' + (height - 14) +
         '" stroke="var(--warning)" stroke-width="1" opacity="0.16"/>' +

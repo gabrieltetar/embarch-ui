@@ -388,7 +388,12 @@ async fn api_trace_taps(
                         ),
                         "rendered": e.rendered,
                         "note": e.note,
-                        "named": e.is_fully_resolved(),
+                        // Two facts, not one: a trace can be named and untimed
+                        // or timed and unnamed, and the tab draws each
+                        // differently (`embarch-outpost/design.md` §3
+                        // decisions 9, 16).
+                        "named": e.is_named(),
+                        "timed": e.is_timed(),
                     })
                 })
                 .collect();
@@ -454,7 +459,14 @@ async fn api_trace_view(
     };
     let csv = String::from_utf8_lossy(&bytes);
 
-    match trace::parse(&study_id, &name, &csv, entry.is_fully_resolved(), entry.note.clone()) {
+    match trace::parse(
+        &study_id,
+        &name,
+        &csv,
+        entry.is_named(),
+        entry.is_timed(),
+        entry.note.clone(),
+    ) {
         Ok(view) => (StatusCode::OK, Json(view)).into_response(),
         Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
     }

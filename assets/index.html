@@ -503,7 +503,7 @@
             </div>
             <div class="trace-legend">
               <span class="trace-key"><i class="sw-run"></i>ran</span>
-              <span class="trace-key"><i class="sw-open"></i>no closing record — extent only</span>
+              <span class="trace-key"><i class="sw-open"></i>no closing record, or inside one frame — extent only</span>
               <span class="trace-key"><i class="sw-gapcross"></i>overlaps a gap — continuity not established</span>
               <span class="trace-key"><i class="sw-gap"></i>records lost</span>
               <span class="trace-key"><i class="sw-marker"></i>marker</span>
@@ -521,10 +521,10 @@
             <div class="table-scroll" style="max-height:420px;">
               <table class="data-table">
                 <thead><tr><th>Subject</th><th>Kind</th><th style="text-align:right;">Entries</th><th style="text-align:right;">Measured spans</th><th style="text-align:right;">Total</th><th style="text-align:right;">Share of window</th><th style="text-align:right;">Not counted</th></tr></thead>
-                <tbody id="trace-load"></tbody>
+                <tbody id="trace-load-rows"></tbody>
               </table>
             </div>
-            <p class="placeholder-note" style="margin-top:10px;">Three kinds of span are left out of a total and counted in <em>Not counted</em> instead, because their drawn width is an extent and not a duration: one that crosses a gap, one with no closing record, and one with no opening record. <em>Entries</em> counts every span regardless — &ldquo;this subject ran N times&rdquo; survives all three doubts. Shares are of the whole window and <strong>deliberately do not sum to 100%</strong>: an ISR runs inside whatever it interrupted, and Zephyr's idle thread is reported both as a thread and as idle records.</p>
+            <p class="placeholder-note" style="margin-top:10px;">Four kinds of span are left out of a total and counted in <em>Not counted</em> instead, because their drawn width is an extent and not a duration: one that crosses a gap, one with no closing record, one with no opening record, and one that <strong>began and ended inside a single frame</strong> — a frame is this capture's resolution, so a span inside one has no measurable length at all. <em>Entries</em> counts every span regardless — &ldquo;this subject ran N times&rdquo; survives all four doubts. Shares are of the whole window and <strong>deliberately do not sum to 100%</strong>: an ISR runs inside whatever it interrupted, and Zephyr's idle thread is reported both as a thread and as idle records.</p>
           </div>
 
           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
@@ -536,13 +536,13 @@
                   <tbody id="trace-gaps"></tbody>
                 </table>
               </div>
-              <p class="placeholder-note" style="margin-top:10px;">A gap is stamped when the losses <em>began</em> and emitted when the ring next had room, so it is placed by its timestamp and not by its position in the stream — which is why the row column can look out of order. A gap band is not an empty interval either: records that survived inside it are still drawn.</p>
+              <p class="placeholder-note" style="margin-top:10px;">A gap band is a <strong>bound, not a measurement</strong>. A gap record is always the first record of the frame that reports it, so the losses happened somewhere between the previous frame's arrival and that one's — <em>From</em> and <em>To</em> are those two arrivals. A gap band is not an empty interval either: the records at both its edges survived and are still drawn.</p>
             </div>
             <div class="card">
               <div class="card-title">Markers</div>
               <div class="table-scroll" style="max-height:320px;">
                 <table class="data-table">
-                  <thead><tr><th>Cycles</th><th>Marker</th><th>Arg</th></tr></thead>
+                  <thead><tr><th>Arrival</th><th>Marker</th><th>Arg</th></tr></thead>
                   <tbody id="trace-markers"></tbody>
                 </table>
               </div>
