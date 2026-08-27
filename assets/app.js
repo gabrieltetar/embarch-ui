@@ -3585,10 +3585,10 @@
     // became the coarser clock and the reader needs to know which one they are
     // looking at.
     var dutNote = view.dut_clock_refused
-      ? " · the DUT's own clock stepped backwards by " +
-        (view.dut_backstep_max_us / 1000000).toFixed(3) + " s, which is longer than this capture " +
-        "lasted — the counter restarted, so this trace spans a DUT reset and is drawn on " +
-        "embarch-core's clock instead"
+      ? " · the DUT's own clock jumped by " +
+        (view.dut_step_max_us / 1000000).toFixed(3) + " s between two consecutive records, which " +
+        "is longer than this capture lasted — so this trace splices two separate stretches of " +
+        "DUT time together and is drawn on embarch-core's clock instead"
       : view.dut_backsteps > 0
         ? " · the DUT's clock inverted " + view.dut_backsteps + " time(s), at most " +
           view.dut_backstep_max_us + " \u00b5s: a hook stamps before it reserves its ring slot, " +

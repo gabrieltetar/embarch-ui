@@ -480,6 +480,12 @@ pub struct TraceView {
     /// ([`Self::dut_clock_refused`]) rather than being drawn across.
     pub dut_backsteps: usize,
     pub dut_backstep_max_us: u64,
+    /// The largest gap between consecutive records in **either** direction,
+    /// microseconds. This is what [`Self::dut_clock_refused`] tests, because a
+    /// stale prefix's sign depends on whether a reset fell between it and the
+    /// fresh stream: after a reset it is ahead of the capture and steps
+    /// backwards, without one it is behind and steps forwards.
+    pub dut_step_max_us: u64,
     /// Set when the DUT clock was available on every row and refused anyway,
     /// because a backwards step exceeded the capture's own duration. The axis
     /// falls to the host's clock, which is monotonic.
@@ -795,11 +801,20 @@ pub fn parse(
     // gave two lanes a 9159% share.
     //
     // The line between them is drawn by **the other clock**, not by a
-    // threshold picked here: a backwards step longer than the whole capture
-    // took is a contradiction between two independent clocks, and the host's
-    // is monotonic. With no host stamps to compare against, the DUT's own
-    // total forward span stands in -- a capture cannot contain a backwards
-    // step longer than itself either way.
+    // threshold picked here: a step longer than the whole capture took is a
+    // contradiction between two independent clocks, and the host's is
+    // monotonic. With no host stamps to compare against, the DUT's own total
+    // span stands in -- a capture cannot contain a step longer than itself
+    // either way.
+    //
+    // **Measured in both directions, and the second one is why.** A stale
+    // prefix's sign depends on whether the DUT was reset in between: after a
+    // reset the buffered pre-reset bytes are *ahead* of the fresh stream and
+    // the step is backwards, but with no reset they are *behind* it and the
+    // step is forwards. A backwards-only check caught the first case on a real
+    // study and sailed straight past the second, reporting a 38-second capture
+    // as a 563-second one. Sign is not the signal; magnitude against the other
+    // clock is.
     let dut_backsteps: Vec<u64> = {
         let mut steps = Vec::new();
         let mut prev: Option<u64> = None;
@@ -816,6 +831,23 @@ pub fn parse(
         steps
     };
     let dut_backstep_max = dut_backsteps.iter().copied().max().unwrap_or(0);
+    // The largest step in *either* direction. A legitimate forward gap is a
+    // DUT that stopped emitting for a while, which is real and bounded by the
+    // capture; one longer than the capture itself is two epochs spliced
+    // together.
+    let dut_step_max = {
+        let mut worst = 0u64;
+        let mut prev: Option<u64> = None;
+        for r in rows.iter().filter(|r| r.kind != Some(RecordKind::Gap)) {
+            if let Some(us) = r.dut_us {
+                if let Some(p) = prev {
+                    worst = worst.max(us.abs_diff(p));
+                }
+                prev = Some(us);
+            }
+        }
+        worst
+    };
     let dut_span = {
         let vals = rows.iter().filter_map(|r| r.dut_us);
         let (lo, hi) = vals.fold((u64::MAX, 0u64), |(lo, hi), v| (lo.min(v), hi.max(v)));
@@ -828,7 +860,11 @@ pub fn parse(
         hi.saturating_sub(if lo == u64::MAX { 0 } else { lo }).saturating_mul(1000)
     };
     let capture_bound = if host_span > 0 { host_span } else { dut_span };
-    let dut_clock_broken = dut_backstep_max > 0 && dut_backstep_max > capture_bound;
+    // `dut_span` is itself inflated by a splice, so it can only be the bound
+    // when there is no host clock at all — and there the comparison degrades
+    // to "is one step most of the whole span", which still catches a splice
+    // between two short epochs far apart.
+    let dut_clock_broken = dut_step_max > 0 && dut_step_max > capture_bound;
 
     let unit = if rows.is_empty() {
         "frame"
@@ -1297,6 +1333,7 @@ pub fn parse(
         undated_rows,
         dut_backsteps: dut_backsteps.len(),
         dut_backstep_max_us: dut_backstep_max,
+        dut_step_max_us: dut_step_max,
         dut_clock_refused: dut_clock_broken,
         dual_clock: !rows.is_empty() && undated_rows == 0 && unstamped_rows == 0
             && !dut_clock_broken,
@@ -1478,6 +1515,23 @@ mod tests {
         // which is exactly what the inversion breaks.
         assert_eq!(view.t_from, 1_000_000);
         assert_eq!(view.t_to, 1_000_200);
+
+        // A stale prefix with NO reset between it and the fresh stream steps
+        // *forwards*, and a backwards-only check sails straight past it. This
+        // is the case a real study hit: 26 buffered rows, a +525 s step, and a
+        // 38-second capture reported as 563 seconds.
+        let stale_forward = format!(
+            "{header}\n\
+             0,0,1700000000000,9000000,9000000.000,thread_switch_in,4096,0,worker\n\
+             1,1,1700000000020,534000000,534000000.000,isr_enter,7,0,irq\n\
+             2,2,1700000000040,534000200,534000200.000,isr_exit,7,0,irq\n"
+        );
+        let view = parse("s", "t", &stale_forward, true, true, Some(true), None).expect("parses");
+        assert_eq!(view.unit, "ms", "a +525 s step inside a 40 ms capture must not draw the axis");
+        assert!(view.dut_clock_refused);
+        assert_eq!(view.dut_backsteps, 0, "nothing went backwards; sign is not the signal");
+        assert_eq!(view.dut_step_max_us, 525_000_000);
+        assert_eq!(view.t_to - view.t_from, 40, "the host axis is intact");
 
         // 195 s backwards, inside a capture spanning 40 ms of host time: the
         // counter restarted, so the DUT clock is refused and the host's draws.
