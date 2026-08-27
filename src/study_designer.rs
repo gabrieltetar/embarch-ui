@@ -32,10 +32,10 @@ use embarch_study_designer::limits::{
 };
 use embarch_study_designer::{
     build_study, merge_actions, requirement_satisfied, validate_taps, Action, ActionRegistry,
-    BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattServiceInfo, Provenance,
-    RegisteredAction, Requirements, RoleChoice, RowAction, Step, StreamEncoding, StreamScope,
-    Outcome, StreamSource, StreamTap, StructLayout, StructRegistry, Study, StudyResult, TableRow,
-    Uuid, VersionSource, REQUIREMENT_ANY,
+    BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattName, GattNameBook,
+    GattServiceInfo, Provenance, RegisteredAction, Requirements, RoleChoice, RowAction, Step,
+    StreamEncoding, StreamScope, Outcome, StreamSource, StreamTap, StructLayout, StructRegistry,
+    Study, StudyResult, TableRow, Uuid, VersionSource, REQUIREMENT_ANY,
 };
 use heapless::String as HString;
 use heapless::Vec as HVec;
@@ -46,6 +46,7 @@ type StreamList = HVec<StreamTap, MAX_STREAMS_PER_STUDY>;
 /// decision 52), named once rather than spelled out at each use.
 type DecoderList = embarch_study_designer::bounded::Bounded<StructLayout, MAX_DECODERS_PER_STUDY>;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -83,11 +84,18 @@ struct Inner {
     /// extractor configured, or it failed), which is a different fact and
     /// must not be recomputed on every request.
     ///
+    /// Holds the extraction's *names* alongside its table
+    /// (`embarch-study-designer/design.md` §3 decision 56) — cached together
+    /// because they come from one text-scan and are invalidated by the same
+    /// event, and a name cache that could outlive its table is the
+    /// one-repo's-names-beside-another's-UUIDs failure decision 14 already
+    /// names in another costume.
+    ///
     /// This was a `OnceLock`, which was exactly right while the project was
     /// fixed for the process's lifetime and is exactly wrong now: a
     /// `OnceLock` that has been set cannot be un-set, so the first project's
     /// extraction would have been served for every project after it.
-    static_gatt: Mutex<Option<Option<Vec<GattServiceInfo>>>>,
+    static_gatt: Mutex<Option<Option<StaticGatt>>>,
     run_tx: watch::Sender<RunState>,
 }
 
@@ -155,11 +163,11 @@ impl StudyDesigner {
         StructRegistry::load(&repo).map_err(|e| e.to_string())
     }
 
-    /// Runs the configured `static_extractor` at most once per process.
+    /// Runs the configured `static_extractor` at most once per project.
     /// An unrecognized name is a named error the first time it's needed,
     /// not a silent guess — `reference-dut` is the only name this crate
     /// currently ships an extractor for (design.md §3 decision 33).
-    fn static_gatt(&self) -> Option<Vec<GattServiceInfo>> {
+    fn static_extraction(&self) -> Option<StaticGatt> {
         let mut cached = self.0.static_gatt.lock().unwrap();
         if let Some(computed) = cached.as_ref() {
             return computed.clone();
@@ -172,8 +180,15 @@ impl StudyDesigner {
         };
         let computed = match project.static_extractor.as_deref() {
             Some("zephyr-ble-def") => ZephyrBleDefExtractor
-                .extract(&project.firmware_repo_path)
-                .map(|services| services.iter().cloned().collect())
+                .extract_labeled(&project.firmware_repo_path)
+                .map(|extracted| StaticGatt {
+                    services: extracted.services.iter().cloned().collect(),
+                    symbols: extracted
+                        .symbols
+                        .into_iter()
+                        .map(|symbol| (symbol.uuid, symbol.identifier))
+                        .collect(),
+                })
                 .map_err(|e| tracing::warn!("static GATT extraction failed: {e}"))
                 .ok(),
             Some(other) => {
@@ -186,9 +201,35 @@ impl StudyDesigner {
         computed
     }
 
+    fn static_gatt(&self) -> Option<Vec<GattServiceInfo>> {
+        self.static_extraction().map(|extraction| extraction.services)
+    }
+
+    /// Every characteristic name this project can resolve
+    /// (`embarch-study-designer/design.md` §3 decision 56): the vendor table
+    /// unconditionally, plus the firmware's own identifiers when a static
+    /// extractor is configured.
+    fn names(&self) -> GattNameBook {
+        match self.static_extraction() {
+            Some(extraction) => GattNameBook::new().with_symbols(extraction.symbols),
+            // Not a failure case — a repo with no extractor configured still
+            // gets vendor names, which is why this is a book rather than an
+            // `Option<Book>`.
+            None => GattNameBook::new(),
+        }
+    }
+
     fn live_gatt(&self) -> Option<Vec<GattServiceInfo>> {
         self.0.live_gatt.lock().unwrap().clone()
     }
+}
+
+/// One static extraction, cached per project: the GATT table plus the C
+/// identifiers behind it (`embarch-study-designer/design.md` §3 decision 56).
+#[derive(Debug, Clone)]
+struct StaticGatt {
+    services: Vec<GattServiceInfo>,
+    symbols: Vec<(Uuid, String)>,
 }
 
 // `StudyResult` is `heapless`-backed with large fixed-capacity buffers
@@ -688,6 +729,22 @@ struct ActionsResponse {
     /// `GattNotify` tap's decoder dropdown offers (§3 decision 52). Empty when
     /// the repo declares none, which is the ordinary starting state.
     struct_layouts: Vec<String>,
+    /// What every picker that names a characteristic labels its options with
+    /// (`embarch-study-designer/design.md` §3 decision 56), keyed by
+    /// hyphenated characteristic UUID.
+    ///
+    /// One map for the whole response rather than a `name` field on
+    /// `SubscribableCharacteristic`: four different places in the browser
+    /// render a characteristic (a selective-monitor checkbox, a GATT tap's
+    /// dropdown, a new tap's default file name, an unregistered-characteristic
+    /// chip), and three of them read from `actions` rather than from
+    /// `subscribable`. A field on one list would have named the options in one
+    /// picker and left the same characteristic as a bare UUID in the next.
+    ///
+    /// Covers every characteristic any source found, not only the
+    /// notify-capable ones: a name is a name regardless of what a study can
+    /// do with the characteristic.
+    characteristic_names: BTreeMap<String, GattName>,
 }
 
 /// One characteristic a study can subscribe to, as the pickers render it.
@@ -703,6 +760,27 @@ pub struct SubscribableCharacteristic {
     /// static-only characteristic behind a disabled Kconfig is exactly the
     /// gap `gatt_extract`'s own doc comment records.
     live: bool,
+}
+
+/// Resolves a display name for every characteristic either discovery source
+/// found (`embarch-study-designer/design.md` §3 decision 56). A characteristic
+/// neither the vendor table nor the firmware's source names is simply absent —
+/// the browser renders the UUID for it, exactly as it did for everything
+/// before decision 56.
+fn characteristic_names(
+    names: &GattNameBook,
+    live: Option<&[GattServiceInfo]>,
+    static_gatt: Option<&[GattServiceInfo]>,
+) -> BTreeMap<String, GattName> {
+    [live, static_gatt]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|service| service.characteristics.iter())
+        .filter_map(|chrc| {
+            names.get(chrc.uuid).map(|name| (chrc.uuid.to_hyphenated().to_string(), name))
+        })
+        .collect()
 }
 
 /// Flattens discovery results into the subscribable list, live entries first
@@ -758,6 +836,11 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
     };
     Json(ActionsResponse {
         subscribable: subscribable_from(live.as_deref(), static_gatt.as_deref()),
+        characteristic_names: characteristic_names(
+            &sd.names(),
+            live.as_deref(),
+            static_gatt.as_deref(),
+        ),
         actions,
         live_gatt_available: live.is_some(),
         static_gatt_available: static_gatt.is_some(),
@@ -1640,6 +1723,84 @@ mod tests {
         }
     }
 
+    fn uuid(text: &str) -> Uuid {
+        Uuid::parse(text).unwrap()
+    }
+
+    fn service(service_uuid: &str, characteristic_uuids: &[&str]) -> GattServiceInfo {
+        GattServiceInfo {
+            uuid: uuid(service_uuid),
+            characteristics: characteristic_uuids
+                .iter()
+                .map(|u| embarch_study_designer::GattCharacteristicInfo {
+                    uuid: uuid(u),
+                    properties: 0x10,
+                })
+                .collect(),
+        }
+    }
+
+    /// `embarch-study-designer/design.md` §3 decision 56: the response names
+    /// every characteristic either source found and that anything can name,
+    /// from both name sources at once — a vendor characteristic on the live
+    /// table and a custom one the firmware source declared.
+    #[test]
+    fn the_response_names_characteristics_from_both_sources() {
+        let live = [service(
+            "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+            &["6e400003-b5a3-f393-e0a9-e50e24dcca9e"],
+        )];
+        let static_gatt = [service(
+            "00000001-853f-4a00-8000-e58100000000",
+            &["00000002-853f-4a00-8000-e58100000000"],
+        )];
+        let names = GattNameBook::new().with_symbols([(
+            uuid("00000002-853f-4a00-8000-e58100000000"),
+            "sds_hrm_rrm_char_uuid".to_string(),
+        )]);
+
+        let resolved = characteristic_names(&names, Some(&live), Some(&static_gatt));
+
+        assert_eq!(
+            resolved["6e400003-b5a3-f393-e0a9-e50e24dcca9e"].label,
+            "NUS TX",
+            "a vendor characteristic is named without any extraction at all"
+        );
+        assert_eq!(resolved["00000002-853f-4a00-8000-e58100000000"].label, "sds_hrm_rrm");
+        assert_eq!(resolved.len(), 2);
+    }
+
+    /// A characteristic nothing names is **absent**, not present with an
+    /// invented label — the browser falls back to the UUID for it, which is
+    /// what every picker showed before decision 56.
+    #[test]
+    fn an_unnamed_characteristic_is_left_out_rather_than_guessed_at() {
+        let live = [service(
+            "00000001-853f-4a00-8000-e58100000000",
+            &["0000dead-853f-4a00-8000-e58100000000"],
+        )];
+        assert!(characteristic_names(&GattNameBook::new(), Some(&live), None).is_empty());
+    }
+
+    /// The two sources overlapping is the ordinary case — the same
+    /// characteristic found live *and* in source must not produce two
+    /// entries, and the name is the same either way because it is keyed by
+    /// UUID rather than by which walk found it.
+    #[test]
+    fn a_characteristic_found_twice_is_named_once() {
+        let both = [service(
+            "00000001-853f-4a00-8000-e58100000000",
+            &["00000002-853f-4a00-8000-e58100000000"],
+        )];
+        let names = GattNameBook::new().with_symbols([(
+            uuid("00000002-853f-4a00-8000-e58100000000"),
+            "sds_hrm_rrm_char_uuid".to_string(),
+        )]);
+        let resolved = characteristic_names(&names, Some(&both), Some(&both));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved["00000002-853f-4a00-8000-e58100000000"].label, "sds_hrm_rrm");
+    }
+
     /// The distinction the whole "Open project" validation rests on
     /// (design.md §3 decision 14): a firmware repo with no `embarch/`
     /// directory yet is a legitimate first-time state, and must read as
@@ -1765,7 +1926,8 @@ mod tests {
         // Stand in for a completed `discover` and a completed static
         // extraction against the first project.
         *sd.0.live_gatt.lock().unwrap() = Some(Vec::new());
-        *sd.0.static_gatt.lock().unwrap() = Some(Some(Vec::new()));
+        *sd.0.static_gatt.lock().unwrap() =
+            Some(Some(StaticGatt { services: Vec::new(), symbols: Vec::new() }));
         assert!(sd.live_gatt().is_some());
 
         sd.open_project(StudyDesignerConfig {
@@ -1803,7 +1965,9 @@ mod tests {
         );
         assert!(sd.0.static_gatt.lock().unwrap().is_none());
         assert!(sd.static_gatt().is_none());
-        assert_eq!(*sd.0.static_gatt.lock().unwrap(), Some(None));
+        let cached = sd.0.static_gatt.lock().unwrap();
+        assert!(cached.is_some(), "the computation must be recorded as having happened");
+        assert!(cached.as_ref().unwrap().is_none(), "...and as having produced nothing");
     }
 
     /// With no project open there is nothing to have computed, so the absence

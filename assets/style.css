@@ -633,6 +633,19 @@ table.data-table {
   color: var(--text-tertiary, var(--text-secondary));
 }
 
+/* The rule above styles a parameter's *caption*, and a selective-monitor
+ * checkbox borrows `.sd-param` for its layout — so its characteristic name
+ * was being shouted as `SDS_HRM_RRM`. Harmless while that span held hex
+ * digits; wrong once it holds an identifier, because a C identifier's case
+ * is part of it and the firmware source does not spell it that way
+ * (embarch-study-designer/design.md §3 decision 56). */
+.sd-param > span.sd-param-value {
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-primary, var(--text-secondary));
+}
+
 .sd-row-actions {
   display: flex;
   gap: 8px;

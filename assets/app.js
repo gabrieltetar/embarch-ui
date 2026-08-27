@@ -821,6 +821,10 @@
   var sdSubscribable = [];
   // Names from the firmware repo's own study-structs.toml (decision 52).
   var sdStructLayouts = [];
+  // Characteristic display names, keyed by hyphenated characteristic UUID
+  // (embarch-study-designer/design.md §3 decision 56). Empty is the honest
+  // starting state and every reader falls back to the UUID.
+  var sdCharNames = {};
   var sdNextRowId = 1;
   var sdRunSource = null;
   var sdLastStudyId = null;
@@ -874,6 +878,36 @@
   // full value stays in the element's title.
   function shortUuid(hyphenated) {
     return String(hyphenated || "").split("-")[0];
+  }
+
+  /* What a picker's option is labelled with (embarch-study-designer/design.md
+   * §3 decision 56): the vendor's name for the characteristic, or the C
+   * identifier the firmware declared it under, or — when nothing named it —
+   * the UUID head this showed for everything before decision 56.
+   *
+   * The UUID never stops being the identity: it is what the checkbox's value
+   * carries, what gets sent to the server, and what `charTitle` puts in every
+   * tooltip. Decision 56 changes only what an engineer *reads*. */
+  function charLabel(uuid) {
+    var name = sdCharNames[uuid];
+    return name ? name.label : shortUuid(uuid);
+  }
+
+  /* The label's provenance, for the tooltip. An engineer has to be able to
+   * tell "the vendor publishes this name" from "your own source spells it
+   * this way" — and both from a UUID nothing named, where the label *is* the
+   * UUID. A name here is an identity, never a claim about what the
+   * characteristic does. */
+  function charTitle(uuid, serviceUuid) {
+    var parts = [];
+    var name = sdCharNames[uuid];
+    if (name) {
+      parts.push(name.origin);
+      parts.push(name.source === "vendor" ? "vendor-published name" : "name from firmware source");
+    }
+    parts.push(uuid);
+    if (serviceUuid) parts.push("service " + serviceUuid);
+    return parts.join(" · ");
   }
 
   // Raw ATT characteristic-properties byte -> the short names that decide
@@ -960,6 +994,7 @@
   function sdAdoptDiscovery(data) {
     sdSubscribable = (data && data.subscribable) || [];
     sdStructLayouts = (data && data.struct_layouts) || [];
+    sdCharNames = (data && data.characteristic_names) || {};
   }
 
   function sdRegisteredActions() {
@@ -1189,8 +1224,9 @@
               '<label class="sd-param" style="flex:0 0 auto; flex-direction:row; align-items:center; gap:6px;">' +
               '<input type="checkbox" data-field="target" data-target-uuid="' +
               escapeHtml(c.characteristic_uuid) + '"' + checked + " /> " +
-              '<span class="mono" title="' + escapeHtml(c.service_uuid) + '">' +
-              escapeHtml(shortUuid(c.characteristic_uuid)) + "</span>" +
+              '<span class="mono sd-param-value" title="' +
+              escapeHtml(charTitle(c.characteristic_uuid, c.service_uuid)) + '">' +
+              escapeHtml(charLabel(c.characteristic_uuid)) + "</span>" +
               '<span class="placeholder-note">' + escapeHtml(propsLabel(c.properties)) +
               " · " + where + "</span></label>"
             );
@@ -1600,11 +1636,18 @@
       var sources = [];
       if (item.sources.live) sources.push("live");
       if (item.sources.static_extraction) sources.push("source");
+      // Named where anything names it (decision 56). The UUID moves to the
+      // second line rather than out of sight: this pool is the route into the
+      // registration form, and matching a characteristic against a vendor's
+      // own table is done by UUID.
+      var uuid = uuidStr(item.uuid);
+      var named = !!sdCharNames[uuid];
       chip.innerHTML =
-        '<div class="mono" style="font-size:12px;">' + escapeHtml(uuidStr(item.uuid)) + "</div>" +
+        '<div class="mono" style="font-size:12px;">' + escapeHtml(charLabel(uuid)) + "</div>" +
         '<div style="font-size:11px; color:var(--text-tertiary);">' +
+        (named ? escapeHtml(shortUuid(uuid)) + " · " : "") +
         escapeHtml(propsLabel(item.properties)) + " · " + sources.join("+") + "</div>";
-      chip.title = "service " + uuidStr(item.service_uuid);
+      chip.title = charTitle(uuid, uuidStr(item.service_uuid));
       chip.style.cursor = "pointer";
       chip.addEventListener("click", function () {
         openRegisterDialog(uuidStr(item.service_uuid), uuidStr(item.uuid), item.properties);
@@ -2269,8 +2312,9 @@
       .map(function (c) {
         var sel = c.characteristic_uuid === tap.characteristic_uuid ? " selected" : "";
         return (
-          '<option value="' + escapeHtml(c.characteristic_uuid) + '"' + sel + ">" +
-          escapeHtml(shortUuid(c.characteristic_uuid) + " · " + propsLabel(c.properties)) +
+          '<option value="' + escapeHtml(c.characteristic_uuid) + '"' + sel +
+          ' title="' + escapeHtml(charTitle(c.characteristic_uuid, c.service_uuid)) + '">' +
+          escapeHtml(charLabel(c.characteristic_uuid) + " · " + propsLabel(c.properties)) +
           "</option>"
         );
       })
@@ -2286,7 +2330,7 @@
       // isn't there, let the server refuse it.
       options =
         '<option value="' + escapeHtml(tap.characteristic_uuid) + '" selected>' +
-        escapeHtml(shortUuid(tap.characteristic_uuid)) + " — not discovered</option>" + options;
+        escapeHtml(charLabel(tap.characteristic_uuid)) + " — not discovered</option>" + options;
     }
 
     var decoders =
@@ -2349,7 +2393,10 @@
         // Named after the characteristic rather than "gatt": this is the
         // file name, and a study capturing two characteristics needs two
         // names an author can tell apart at a glance.
-        name: first ? shortUuid(first.characteristic_uuid) : "notify",
+        // Sliced to MAX_STREAM_NAME_LEN: a name is a file name here, and a
+        // long identifier would be refused by `build_study` at submit time
+        // rather than here, where it was chosen.
+        name: first ? charLabel(first.characteristic_uuid).slice(0, 32) : "notify",
         service_uuid: first ? first.service_uuid : "",
         characteristic_uuid: first ? first.characteristic_uuid : "",
         decoder: "",
