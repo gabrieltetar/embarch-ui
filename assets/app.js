@@ -3397,6 +3397,42 @@
     return String(t) + " ms";
   }
 
+  // A position on the axis, with **as many digits as the current zoom can
+  // distinguish**. `fmtT` picks its tier from the magnitude of `t` alone,
+  // which is right for a table and wrong for a zoomed chart: at a 40 µs
+  // window, every position in this capture is somewhere in the 88th second,
+  // and three decimals renders both ends of the window as the same number.
+  // The tier still comes from `t`; only the precision comes from `span`, so
+  // an axis never claims a digit finer than the window it is labelling.
+  function fmtAxisT(view, t, span, tierRef) {
+    if (view.unit === "frame") return "frame " + String(t);
+    // The tier comes from the **largest** position on screen rather than from
+    // this one, so every label in one drawing carries the same unit: an axis
+    // reading "0 µs · 24.577 s · 49.154 s" makes a reader convert in their
+    // head to compare its own ends.
+    var ref = Math.abs(tierRef === undefined ? t : tierRef);
+    var div = 1;
+    var suffix = view.unit === "us" ? " \u00b5s" : " ms";
+    if (view.unit === "us") {
+      if (ref >= 1000000) { div = 1000000; suffix = " s"; }
+      else if (ref >= 1000) { div = 1000; suffix = " ms"; }
+    } else if (ref >= 1000) {
+      div = 1000;
+      suffix = " s";
+    }
+    // The finest tier is already the axis's own integer unit — there is no
+    // sub-unit digit to show, and a "123.00 µs" would be inventing one.
+    if (div === 1) return String(Math.round(t)) + suffix;
+    // Never finer than the axis's own unit either: `Math.log10(div)` is
+    // exactly how many decimals of the display unit one axis unit is worth,
+    // and a digit past it is a precision the DUT's counter does not have.
+    var digits = Math.min(
+      Math.log10(div),
+      Math.max(3, Math.ceil(-Math.log10(Math.max(1e-9, span / div))) + 3)
+    );
+    return (t / div).toFixed(digits) + suffix;
+  }
+
   function statCard(label, value, sub, tone) {
     return (
       '<div class="card"><div class="card-title"><span style="font-size:10.5px; font-weight:650; ' +
@@ -3649,33 +3685,328 @@
         "opt-in: an application registers them with OUTPOST_MARKERS(X), and an image that " +
         "declares none has nothing to report here. This is not a missing measurement.</td></tr>";
 
+    // The step row's own sentence, whether or not the row can be drawn. When
+    // it cannot — no time base, so no axis to project onto — this is where the
+    // reader is told, rather than being shown bands at invented positions.
+    var stepsNote = trEl("trace-steps-note");
+    if (stepsNote) {
+      stepsNote.textContent = view.steps
+        ? view.steps.note
+        : "This study's events.json carries no per-step arrival stamps, so which step was running " +
+          "at a given instant cannot be drawn. embarch-core has recorded them since 2026-08-27; a " +
+          "capture from before that has no such record to read.";
+    }
+
     renderTraceLoad(view);
+    // A freshly loaded view starts at the whole capture with every lane
+    // shown and in the order `trace.rs` built them — the window and the lane
+    // set are the reader's state, and carrying either across from the last
+    // trace they looked at would silently hide part of this one.
+    traceResetWindow(view);
+    traceResetLanes(view);
+    traceRenderLanePanel(view);
     drawTraceChart(view);
   }
 
-  var TRACE_GUTTER = 230;
+  /// The lane-name gutter's floor. The gutter itself is measured per draw
+  /// against the *visible* lanes' longest label (`traceGutter`), because a
+  /// name that runs off the left edge makes a lane unidentifiable — and a
+  /// reader who has just hidden twenty lanes to look at three ISRs should get
+  /// the width back that those twenty were forcing.
+  var TRACE_GUTTER_MIN = 230;
+  var TRACE_GUTTER_MAX = 380;
+  var traceGutter = TRACE_GUTTER_MIN;
   var TRACE_AXIS_H = 30;
   var TRACE_ROW_H = 24;
   var TRACE_BAR_H = 13;
+  var TRACE_PAD_RIGHT = 14;
+  var TRACE_BODY_PAD = 18;
+  /// The study-action row's own band height, and the gap under it before the
+  /// lanes begin. It lives in the pinned header rather than in the scrolling
+  /// body: which step was running is the context for *every* lane, so it must
+  /// not scroll away from the lane a reader has scrolled down to.
+  var TRACE_STEP_H = 26;
+  var TRACE_STEP_GAP = 8;
+
+  // ---- the visible window ---------------------------------------------------
+  //
+  // Everything below draws one window of the capture rather than the whole of
+  // it, and `traceWin` is that window in the view's **own axis units** — DUT
+  // microseconds, host milliseconds or frame indices, whichever
+  // `view.axis_clock` says. Never a fraction and never pixels: a window stored
+  // as a fraction of the capture would have to be re-derived against `t_from`
+  // on every draw, and a window stored in pixels would change meaning when the
+  // panel resizes.
+  var traceWin = null;
+  /// Lane order (by `lane.key`) and the hidden set. Both are the reader's, not
+  /// the data's — `view.lanes` is never reordered or filtered in place, so the
+  /// Load repartition below keeps computing over every lane and a filtered
+  /// timeline cannot quietly change a denominator.
+  var traceLaneOrder = null;
+  var traceHidden = null;
+  var traceDrawQueued = false;
+  /// Reused per-column aggregation buffers. Allocated once per plot width and
+  /// cleared per lane — a fresh `Uint8Array` per lane per frame would allocate
+  /// 26 arrays sixty times a second while a reader is dragging.
+  var traceScratch = null;
+
+  function traceFullWin(view) {
+    return { from: view.t_from, to: Math.max(view.t_from + 1, view.t_to) };
+  }
+
+  /// The finest window a reader may zoom to. A floor is needed because the
+  /// axis is integers: a window narrower than a few units would put several
+  /// pixel columns inside one unit, and the aggregation below would draw a
+  /// span's *rounding* rather than its extent. The floors differ per clock
+  /// because the units do — 40 µs of the DUT's counter, 4 ms of the host's,
+  /// 4 frames when there is no time base at all.
+  function traceMinWin(view) {
+    if (view.unit === "us") return 40;
+    if (view.unit === "ms") return 4;
+    return 4;
+  }
+
+  /// Clamps a proposed window into the capture. Zoom never goes wider than the
+  /// whole capture and pan never leaves it, so there is no way to end up
+  /// looking at empty axis and wondering whether the trace stopped.
+  function traceClampWin(view, win) {
+    var full = traceFullWin(view);
+    var extent = full.to - full.from;
+    var w = Math.min(extent, Math.max(traceMinWin(view), win.to - win.from));
+    var from = Math.min(Math.max(win.from, full.from), full.to - w);
+    return { from: from, to: from + w };
+  }
+
+  function traceResetWindow(view) {
+    traceWin = traceFullWin(view);
+  }
+
+  function traceResetLanes(view) {
+    traceLaneOrder = view.lanes.map(function (l) { return l.key; });
+    traceHidden = {};
+  }
+
+  /// The lanes to draw, in the reader's order, minus the hidden ones.
+  function traceLanesInOrder(view) {
+    if (!traceLaneOrder) traceResetLanes(view);
+    var byKey = {};
+    view.lanes.forEach(function (l) { byKey[l.key] = l; });
+    var out = [];
+    traceLaneOrder.forEach(function (k) {
+      if (byKey[k] && !traceHidden[k]) out.push(byKey[k]);
+    });
+    return out;
+  }
+
+  function traceHiddenCount(view) {
+    var n = 0;
+    view.lanes.forEach(function (l) { if (traceHidden && traceHidden[l.key]) n += 1; });
+    return n;
+  }
+
+  // ---- windowed culling and pixel-column aggregation ------------------------
+  //
+  // **What bounds this drawing is pixels times lanes, not the dataset.** The
+  // reference capture holds 112,801 spans and, aggregated onto a 1,170 px plot
+  // across 26 lanes, draws under 2,600 rects at *every* zoom level — fewer as
+  // you zoom in, because fewer spans are in the window. That measurement is
+  // why this view is still SVG rather than a canvas: a canvas would have cost
+  // CSS-variable theming, hand-written hit-testing and the browser harness's
+  // ability to inspect what was drawn, to solve an element count that
+  // aggregation had already bounded.
+  //
+  // Spans arrive sorted by `from` within a lane (`trace.rs` builds them in
+  // record order off a clock the view has already vetted for monotonicity), so
+  // finding the window is a binary search rather than a scan of the lane.
+
+  /// Index of the first span whose `from` is at or after `t`.
+  function traceLowerBound(spans, t) {
+    var lo = 0;
+    var hi = spans.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (spans[mid].from < t) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  // The four facts a merged run has to carry out of aggregation. They are
+  // flags on a byte rather than fields on an object because a run is split
+  // wherever they change: merging a vouched-for span into the same block as
+  // one that crosses a gap would fold an unestablished continuity into a
+  // clean-looking bar, which is exactly the quiet lie decision 10 exists to
+  // prevent. Measured on the reference capture, splitting on all four costs
+  // **nothing** — 1,937 rects either way, because open and gap-crossing spans
+  // are rare — so the honest version is also the cheap one.
+  var TRACE_F_ON = 1;
+  var TRACE_F_GAP = 2;
+  var TRACE_F_SUBRES = 4;
+  var TRACE_F_OPEN = 8;
+
+  function traceScratchFor(cols) {
+    if (!traceScratch || traceScratch.cols !== cols) {
+      traceScratch = {
+        cols: cols,
+        flags: new Uint8Array(cols),
+        starts: new Int32Array(cols),
+        one: new Array(cols),
+      };
+    }
+    return traceScratch;
+  }
+
+  /// One lane's visible spans, merged into per-pixel-column occupancy runs.
+  ///
+  /// A span is attributed to every column it covers (so the drawing is right)
+  /// and *counted* only on the column it starts in (so a run's "N runs here"
+  /// counts each span once rather than once per column it spans).
+  function traceAggregateLane(lane, win, cols) {
+    var spans = lane.spans;
+    var s = traceScratchFor(cols);
+    s.flags.fill(0);
+    s.starts.fill(0);
+    var scale = cols / Math.max(1, win.to - win.from);
+    var visible = 0;
+    if (spans.length) {
+      var i = traceLowerBound(spans, win.from);
+      // One step back covers the span already running when the window opens.
+      // Exactly one, because spans within a lane do not overlap: the one
+      // before that ends no later than this one begins.
+      while (i > 0 && spans[i - 1].to >= win.from) i -= 1;
+      for (; i < spans.length; i += 1) {
+        var sp = spans[i];
+        if (sp.from > win.to) break;
+        if (sp.to < win.from) continue;
+        var c0 = Math.floor((Math.max(sp.from, win.from) - win.from) * scale);
+        var c1 = Math.floor((Math.min(sp.to, win.to) - win.from) * scale);
+        if (c0 < 0) c0 = 0;
+        if (c0 > cols - 1) c0 = cols - 1;
+        if (c1 < c0) c1 = c0;
+        if (c1 > cols - 1) c1 = cols - 1;
+        var f = TRACE_F_ON;
+        if (sp.crosses_gap) f |= TRACE_F_GAP;
+        if (sp.below_resolution) f |= TRACE_F_SUBRES;
+        if (sp.open_start || sp.open_end) f |= TRACE_F_OPEN;
+        for (var c = c0; c <= c1; c += 1) s.flags[c] |= f;
+        s.starts[c0] += 1;
+        s.one[c0] = s.starts[c0] === 1 ? sp : null;
+        visible += 1;
+      }
+    }
+    var runs = [];
+    var col = 0;
+    while (col < cols) {
+      var flags = s.flags[col];
+      if (!flags) {
+        col += 1;
+        continue;
+      }
+      var start = col;
+      var count = 0;
+      var only = null;
+      while (col < cols && s.flags[col] === flags) {
+        count += s.starts[col];
+        if (s.starts[col] === 1 && only === null) only = s.one[col];
+        col += 1;
+      }
+      runs.push({
+        c0: start,
+        c1: col - 1,
+        flags: flags,
+        count: count,
+        one: count === 1 ? only : null,
+      });
+    }
+    return { runs: runs, visible: visible };
+  }
+
+  // ---- the study-action row -------------------------------------------------
+
+  /// Whether this view's step row can be drawn at all. `view.steps` is
+  /// `trace.rs`'s own projection of embarch-core's per-step arrival stamps
+  /// onto this axis — `placeable: false` means there is no time base to
+  /// project onto, and the row is then **not drawn**, with the reason said in
+  /// `#trace-steps-note` rather than bands invented at guessed positions.
+  function traceStepsPlaced(view) {
+    return !!(view.steps && view.steps.placeable && view.steps.bands && view.steps.bands.length);
+  }
+
+  /// Outcome colours, in the vocabulary Core reports them in. `Pass`, `Fail`
+  /// and `TimedOut` are all present in a single real capture, so all three are
+  /// distinguishable rather than "green or not green".
+  function traceOutcomeColor(outcome) {
+    if (outcome === "Pass") return "var(--success)";
+    if (outcome === "Fail") return "var(--danger)";
+    if (outcome === "TimedOut") return "var(--warning)";
+    return "var(--info)";
+  }
+
+  // ---- drawing --------------------------------------------------------------
+
+  /// Coalesces redraws onto the next animation frame. A wheel gesture fires
+  /// dozens of events and a drag fires one per mouse sample; redrawing per
+  /// event would draw frames the compositor never shows.
+  function traceScheduleDraw() {
+    if (traceDrawQueued) return;
+    traceDrawQueued = true;
+    requestAnimationFrame(function () {
+      traceDrawQueued = false;
+      if (traceView) drawTraceChart(traceView);
+    });
+  }
 
   function drawTraceChart(view) {
     var svg = trEl("trace-chart");
-    var width = Math.max(640, svg.clientWidth || svg.parentElement.clientWidth || 900);
-    var height = TRACE_AXIS_H + view.lanes.length * TRACE_ROW_H + 18;
-    svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-    svg.setAttribute("height", String(height));
+    var head = trEl("trace-head");
+    if (!svg) return;
+    if (!traceWin) traceResetWindow(view);
+    var win = traceClampWin(view, traceWin);
+    traceWin = win;
 
-    var span = Math.max(1, view.t_to - view.t_from);
-    var plotLeft = TRACE_GUTTER;
-    var plotRight = width - 14;
+    // Both SVGs must share one x mapping or the axis would label a position
+    // the lanes do not draw at, so the header is sized from the *body's* own
+    // measured width — which is the one that shrinks when the lane list grows
+    // tall enough to raise a vertical scrollbar.
+    var width = Math.max(640, svg.clientWidth || svg.parentElement.clientWidth || 900);
+    var lanes = traceLanesInOrder(view);
+    // ~6.6 px per character at 11.5 px IBM Plex Mono, plus the 12 px the
+    // label is inset from the plot and a little breathing room.
+    var widest = 0;
+    lanes.forEach(function (l) { widest = Math.max(widest, l.label.length); });
+    traceGutter = Math.max(
+      TRACE_GUTTER_MIN,
+      Math.min(TRACE_GUTTER_MAX, Math.ceil(widest * 6.6) + 24)
+    );
+    var plotLeft = traceGutter;
+    var plotRight = width - TRACE_PAD_RIGHT;
+    var plotW = Math.max(1, plotRight - plotLeft);
+    var cols = Math.max(1, Math.round(plotW));
+    var span = Math.max(1, win.to - win.from);
     function x(t) {
-      return plotLeft + ((t - view.t_from) / span) * (plotRight - plotLeft);
+      return plotLeft + ((t - win.from) / span) * plotW;
+    }
+    function clampX(v) {
+      return Math.max(plotLeft, Math.min(plotRight, v));
+    }
+    // Every *position* drawn or described below, at the precision this window
+    // can distinguish. Durations stay on `fmtSpanLen` — a length is legible at
+    // its own magnitude whatever the window is.
+    var tier = Math.max(Math.abs(win.to - view.t_from), Math.abs(win.from - view.t_from));
+    function at(t) {
+      return fmtAxisT(view, t - view.t_from, span, tier);
     }
 
+    var stepped = traceStepsPlaced(view);
+    var headH = TRACE_AXIS_H + (stepped ? TRACE_STEP_H + TRACE_STEP_GAP : 0);
+    var bodyH = Math.max(TRACE_ROW_H, lanes.length * TRACE_ROW_H) + TRACE_BODY_PAD;
+
+    // ---- body: lanes ------------------------------------------------------
     var parts = [];
     // Two hatches, and they mean different things: a span the data cannot
     // vouch for the continuity of, and an interval the firmware said it lost
-    // records in.
+    // records in. Defined once here and referenced by `url(#…)` from the
+    // header SVG too — one document, one pair of ids.
     parts.push(
       '<defs>' +
       '<pattern id="tr-gap" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
@@ -3684,20 +4015,20 @@
       '<pattern id="tr-cross" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
       '<rect width="7" height="7" fill="var(--accent-soft-bg)"/>' +
       '<line x1="0" y1="0" x2="0" y2="7" stroke="var(--accent)" stroke-width="2.4"/></pattern>' +
+      '<pattern id="tr-delay" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
+      '<rect width="6" height="6" fill="var(--bg-surface-inset)"/>' +
+      '<line x1="0" y1="0" x2="0" y2="6" stroke="var(--text-tertiary)" stroke-width="1.4"/></pattern>' +
       "</defs>"
     );
 
-    // Axis.
+    // Vertical grid, at the same six positions the header labels.
     var ticks = 6;
-    for (var t = 0; t <= ticks; t += 1) {
-      var at = view.t_from + (span * t) / ticks;
-      var tx = x(at);
+    var t;
+    for (t = 0; t <= ticks; t += 1) {
+      var gx = x(win.from + (span * t) / ticks);
       parts.push(
-        '<line x1="' + tx + '" y1="' + TRACE_AXIS_H + '" x2="' + tx + '" y2="' + (height - 14) +
-        '" stroke="var(--border)" stroke-width="1" opacity="0.7"/>' +
-        '<text x="' + tx + '" y="' + (TRACE_AXIS_H - 10) + '" text-anchor="middle" ' +
-        'fill="var(--text-tertiary)" font-size="10.5" font-family="IBM Plex Mono, monospace">' +
-        escapeHtml(fmtSpanLen(view, Math.round(at - view.t_from))) + "</text>"
+        '<line x1="' + gx + '" y1="0" x2="' + gx + '" y2="' + (bodyH - 4) +
+        '" stroke="var(--border)" stroke-width="1" opacity="0.7"/>'
       );
     }
 
@@ -3708,12 +4039,15 @@
     // record of its frame, so the losses fall between the previous frame's
     // arrival and its own. Erasing what survived to make the picture tidier
     // would be its own lie.
-    view.gaps.forEach(function (g) {
-      var gx = x(g.from);
-      var gw = Math.max(2, x(g.to) - gx);
+    var visibleGaps = view.gaps.filter(function (g) {
+      return g.to >= win.from && g.from <= win.to;
+    });
+    visibleGaps.forEach(function (g) {
+      var gx0 = clampX(x(g.from));
+      var gw = Math.max(2, clampX(x(g.to)) - gx0);
       parts.push(
-        '<rect x="' + gx + '" y="' + TRACE_AXIS_H + '" width="' + gw + '" height="' +
-        (height - 14 - TRACE_AXIS_H) + '" fill="url(#tr-gap)" stroke="var(--danger)" ' +
+        '<rect x="' + gx0 + '" y="0" width="' + gw + '" height="' + (bodyH - 4) +
+        '" fill="url(#tr-gap)" stroke="var(--danger)" ' +
         'stroke-width="1" stroke-dasharray="3 3"><title>' +
         escapeHtml(g.records_lost + " records lost somewhere inside " +
           fmtSpanLen(view, g.to - g.from) +
@@ -3726,22 +4060,24 @@
       );
     });
 
-    view.lanes.forEach(function (lane, i) {
-      var top = TRACE_AXIS_H + i * TRACE_ROW_H;
+    var drawnRects = 0;
+    lanes.forEach(function (lane, i) {
+      var top = i * TRACE_ROW_H;
       var mid = top + TRACE_ROW_H / 2;
       var barTop = mid - TRACE_BAR_H / 2;
 
       parts.push(
-        '<text x="' + (TRACE_GUTTER - 12) + '" y="' + (mid + 4) + '" text-anchor="end" ' +
+        '<text x="' + (traceGutter - 12) + '" y="' + (mid + 4) + '" text-anchor="end" ' +
         'fill="' + (lane.unnamed ? "var(--text-tertiary)" : "var(--text-primary)") + '" ' +
         'font-size="11.5" font-family="IBM Plex Mono, monospace"' +
         (lane.unnamed ? ' font-style="italic"' : "") + ">" +
-        escapeHtml(lane.label) + "</text>"
+        "<title>" + escapeHtml(lane.label + " — " + lane.kind + ", " + lane.spans.length + " run(s) in the whole capture") +
+        "</title>" + escapeHtml(lane.label) + "</text>"
       );
       if (lane.unnamed) {
         parts.push(
-          '<line x1="' + (TRACE_GUTTER - 12 - Math.min(200, lane.label.length * 6.6)) + '" y1="' +
-          (mid + 7) + '" x2="' + (TRACE_GUTTER - 12) + '" y2="' + (mid + 7) +
+          '<line x1="' + (traceGutter - 12 - Math.min(240, lane.label.length * 6.6)) + '" y1="' +
+          (mid + 7) + '" x2="' + (traceGutter - 12) + '" y2="' + (mid + 7) +
           '" stroke="var(--text-tertiary)" stroke-width="1" stroke-dasharray="2 2"/>'
         );
       }
@@ -3750,49 +4086,69 @@
         '" stroke="var(--border)" stroke-width="1" stroke-dasharray="2 4"/>'
       );
 
-      lane.spans.forEach(function (sp) {
-        var sx = x(sp.from);
-        // A zero-length span still happened, so it is drawn at a minimum
-        // width to stay visible. That width is a visibility floor, not a
-        // duration — which is what the tooltip's own numbers are for. On the
-        // frame clock it is the *common* case, because a span that begins and
-        // ends inside one frame has no measurable length at all; on the DUT's
-        // clock it is an edge case again, and a span drawn at the floor really
-        // did take under a microsecond.
-        var sw = Math.max(1.5, x(sp.to) - sx);
-        var fill = sp.crosses_gap ? "url(#tr-cross)" : "var(--accent)";
-        var title =
-          fmtT(view, sp.from - view.t_from) + " → " +
-          fmtT(view, sp.to - view.t_from) +
-          (sp.below_resolution
-            ? " (one frame: duration below this capture's resolution)"
-            : " (" + fmtSpanLen(view, sp.to - sp.from) + ")") +
-          (sp.open_start ? " · no switch-in record: this run was already going when it became observable" : "") +
-          (sp.open_end ? " · no closing record: the bar ends at the next traced event, which is not when it ended" : "") +
-          (sp.crosses_gap ? " · overlaps a gap: events inside it were lost, so continuity is not established" : "");
+      var agg = traceAggregateLane(lane, win, cols);
+      agg.runs.forEach(function (run) {
+        var rx = plotLeft + run.c0;
+        var rw = Math.max(1.5, run.c1 - run.c0 + 1);
+        var crosses = (run.flags & TRACE_F_GAP) !== 0;
+        var subres = (run.flags & TRACE_F_SUBRES) !== 0;
+        var open = (run.flags & TRACE_F_OPEN) !== 0;
+        var fill = crosses ? "url(#tr-cross)" : "var(--accent)";
+        var title;
+        if (run.one) {
+          var sp = run.one;
+          // A run that is exactly one span says exactly what that span says —
+          // aggregation must not cost a reader the numbers they zoomed in for.
+          title =
+            at(sp.from) + " → " + at(sp.to) +
+            (sp.below_resolution
+              ? " (one frame: duration below this capture's resolution)"
+              : " (" + fmtSpanLen(view, sp.to - sp.from) + ")") +
+            (sp.open_start ? " · no switch-in record: this run was already going when it became observable" : "") +
+            (sp.open_end ? " · no closing record: the bar ends at the next traced event, which is not when it ended" : "") +
+            (sp.crosses_gap ? " · overlaps a gap: events inside it were lost, so continuity is not established" : "");
+        } else {
+          // A merged block, said as one. The count is of runs that *begin*
+          // inside this block, and the width is the block's, not any one
+          // span's — so neither number can be read as a duration.
+          var blockFrom = win.from + (run.c0 / cols) * span;
+          var blockTo = win.from + ((run.c1 + 1) / cols) * span;
+          title =
+            run.count + " run(s) of this subject merged into " + (run.c1 - run.c0 + 1) +
+            " pixel column(s), " + at(Math.round(blockFrom)) + " → " + at(Math.round(blockTo)) +
+            " — zoom in to separate them; this block's width is not any one run's duration" +
+            (crosses ? " · at least one of them overlaps a gap, so continuity is not established across this block" : "") +
+            (subres ? " · at least one of them is below this capture's resolution" : "") +
+            (open ? " · at least one of them has no opening or closing record, so its extent is not a measurement" : "");
+        }
         parts.push(
-          '<rect x="' + sx + '" y="' + barTop + '" width="' + sw + '" height="' + TRACE_BAR_H +
+          '<rect x="' + rx + '" y="' + barTop + '" width="' + rw + '" height="' + TRACE_BAR_H +
           '" rx="2" fill="' + fill + '"' +
-          (sp.open_end || sp.open_start || sp.below_resolution ? ' opacity="0.62"' : "") +
+          (open || subres ? ' opacity="0.62"' : "") +
           "><title>" + escapeHtml(title) + "</title></rect>"
         );
+        drawnRects += 1;
         // Ragged edges: dashed where a record is missing, so an extent never
-        // reads as a measurement.
-        if (sp.open_start) {
+        // reads as a measurement. Drawn only for an unmerged run — a dashed
+        // edge on a block of forty merged runs would point at a column, not at
+        // the span whose record is missing, and the block's own tooltip says
+        // it instead.
+        if (run.one && run.one.open_start) {
           parts.push(
-            '<line x1="' + sx + '" y1="' + barTop + '" x2="' + sx + '" y2="' + (barTop + TRACE_BAR_H) +
+            '<line x1="' + rx + '" y1="' + barTop + '" x2="' + rx + '" y2="' + (barTop + TRACE_BAR_H) +
             '" stroke="var(--warning)" stroke-width="2" stroke-dasharray="2 2"/>'
           );
         }
-        if (sp.open_end) {
+        if (run.one && run.one.open_end) {
           parts.push(
-            '<line x1="' + (sx + sw) + '" y1="' + barTop + '" x2="' + (sx + sw) + '" y2="' +
+            '<line x1="' + (rx + rw) + '" y1="' + barTop + '" x2="' + (rx + rw) + '" y2="' +
             (barTop + TRACE_BAR_H) + '" stroke="var(--warning)" stroke-width="2" stroke-dasharray="2 2"/>'
           );
         }
       });
 
       lane.points.forEach(function (pt) {
+        if (pt.t < win.from || pt.t > win.to) return;
         var px = x(pt.t);
         parts.push(
           '<path d="M' + px + " " + (mid - 6) + " L" + (px + 5) + " " + mid + " L" + px + " " +
@@ -3803,30 +4159,403 @@
     });
 
     // Markers last, over everything: they are the engineer's own annotations
-    // and the reason a trace is worth reading against a specific run.
-    //
-    // A bright tick in a strip of their own, plus a **very** faint full-height
-    // rule. Both halves earn their place, and the split was forced by real
-    // data: the committed capture carries 163 markers across 32 frames, and at
-    // the opacity the first version used they swamped every span on the chart
-    // — a legend of vertical lines with a timeline somewhere behind it. The
-    // tick is what makes a marker locatable; the rule is what lets a reader
-    // line one up against the lane that was running, which is the whole reason
-    // a marker is worth drawing on a timeline at all.
-    view.markers.forEach(function (m) {
+    // and the reason a trace is worth reading against a specific run. A very
+    // faint full-height rule here; the bright locatable tick is in the header,
+    // where it stays put while the lanes scroll.
+    var visibleMarkers = view.markers.filter(function (m) {
+      return m.t >= win.from && m.t <= win.to;
+    });
+    visibleMarkers.forEach(function (m) {
       var mx = x(m.t);
-      var title =
-        escapeHtml(m.label + " (arg " + m.arg + ") in frame " + m.frame_index + ", at " +
-          fmtT(view, m.t - view.t_from));
       parts.push(
-        '<line x1="' + mx + '" y1="' + TRACE_AXIS_H + '" x2="' + mx + '" y2="' + (height - 14) +
-        '" stroke="var(--warning)" stroke-width="1" opacity="0.16"/>' +
-        '<line x1="' + mx + '" y1="' + TRACE_AXIS_H + '" x2="' + mx + '" y2="' + (TRACE_AXIS_H + 8) +
-        '" stroke="var(--warning)" stroke-width="1.6"><title>' + title + "</title></line>"
+        '<line x1="' + mx + '" y1="0" x2="' + mx + '" y2="' + (bodyH - 4) +
+        '" stroke="var(--warning)" stroke-width="1" opacity="0.16"/>'
       );
     });
 
+    if (!lanes.length) {
+      parts.push(
+        '<text x="' + (plotLeft + 12) + '" y="' + (TRACE_ROW_H / 2 + 4) + '" ' +
+        'fill="var(--text-tertiary)" font-size="12">' +
+        escapeHtml("Every lane is hidden — nothing is being drawn. Use Lanes… to show some.") +
+        "</text>"
+      );
+    }
+
+    svg.setAttribute("viewBox", "0 0 " + width + " " + bodyH);
+    svg.setAttribute("height", String(bodyH));
     svg.innerHTML = parts.join("");
+
+    // ---- header: the axis, the study-action row, marker ticks -------------
+    if (head) {
+      var hp = [];
+      var stepTop = TRACE_AXIS_H + TRACE_STEP_GAP;
+
+      // Gap bands and marker rules continue through the header, so a band a
+      // reader sees in the lanes is the same band under the axis label that
+      // dates it.
+      visibleGaps.forEach(function (g) {
+        var hx = clampX(x(g.from));
+        var hw = Math.max(2, clampX(x(g.to)) - hx);
+        hp.push(
+          '<rect x="' + hx + '" y="' + TRACE_AXIS_H + '" width="' + hw + '" height="' +
+          (headH - TRACE_AXIS_H) + '" fill="url(#tr-gap)" opacity="0.5"/>'
+        );
+      });
+
+      for (t = 0; t <= ticks; t += 1) {
+        var tickAt = win.from + (span * t) / ticks;
+        var tx = x(tickAt);
+        hp.push(
+          '<line x1="' + tx + '" y1="' + (TRACE_AXIS_H - 6) + '" x2="' + tx + '" y2="' + headH +
+          '" stroke="var(--border)" stroke-width="1" opacity="0.7"/>' +
+          // The end labels are anchored inward rather than centred: at full
+          // zoom the last one is the capture's own length, and half of it
+          // hanging off the right edge of the viewBox is exactly the number a
+          // reader came for.
+          '<text x="' + tx + '" y="' + (TRACE_AXIS_H - 10) + '" text-anchor="' +
+          (t === 0 ? "start" : t === ticks ? "end" : "middle") + '" ' +
+          'fill="var(--text-tertiary)" font-size="10.5" font-family="IBM Plex Mono, monospace">' +
+          escapeHtml(at(Math.round(tickAt))) + "</text>"
+        );
+      }
+
+      if (stepped) {
+        // **The row's own clock is named in the gutter, not in a tooltip.**
+        // On `dut-cycles` these bands are Core's host-clock stamps *projected*
+        // onto the DUT's counter and are good to about `resolution_ms`; the
+        // lanes beneath them are microsecond-exact. A row that looked
+        // microsecond-aligned to those lanes would be claiming a precision
+        // this projection does not have.
+        hp.push(
+          '<text x="' + (traceGutter - 12) + '" y="' + (stepTop + TRACE_STEP_H / 2 + 4) +
+          '" text-anchor="end" fill="var(--text-secondary)" font-size="11.5" ' +
+          'font-family="IBM Plex Mono, monospace">' +
+          escapeHtml(view.steps.projected ? "study step (±" +
+            (view.steps.accuracy_ms === null || view.steps.accuracy_ms === undefined
+              ? "?"
+              : view.steps.accuracy_ms) + " ms)" : "study step") +
+          "</text>"
+        );
+        view.steps.bands.forEach(function (b) {
+          if (b.to < win.from || b.from > win.to) return;
+          var bx0 = clampX(x(b.from));
+          var bx1 = clampX(x(b.to));
+          var bxd = clampX(x(b.exec_from));
+          var color = traceOutcomeColor(b.outcome);
+          var detail =
+            "step " + b.index + " · " + b.name + " → " + b.outcome +
+            (b.reason ? " (" + b.reason + ")" : "") +
+            " · " + (b.delay_before_ms > 0
+              ? b.delay_before_ms + " ms declared delay, then "
+              : "no declared delay, ") +
+            fmtSpanLen(view, Math.max(0, b.to - b.exec_from)) + " running" +
+            (view.steps.projected
+              ? " · placed from embarch-core's own receipt clock, projected onto the DUT's counter to about " +
+                view.steps.accuracy_ms + " ms — not microsecond-aligned to the lanes below"
+              : " · embarch-core's own clock, which is also this axis, so this band is exactly aligned") +
+            (b.clipped_start ? " · began before this capture starts" : "") +
+            (b.clipped_end ? " · ended after this capture ends" : "");
+
+          // The delay is drawn as part of the step and visibly not as part of
+          // its execution. Without the split a step reads as having taken its
+          // own delay — `close-nus-window` carries 5 s of it and
+          // `drain-bds-2min` 3 s, which is most of what those bands would
+          // otherwise appear to measure.
+          if (bxd > bx0 + 0.5) {
+            hp.push(
+              '<rect x="' + bx0 + '" y="' + stepTop + '" width="' + (bxd - bx0) + '" height="' +
+              TRACE_STEP_H + '" fill="url(#tr-delay)" stroke="var(--border)" stroke-width="1"><title>' +
+              escapeHtml(detail) + "</title></rect>"
+            );
+          }
+          if (bx1 > bxd + 0.5) {
+            hp.push(
+              '<rect x="' + bxd + '" y="' + stepTop + '" width="' + (bx1 - bxd) + '" height="' +
+              TRACE_STEP_H + '" rx="2" fill="' + color + '" opacity="0.42" stroke="' + color +
+              '" stroke-width="1"><title>' + escapeHtml(detail) + "</title></rect>"
+            );
+          }
+          if (b.clipped_start) {
+            hp.push(
+              '<line x1="' + bx0 + '" y1="' + stepTop + '" x2="' + bx0 + '" y2="' +
+              (stepTop + TRACE_STEP_H) + '" stroke="var(--text-tertiary)" stroke-width="2" ' +
+              'stroke-dasharray="2 2"/>'
+            );
+          }
+          if (b.clipped_end) {
+            hp.push(
+              '<line x1="' + bx1 + '" y1="' + stepTop + '" x2="' + bx1 + '" y2="' +
+              (stepTop + TRACE_STEP_H) + '" stroke="var(--text-tertiary)" stroke-width="2" ' +
+              'stroke-dasharray="2 2"/>'
+            );
+          }
+          var labelW = bx1 - bxd;
+          if (labelW > 44) {
+            hp.push(
+              '<text x="' + (bxd + labelW / 2) + '" y="' + (stepTop + TRACE_STEP_H / 2 + 4) +
+              '" text-anchor="middle" fill="var(--text-primary)" font-size="10.5" ' +
+              'font-family="IBM Plex Mono, monospace" pointer-events="none">' +
+              escapeHtml(traceFitLabel(b.name, labelW)) + "</text>"
+            );
+          }
+        });
+      }
+
+      // The bright, locatable half of a marker.
+      visibleMarkers.forEach(function (m) {
+        var mx = x(m.t);
+        hp.push(
+          '<line x1="' + mx + '" y1="' + (headH - 10) + '" x2="' + mx + '" y2="' + headH +
+          '" stroke="var(--warning)" stroke-width="1.6"><title>' +
+          escapeHtml(m.label + " (arg " + m.arg + ") in frame " + m.frame_index + ", at " +
+            at(m.t)) + "</title></line>"
+        );
+      });
+
+      head.setAttribute("viewBox", "0 0 " + width + " " + headH);
+      head.setAttribute("height", String(headH));
+      head.style.width = width + "px";
+      head.innerHTML = hp.join("");
+    }
+
+    traceUpdateReadout(view, win, span, lanes, drawnRects);
+  }
+
+  /// Truncates a step name to what its band can actually hold, with an
+  /// ellipsis so a clipped name never reads as a shorter one. ~6.1 px per
+  /// character at 10.5 px IBM Plex Mono.
+  function traceFitLabel(name, widthPx) {
+    var fits = Math.floor((widthPx - 8) / 6.1);
+    if (fits >= name.length) return name;
+    if (fits < 4) return "";
+    return name.slice(0, fits - 1) + "…";
+  }
+
+  /// The one line that says where in the capture the reader is. The axis
+  /// labels alone are offsets; this says how much of the whole they are
+  /// looking at, which is what makes a 34 µs span's zoom level legible.
+  function traceUpdateReadout(view, win, span, lanes, rects) {
+    var el = trEl("trace-window");
+    if (!el) return;
+    var full = traceFullWin(view);
+    var extent = full.to - full.from;
+    var w = win.to - win.from;
+    var zoomed = w < extent;
+    el.textContent =
+      (zoomed
+        ? "showing " + fmtSpanLen(view, w) + " of " + fmtSpanLen(view, extent) + " — " +
+          fmtAxisT(view, win.from - view.t_from, span, win.to - view.t_from) + " to " +
+          fmtAxisT(view, win.to - view.t_from, span, win.to - view.t_from)
+        : "showing the whole capture, " + fmtSpanLen(view, extent)) +
+      " · " + lanes.length + " of " + view.lanes.length + " lanes · " + rects +
+      " marks drawn";
+  }
+
+  // ---- navigation: wheel-zooms at the cursor, drag pans ---------------------
+  //
+  // No overview strip, no zoom buttons and no scrollbar for the time axis:
+  // the axis labels are what say where the reader is, and they are correct at
+  // every scale because `fmtSpanLen` formats against `view.unit`. What the
+  // chrome does carry is a way back — double-click anywhere on the plot, or
+  // the Fit button — because a reader who has zoomed into a 34 µs ISR span
+  // has no other way to find the whole capture again.
+
+  var traceDrag = null;
+
+  function traceUnitsPerPx(view, win) {
+    var svg = trEl("trace-chart");
+    var width = Math.max(640, (svg && svg.clientWidth) || 900);
+    var plotW = Math.max(1, width - TRACE_PAD_RIGHT - traceGutter);
+    return (win.to - win.from) / plotW;
+  }
+
+  /// The axis value under a pointer event, in view units. Returns `null` when
+  /// the pointer is left of the plot (over the lane-name gutter), where a
+  /// zoom anchor would be meaningless.
+  function traceAxisAt(view, win, ev) {
+    var svg = trEl("trace-chart");
+    if (!svg) return null;
+    var rect = svg.getBoundingClientRect();
+    var px = ev.clientX - rect.left;
+    if (px < traceGutter) return null;
+    var plotW = Math.max(1, rect.width - TRACE_PAD_RIGHT - traceGutter);
+    var f = Math.max(0, Math.min(1, (px - traceGutter) / plotW));
+    return win.from + f * (win.to - win.from);
+  }
+
+  function traceOnWheel(ev) {
+    var view = traceView;
+    if (!view || !traceWin) return;
+    // Shift-wheel is left alone so the lane list can still be scrolled with
+    // the wheel while the pointer is over the plot — which is where a reader's
+    // pointer already is.
+    if (ev.shiftKey) return;
+    var anchor = traceAxisAt(view, traceWin, ev);
+    if (anchor === null) return;
+    ev.preventDefault();
+    // `deltaMode` 1 is lines and 2 is pages; normalising them keeps a
+    // Firefox notch and a Chrome notch roughly the same gesture.
+    // Firefox on Linux reports 3 *lines* per notch and Chrome reports ~100
+    // pixels; 33 px a line puts both on roughly the same gesture, so the same
+    // flick of the same wheel zooms by the same amount in either.
+    var delta = ev.deltaY * (ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? 700 : 1);
+    var factor = Math.exp(delta * 0.0028);
+    var w = traceWin.to - traceWin.from;
+    var next = w * factor;
+    var frac = (anchor - traceWin.from) / w;
+    traceWin = traceClampWin(view, { from: anchor - frac * next, to: anchor + (1 - frac) * next });
+    traceScheduleDraw();
+  }
+
+  function traceOnPointerDown(ev) {
+    var view = traceView;
+    if (!view || !traceWin) return;
+    if (ev.button !== 0) return;
+    if (traceAxisAt(view, traceWin, ev) === null) return;
+    traceDrag = { x: ev.clientX, win: { from: traceWin.from, to: traceWin.to } };
+    var plot = trEl("trace-plot");
+    if (plot) plot.classList.add("is-panning");
+    if (ev.currentTarget.setPointerCapture && ev.pointerId !== undefined) {
+      try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (e) { /* not fatal */ }
+    }
+    ev.preventDefault();
+  }
+
+  function traceOnPointerMove(ev) {
+    if (!traceDrag || !traceView) return;
+    var perPx = traceUnitsPerPx(traceView, traceDrag.win);
+    var dt = (ev.clientX - traceDrag.x) * perPx;
+    traceWin = traceClampWin(traceView, {
+      from: traceDrag.win.from - dt,
+      to: traceDrag.win.to - dt,
+    });
+    traceScheduleDraw();
+  }
+
+  function traceOnPointerUp() {
+    traceDrag = null;
+    var plot = trEl("trace-plot");
+    if (plot) plot.classList.remove("is-panning");
+  }
+
+  function traceFit() {
+    if (!traceView) return;
+    traceResetWindow(traceView);
+    traceScheduleDraw();
+  }
+
+  // ---- lane filtering, collapse and order ----------------------------------
+  //
+  // The reading that found the connection-interval fault was "watch
+  // `rtc0_nrf5_isr`, `swi_lll_nrf5_isr` and `radio_nrf5_isr` and ignore
+  // everything else", and doing that by eye across 26 lanes is the friction
+  // this removes.
+  //
+  // **Filtering here changes the drawing and nothing else.** The Load
+  // repartition below is computed in Rust across every lane, and it stays that
+  // way — a hidden lane must not quietly leave a denominator. When a filter is
+  // active the table says so in its own words rather than silently agreeing.
+
+  function traceRenderLanePanel(view) {
+    var list = trEl("trace-lane-list");
+    if (!list) return;
+    if (!traceLaneOrder) traceResetLanes(view);
+    var byKey = {};
+    view.lanes.forEach(function (l) { byKey[l.key] = l; });
+    list.innerHTML = traceLaneOrder
+      .map(function (key, i) {
+        var lane = byKey[key];
+        if (!lane) return "";
+        var hidden = !!traceHidden[key];
+        return (
+          '<div class="trace-lane-row' + (hidden ? " is-hidden" : "") + '" data-lane="' +
+          escapeHtml(key) + '">' +
+          '<input type="checkbox" data-lane-toggle="' + escapeHtml(key) + '"' +
+          (hidden ? "" : " checked") + ' aria-label="show lane ' + escapeHtml(lane.label) + '" />' +
+          '<span class="trace-lane-name' + (lane.unnamed ? " trace-key-unnamed" : "") + '">' +
+          escapeHtml(lane.label) + "</span>" +
+          '<span class="trace-lane-kind">' + escapeHtml(lane.kind) + "</span>" +
+          '<span class="trace-lane-count mono">' + lane.spans.length + "</span>" +
+          '<button class="btn btn-tiny" data-lane-up="' + escapeHtml(key) + '"' +
+          (i === 0 ? " disabled" : "") + ' title="move up">&#9650;</button>' +
+          '<button class="btn btn-tiny" data-lane-down="' + escapeHtml(key) + '"' +
+          (i === traceLaneOrder.length - 1 ? " disabled" : "") +
+          ' title="move down">&#9660;</button>' +
+          "</div>"
+        );
+      })
+      .join("");
+
+    var note = trEl("trace-load-filter");
+    if (note) {
+      var hidden = traceHiddenCount(view);
+      if (hidden > 0) {
+        note.style.display = "block";
+        note.innerHTML =
+          "<strong>" + hidden + " of " + view.lanes.length + " lanes are hidden on the timeline " +
+          "above.</strong> This table is not filtered with it — every share below is still of the " +
+          "whole window across every lane, so hiding a lane cannot quietly change a denominator here.";
+      } else {
+        note.style.display = "none";
+      }
+    }
+  }
+
+  function traceSetLaneVisible(key, visible) {
+    if (visible) delete traceHidden[key];
+    else traceHidden[key] = true;
+  }
+
+  function traceMoveLane(key, by) {
+    var i = traceLaneOrder.indexOf(key);
+    var j = i + by;
+    if (i < 0 || j < 0 || j >= traceLaneOrder.length) return;
+    traceLaneOrder.splice(j, 0, traceLaneOrder.splice(i, 1)[0]);
+  }
+
+  function traceLanePanelClick(ev) {
+    var view = traceView;
+    if (!view) return;
+    var t = ev.target;
+    var key;
+    if (t.hasAttribute && t.hasAttribute("data-lane-toggle")) {
+      key = t.getAttribute("data-lane-toggle");
+      traceSetLaneVisible(key, t.checked);
+    } else if (t.closest && t.closest("[data-lane-up]")) {
+      traceMoveLane(t.closest("[data-lane-up]").getAttribute("data-lane-up"), -1);
+    } else if (t.closest && t.closest("[data-lane-down]")) {
+      traceMoveLane(t.closest("[data-lane-down]").getAttribute("data-lane-down"), 1);
+    } else {
+      return;
+    }
+    traceRenderLanePanel(view);
+    traceScheduleDraw();
+  }
+
+  function traceLaneQuickAction(action) {
+    var view = traceView;
+    if (!view) return;
+    if (action === "all") {
+      traceHidden = {};
+    } else if (action === "none") {
+      view.lanes.forEach(function (l) { traceHidden[l.key] = true; });
+    } else if (action === "no-idle") {
+      // The largest lane in the reference capture by a wide margin (29,677
+      // spans), and the first thing anyone wants out of the way.
+      view.lanes.forEach(function (l) {
+        if (l.kind === "idle" || l.label === "idle") traceHidden[l.key] = true;
+      });
+    } else if (action === "isrs") {
+      view.lanes.forEach(function (l) {
+        if (l.kind === "isr") delete traceHidden[l.key];
+        else traceHidden[l.key] = true;
+      });
+    } else if (action === "reset") {
+      traceResetLanes(view);
+    }
+    traceRenderLanePanel(view);
+    traceScheduleDraw();
   }
 
   function initTraceTab() {
@@ -3862,7 +4591,46 @@
     window.addEventListener("resize", function () {
       if (!traceView) return;
       clearTimeout(pending);
-      pending = setTimeout(function () { drawTraceChart(traceView); }, 120);
+      pending = setTimeout(function () { traceScheduleDraw(); }, 120);
+    });
+
+    // Navigation. `passive: false` on the wheel because zooming has to stop
+    // the page from scrolling under the gesture — and only then, which is why
+    // `traceOnWheel` returns without preventing the default when the pointer
+    // is over the lane-name gutter or Shift is held.
+    var plot = trEl("trace-plot");
+    if (plot) {
+      plot.addEventListener("wheel", traceOnWheel, { passive: false });
+      plot.addEventListener("pointerdown", traceOnPointerDown);
+      plot.addEventListener("pointermove", traceOnPointerMove);
+      plot.addEventListener("pointerup", traceOnPointerUp);
+      plot.addEventListener("pointercancel", traceOnPointerUp);
+      plot.addEventListener("dblclick", function (ev) {
+        ev.preventDefault();
+        traceFit();
+      });
+    }
+    var fit = trEl("trace-fit");
+    if (fit) fit.addEventListener("click", traceFit);
+
+    var lanesToggle = trEl("trace-lanes-toggle");
+    var lanesPanel = trEl("trace-lanes-panel");
+    if (lanesToggle && lanesPanel) {
+      lanesToggle.addEventListener("click", function () {
+        var open = lanesPanel.style.display !== "none";
+        lanesPanel.style.display = open ? "none" : "block";
+        lanesToggle.setAttribute("aria-expanded", open ? "false" : "true");
+      });
+    }
+    if (lanesPanel) {
+      lanesPanel.addEventListener("click", traceLanePanelClick);
+      lanesPanel.addEventListener("change", traceLanePanelClick);
+    }
+    var quick = document.querySelectorAll("[data-lane-action]");
+    Array.prototype.forEach.call(quick, function (btn) {
+      btn.addEventListener("click", function () {
+        traceLaneQuickAction(btn.getAttribute("data-lane-action"));
+      });
     });
   }
 

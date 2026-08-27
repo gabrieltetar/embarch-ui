@@ -531,8 +531,35 @@
               <span class="trace-key"><i class="sw-marker"></i>marker</span>
               <span class="trace-key trace-key-unnamed">italic, dotted = no name in the manifest; the number is the answer</span>
             </div>
-            <div class="trace-scroll">
-              <svg id="trace-chart" width="100%" style="display:block;"></svg>
+            <div class="trace-legend">
+              <span class="trace-key"><i class="sw-delay"></i>a step's declared <span class="mono">delay_before_ms</span> &mdash; part of the step, not part of its execution</span>
+              <span class="trace-key"><i class="sw-step-pass"></i>step passed</span>
+              <span class="trace-key"><i class="sw-step-fail"></i>step failed</span>
+              <span class="trace-key"><i class="sw-step-timeout"></i>step timed out</span>
+            </div>
+            <div class="trace-nav">
+              <button id="trace-fit" class="btn" title="back to the whole capture (double-clicking the plot does the same)">Fit</button>
+              <button id="trace-lanes-toggle" class="btn" aria-expanded="false">Lanes&hellip;</button>
+              <span id="trace-window" class="placeholder-note mono" style="margin:0;"></span>
+              <span class="placeholder-note" style="margin:0;">wheel over the plot zooms at the pointer, drag pans, double-click fits; hold <span class="mono">Shift</span> to scroll the lanes instead</span>
+            </div>
+            <div id="trace-lanes-panel" class="trace-lanes-panel" style="display:none;">
+              <div class="trace-lane-actions">
+                <button class="btn btn-tiny" data-lane-action="all">Show all</button>
+                <button class="btn btn-tiny" data-lane-action="none">Hide all</button>
+                <button class="btn btn-tiny" data-lane-action="no-idle">Hide idle</button>
+                <button class="btn btn-tiny" data-lane-action="isrs">ISRs only</button>
+                <button class="btn btn-tiny" data-lane-action="reset">Reset order</button>
+              </div>
+              <div id="trace-lane-list" class="trace-lane-list"></div>
+              <p class="placeholder-note" style="margin:10px 0 0;">Hiding a lane changes this chart and nothing else. The Load repartition below is computed across every lane in the capture and stays that way &mdash; a filter here can never quietly change a share down there.</p>
+            </div>
+            <p id="trace-steps-note" class="placeholder-note" style="margin-top:10px;"></p>
+            <div id="trace-plot" class="trace-plot">
+              <svg id="trace-head" style="display:block;"></svg>
+              <div class="trace-scroll">
+                <svg id="trace-chart" width="100%" style="display:block;"></svg>
+              </div>
             </div>
           </div>
 
@@ -540,6 +567,7 @@
             <div class="card-title">Load repartition</div>
             <p class="placeholder-note" style="margin-top:0;">Where the CPU's time went, per traced subject. <strong>Read the coverage line first:</strong> a repartition computed across an interval where records were dropped is not a measurement, and this capture's own losses are stated rather than smoothed over.</p>
             <div id="trace-load-coverage" style="margin:12px 0;"></div>
+            <p id="trace-load-filter" class="placeholder-note" style="display:none; margin:12px 0; color:var(--warning);"></p>
             <div class="table-scroll" style="max-height:420px;">
               <table class="data-table">
                 <thead><tr><th>Subject</th><th>Kind</th><th style="text-align:right;">Entries</th><th style="text-align:right;">Measured spans</th><th style="text-align:right;">Total</th><th style="text-align:right;">Share of window</th><th style="text-align:right;">Not counted</th></tr></thead>

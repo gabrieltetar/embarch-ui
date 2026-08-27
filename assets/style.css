@@ -881,9 +881,96 @@ table.data-table {
 
 /* ---- Trace view --------------------------------------------------------- */
 
+/* The plot is two SVGs stacked: a pinned header carrying the time axis and
+ * the study-action row, and a scrolling body carrying the lanes. 26 lanes at
+ * 24 px is already taller than a screen and a busier image is taller still,
+ * and an axis that scrolls off the top leaves every bar below it undated. */
+.trace-plot {
+  margin-top: 12px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.trace-plot.is-panning {
+  cursor: grabbing;
+}
+
 .trace-scroll {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 58vh;
+}
+
+.trace-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
   margin-top: 12px;
+}
+
+.btn-tiny {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  gap: 4px;
+}
+
+.trace-lanes-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-surface-inset);
+}
+
+.trace-lane-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.trace-lane-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 2px 16px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.trace-lane-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 11.5px;
+}
+
+.trace-lane-row.is-hidden .trace-lane-name,
+.trace-lane-row.is-hidden .trace-lane-count {
+  color: var(--text-tertiary);
+}
+
+.trace-lane-name {
+  font-family: IBM Plex Mono, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-lane-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+}
+
+.trace-lane-count {
+  font-size: 10.5px;
+  color: var(--text-secondary);
 }
 
 .trace-legend {
@@ -959,6 +1046,35 @@ table.data-table {
   height: 13px;
   border-radius: 1px;
   background: var(--warning);
+}
+
+/* The study-action row: a declared delay is hatched and is not execution, and
+ * the execution half is coloured by the outcome Core recorded for that step. */
+.trace-key i.sw-delay {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--text-tertiary) 0 2px,
+    var(--bg-surface-inset) 2px 5px
+  );
+  border: 1px solid var(--border);
+}
+
+.trace-key i.sw-step-pass {
+  background: var(--success);
+  opacity: 0.55;
+  border: 1px solid var(--success);
+}
+
+.trace-key i.sw-step-fail {
+  background: var(--danger);
+  opacity: 0.55;
+  border: 1px solid var(--danger);
+}
+
+.trace-key i.sw-step-timeout {
+  background: var(--warning);
+  opacity: 0.55;
+  border: 1px solid var(--warning);
 }
 
 .trace-key-unnamed {
