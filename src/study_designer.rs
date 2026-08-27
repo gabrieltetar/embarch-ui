@@ -183,11 +183,8 @@ impl StudyDesigner {
                 .extract_labeled(&project.firmware_repo_path)
                 .map(|extracted| StaticGatt {
                     services: extracted.services.iter().cloned().collect(),
-                    symbols: extracted
-                        .symbols
-                        .into_iter()
-                        .map(|symbol| (symbol.uuid, symbol.identifier))
-                        .collect(),
+                    symbols: extracted.characteristic_symbols().collect(),
+                    service_symbols: extracted.service_symbols().collect(),
                 })
                 .map_err(|e| tracing::warn!("static GATT extraction failed: {e}"))
                 .ok(),
@@ -211,7 +208,9 @@ impl StudyDesigner {
     /// extractor is configured.
     fn names(&self) -> GattNameBook {
         match self.static_extraction() {
-            Some(extraction) => GattNameBook::new().with_symbols(extraction.symbols),
+            Some(extraction) => GattNameBook::new()
+                .with_symbols(extraction.symbols)
+                .with_service_symbols(extraction.service_symbols),
             // Not a failure case — a repo with no extractor configured still
             // gets vendor names, which is why this is a book rather than an
             // `Option<Book>`.
@@ -230,6 +229,11 @@ impl StudyDesigner {
 struct StaticGatt {
     services: Vec<GattServiceInfo>,
     symbols: Vec<(Uuid, String)>,
+    /// The identifiers the *services* were declared under
+    /// (`embarch-study-designer/design.md` §3 decision 57) — what the
+    /// selective-monitor picker's group headers read
+    /// (`embarch-ui/design.md` §3 decision 17).
+    service_symbols: Vec<(Uuid, String)>,
 }
 
 // `StudyResult` is `heapless`-backed with large fixed-capacity buffers
@@ -745,6 +749,22 @@ struct ActionsResponse {
     /// notify-capable ones: a name is a name regardless of what a study can
     /// do with the characteristic.
     characteristic_names: BTreeMap<String, GattName>,
+    /// The same thing one level up, keyed by hyphenated **service** UUID
+    /// (`embarch-study-designer/design.md` §3 decision 57). What the
+    /// selective-monitor picker's group headers read
+    /// (`embarch-ui/design.md` §3 decision 17) — a picker that groups by
+    /// service needs a name for the group, and `sds_service` is a heading an
+    /// engineer can navigate by where `00000001` is not.
+    service_names: BTreeMap<String, GattName>,
+    /// `limits::MAX_MONITOR_TARGETS` — how many characteristics one selective
+    /// monitor step may name (`embarch-study-designer/design.md` §3 decision
+    /// 53). Served rather than restated in `app.js`: the cap is enforced by
+    /// `build_study`, and a browser-side copy of it is a number that drifts
+    /// silently the day the limit moves. The picker
+    /// (`embarch-ui/design.md` §3 decision 17) shows it and stops at it, so
+    /// the refusal happens where the choice is made rather than as a `400`
+    /// after a round trip.
+    max_monitor_targets: usize,
 }
 
 /// One characteristic a study can subscribe to, as the pickers render it.
@@ -779,6 +799,25 @@ fn characteristic_names(
         .flat_map(|service| service.characteristics.iter())
         .filter_map(|chrc| {
             names.get(chrc.uuid).map(|name| (chrc.uuid.to_hyphenated().to_string(), name))
+        })
+        .collect()
+}
+
+/// The same, for services (`embarch-study-designer/design.md` §3 decision
+/// 57). Separate from `characteristic_names` because the lookup is: a
+/// service UUID resolves against the vendor table's *services*, and a
+/// merged map would have had to guess which half a UUID wanted.
+fn service_names(
+    names: &GattNameBook,
+    live: Option<&[GattServiceInfo]>,
+    static_gatt: Option<&[GattServiceInfo]>,
+) -> BTreeMap<String, GattName> {
+    [live, static_gatt]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|service| {
+            names.service(service.uuid).map(|name| (service.uuid.to_hyphenated().to_string(), name))
         })
         .collect()
 }
@@ -841,6 +880,8 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
             live.as_deref(),
             static_gatt.as_deref(),
         ),
+        service_names: service_names(&sd.names(), live.as_deref(), static_gatt.as_deref()),
+        max_monitor_targets: embarch_study_designer::limits::MAX_MONITOR_TARGETS,
         actions,
         live_gatt_available: live.is_some(),
         static_gatt_available: static_gatt.is_some(),
@@ -1770,6 +1811,51 @@ mod tests {
         assert_eq!(resolved.len(), 2);
     }
 
+    /// `embarch-study-designer/design.md` §3 decision 57: the same, one
+    /// level up. A picker that groups by service (`embarch-ui/design.md` §3
+    /// decision 17) needs a heading, and it comes from the identifier
+    /// `parse_gatt_services` already had in hand to resolve the service's
+    /// UUID at all.
+    #[test]
+    fn the_response_names_services_from_both_sources() {
+        let live = [service(
+            "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+            &["6e400003-b5a3-f393-e0a9-e50e24dcca9e"],
+        )];
+        let static_gatt = [service(
+            "00000020-853f-4a00-8000-e58100000000",
+            &["00000021-853f-4a00-8000-e58100000000"],
+        )];
+        let names = GattNameBook::new().with_service_symbols([(
+            uuid("00000020-853f-4a00-8000-e58100000000"),
+            "bds_service_uuid".to_string(),
+        )]);
+
+        let resolved = service_names(&names, Some(&live), Some(&static_gatt));
+
+        assert_eq!(resolved["6e400001-b5a3-f393-e0a9-e50e24dcca9e"].label, "Nordic UART Service (NUS)");
+        assert_eq!(resolved["00000020-853f-4a00-8000-e58100000000"].label, "bds_service");
+        assert_eq!(resolved.len(), 2);
+    }
+
+    /// Service names and characteristic names are two maps because they are
+    /// two lookups: a *characteristic* symbol must never surface as a
+    /// service heading, or a grouped picker invents a group.
+    #[test]
+    fn a_service_nothing_names_is_left_out_rather_than_guessed_at() {
+        let static_gatt = [service(
+            "00000020-853f-4a00-8000-e58100000000",
+            &["00000021-853f-4a00-8000-e58100000000"],
+        )];
+        // Only the *characteristic* is named.
+        let names = GattNameBook::new().with_symbols([(
+            uuid("00000021-853f-4a00-8000-e58100000000"),
+            "bds_data_char_uuid".to_string(),
+        )]);
+        assert!(service_names(&names, None, Some(&static_gatt)).is_empty());
+        assert_eq!(characteristic_names(&names, None, Some(&static_gatt)).len(), 1);
+    }
+
     /// A characteristic nothing names is **absent**, not present with an
     /// invented label — the browser falls back to the UUID for it, which is
     /// what every picker showed before decision 56.
@@ -1927,7 +2013,11 @@ mod tests {
         // extraction against the first project.
         *sd.0.live_gatt.lock().unwrap() = Some(Vec::new());
         *sd.0.static_gatt.lock().unwrap() =
-            Some(Some(StaticGatt { services: Vec::new(), symbols: Vec::new() }));
+            Some(Some(StaticGatt {
+                services: Vec::new(),
+                symbols: Vec::new(),
+                service_symbols: Vec::new(),
+            }));
         assert!(sd.live_gatt().is_some());
 
         sd.open_project(StudyDesignerConfig {

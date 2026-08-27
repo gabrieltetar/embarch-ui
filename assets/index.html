@@ -348,6 +348,27 @@
           </div>
         </div>
 
+        <!-- Selective-monitor target picker (design.md §3 decision 17). A
+             dialog rather than an inline list: the step table lives inside an
+             `overflow-x: auto` wrapper, and fourteen inline checkboxes made
+             one row taller than the rest of the table put together. -->
+        <div id="sd-targets-backdrop" class="dialog-backdrop" style="display:none;"></div>
+        <div id="sd-targets-dialog" class="dialog" style="display:none;">
+          <div class="card-title">Characteristics to subscribe to</div>
+          <p class="placeholder-note">Only what discovery actually found — live, or read out of the firmware repo's source. There is deliberately no free-text UUID box: a step that names a characteristic nothing has seen is a run that fails on the bench.</p>
+          <div class="sd-targets-bar">
+            <input id="sd-targets-filter" type="text" class="sd-input" spellcheck="false" placeholder="filter by name or UUID…" />
+            <span id="sd-targets-count" class="placeholder-note"></span>
+          </div>
+          <div id="sd-targets-list" class="sd-targets-list"></div>
+          <p id="sd-targets-note" class="placeholder-note" style="margin:10px 0 0;"></p>
+          <div class="sd-row-actions" style="margin-top:16px;">
+            <span style="flex:1;"></span>
+            <button id="sd-targets-cancel" class="btn">Cancel</button>
+            <button id="sd-targets-done" class="btn btn-primary">Done</button>
+          </div>
+        </div>
+
         <div id="sd-register-backdrop" class="dialog-backdrop" style="display:none;"></div>
         <div id="sd-register-dialog" class="dialog" style="display:none;">
           <div class="card-title">Register a custom action</div>

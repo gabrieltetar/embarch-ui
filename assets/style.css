@@ -966,3 +966,114 @@ table.data-table {
   color: var(--text-tertiary);
   border-bottom: 1px dotted var(--text-tertiary);
 }
+
+/* ---- Selective-monitor target picker (design.md §3 decision 17) ---------
+ *
+ * Replaces one inline checkbox per notify-capable characteristic in a step
+ * table cell — eleven of them on the reference DUT, fourteen once the
+ * repo-wide GATT scan picked up its third service, and growing. No new
+ * tokens and no new components: the dialog is `.dialog`, the rows are the
+ * same checkbox-plus-mono-label shape `.sd-param` already renders, and the
+ * summary chip in the cell is `.probe-card` from the Enroll tab.
+ */
+
+.sd-targets-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 8px;
+}
+
+.sd-targets-bar .sd-input {
+  flex: 1 1 auto;
+}
+
+.sd-targets-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px 0;
+}
+
+.sd-targets-group + .sd-targets-group {
+  border-top: 1px solid var(--border);
+}
+
+.sd-targets-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 14px 6px;
+}
+
+.sd-targets-group-name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Per-group all/none. Deliberately text-weight buttons rather than `.btn`:
+ * a group header holding two filled buttons reads as the primary action of
+ * the dialog, which it is not — the checkboxes are. */
+.sd-targets-bulk {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--accent-strong);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.sd-targets-bulk:disabled {
+  color: var(--text-tertiary);
+  cursor: default;
+  text-decoration: none;
+}
+
+.sd-targets-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px 5px 26px;
+  cursor: pointer;
+}
+
+.sd-targets-row:hover {
+  background: var(--bg-surface-2);
+}
+
+/* A characteristic that can't be picked because the cap is reached still
+ * renders — hiding it would look like discovery lost it. */
+.sd-targets-row.disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sd-targets-row.disabled:hover {
+  background: none;
+}
+
+.sd-targets-name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+/* The cell's own summary: one line whether two characteristics are picked
+ * or fourteen. */
+.sd-targets-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sd-targets-summary .probe-card {
+  cursor: default;
+  padding: 3px 9px;
+  font-size: 11.5px;
+}

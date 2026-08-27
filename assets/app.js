@@ -819,6 +819,19 @@
   // Notify/indicate-capable characteristics, from the same response — what a
   // selective monitor row and a GATT tap both pick from (decisions 53/55).
   var sdSubscribable = [];
+  /* Group headings for the target picker (decision 17), keyed by hyphenated
+   * *service* UUID — `embarch-study-designer/design.md` §3 decision 56's
+   * 2026-08-26 amendment. Same fallback rule as `charLabel`: an unnamed
+   * service is its UUID head, never an invented name. */
+  var sdServiceNames = {};
+  /* `limits::MAX_MONITOR_TARGETS`, served rather than restated here so the
+   * browser and `build_study` cannot disagree about the cap. The fallback
+   * only applies to a response written before the field existed. */
+  var sdMaxTargets = 16;
+  /* The picker's working copy while its dialog is open (decision 17).
+   * Cancel discards it; Done commits it to the row. Held outside the row so
+   * a half-made selection never reaches `sdCollectRows`. */
+  var sdTargetDraft = null;
   // Names from the firmware repo's own study-structs.toml (decision 52).
   var sdStructLayouts = [];
   // Characteristic display names, keyed by hyphenated characteristic UUID
@@ -910,6 +923,21 @@
     return parts.join(" · ");
   }
 
+  /* A service's group heading (decision 17): the vendor's name for it, or
+   * the C identifier the firmware declared it under, or — when nothing names
+   * it — the UUID head. Same three-step fallback as `charLabel`, because it
+   * is the same mechanism one level up
+   * (`embarch-study-designer/design.md` §3 decision 56, amended 2026-08-26). */
+  function serviceLabel(uuid) {
+    var name = sdServiceNames[uuid];
+    return name ? name.label : shortUuid(uuid);
+  }
+
+  function serviceTitle(uuid) {
+    var name = sdServiceNames[uuid];
+    return (name ? name.origin + " · " : "") + uuid;
+  }
+
   // Raw ATT characteristic-properties byte -> the short names that decide
   // whether a characteristic is even usable for a given operation. Bit
   // meanings are the Bluetooth Core Spec's, not this file's invention.
@@ -995,6 +1023,10 @@
     sdSubscribable = (data && data.subscribable) || [];
     sdStructLayouts = (data && data.struct_layouts) || [];
     sdCharNames = (data && data.characteristic_names) || {};
+    sdServiceNames = (data && data.service_names) || {};
+    if (data && typeof data.max_monitor_targets === "number") {
+      sdMaxTargets = data.max_monitor_targets;
+    }
   }
 
   function sdRegisteredActions() {
@@ -1207,40 +1239,19 @@
         return '<span class="placeholder-note">no parameters — this drops the link</span>';
       }
       if (sdIsSelectiveMonitor(row.which)) {
-        // A checkbox per notify/indicate-capable characteristic, from
-        // whatever discovery found. Never a free-text UUID list: the whole
-        // point of decision 53 is picking from what is actually there.
+        // One line whatever the DUT's table looks like (decision 17): a
+        // summary of what is picked, and a button opening the picker. The
+        // options themselves are still only ever what discovery found, and
+        // an empty selection is still refused rather than promoted to
+        // "everything" — decision 15's two invariants are unchanged, this
+        // decision changes only where the picking happens.
         if (!sdSubscribable.length) {
           return (
             '<span class="placeholder-note">no notify-capable characteristic known yet — run ' +
             '<span class="mono">Discover GATT</span>, or use GattMonitorAll to see what this DUT has</span>'
           );
         }
-        var boxes = sdSubscribable
-          .map(function (c) {
-            var checked = row.targets.indexOf(c.characteristic_uuid) >= 0 ? " checked" : "";
-            var where = c.live ? "live" : "from source";
-            return (
-              '<label class="sd-param" style="flex:0 0 auto; flex-direction:row; align-items:center; gap:6px;">' +
-              '<input type="checkbox" data-field="target" data-target-uuid="' +
-              escapeHtml(c.characteristic_uuid) + '"' + checked + " /> " +
-              '<span class="mono sd-param-value" title="' +
-              escapeHtml(charTitle(c.characteristic_uuid, c.service_uuid)) + '">' +
-              escapeHtml(charLabel(c.characteristic_uuid)) + "</span>" +
-              '<span class="placeholder-note">' + escapeHtml(propsLabel(c.properties)) +
-              " · " + where + "</span></label>"
-            );
-          })
-          .join("");
-        var count = row.targets.length;
-        return (
-          '<div class="sd-params">' + boxes + "</div>" +
-          '<p class="placeholder-note" style="margin:6px 0 0;">' +
-          (count
-            ? count + " characteristic" + (count === 1 ? "" : "s") + " subscribed"
-            : "pick at least one — an empty selection is refused rather than treated as \"everything\"") +
-          "</p>"
-        );
+        return sdTargetsSummaryHtml(row);
       }
       if (row.which !== "ble_connect") {
         return '<span class="placeholder-note">no parameters</span>';
@@ -1461,16 +1472,6 @@
       row.fieldChoices[ev.target.dataset.choiceField] = ev.target.value;
       return;
     }
-    if (field === "target") {
-      var uuid = ev.target.dataset.targetUuid;
-      var at = row.targets.indexOf(uuid);
-      if (ev.target.checked && at < 0) row.targets.push(uuid);
-      else if (!ev.target.checked && at >= 0) row.targets.splice(at, 1);
-      // Re-rendered so the "n characteristics subscribed" line under the
-      // boxes stays true — a checkbox has no caret to lose.
-      renderSdRows();
-      return;
-    }
     if (field === "name") { row.name = ev.target.value; return; }
     if (field === "timeout_ms") { row.timeout_ms = Number(ev.target.value) || 0; return; }
     if (field === "delay_before_ms") {
@@ -1514,6 +1515,7 @@
     var index = sdRows.findIndex(function (r) { return r.id === Number(tr.dataset.rowId); });
     if (index < 0) return;
     var act = btn.dataset.act;
+    if (act === "pick-targets") return openTargetDialog(sdRows[index]);
     if (act === "remove") sdRows.splice(index, 1);
     else if (act === "up" && index > 0) sdRows.splice(index - 1, 0, sdRows.splice(index, 1)[0]);
     else if (act === "down" && index < sdRows.length - 1) sdRows.splice(index + 1, 0, sdRows.splice(index, 1)[0]);
@@ -1735,6 +1737,15 @@
         base.which = a.which;
         base.role = a.role || "central";
         base.targetName = a.target_name || "";
+        // Restored, unlike before decision 17: a saved selective-monitor
+        // step round-trips its targets through `TableRow`, and this used to
+        // read `which`/`role`/`target_name` and drop the rest — so
+        // reopening such a study came back with an empty selection and the
+        // security level reset, both without a word.
+        base.securityLevel = a.security_level || base.securityLevel;
+        base.targets = (a.targets || []).map(function (t) {
+          return t.characteristic_uuid;
+        });
       } else if (a.kind === "registered") {
         base.kind = "registered";
         base.registeredName = a.name;
@@ -1847,6 +1858,249 @@
       '<button class="sd-icon-btn" data-reg="remove-value">&#10005;</button>' +
       "</div>"
     );
+  }
+
+  /* ---- Selective-monitor target picker (design.md §3 decision 17) --------
+   *
+   * The step table's Parameters cell used to hold one checkbox per
+   * notify/indicate-capable characteristic — eleven on the reference DUT,
+   * fourteen once the repo-wide GATT scan found its third service — which
+   * made one row taller than the rest of the table put together and only
+   * ever grew. What replaces it is a one-line summary plus a dialog, using
+   * the same `.dialog`/`.dialog-backdrop` pattern four other places in this
+   * app already use.
+   *
+   * What decision 15 bought is deliberately untouched: options come from
+   * `sdSubscribable` and nowhere else, a picked characteristic's service
+   * UUID is still read back out of the same entry the option was rendered
+   * from at submit time, and an empty selection is still refused.
+   */
+
+  /* Characteristics that are picked but that the current discovery no longer
+   * knows about — a study saved against one DUT and reopened against
+   * another, or a Kconfig-gated characteristic that a later live discovery
+   * didn't see. `sdCollectRows` drops these (it has no service UUID to pair
+   * them with), so they are surfaced rather than left to vanish quietly. */
+  function sdUnknownTargets(row) {
+    return (row.targets || []).filter(function (uuid) {
+      return !sdSubscribable.some(function (c) { return c.characteristic_uuid === uuid; });
+    });
+  }
+
+  /* The cell's own content: one line, whether two characteristics are picked
+   * or fourteen. */
+  function sdTargetsSummaryHtml(row) {
+    var picked = row.targets || [];
+    var total = sdSubscribable.length;
+    var unknown = sdUnknownTargets(row);
+    var chips = picked
+      .slice(0, 2)
+      .map(function (uuid) {
+        return (
+          '<span class="probe-card mono" title="' + escapeHtml(charTitle(uuid, "")) + '">' +
+          escapeHtml(charLabel(uuid)) + "</span>"
+        );
+      })
+      .join("");
+    if (picked.length > 2) {
+      chips += '<span class="placeholder-note">+' + (picked.length - 2) + " more</span>";
+    }
+    var head = picked.length
+      ? '<span class="mono" style="font-size:12px;">' + picked.length + " of " + total + "</span>"
+      : '<span class="sd-error" style="font-size:12px;">none picked</span>';
+    var note = picked.length
+      ? ""
+      : '<p class="placeholder-note" style="margin:6px 0 0;">pick at least one — an empty ' +
+        'selection is refused rather than treated as "everything"</p>';
+    if (unknown.length) {
+      note +=
+        '<p class="sd-error" style="margin:6px 0 0; font-size:12px;">' +
+        unknown.length +
+        " picked characteristic" + (unknown.length === 1 ? " is" : "s are") +
+        " not in the current discovery and will be dropped — reopen the picker to clear " +
+        escapeHtml(unknown.map(shortUuid).join(", ")) + "</p>";
+    }
+    return (
+      '<div class="sd-targets-summary">' + head + chips +
+      '<button class="btn" data-act="pick-targets" type="button">Choose…</button></div>' + note
+    );
+  }
+
+  function openTargetDialog(row) {
+    sdTargetDraft = {
+      rowId: row.id,
+      // A copy, so Cancel is a real cancel rather than a no-op over state
+      // the checkboxes already mutated.
+      selected: (row.targets || []).slice(),
+      filter: "",
+    };
+    sdEl("sd-targets-filter").value = "";
+    renderTargetDialog();
+    sdEl("sd-targets-dialog").style.display = "block";
+    sdEl("sd-targets-backdrop").style.display = "block";
+    sdEl("sd-targets-filter").focus();
+  }
+
+  function closeTargetDialog() {
+    sdTargetDraft = null;
+    sdEl("sd-targets-dialog").style.display = "none";
+    sdEl("sd-targets-backdrop").style.display = "none";
+  }
+
+  /* Groups the subscribable list by service, preserving the order discovery
+   * returned it in rather than sorting — that order is the DUT's own, and a
+   * picker that reorders it stops matching what `Discover GATT` printed.
+   *
+   * The service UUID travels with the group, so every option rendered under
+   * a heading carries the same pair `sdCollectRows` resolves at submit time:
+   * a row's two UUIDs cannot disagree (decision 15). */
+  function sdTargetGroups(filter) {
+    var needle = (filter || "").trim().toLowerCase();
+    var groups = [];
+    sdSubscribable.forEach(function (c) {
+      if (needle) {
+        var hay = [
+          charLabel(c.characteristic_uuid),
+          charTitle(c.characteristic_uuid, c.service_uuid),
+          serviceLabel(c.service_uuid),
+          c.service_uuid,
+        ].join(" ").toLowerCase();
+        if (hay.indexOf(needle) < 0) return;
+      }
+      var group = groups.find(function (g) { return g.serviceUuid === c.service_uuid; });
+      if (!group) {
+        group = { serviceUuid: c.service_uuid, items: [] };
+        groups.push(group);
+      }
+      group.items.push(c);
+    });
+    return groups;
+  }
+
+  function renderTargetDialog() {
+    if (!sdTargetDraft) return;
+    var selected = sdTargetDraft.selected;
+    var atCap = selected.length >= sdMaxTargets;
+    var groups = sdTargetGroups(sdTargetDraft.filter);
+
+    var html = groups
+      .map(function (group) {
+        var allPicked = group.items.every(function (c) {
+          return selected.indexOf(c.characteristic_uuid) >= 0;
+        });
+        var nonePicked = group.items.every(function (c) {
+          return selected.indexOf(c.characteristic_uuid) < 0;
+        });
+        var rows = group.items
+          .map(function (c) {
+            var on = selected.indexOf(c.characteristic_uuid) >= 0;
+            // Rendered but unpickable at the cap. Hiding it would look like
+            // discovery had lost the characteristic.
+            var blocked = !on && atCap;
+            return (
+              '<label class="sd-targets-row' + (blocked ? " disabled" : "") + '" title="' +
+              escapeHtml(charTitle(c.characteristic_uuid, c.service_uuid)) + '">' +
+              '<input type="checkbox" data-target-uuid="' +
+              escapeHtml(c.characteristic_uuid) + '"' + (on ? " checked" : "") +
+              (blocked ? " disabled" : "") + " />" +
+              '<span class="sd-targets-name">' + escapeHtml(charLabel(c.characteristic_uuid)) +
+              "</span>" +
+              '<span class="placeholder-note">' + escapeHtml(propsLabel(c.properties)) + " · " +
+              (c.live ? "live" : "from source") + "</span></label>"
+            );
+          })
+          .join("");
+        return (
+          '<div class="sd-targets-group"><div class="sd-targets-group-head">' +
+          '<span class="sd-targets-group-name" title="' +
+          escapeHtml(serviceTitle(group.serviceUuid)) + '">' +
+          escapeHtml(serviceLabel(group.serviceUuid)) + "</span>" +
+          '<button class="sd-targets-bulk" type="button" data-bulk="all" data-service="' +
+          // Also disabled at the cap: an enabled control that would add
+          // nothing is a small lie about what the cap allows.
+          escapeHtml(group.serviceUuid) + '"' + (allPicked || atCap ? " disabled" : "") +
+          ">all</button>" +
+          '<button class="sd-targets-bulk" type="button" data-bulk="none" data-service="' +
+          escapeHtml(group.serviceUuid) + '"' + (nonePicked ? " disabled" : "") + ">none</button>" +
+          "</div>" + rows + "</div>"
+        );
+      })
+      .join("");
+
+    sdEl("sd-targets-list").innerHTML =
+      html ||
+      '<p class="placeholder-note" style="padding:14px;">nothing matches that filter</p>';
+    sdEl("sd-targets-count").textContent =
+      selected.length + " of " + sdSubscribable.length + " · max " + sdMaxTargets;
+
+    var note = "";
+    if (atCap) {
+      note =
+        "at the cap of " + sdMaxTargets +
+        " — a study wanting more than this wants GattMonitorAll, which is what that action is for";
+    } else if (!selected.length) {
+      note = 'an empty selection is refused, never treated as "everything"';
+    }
+    var unknown = sdTargetDraft.selected.filter(function (uuid) {
+      return !sdSubscribable.some(function (c) { return c.characteristic_uuid === uuid; });
+    });
+    if (unknown.length) {
+      note +=
+        (note ? " · " : "") + unknown.length + " picked characteristic" +
+        (unknown.length === 1 ? " is" : "s are") +
+        " no longer in discovery (" + unknown.map(shortUuid).join(", ") +
+        ") and Done will drop " + (unknown.length === 1 ? "it" : "them");
+    }
+    sdEl("sd-targets-note").textContent = note;
+  }
+
+  function onTargetDialogChange(ev) {
+    if (!sdTargetDraft) return;
+    var uuid = ev.target.dataset && ev.target.dataset.targetUuid;
+    if (!uuid) return;
+    var at = sdTargetDraft.selected.indexOf(uuid);
+    if (ev.target.checked && at < 0) sdTargetDraft.selected.push(uuid);
+    else if (!ev.target.checked && at >= 0) sdTargetDraft.selected.splice(at, 1);
+    renderTargetDialog();
+  }
+
+  function onTargetDialogClick(ev) {
+    if (!sdTargetDraft) return;
+    var btn = ev.target.closest("button[data-bulk]");
+    if (!btn) return;
+    ev.preventDefault();
+    var service = btn.dataset.service;
+    var items = sdSubscribable.filter(function (c) { return c.service_uuid === service; });
+    if (btn.dataset.bulk === "none") {
+      sdTargetDraft.selected = sdTargetDraft.selected.filter(function (uuid) {
+        return !items.some(function (c) { return c.characteristic_uuid === uuid; });
+      });
+    } else {
+      items.forEach(function (c) {
+        // Stops at the cap rather than overshooting it and having the
+        // server refuse the study afterwards.
+        if (sdTargetDraft.selected.length >= sdMaxTargets) return;
+        if (sdTargetDraft.selected.indexOf(c.characteristic_uuid) < 0) {
+          sdTargetDraft.selected.push(c.characteristic_uuid);
+        }
+      });
+    }
+    renderTargetDialog();
+  }
+
+  function commitTargetDialog() {
+    if (!sdTargetDraft) return;
+    var row = sdRows.find(function (r) { return r.id === sdTargetDraft.rowId; });
+    if (row) {
+      // Written back in the order `sdSubscribable` lists them, not in click
+      // order, so two rows picking the same set produce the same study.
+      var picked = sdTargetDraft.selected;
+      row.targets = sdSubscribable
+        .filter(function (c) { return picked.indexOf(c.characteristic_uuid) >= 0; })
+        .map(function (c) { return c.characteristic_uuid; });
+    }
+    closeTargetDialog();
+    renderSdRows();
   }
 
   function openRegisterDialog(serviceUuid, charUuid, properties) {
@@ -2749,6 +3003,16 @@
     });
     sdEl("sd-req-refresh").addEventListener("click", function () {
       sdLoadBenchState(false);
+    });
+    sdEl("sd-targets-cancel").addEventListener("click", closeTargetDialog);
+    sdEl("sd-targets-backdrop").addEventListener("click", closeTargetDialog);
+    sdEl("sd-targets-done").addEventListener("click", commitTargetDialog);
+    sdEl("sd-targets-list").addEventListener("change", onTargetDialogChange);
+    sdEl("sd-targets-list").addEventListener("click", onTargetDialogClick);
+    sdEl("sd-targets-filter").addEventListener("input", function (ev) {
+      if (!sdTargetDraft) return;
+      sdTargetDraft.filter = ev.target.value;
+      renderTargetDialog();
     });
     sdEl("sd-runcheck-cancel").addEventListener("click", closeRunCheck);
     sdEl("sd-runcheck-backdrop").addEventListener("click", closeRunCheck);
