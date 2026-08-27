@@ -816,6 +816,11 @@
   var sdRows = [];
   var sdActions = [];        // MergedAction[] from GET /api/study-designer/actions
   var sdRegistry = [];       // RegisteredAction[] — the subset with fields to pick
+  // Notify/indicate-capable characteristics, from the same response — what a
+  // selective monitor row and a GATT tap both pick from (decisions 53/55).
+  var sdSubscribable = [];
+  // Names from the firmware repo's own study-structs.toml (decision 52).
+  var sdStructLayouts = [];
   var sdNextRowId = 1;
   var sdRunSource = null;
   var sdLastStudyId = null;
@@ -829,10 +834,21 @@
     { value: "ble_security", label: "BleSecurity — establish encryption/pairing" },
     { value: "ble_unbond", label: "BleUnbond — drop the bond (disconnects)" },
     { value: "gatt_discover", label: "GattDiscover — walk the GATT table" },
-    { value: "gatt_monitor_all", label: "GattMonitorAll — subscribe + capture for this step" },
-    { value: "gatt_monitor_start", label: "GattMonitorStart — open a capture window" },
+    { value: "gatt_monitor_all", label: "GattMonitorAll — subscribe to everything + capture for this step" },
+    { value: "gatt_monitor_start", label: "GattMonitorStart — open a capture window on everything" },
+    // embarch-study-designer/design.md §3 decision 53. Listed after the
+    // unfiltered pair because that is the order they are reached for: point
+    // GattMonitorAll at an unfamiliar DUT to see what it does, then narrow
+    // to the two characteristics the study is actually about.
+    { value: "gatt_monitor_selected", label: "GattMonitorSelected — subscribe to chosen characteristics + capture for this step" },
+    { value: "gatt_monitor_selected_start", label: "GattMonitorSelectedStart — open a capture window on chosen characteristics" },
     { value: "gatt_monitor_stop", label: "GattMonitorStop — close the capture window" },
   ];
+
+  // Which built-ins take a characteristic selection (decision 53).
+  function sdIsSelectiveMonitor(which) {
+    return which === "gatt_monitor_selected" || which === "gatt_monitor_selected_start";
+  }
 
   function sdEl(id) {
     return document.getElementById(id);
@@ -850,6 +866,14 @@
       hex.slice(6, 8).join("") + "-" + hex.slice(8, 10).join("") + "-" +
       hex.slice(10, 16).join("")
     );
+  }
+
+  // The 16-bit-ish head of a 128-bit UUID, which is what an engineer
+  // actually reads off a vendor's table — `6e400003-…` rather than the whole
+  // 36 characters, in a checkbox label that has to fit several per row. The
+  // full value stays in the element's title.
+  function shortUuid(hyphenated) {
+    return String(hyphenated || "").split("-")[0];
   }
 
   // Raw ATT characteristic-properties byte -> the short names that decide
@@ -921,6 +945,21 @@
       if (value < 0 || value > 255) throw new Error("'" + tok + "' is out of the 0-255 byte range");
       return value;
     });
+  }
+
+  /* Takes the two lists that are about *capture* rather than about writing
+   * an action: the notify/indicate-capable characteristics a selective
+   * monitor row and a GATT tap both pick from (decision 53), and the payload
+   * layouts a tap can decode with (decision 52).
+   *
+   * A characteristic disappearing between discoveries (a different DUT, a
+   * Kconfig-gated one) leaves a row's target checked and unrenderable, which
+   * is why `sdCollectRows` resolves each UUID against this list at submit
+   * time and drops what it can't resolve — refusing loudly rather than
+   * sending a pair it had to invent a service for. */
+  function sdAdoptDiscovery(data) {
+    sdSubscribable = (data && data.subscribable) || [];
+    sdStructLayouts = (data && data.struct_layouts) || [];
   }
 
   function sdRegisteredActions() {
@@ -995,6 +1034,12 @@
       rawOp: "write",
       rawMode: "text",
       rawPayload: "",
+      // Only meaningful for a selective monitor row (decision 53): the
+      // characteristic UUIDs this step subscribes to. Empty is refused
+      // server-side rather than promoted to "everything" — quietly
+      // subscribing to the whole table is the flood the action exists to
+      // avoid.
+      targets: [],
       timeout_ms: 15000,
       continue_on_fail: false,
       // The "when" (decision 40): how long dev-bench waits before starting
@@ -1125,6 +1170,41 @@
       }
       if (row.which === "ble_unbond") {
         return '<span class="placeholder-note">no parameters — this drops the link</span>';
+      }
+      if (sdIsSelectiveMonitor(row.which)) {
+        // A checkbox per notify/indicate-capable characteristic, from
+        // whatever discovery found. Never a free-text UUID list: the whole
+        // point of decision 53 is picking from what is actually there.
+        if (!sdSubscribable.length) {
+          return (
+            '<span class="placeholder-note">no notify-capable characteristic known yet — run ' +
+            '<span class="mono">Discover GATT</span>, or use GattMonitorAll to see what this DUT has</span>'
+          );
+        }
+        var boxes = sdSubscribable
+          .map(function (c) {
+            var checked = row.targets.indexOf(c.characteristic_uuid) >= 0 ? " checked" : "";
+            var where = c.live ? "live" : "from source";
+            return (
+              '<label class="sd-param" style="flex:0 0 auto; flex-direction:row; align-items:center; gap:6px;">' +
+              '<input type="checkbox" data-field="target" data-target-uuid="' +
+              escapeHtml(c.characteristic_uuid) + '"' + checked + " /> " +
+              '<span class="mono" title="' + escapeHtml(c.service_uuid) + '">' +
+              escapeHtml(shortUuid(c.characteristic_uuid)) + "</span>" +
+              '<span class="placeholder-note">' + escapeHtml(propsLabel(c.properties)) +
+              " · " + where + "</span></label>"
+            );
+          })
+          .join("");
+        var count = row.targets.length;
+        return (
+          '<div class="sd-params">' + boxes + "</div>" +
+          '<p class="placeholder-note" style="margin:6px 0 0;">' +
+          (count
+            ? count + " characteristic" + (count === 1 ? "" : "s") + " subscribed"
+            : "pick at least one — an empty selection is refused rather than treated as \"everything\"") +
+          "</p>"
+        );
       }
       if (row.which !== "ble_connect") {
         return '<span class="placeholder-note">no parameters</span>';
@@ -1345,6 +1425,16 @@
       row.fieldChoices[ev.target.dataset.choiceField] = ev.target.value;
       return;
     }
+    if (field === "target") {
+      var uuid = ev.target.dataset.targetUuid;
+      var at = row.targets.indexOf(uuid);
+      if (ev.target.checked && at < 0) row.targets.push(uuid);
+      else if (!ev.target.checked && at >= 0) row.targets.splice(at, 1);
+      // Re-rendered so the "n characteristics subscribed" line under the
+      // boxes stays true — a checkbox has no caret to lose.
+      renderSdRows();
+      return;
+    }
     if (field === "name") { row.name = ev.target.value; return; }
     if (field === "timeout_ms") { row.timeout_ms = Number(ev.target.value) || 0; return; }
     if (field === "delay_before_ms") {
@@ -1412,7 +1502,26 @@
           // server ignores it for the rest, exactly as it already ignores
           // `role` and `target_name` outside `ble_connect`.
           security_level: row.securityLevel || null,
+          // Resolved from checked UUIDs back to the {service, characteristic}
+          // pairs the server parses (decision 53). The service comes from the
+          // same discovery entry the checkbox was rendered from, so the two
+          // can never disagree.
+          targets: (row.targets || [])
+            .map(function (uuid) {
+              var found = sdSubscribable.find(function (c) {
+                return c.characteristic_uuid === uuid;
+              });
+              return found
+                ? { service_uuid: found.service_uuid, characteristic_uuid: uuid }
+                : null;
+            })
+            .filter(Boolean),
         };
+        if (sdIsSelectiveMonitor(row.which) && !action.targets.length) {
+          throw new Error(
+            label + ": pick at least one characteristic, or use GattMonitorAll to subscribe to everything"
+          );
+        }
       } else if (row.kind === "registered") {
         action = { kind: "registered", name: row.registeredName, field_choices: row.fieldChoices };
       } else if (row.kind === "vendor") {
@@ -1510,6 +1619,7 @@
     var data = await resp.json();
     sdActions = data.actions || [];
     sdRegistry = sdRegisteredActions();
+    sdAdoptDiscovery(data);
     renderSdUnregistered();
     renderSdRows();
     return data;
@@ -1629,7 +1739,22 @@
     btn.textContent = "Discovering…";
     sdShowBuildError("");
     try {
-      var resp = await fetch("/api/study-designer/discover", { method: "POST" });
+      // The device name comes from the step table's own `ble_connect` row.
+      // A discovery that connects to whatever advertises first is a coin
+      // flip on a bench with more than one device in range, and against a
+      // named DUT it simply failed — so the name the operator has already
+      // typed is the one this should use. Blank stays blank, which the
+      // server reads as "any device", still a legitimate single-device bench.
+      var connectRow = sdRows.filter(function (r) {
+        return r.kind === "built_in" && r.which === "ble_connect" && (r.targetName || "").trim();
+      })[0];
+      var resp = await fetch("/api/study-designer/discover", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target_name: connectRow ? connectRow.targetName.trim() : null,
+        }),
+      });
       if (!resp.ok) {
         sdShowBuildError("discover failed: " + resp.status + " " + (await resp.text()));
         return;
@@ -1637,6 +1762,7 @@
       var data = await resp.json();
       sdActions = data.actions || [];
       sdRegistry = sdRegisteredActions();
+      sdAdoptDiscovery(data);
       renderSdUnregistered();
       renderSdRows();
     } catch (e) {
@@ -2100,39 +2226,102 @@
     });
   }
 
+  /* One outpost-trace tap row: a topology-declared signal, and an encoding
+   * that is the one thing a trace tap can be. */
+  function sdOutpostTapCells(tap, i) {
+    var signals = sdSignalNames();
+    var options = signals.length
+      ? signals
+          .map(function (name) {
+            return (
+              '<option value="' + escapeHtml(name) + '"' +
+              (name === tap.signal ? " selected" : "") + ">" + escapeHtml(name) + "</option>"
+            );
+          })
+          .join("")
+      : "";
+    // A tap whose signal is no longer declared keeps showing the name it
+    // was authored against rather than silently snapping to another one —
+    // Core will reject the study, and the row is where a human sees why.
+    if (tap.signal && signals.indexOf(tap.signal) === -1) {
+      options =
+        '<option value="' + escapeHtml(tap.signal) + '" selected>' + escapeHtml(tap.signal) +
+        " — not declared</option>" + options;
+    }
+    return (
+      '<td><select class="sd-input mono" data-tap-signal="' + i + '">' +
+      (signals.length || tap.signal ? options : '<option value="">no signal declared — declare one in Topology</option>') +
+      "</select></td>" +
+      '<td class="mono placeholder-note">OutpostTrace · WholeStudy — an outpost capture is ' +
+      "study-scoped with no live feed, and this is the one thing a trace tap can be</td>"
+    );
+  }
+
+  /* One GATT-notify tap row (embarch-study-designer/design.md §3 decisions
+   * 52/55): which characteristic's notifications get their own file, and
+   * which declared layout — if any — renders them as columns.
+   *
+   * "raw bytes" is the honest default and stays selectable. A payload nobody
+   * has described gets a `.bin` and no CSV, rather than a CSV of numbers
+   * this tool guessed the width of. */
+  function sdGattTapCells(tap, i) {
+    var options = sdSubscribable
+      .map(function (c) {
+        var sel = c.characteristic_uuid === tap.characteristic_uuid ? " selected" : "";
+        return (
+          '<option value="' + escapeHtml(c.characteristic_uuid) + '"' + sel + ">" +
+          escapeHtml(shortUuid(c.characteristic_uuid) + " · " + propsLabel(c.properties)) +
+          "</option>"
+        );
+      })
+      .join("");
+    if (!sdSubscribable.length) {
+      options =
+        '<option value="">no notify-capable characteristic known — run Discover GATT</option>';
+    } else if (
+      tap.characteristic_uuid &&
+      !sdSubscribable.some(function (c) { return c.characteristic_uuid === tap.characteristic_uuid; })
+    ) {
+      // Same rule the signal column follows: keep what was authored, say it
+      // isn't there, let the server refuse it.
+      options =
+        '<option value="' + escapeHtml(tap.characteristic_uuid) + '" selected>' +
+        escapeHtml(shortUuid(tap.characteristic_uuid)) + " — not discovered</option>" + options;
+    }
+
+    var decoders =
+      '<option value="">raw bytes — no layout declared</option>' +
+      sdStructLayouts
+        .map(function (name) {
+          return (
+            '<option value="' + escapeHtml(name) + '"' +
+            (name === tap.decoder ? " selected" : "") + ">" + escapeHtml(name) + "</option>"
+          );
+        })
+        .join("");
+
+    return (
+      '<td><select class="sd-input mono" data-tap-char="' + i + '">' + options + "</select></td>" +
+      '<td><select class="sd-input mono" data-tap-decoder="' + i + '">' + decoders + "</select>" +
+      '<div class="placeholder-note" style="margin-top:4px;">' +
+      (sdStructLayouts.length
+        ? "layouts come from the firmware repo's <span class=\"mono\">embarch/study-structs.toml</span>"
+        : "no layout declared in this repo's <span class=\"mono\">embarch/study-structs.toml</span> yet — this tap captures raw bytes") +
+      "</div></td>"
+    );
+  }
+
   function renderSdTaps() {
     var tbody = sdEl("sd-taps");
     if (!tbody) return;
-    var signals = sdSignalNames();
     tbody.innerHTML = sdTaps
       .map(function (tap, i) {
-        var options = signals.length
-          ? signals
-              .map(function (name) {
-                return (
-                  '<option value="' + escapeHtml(name) + '"' +
-                  (name === tap.signal ? " selected" : "") + ">" + escapeHtml(name) + "</option>"
-                );
-              })
-              .join("")
-          : "";
-        // A tap whose signal is no longer declared keeps showing the name it
-        // was authored against rather than silently snapping to another one —
-        // Core will reject the study, and the row is where a human sees why.
-        if (tap.signal && signals.indexOf(tap.signal) === -1) {
-          options =
-            '<option value="' + escapeHtml(tap.signal) + '" selected>' + escapeHtml(tap.signal) +
-            " — not declared</option>" + options;
-        }
+        var isGatt = tap.kind === "gatt_notify";
         return (
           "<tr><td>" + (i + 1) + "</td>" +
           '<td><input class="sd-input mono" data-tap-name="' + i + '" value="' +
           escapeHtml(tap.name) + '" spellcheck="false" /></td>' +
-          '<td><select class="sd-input mono" data-tap-signal="' + i + '">' +
-          (signals.length || tap.signal ? options : '<option value="">no signal declared — declare one in Topology</option>') +
-          "</select></td>" +
-          '<td class="mono placeholder-note">OutpostTrace · WholeStudy — an outpost capture is ' +
-          "study-scoped with no live feed, and this is the one thing a trace tap can be</td>" +
+          (isGatt ? sdGattTapCells(tap, i) : sdOutpostTapCells(tap, i)) +
           '<td style="text-align:right;"><button class="sd-icon-btn" data-tap-remove="' + i +
           '" title="Remove this tap">✕</button></td></tr>'
         );
@@ -2146,7 +2335,25 @@
     if (!tbody) return;
     sdEl("sd-add-tap").addEventListener("click", function () {
       var signals = sdSignalNames();
-      sdTaps.push({ name: "outpost", signal: signals.length ? signals[0] : "" });
+      sdTaps.push({
+        kind: "outpost",
+        name: "outpost",
+        signal: signals.length ? signals[0] : "",
+      });
+      renderSdTaps();
+    });
+    sdEl("sd-add-gatt-tap").addEventListener("click", function () {
+      var first = sdSubscribable[0];
+      sdTaps.push({
+        kind: "gatt_notify",
+        // Named after the characteristic rather than "gatt": this is the
+        // file name, and a study capturing two characteristics needs two
+        // names an author can tell apart at a glance.
+        name: first ? shortUuid(first.characteristic_uuid) : "notify",
+        service_uuid: first ? first.service_uuid : "",
+        characteristic_uuid: first ? first.characteristic_uuid : "",
+        decoder: "",
+      });
       renderSdTaps();
     });
     tbody.addEventListener("input", function (ev) {
@@ -2155,7 +2362,29 @@
     });
     tbody.addEventListener("change", function (ev) {
       var i = ev.target.getAttribute("data-tap-signal");
-      if (i !== null) sdTaps[Number(i)].signal = ev.target.value;
+      if (i !== null) {
+        sdTaps[Number(i)].signal = ev.target.value;
+        return;
+      }
+      var c = ev.target.getAttribute("data-tap-char");
+      if (c !== null) {
+        var tap = sdTaps[Number(c)];
+        tap.characteristic_uuid = ev.target.value;
+        // The service comes from the same discovery entry the option was
+        // rendered from, so a tap's two UUIDs can never disagree — the
+        // author never types or picks a service at all.
+        var found = sdSubscribable.find(function (x) {
+          return x.characteristic_uuid === ev.target.value;
+        });
+        if (found) tap.service_uuid = found.service_uuid;
+        renderSdTaps();
+        return;
+      }
+      var d = ev.target.getAttribute("data-tap-decoder");
+      if (d !== null) {
+        sdTaps[Number(d)].decoder = ev.target.value;
+        renderSdTaps();
+      }
     });
     tbody.addEventListener("click", function (ev) {
       var btn = ev.target.closest("[data-tap-remove]");
@@ -2438,6 +2667,7 @@
     var data = await resp.json();
     sdActions = data.actions || [];
     sdRegistry = sdRegisteredActions();
+    sdAdoptDiscovery(data);
     if (!sdWired) {
       sdWireStudyDesigner();
       sdWired = true;

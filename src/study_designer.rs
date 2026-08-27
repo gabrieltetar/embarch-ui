@@ -27,19 +27,24 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json};
 use embarch_core_client::{CoreClient, StudyRunOptions};
 use embarch_study_designer::limits::{
-    MAX_FIRMWARE_VERSION_LEN, MAX_SIGNAL_NAME_LEN, MAX_STREAMS_PER_STUDY, MAX_STREAM_NAME_LEN,
+    MAX_DECODERS_PER_STUDY, MAX_FIRMWARE_VERSION_LEN, MAX_SIGNAL_NAME_LEN, MAX_STREAMS_PER_STUDY,
+    MAX_STREAM_NAME_LEN,
 };
 use embarch_study_designer::{
-    build_study, merge_actions, requirement_satisfied, validate_taps, ActionRegistry,
+    build_study, merge_actions, requirement_satisfied, validate_taps, Action, ActionRegistry,
     BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattServiceInfo, Provenance,
-    RegisteredAction, Requirements, RoleChoice, RowAction, StreamEncoding, StreamScope,
-    StreamSource, StreamTap, Study, StudyResult, TableRow, VersionSource, REQUIREMENT_ANY,
+    RegisteredAction, Requirements, RoleChoice, RowAction, Step, StreamEncoding, StreamScope,
+    Outcome, StreamSource, StreamTap, StructLayout, StructRegistry, Study, StudyResult, TableRow,
+    Uuid, VersionSource, REQUIREMENT_ANY,
 };
 use heapless::String as HString;
 use heapless::Vec as HVec;
 
 /// `Study.streams`' own type, named once rather than spelled out at each use.
 type StreamList = HVec<StreamTap, MAX_STREAMS_PER_STUDY>;
+/// `Study.decoders`' own type (`embarch-study-designer/design.md` §3
+/// decision 52), named once rather than spelled out at each use.
+type DecoderList = embarch_study_designer::bounded::Bounded<StructLayout, MAX_DECODERS_PER_STUDY>;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -55,7 +60,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 struct Inner {
     /// The project currently open — `None` when neither config named one nor
-    /// anybody has opened one yet (`embarch-ui/design.md` §3 decision 14).
+    /// anybody has opened one yet (`embarch-ui/design.md` §3 decision 15).
     ///
     /// A `Mutex`, not a plain field, and that is the whole shape of decision
     /// 14: `firmware_repo_path` is read by three different things (the saved
@@ -135,6 +140,21 @@ impl StudyDesigner {
         ActionRegistry::load(&repo).map_err(|e| e.to_string())
     }
 
+    /// The firmware repo's own `embarch/study-structs.toml` — the payload
+    /// layouts a `GattNotify` tap can decode with
+    /// (`embarch-study-designer/design.md` §3 decision 52).
+    ///
+    /// Read fresh on every call rather than cached, same as
+    /// [`Self::registry`]: the file is hand-edited beside the running UI,
+    /// and a cached copy would mean a fix to a layout needs a restart to
+    /// take effect.
+    fn structs(&self) -> Result<StructRegistry, String> {
+        let Some(repo) = self.repo_path() else {
+            return Err(NO_PROJECT.to_string());
+        };
+        StructRegistry::load(&repo).map_err(|e| e.to_string())
+    }
+
     /// Runs the configured `static_extractor` at most once per process.
     /// An unrecognized name is a named error the first time it's needed,
     /// not a silent guess — `reference-dut` is the only name this crate
@@ -212,21 +232,39 @@ fn not_configured() -> axum::response::Response {
     (StatusCode::NOT_FOUND, NO_PROJECT).into_response()
 }
 
-/// A fixed step-count of `MAX_STEPS_PER_STUDY`-independent studies — `Study`
-/// name doesn't matter beyond fitting the length limit, so a literal here is
-/// fine rather than accepting one from the client for this one-click action.
-fn discover_study() -> Result<Study, String> {
+/// The one-click discovery `Study`: connect, then walk the GATT table.
+///
+/// **`target_name` is an argument rather than the `None` this shipped with,
+/// and that `None` was a real defect.** A `BleConnect` with no name connects
+/// to *whatever advertises first*, which on a bench with more than one BLE
+/// device in the room is a coin flip — and against the DUT this was written
+/// for it failed outright, three runs in a row (`connection failed (HCI
+/// 0x1f)`, then a disconnect mid-discovery), while the identical study
+/// naming the device passed every time. The name is the one fact this
+/// action cannot derive and the operator already has: the step table's own
+/// `BleConnect` row is holding it.
+///
+/// `None` is still accepted, because a bench with exactly one device in
+/// range is a real case and demanding a name there would be ceremony. It is
+/// no longer the *only* option.
+fn discover_study(target_name: Option<&str>) -> Result<Study, String> {
     let rows = vec![
         TableRow {
             name: "connect".to_string(),
-            action: RowAction::BuiltIn { which: BuiltInActionKind::BleConnect, role: RoleChoice::Central , target_name: None, security_level: None },
+            action: RowAction::BuiltIn {
+                targets: Vec::new(),
+                which: BuiltInActionKind::BleConnect,
+                role: RoleChoice::Central,
+                target_name: target_name.map(|n| n.to_string()),
+                security_level: None,
+            },
             timeout_ms: 15_000,
             continue_on_fail: false,
             delay_before_ms: 0,
         },
         TableRow {
             name: "discover".to_string(),
-            action: RowAction::BuiltIn { which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central , target_name: None, security_level: None },
+            action: RowAction::BuiltIn { targets: Vec::new(), which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central , target_name: None, security_level: None },
             timeout_ms: 15_000,
             continue_on_fail: false,
             delay_before_ms: 0,
@@ -244,6 +282,36 @@ fn discover_study() -> Result<Study, String> {
         &ActionRegistry::default(),
     )
     .map_err(|e| e.to_string())
+}
+
+/// Why a discovery run produced no GATT table, in the words of the step that
+/// failed — or `None` when it genuinely succeeded.
+///
+/// **This exists because the failure used to be invisible.** `api_discover`
+/// ended in `first_gatt_services(&result).unwrap_or_default()`, so a study
+/// that never reached `GattDiscover` at all stored an *empty* live set,
+/// answered `200`, and left the tab reporting live discovery as available
+/// with nothing in it. A button that reports success on failure is worse
+/// than one that fails, because the operator's next move is to go looking
+/// for the bug in their own study.
+fn discovery_failure(result: &StudyResult) -> Option<String> {
+    for step in result.steps.iter() {
+        match &step.outcome {
+            Outcome::Pass => continue,
+            Outcome::Fail { reason } => {
+                return Some(format!("step '{}' failed: {reason}", step.step_name));
+            }
+            Outcome::TimedOut => {
+                return Some(format!("step '{}' timed out", step.step_name));
+            }
+        }
+    }
+    // Every step passed and there is still no table: not a failure this can
+    // name, but not a success either — say which of the two it is rather
+    // than folding it into an empty list.
+    first_gatt_services(result)
+        .is_none()
+        .then(|| "the study completed but reported no GATT table".to_string())
 }
 
 /// What a study authored in this tab requires
@@ -305,28 +373,55 @@ impl RequirementsInput {
     }
 }
 
-/// One outpost-trace tap, as this tab authors it
-/// (`embarch-study-designer/design.md` §3 decision 39,
-/// `embarch-outpost/design.md` §3 decisions 11/12).
+/// One tap, as this tab authors it (`embarch-study-designer/design.md` §3
+/// decisions 39/52/55, `embarch-outpost/design.md` §3 decisions 11/12).
 ///
-/// **The tap names the signal, never the carrier**, which is why this input
+/// Two kinds, distinguished by `kind` rather than by which fields happen to
+/// be filled in — an untagged shape would make "no signal" and "no
+/// characteristic" the same authoring mistake with two different fixes.
+///
+/// **An outpost tap names the signal, never the carrier**, which is why it
 /// has no port and no pins in it: those live in the signal's declared route
 /// (Topology tab), so the identical saved study runs unchanged across a
-/// rewiring of the bench.
+/// rewiring of the bench. Its `OutpostTrace`/`WholeStudy` encoding and scope
+/// are not choices offered — an outpost capture is study-scoped with no live
+/// feed by design, and its encoding is the one thing a trace tap can be.
 ///
-/// `OutpostTrace`/`WholeStudy` are not choices offered here. An outpost
-/// capture is study-scoped with no live feed by design, and its encoding is
-/// the one thing a trace tap can be — offering a menu whose other entries are
-/// all wrong would be worse than offering none.
+/// **A GATT tap names one characteristic and, optionally, the layout to
+/// decode its payloads with** (§3 decision 52). Undeclared, its file is raw
+/// bytes with no CSV, which is the honest rendering of a payload nobody has
+/// described.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TapInput {
-    /// The output file's name under the study's `streams/` directory, and what
-    /// `GET /study/{id}/stream/{name}` takes.
-    name: String,
-    /// The declared signal this taps (`SignalLink::name`). Core's `POST /study`
-    /// pre-flight rejects a tap naming an undeclared signal with a `400`,
-    /// which is why the Topology tab's routes come first.
-    signal: String,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TapInput {
+    /// An outpost trace on a topology-declared signal.
+    Outpost {
+        /// The output file's name under the study's `streams/` directory, and
+        /// what `GET /study/{id}/stream/{name}` takes.
+        name: String,
+        /// The declared signal this taps (`SignalLink::name`). Core's
+        /// `POST /study` pre-flight rejects a tap naming an undeclared signal
+        /// with a `400`, which is why the Topology tab's routes come first.
+        signal: String,
+    },
+    /// One DUT characteristic's notifications, in their own file.
+    GattNotify {
+        name: String,
+        service_uuid: String,
+        characteristic_uuid: String,
+        /// A `study-structs.toml` entry's name, or blank for raw bytes.
+        #[serde(default)]
+        decoder: String,
+    },
+}
+
+impl TapInput {
+    /// The output file's name, whichever kind this is.
+    fn name(&self) -> &str {
+        match self {
+            TapInput::Outpost { name, .. } | TapInput::GattNotify { name, .. } => name,
+        }
+    }
 }
 
 /// Turns authored tap rows into `Study.streams`, sealed by the caller.
@@ -335,41 +430,190 @@ pub struct TapInput {
 /// *is* — the wire handle every `StreamOpen`/`StreamChunkBatch`/`StreamClose`
 /// carries — and `validate_taps` rejects any other value. Nothing about that
 /// is a choice for an author to make or get wrong.
-fn build_taps(taps: &[TapInput], step_count: usize) -> Result<StreamList, String> {
+fn build_taps(
+    taps: &[TapInput],
+    steps: &[Step],
+    structs: &StructRegistry,
+) -> Result<(StreamList, DecoderList), String> {
     let mut out: StreamList = StreamList::new();
+    let mut decoders: DecoderList = DecoderList::new();
+
     for (index, tap) in taps.iter().enumerate() {
-        let name = tap.name.trim();
-        let signal = tap.signal.trim();
-        if signal.is_empty() {
-            return Err(format!("stream tap {} names no signal", index + 1));
-        }
-        let id = u8::try_from(index)
-            .map_err(|_| format!("more than {} stream taps", u8::MAX))?;
-        let built = StreamTap {
-            id,
-            name: HString::try_from(name).map_err(|_| {
-                format!("tap name '{name}' is longer than the wire's {MAX_STREAM_NAME_LEN} characters")
-            })?,
-            source: StreamSource::Signal {
-                name: HString::try_from(signal).map_err(|_| {
-                    format!(
-                        "signal name '{signal}' is longer than the wire's \
-                         {MAX_SIGNAL_NAME_LEN} characters"
-                    )
-                })?,
-            },
-            encoding: StreamEncoding::OutpostTrace,
-            scope: StreamScope::WholeStudy,
+        let name = tap.name().trim();
+        let id =
+            u8::try_from(index).map_err(|_| format!("more than {} stream taps", u8::MAX))?;
+        let tap_name = HString::try_from(name).map_err(|_| {
+            format!("tap name '{name}' is longer than the wire's {MAX_STREAM_NAME_LEN} characters")
+        })?;
+
+        let built = match tap {
+            TapInput::Outpost { signal, .. } => {
+                let signal = signal.trim();
+                if signal.is_empty() {
+                    return Err(format!("stream tap {} names no signal", index + 1));
+                }
+                StreamTap {
+                    id,
+                    name: tap_name,
+                    source: StreamSource::Signal {
+                        name: HString::try_from(signal).map_err(|_| {
+                            format!(
+                                "signal name '{signal}' is longer than the wire's \
+                                 {MAX_SIGNAL_NAME_LEN} characters"
+                            )
+                        })?,
+                    },
+                    encoding: StreamEncoding::OutpostTrace,
+                    scope: StreamScope::WholeStudy,
+                }
+            }
+            TapInput::GattNotify { service_uuid, characteristic_uuid, decoder, .. } => {
+                let service_uuid = Uuid::parse(service_uuid.trim()).ok_or_else(|| {
+                    format!("stream tap {}: '{service_uuid}' is not a UUID", index + 1)
+                })?;
+                let characteristic_uuid =
+                    Uuid::parse(characteristic_uuid.trim()).ok_or_else(|| {
+                        format!(
+                            "stream tap {}: '{characteristic_uuid}' is not a UUID",
+                            index + 1
+                        )
+                    })?;
+
+                // A tap whose characteristic no step subscribes captures
+                // nothing, passes, and looks fine — which is the exact
+                // failure decisions 34/36/53/54 were each opened by. Refused
+                // here, where the author can fix it, rather than discovered
+                // as an empty file after a run.
+                if !any_step_subscribes(steps, service_uuid, characteristic_uuid) {
+                    return Err(format!(
+                        "stream tap '{name}' captures {} , but no step in this study subscribes \
+                         to it — add a GattMonitorAll/GattMonitorStart step, or name it in a \
+                         selective monitor step's targets",
+                        characteristic_uuid.to_hyphenated()
+                    ));
+                }
+
+                // Resolved here, against the firmware repo's own
+                // `study-structs.toml`, so the submitted `Study` carries the
+                // layout rather than a name Core has no way to look up
+                // (design.md §3 decision 52).
+                let encoding = match decoder.trim() {
+                    "" => StreamEncoding::Raw,
+                    named => {
+                        let layout = structs.resolve(named).map_err(|e| e.to_string())?;
+                        let existing =
+                            decoders.iter().position(|d: &StructLayout| d.name == layout.name);
+                        let slot = match existing {
+                            Some(at) => at,
+                            None => {
+                                decoders.push(layout).map_err(|_| {
+                                    format!(
+                                        "more than {MAX_DECODERS_PER_STUDY} decoders in one study"
+                                    )
+                                })?;
+                                decoders.len() - 1
+                            }
+                        };
+                        StreamEncoding::Struct {
+                            decoder: u8::try_from(slot).map_err(|_| "too many decoders")?,
+                        }
+                    }
+                };
+
+                StreamTap {
+                    id,
+                    name: tap_name,
+                    source: StreamSource::GattNotify { service_uuid, characteristic_uuid },
+                    encoding,
+                    // WholeStudy rather than a step range: a notification
+                    // arrives when the DUT sends it, not when a step says so,
+                    // and a window authored by hand is one more thing to get
+                    // wrong for no gain. The monitor steps already bound when
+                    // anything is subscribed at all.
+                    scope: StreamScope::WholeStudy,
+                }
+            }
         };
+
         out.push(built).map_err(|_| {
             format!("more than {MAX_STREAMS_PER_STUDY} stream taps in one study")
         })?;
     }
+
     // The same pre-flight Core runs on submit, run here so an authoring
     // mistake is a message in this tab rather than a `400` from a round trip.
-    validate_taps(&out, step_count as u32).map_err(|e| format!("{e:?}"))?;
-    Ok(out)
+    validate_taps(&out, steps.len() as u32, decoders.len()).map_err(|e| format!("{e:?}"))?;
+    Ok((out, decoders))
 }
+
+/// Whether any step in `steps` subscribes to this characteristic — an
+/// unfiltered monitor action (which subscribes to everything notify- or
+/// indicate-capable) or a selective one that names it (design.md §3
+/// decision 53).
+fn any_step_subscribes(steps: &[Step], service: Uuid, characteristic: Uuid) -> bool {
+    steps.iter().any(|step| match &step.action {
+        Action::GattMonitorAll {} | Action::GattMonitorStart {} => true,
+        Action::GattMonitorSelected { targets } | Action::GattMonitorSelectedStart { targets } => {
+            targets
+                .iter()
+                .any(|t| t.service_uuid == service && t.characteristic_uuid == characteristic)
+        }
+        _ => false,
+    })
+}
+
+/// The `GattTranscript` tap every study with a monitor step gets, appended
+/// after whatever the author declared — `embarch-ui/design.md` §3 decision 15.
+///
+/// **Auto-declared rather than offered as a checkbox.** Before this, the
+/// Study Designer authored no GATT tap at all, so a monitor step's capture
+/// existed only as `StepResult.gatt_activity`'s first 32 records — and that
+/// field is retired (`embarch-study-designer/design.md` §3 decision 54). A
+/// study that monitors and captures nothing is not a configuration anyone
+/// wants; making it reachable by leaving a box unticked would only make the
+/// old failure re-authorable.
+///
+/// Skipped when the author already declared a `GattTranscript` tap of their
+/// own, and when the study has no monitor step to record.
+fn auto_transcript_tap(streams: &mut StreamList, steps: &[Step]) -> Result<(), String> {
+    let monitors = steps.iter().any(|step| {
+        matches!(
+            step.action,
+            Action::GattMonitorAll {}
+                | Action::GattMonitorStart {}
+                | Action::GattMonitorSelected { .. }
+                | Action::GattMonitorSelectedStart { .. }
+        )
+    });
+    if !monitors {
+        return Ok(());
+    }
+    if streams.iter().any(|t| matches!(t.source, StreamSource::GattTranscript)) {
+        return Ok(());
+    }
+    let id = u8::try_from(streams.len()).map_err(|_| "more than 255 stream taps".to_string())?;
+    streams
+        .push(StreamTap {
+            id,
+            name: HString::try_from(AUTO_TRANSCRIPT_TAP_NAME)
+                .expect("AUTO_TRANSCRIPT_TAP_NAME fits MAX_STREAM_NAME_LEN"),
+            source: StreamSource::GattTranscript,
+            encoding: StreamEncoding::GattTranscript,
+            scope: StreamScope::WholeStudy,
+        })
+        .map_err(|_| {
+            format!(
+                "this study declares {MAX_STREAMS_PER_STUDY} taps, leaving no room for the GATT \
+                 transcript every monitor step needs — remove one"
+            )
+        })
+}
+
+/// The name [`auto_transcript_tap`] gives its tap, and therefore the file a
+/// study's full GATT transcript lands in: `streams/gatt.csv`. Chosen to match
+/// the retired fixed path that data used to live at, so a reader who knows
+/// where to look still looks in the right place.
+const AUTO_TRANSCRIPT_TAP_NAME: &str = "gatt";
 
 /// Every submitter recomputes both of a study's seals immediately before
 /// sending (`embarch-study-designer/design.md` §3 decision 26) — the same
@@ -429,6 +673,66 @@ struct ActionsResponse {
     actions: Vec<embarch_study_designer::MergedAction>,
     live_gatt_available: bool,
     static_gatt_available: bool,
+    /// Every notify- or indicate-capable characteristic any discovery source
+    /// found — what a selective monitor step picks its targets from, and what
+    /// a `GattNotify` tap picks its characteristic from
+    /// (`embarch-study-designer/design.md` §3 decisions 53/55).
+    ///
+    /// A separate list from `actions` rather than a filter over it: `actions`
+    /// is keyed by characteristic for *authoring a write*, and its `Vendor`
+    /// entries are a compile-time table with no observed properties byte at
+    /// all. Whether a characteristic can notify is an observation, and this
+    /// list carries only observations.
+    subscribable: Vec<SubscribableCharacteristic>,
+    /// The names in the firmware repo's `embarch/study-structs.toml` — what a
+    /// `GattNotify` tap's decoder dropdown offers (§3 decision 52). Empty when
+    /// the repo declares none, which is the ordinary starting state.
+    struct_layouts: Vec<String>,
+}
+
+/// One characteristic a study can subscribe to, as the pickers render it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscribableCharacteristic {
+    service_uuid: String,
+    characteristic_uuid: String,
+    /// The raw ATT properties byte, passed through unchanged — this crate's
+    /// standing "raw, not symbolic" stance. The UI renders the bit names.
+    properties: u8,
+    /// Whether a live discovery saw it, as opposed to only the static source
+    /// read out of the firmware repo. A study can name either; a
+    /// static-only characteristic behind a disabled Kconfig is exactly the
+    /// gap `gatt_extract`'s own doc comment records.
+    live: bool,
+}
+
+/// Flattens discovery results into the subscribable list, live entries first
+/// and de-duplicated by characteristic.
+fn subscribable_from(
+    live: Option<&[GattServiceInfo]>,
+    static_gatt: Option<&[GattServiceInfo]>,
+) -> Vec<SubscribableCharacteristic> {
+    const NOTIFY_OR_INDICATE: u8 = 0x10 | 0x20;
+    let mut out: Vec<SubscribableCharacteristic> = Vec::new();
+    for (services, is_live) in [(live, true), (static_gatt, false)] {
+        for service in services.unwrap_or(&[]) {
+            for chrc in &service.characteristics {
+                if chrc.properties & NOTIFY_OR_INDICATE == 0 {
+                    continue;
+                }
+                let characteristic_uuid = chrc.uuid.to_hyphenated().to_string();
+                if out.iter().any(|c| c.characteristic_uuid == characteristic_uuid) {
+                    continue;
+                }
+                out.push(SubscribableCharacteristic {
+                    service_uuid: service.uuid.to_hyphenated().to_string(),
+                    characteristic_uuid,
+                    properties: chrc.properties,
+                    live: is_live,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Shared by the `GET /api/study-designer/actions` handler and `discover`
@@ -441,10 +745,23 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
     let live = sd.live_gatt();
     let static_gatt = sd.static_gatt();
     let actions = merge_actions(live.as_deref(), static_gatt.as_deref(), &registry);
+    // A malformed `study-structs.toml` is reported as an empty list plus a
+    // logged reason rather than failing this whole route: the action list and
+    // the tap pickers are still usable without it, and a tab that renders
+    // nothing at all is a worse answer to "one layout has a typo".
+    let struct_layouts = match sd.structs() {
+        Ok(r) => r.structs.into_iter().map(|d| d.name).collect(),
+        Err(e) => {
+            tracing::warn!("study-structs.toml could not be read: {e}");
+            Vec::new()
+        }
+    };
     Json(ActionsResponse {
+        subscribable: subscribable_from(live.as_deref(), static_gatt.as_deref()),
         actions,
         live_gatt_available: live.is_some(),
         static_gatt_available: static_gatt.is_some(),
+        struct_layouts,
     })
     .into_response()
 }
@@ -493,14 +810,31 @@ pub async fn api_register_action(
     }
 }
 
-pub async fn api_discover(State(state): State<crate::AppState>) -> axum::response::Response {
+/// What the Discover button may say about *which* device to talk to.
+///
+/// Optional, and posted as a body rather than baked in, because the name
+/// lives in the step table the operator is already editing — see
+/// [`discover_study`] for why a nameless connect was a real defect rather
+/// than a simplification.
+#[derive(Debug, Default, Deserialize)]
+pub struct DiscoverRequest {
+    #[serde(default)]
+    target_name: Option<String>,
+}
+
+pub async fn api_discover(
+    State(state): State<crate::AppState>,
+    body: Option<Json<DiscoverRequest>>,
+) -> axum::response::Response {
     let sd = state.study_designer;
     // A project is a precondition rather than an input here — this route
     // reads nothing off it, but it has nothing to answer about without one.
     if sd.project().is_none() {
         return not_configured();
     }
-    let mut study = match discover_study() {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let target_name = req.target_name.as_deref().filter(|n| !n.trim().is_empty());
+    let mut study = match discover_study(target_name) {
         Ok(s) => s,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
@@ -519,6 +853,21 @@ pub async fn api_discover(State(state): State<crate::AppState>) -> axum::respons
     };
     match poll_until_terminal(&sd.0.core, &study_id, DISCOVER_TIMEOUT).await {
         Ok(result) => {
+            // **A run that found nothing is reported as the failure it was,
+            // and the previous live table is left alone.** Overwriting it
+            // with `unwrap_or_default()`'s empty list was how a failed
+            // discovery came back as `200` with `live_gatt_available: true`
+            // and nothing live in it — the tab then showed every
+            // characteristic as static-only, which is a different claim
+            // about the DUT than "we could not reach it", and the operator
+            // has no way to tell the two apart.
+            if let Some(why) = discovery_failure(&result) {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("discovery run {study_id} found nothing — {why}"),
+                )
+                    .into_response();
+            }
             let services = first_gatt_services(&result).unwrap_or_default();
             *sd.0.live_gatt.lock().unwrap() = Some(services);
             actions_response(&sd)
@@ -556,12 +905,20 @@ fn build_authored(
     requires: &RequirementsInput,
     taps: &[TapInput],
     registry: &ActionRegistry,
+    structs: &StructRegistry,
 ) -> Result<Study, (StatusCode, String)> {
     let requires = requires.build().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let mut study = build_study(req_name, requires, rows, registry)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    study.streams =
-        build_taps(taps, rows.len()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // Taps are built against the *resolved* steps rather than the raw rows:
+    // whether a characteristic is subscribed at all is a property of the
+    // `Action` a row became, not of the row's own text.
+    let (mut streams, decoders) = build_taps(taps, &study.steps, structs)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    auto_transcript_tap(&mut streams, &study.steps)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    study.streams = streams;
+    study.decoders = decoders;
     seal_crc(&mut study).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(study)
 }
@@ -580,7 +937,12 @@ pub async fn api_run(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let study = match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry) {
+    let structs = match sd.structs() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let study =
+        match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry, &structs) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
@@ -767,11 +1129,11 @@ struct RequirementsOut {
     firmware_version: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct LoadedTap {
-    name: String,
-    signal: String,
-}
+/// A tap as it loads back into the table. **Structurally [`TapInput`]**, and
+/// deliberately so: the sidecar this reads is written from `TapInput`, and a
+/// second shape that had to agree with it by hand is one more place a saved
+/// study and a running one can drift apart.
+type LoadedTap = TapInput;
 
 pub async fn api_studies_list(State(state): State<crate::AppState>) -> axum::response::Response {
     let sd = state.study_designer;
@@ -836,7 +1198,12 @@ pub async fn api_studies_save(
     // are run parameters, not study fields (decision 11: "reflash lives in the
     // run dialog, never in the saved study"), so a saved study cannot carry a
     // waiver into every later re-read of its own results.
-    let study = match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry) {
+    let structs = match sd.structs() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let study =
+        match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry, &structs) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
@@ -976,15 +1343,52 @@ fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
         .iter()
         .filter_map(|tap| {
             let name = tap.get("name")?.as_str()?.to_string();
-            let signal = tap
-                .get("source")?
-                .get("Signal")?
-                .get("name")?
-                .as_str()?
-                .to_string();
-            Some(LoadedTap { name, signal })
+            let source = tap.get("source")?;
+            if let Some(signal) = source.get("Signal").and_then(|s| s.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                return Some(TapInput::Outpost { name, signal: signal.to_string() });
+            }
+            let gatt = source.get("GattNotify")?;
+            // The *decoder name* is not recoverable from a `Study.streams`
+            // entry — the encoding carries an index into `Study.decoders`,
+            // and the layout there has a name but nothing ties it back to
+            // the `study-structs.toml` entry it was resolved from. The
+            // sidecar is what preserves that; a study loaded without one
+            // gets the tap with its layout blank rather than a name this
+            // function guessed at.
+            let decoder = value
+                .get("decoders")
+                .and_then(|d| d.as_array())
+                .and_then(|d| {
+                    let index = tap.get("encoding")?.get("Struct")?.get("decoder")?.as_u64()?;
+                    d.get(index as usize)?.get("name")?.as_str().map(str::to_string)
+                })
+                .unwrap_or_default();
+            Some(TapInput::GattNotify {
+                name,
+                service_uuid: uuid_field(gatt, "service_uuid")?,
+                characteristic_uuid: uuid_field(gatt, "characteristic_uuid")?,
+                decoder,
+            })
         })
         .collect()
+}
+
+/// A `Uuid` in a saved `Study` is a JSON array of 16 bytes (its `Serialize`
+/// is the raw form, design.md §4.3); the table works in the hyphenated text
+/// an engineer reads. This is the one place that conversion happens on the
+/// load path.
+fn uuid_field(source: &serde_json::Value, field: &str) -> Option<String> {
+    let bytes = source.get(field)?.as_array()?;
+    if bytes.len() != 16 {
+        return None;
+    }
+    let mut raw = [0u8; 16];
+    for (slot, value) in raw.iter_mut().zip(bytes) {
+        *slot = u8::try_from(value.as_u64()?).ok()?;
+    }
+    Some(Uuid(raw).to_hyphenated().to_string())
 }
 
 /// What this bench currently has in front of the operator, for decision 11's
@@ -1457,7 +1861,55 @@ mod tests {
     }
 
     fn tap(name: &str, signal: &str) -> TapInput {
-        TapInput { name: name.to_string(), signal: signal.to_string() }
+        TapInput::Outpost { name: name.to_string(), signal: signal.to_string() }
+    }
+
+    const NUS_SERVICE: &str = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const NUS_TX: &str = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+    fn gatt_tap(name: &str, characteristic: &str, decoder: &str) -> TapInput {
+        TapInput::GattNotify {
+            name: name.to_string(),
+            service_uuid: NUS_SERVICE.to_string(),
+            characteristic_uuid: characteristic.to_string(),
+            decoder: decoder.to_string(),
+        }
+    }
+
+    /// Steps with one unfiltered monitor action, so a GattNotify tap in
+    /// these tests has something subscribing to it.
+    fn monitoring_steps() -> Vec<Step> {
+        vec![Step {
+            name: HString::try_from("monitor").unwrap(),
+            action: Action::GattMonitorStart {},
+            timeout_ms: 1_000,
+            continue_on_fail: false,
+            delay_before_ms: 0,
+        }]
+    }
+
+    fn plain_steps(count: usize) -> Vec<Step> {
+        (0..count)
+            .map(|i| Step {
+                name: HString::try_from(format!("s{i}").as_str()).unwrap(),
+                action: Action::GattDiscover {},
+                timeout_ms: 1_000,
+                continue_on_fail: false,
+                delay_before_ms: 0,
+            })
+            .collect()
+    }
+
+    fn structs_toml() -> StructRegistry {
+        toml::from_str(
+            r#"
+[[struct]]
+name = "ppg_packet"
+header = [{ name = "seq", type = "u16le" }]
+repeat = [{ name = "green", type = "i32le" }]
+"#,
+        )
+        .unwrap()
     }
 
     /// `id` is the wire handle every `StreamOpen`/`StreamChunkBatch`/
@@ -1465,8 +1917,14 @@ mod tests {
     /// it here rather than accepting it is what makes that unfailable.
     #[test]
     fn authored_taps_get_their_index_as_their_wire_handle() {
-        let taps = build_taps(&[tap("outpost", "outpost-uart"), tap("second", "other")], 3).unwrap();
+        let (taps, decoders) = build_taps(
+            &[tap("outpost", "outpost-uart"), tap("second", "other")],
+            &plain_steps(3),
+            &StructRegistry::default(),
+        )
+        .unwrap();
         assert_eq!(taps.len(), 2);
+        assert!(decoders.is_empty(), "an outpost tap declares no decoder");
         assert_eq!(taps[0].id, 0);
         assert_eq!(taps[1].id, 1);
         assert_eq!(taps[0].name.as_str(), "outpost");
@@ -1482,17 +1940,171 @@ mod tests {
     /// a message in this tab rather than a `400` from a round trip.
     #[test]
     fn the_taps_core_would_reject_are_rejected_here() {
+        let steps = plain_steps(1);
+        let none = StructRegistry::default();
         // Two taps naming the same output file would interleave into one.
-        assert!(build_taps(&[tap("outpost", "a"), tap("outpost", "b")], 1).is_err());
+        assert!(build_taps(&[tap("outpost", "a"), tap("outpost", "b")], &steps, &none).is_err());
         // An unnamed tap has no output file to write to.
-        assert!(build_taps(&[tap("  ", "a")], 1).is_err());
+        assert!(build_taps(&[tap("  ", "a")], &steps, &none).is_err());
         // And a tap that names no signal has no source at all.
-        assert!(build_taps(&[tap("outpost", "")], 1).is_err());
+        assert!(build_taps(&[tap("outpost", "")], &steps, &none).is_err());
     }
 
     #[test]
     fn no_taps_is_a_valid_study() {
-        assert!(build_taps(&[], 2).unwrap().is_empty());
+        assert!(build_taps(&[], &plain_steps(2), &StructRegistry::default())
+            .unwrap()
+            .0
+            .is_empty());
+    }
+
+    // ---- GattNotify taps (design.md §3 decisions 52/55) ----
+
+    #[test]
+    fn a_gatt_tap_with_a_named_layout_resolves_it_into_the_study() {
+        // The submitted `Study` carries the layout, not the name: Core cannot
+        // read the firmware repo, so a study that named a layout without
+        // carrying it would render nothing on any machine but this one.
+        let (taps, decoders) = build_taps(
+            &[gatt_tap("ppg", NUS_TX, "ppg_packet")],
+            &monitoring_steps(),
+            &structs_toml(),
+        )
+        .unwrap();
+        assert_eq!(decoders.len(), 1);
+        assert_eq!(decoders[0].name.as_str(), "ppg_packet");
+        assert!(matches!(taps[0].encoding, StreamEncoding::Struct { decoder: 0 }));
+        match taps[0].source {
+            StreamSource::GattNotify { characteristic_uuid, .. } => {
+                assert_eq!(characteristic_uuid, Uuid::parse(NUS_TX).unwrap());
+            }
+            ref other => panic!("expected a GattNotify source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_gatt_tap_with_no_layout_is_raw_rather_than_guessed_at() {
+        let (taps, decoders) =
+            build_taps(&[gatt_tap("ppg", NUS_TX, "")], &monitoring_steps(), &structs_toml())
+                .unwrap();
+        assert!(decoders.is_empty());
+        assert!(matches!(taps[0].encoding, StreamEncoding::Raw));
+    }
+
+    #[test]
+    fn two_taps_sharing_a_layout_share_one_decoder_slot() {
+        let (taps, decoders) = build_taps(
+            &[gatt_tap("a", NUS_TX, "ppg_packet"), gatt_tap("b", NUS_SERVICE, "ppg_packet")],
+            &monitoring_steps(),
+            &structs_toml(),
+        )
+        .unwrap();
+        assert_eq!(decoders.len(), 1, "one layout, one slot");
+        assert!(matches!(taps[0].encoding, StreamEncoding::Struct { decoder: 0 }));
+        assert!(matches!(taps[1].encoding, StreamEncoding::Struct { decoder: 0 }));
+    }
+
+    #[test]
+    fn a_gatt_tap_nothing_subscribes_to_is_refused_at_authoring_time() {
+        // A tap whose characteristic no step subscribes captures nothing,
+        // passes, and looks fine — the failure decisions 34/36/53/54 were
+        // each opened by. Caught where the author can fix it.
+        let err = build_taps(&[gatt_tap("ppg", NUS_TX, "")], &plain_steps(1), &structs_toml())
+            .expect_err("must refuse");
+        assert!(err.contains("no step in this study subscribes"), "{err}");
+    }
+
+    #[test]
+    fn a_selective_monitor_step_satisfies_only_the_characteristics_it_names() {
+        let mut steps = plain_steps(0);
+        let mut targets = embarch_study_designer::bounded::Bounded::new();
+        targets
+            .push(embarch_study_designer::GattTarget {
+                service_uuid: Uuid::parse(NUS_SERVICE).unwrap(),
+                characteristic_uuid: Uuid::parse(NUS_TX).unwrap(),
+            })
+            .unwrap();
+        steps.push(Step {
+            name: HString::try_from("monitor").unwrap(),
+            action: Action::GattMonitorSelectedStart { targets },
+            timeout_ms: 1_000,
+            continue_on_fail: false,
+            delay_before_ms: 0,
+        });
+
+        assert!(build_taps(&[gatt_tap("tx", NUS_TX, "")], &steps, &structs_toml()).is_ok());
+        // The RX characteristic is not named by that step, so a tap on it
+        // would capture nothing.
+        let rx = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+        assert!(build_taps(&[gatt_tap("rx", rx, "")], &steps, &structs_toml()).is_err());
+    }
+
+    #[test]
+    fn a_layout_the_repo_does_not_declare_is_named_not_silently_dropped() {
+        let err = build_taps(
+            &[gatt_tap("ppg", NUS_TX, "ecg_packet")],
+            &monitoring_steps(),
+            &structs_toml(),
+        )
+        .expect_err("must refuse");
+        assert!(err.contains("ecg_packet"), "{err}");
+    }
+
+    // ---- the auto-declared transcript tap (design.md §3 decision 14) ----
+
+    #[test]
+    fn a_study_with_a_monitor_step_gets_a_transcript_tap_it_did_not_author() {
+        // Before this, the Study Designer authored no GATT tap at all, so a
+        // monitor step's capture existed only as the (now retired)
+        // `StepResult.gatt_activity`'s first 32 records.
+        let mut streams: StreamList = StreamList::new();
+        auto_transcript_tap(&mut streams, &monitoring_steps()).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].name.as_str(), "gatt");
+        assert_eq!(streams[0].id, 0, "id is still the tap's own index");
+        assert!(matches!(streams[0].source, StreamSource::GattTranscript));
+        assert!(matches!(streams[0].encoding, StreamEncoding::GattTranscript));
+    }
+
+    #[test]
+    fn a_study_with_no_monitor_step_gets_no_transcript_tap() {
+        let mut streams: StreamList = StreamList::new();
+        auto_transcript_tap(&mut streams, &plain_steps(2)).unwrap();
+        assert!(streams.is_empty(), "nothing to record, nothing declared");
+    }
+
+    #[test]
+    fn the_auto_tap_lands_after_the_authored_ones_and_keeps_index_as_id() {
+        let (mut streams, _) = build_taps(
+            &[gatt_tap("ppg", NUS_TX, "ppg_packet")],
+            &monitoring_steps(),
+            &structs_toml(),
+        )
+        .unwrap();
+        auto_transcript_tap(&mut streams, &monitoring_steps()).unwrap();
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[1].id, 1);
+        assert_eq!(
+            validate_taps(&streams, 1, 1),
+            Ok(()),
+            "the auto tap must satisfy the same pre-flight Core runs"
+        );
+    }
+
+    #[test]
+    fn an_authored_transcript_tap_is_not_duplicated() {
+        let mut streams: StreamList = StreamList::new();
+        streams
+            .push(StreamTap {
+                id: 0,
+                name: HString::try_from("my-transcript").unwrap(),
+                source: StreamSource::GattTranscript,
+                encoding: StreamEncoding::GattTranscript,
+                scope: StreamScope::WholeStudy,
+            })
+            .unwrap();
+        auto_transcript_tap(&mut streams, &monitoring_steps()).unwrap();
+        assert_eq!(streams.len(), 1, "one producer per transcript, and the author's wins");
     }
 
     /// `Declared` has to render visibly weaker than a verified reading, and
@@ -1555,8 +2167,65 @@ mod tests {
         });
         let taps = taps_from_streams(&study);
         assert_eq!(taps.len(), 1);
-        assert_eq!(taps[0].name, "outpost");
-        assert_eq!(taps[0].signal, "outpost-uart");
+        match &taps[0] {
+            TapInput::Outpost { name, signal } => {
+                assert_eq!(name, "outpost");
+                assert_eq!(signal, "outpost-uart");
+            }
+            other => panic!("expected an outpost tap, got {other:?}"),
+        }
+    }
+
+    /// A GATT tap loads back with both UUIDs in the hyphenated form the
+    /// table works in, and — when the study carries the layout — with its
+    /// decoder name.
+    #[test]
+    fn a_gatt_tap_loads_back_from_a_study_with_no_sidecar() {
+        let service: Vec<u8> = Uuid::parse(NUS_SERVICE).unwrap().0.to_vec();
+        let characteristic: Vec<u8> = Uuid::parse(NUS_TX).unwrap().0.to_vec();
+        let study = serde_json::json!({
+            "name": "capture",
+            "decoders": [{ "name": "ppg_packet", "header": [], "repeat": [] }],
+            "streams": [{
+                "id": 0,
+                "name": "ppg",
+                "source": { "GattNotify": {
+                    "service_uuid": service,
+                    "characteristic_uuid": characteristic,
+                } },
+                "encoding": { "Struct": { "decoder": 0 } },
+                "scope": "WholeStudy"
+            }]
+        });
+        match &taps_from_streams(&study)[0] {
+            TapInput::GattNotify { name, service_uuid, characteristic_uuid, decoder } => {
+                assert_eq!(name, "ppg");
+                assert_eq!(service_uuid, NUS_SERVICE);
+                assert_eq!(characteristic_uuid, NUS_TX);
+                assert_eq!(decoder, "ppg_packet");
+            }
+            other => panic!("expected a GattNotify tap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_raw_gatt_tap_loads_back_with_no_decoder_rather_than_a_guessed_one() {
+        let study = serde_json::json!({
+            "streams": [{
+                "id": 0,
+                "name": "ppg",
+                "source": { "GattNotify": {
+                    "service_uuid": Uuid::parse(NUS_SERVICE).unwrap().0.to_vec(),
+                    "characteristic_uuid": Uuid::parse(NUS_TX).unwrap().0.to_vec(),
+                } },
+                "encoding": "Raw",
+                "scope": "WholeStudy"
+            }]
+        });
+        match &taps_from_streams(&study)[0] {
+            TapInput::GattNotify { decoder, .. } => assert!(decoder.is_empty()),
+            other => panic!("expected a GattNotify tap, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1887,7 +2556,14 @@ pub async fn api_new_study(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let study = match build_authored(&req.name, &[], &RequirementsInput::any(), &[], &registry) {
+    let study = match build_authored(
+        &req.name,
+        &[],
+        &RequirementsInput::any(),
+        &[],
+        &registry,
+        &StructRegistry::default(),
+    ) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };

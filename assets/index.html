@@ -281,18 +281,19 @@
             <div class="sd-toolbar">
               <div class="card-title" style="margin:0;">Streams — what this study records alongside its steps</div>
               <div class="sd-toolbar-actions">
+                <button id="sd-add-gatt-tap" class="btn">+ GATT notify tap</button>
                 <button id="sd-add-tap" class="btn">+ Outpost trace tap</button>
               </div>
             </div>
-            <p class="placeholder-note" style="margin:8px 0 12px;">A tap names a <em>signal</em>, never a carrier — so the identical saved study runs unchanged after the bench is rewired. Routes are declared in the <a href="#topology" class="mono">Topology</a> tab, and embarch-core rejects a study whose tap names a signal nothing has declared.</p>
+            <p class="placeholder-note" style="margin:8px 0 12px;">A <strong>GATT notify tap</strong> gives one characteristic its own file, decoded with a layout your firmware repo declares in <span class="mono">embarch/study-structs.toml</span> — pick the layout, or leave it raw. Something has to subscribe to that characteristic for it to capture anything, so a monitor step must cover it. An <strong>outpost trace tap</strong> names a <em>signal</em>, never a carrier, so the identical saved study runs unchanged after the bench is rewired; routes are declared in the <a href="#topology" class="mono">Topology</a> tab. Any study with a monitor step also gets a full GATT transcript at <span class="mono">streams/gatt.csv</span> automatically — you do not declare it and it is not capped.</p>
             <div class="table-scroll">
               <table class="data-table sd-table">
                 <thead>
                   <tr>
                     <th style="width:34px;">#</th>
                     <th style="width:200px;">Output name</th>
-                    <th style="width:230px;">Signal</th>
-                    <th>Encoding / scope</th>
+                    <th style="width:230px;">Signal / characteristic</th>
+                    <th>Decoding</th>
                     <th style="width:60px;"></th>
                   </tr>
                 </thead>
