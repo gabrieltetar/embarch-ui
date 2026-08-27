@@ -3630,7 +3630,13 @@
           view.dut_backstep_max_us + " \u00b5s: a hook stamps before it reserves its ring slot, " +
           "so an interrupt preempting a thread can publish after it and be stamped before it"
         : "";
-    var clockNote = view.out_of_order_rows > 0
+    // **Only on the host's clock.** `out_of_order_rows` counts rows whose
+    // *axis position* went backwards, and on the DUT's clock that is the same
+    // benign hook-stamp inversion `dutNote` has already explained a line
+    // above — saying "this host's clock stepped backwards" about it made one
+    // sentence contradict the one before it. On the host's clock it really is
+    // the wall clock stepping, which is a different and reportable thing.
+    var clockNote = view.unit === "ms" && view.out_of_order_rows > 0
       ? " · " + view.out_of_order_rows + " row(s) arrived with a stamp earlier than the row " +
         "before them, which means this host's clock stepped backwards during the capture — " +
         "positions across that step are not comparable"
@@ -3998,7 +4004,7 @@
     }
 
     var stepped = traceStepsPlaced(view);
-    var headH = TRACE_AXIS_H + (stepped ? TRACE_STEP_H + TRACE_STEP_GAP : 0);
+    var headH = TRACE_AXIS_H + (stepped ? TRACE_STEP_H + TRACE_STEP_GAP * 2 : 0);
     var bodyH = Math.max(TRACE_ROW_H, lanes.length * TRACE_ROW_H) + TRACE_BODY_PAD;
 
     // ---- body: lanes ------------------------------------------------------

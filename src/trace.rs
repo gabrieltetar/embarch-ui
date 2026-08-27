@@ -381,6 +381,108 @@ pub struct LoadSummary {
     pub subjects: Vec<LoadSubject>,
 }
 
+/// One study step as **embarch-core** recorded it: two wall-clock stamps and
+/// the delay the study declared before it. Nothing here is on the trace's axis
+/// yet — [`project_steps`] is what puts it there, and refuses to when it
+/// cannot.
+#[derive(Debug, Clone)]
+pub struct StepStamp {
+    pub index: usize,
+    pub name: String,
+    /// `"Pass"`, `"Fail"` or `"TimedOut"`, in Core's own vocabulary.
+    pub outcome: String,
+    pub reason: Option<String>,
+    pub delay_before_ms: u32,
+    /// When Core started waiting for this step, and when its `StepResult`
+    /// arrived — Core's own wall clock, UTC milliseconds.
+    pub started_utc_ms: u64,
+    pub ended_utc_ms: u64,
+}
+
+/// One step, placed on this view's axis.
+#[derive(Debug, Clone, Serialize)]
+pub struct StepBand {
+    pub index: usize,
+    pub name: String,
+    pub outcome: String,
+    pub reason: Option<String>,
+    pub delay_before_ms: u32,
+    pub started_utc_ms: u64,
+    pub ended_utc_ms: u64,
+    /// The band's edges in [`TraceView::unit`]s, clamped into the capture.
+    pub from: u64,
+    pub to: u64,
+    /// Where the declared delay ends and execution begins, same units.
+    ///
+    /// **The split is the point of the row.** dev-bench sleeps
+    /// `delay_before_ms` as part of dispatching a step, so the delay is
+    /// genuinely inside the step's window — and a band that did not separate
+    /// the two would report a step carrying a 5 s delay as a 5 s step.
+    /// Equals `from` when the study declared no delay.
+    pub exec_from: u64,
+    /// This step began before the capture does, or ended after it does — so
+    /// its drawn edge is the capture's edge and not the step's. A trace covers
+    /// the study's declared tap scope, which is routinely narrower than the
+    /// study.
+    pub clipped_start: bool,
+    pub clipped_end: bool,
+}
+
+/// The study-action row: which step was running at a given instant, which is
+/// the one piece of context that turns a timeline into a diagnosis.
+///
+/// **Three axis cases, each named rather than guessed** — see
+/// [`project_steps`].
+#[derive(Debug, Clone, Serialize)]
+pub struct StepRow {
+    /// False when this axis has no time base to project onto. The row is then
+    /// **not drawn at all**, and [`Self::note`] says why; inventing positions
+    /// would be worse than an absent row.
+    pub placeable: bool,
+    /// True when these bands were projected from Core's clock onto a
+    /// different one (the DUT's), and so carry [`Self::accuracy_ms`]. False
+    /// when the axis already *is* Core's clock, where a band is exact.
+    pub projected: bool,
+    /// How closely a projected band can be placed, in milliseconds — this
+    /// capture's own [`TraceView::resolution_ms`], because that is how finely
+    /// the two clocks are tied together. `None` when nothing was projected.
+    pub accuracy_ms: Option<f64>,
+    /// What to tell a reader about which clock this row is on. Stated in the
+    /// axis note's own idiom rather than hidden in a tooltip: a band placed to
+    /// ~12 ms must not read as microsecond-aligned to the spans beneath it.
+    pub note: String,
+    pub bands: Vec<StepBand>,
+}
+
+/// A tie between the two clocks: one frame's arrival on the host's, and the
+/// DUT stamp of the last record in it.
+///
+/// **Last rather than first.** A frame carries the records the drain thread
+/// batched since the previous one, and it is sent once the last of them is in
+/// — so the last record's stamp is the one closest to the instant the host
+/// stamped the frame's arrival. Either choice is inside `resolution_ms`, which
+/// is what the row reports; this one is inside it by less.
+#[derive(Debug, Clone, Copy)]
+struct ClockAnchor {
+    rx_utc_ms: u64,
+    dut_us: u64,
+}
+
+/// A backwards step between two frame anchors larger than this means the DUT's
+/// counter **restarted** — the capture opened with bytes that were already
+/// inside the USB-UART bridge when Core flushed its input, from before the
+/// reset (`embarch-core`'s port flush cannot reach those). Everything before
+/// such a step is a stale pre-reset prefix and must not anchor a projection:
+/// project off it and every band lands in the wrong place.
+///
+/// Ten milliseconds, and the number is not a guess at where a reset lives. It
+/// is well above the *other* thing that makes this counter go backwards — a
+/// hook stamps the counter before it reserves its ring slot, so an interrupt
+/// preempting a thread publishes after it and is stamped before it, by tens of
+/// microseconds (93 µs at worst across a 225,606-row real capture) — and far
+/// below a restart, which puts seconds between the two epochs.
+const STALE_PREFIX_MIN_US: u64 = 10_000;
+
 /// A study's outpost tap, decoded into something drawable.
 #[derive(Debug, Clone, Serialize)]
 pub struct TraceView {
@@ -497,6 +599,12 @@ pub struct TraceView {
     /// is the realistic cause); on the DUT clock it means the unwrap lost a
     /// wrap. Either way it says so instead of drawing confidently.
     pub out_of_order_rows: usize,
+    /// Which study step was running when, projected onto this axis. `None`
+    /// when embarch-core had no per-step stamps to offer — a study that ran
+    /// before Core recorded them, or one whose `events.json` is gone.
+    /// `Some` with `placeable: false` is a different answer: the stamps exist
+    /// and this axis cannot take them.
+    pub steps: Option<StepRow>,
     pub gaps: Vec<Gap>,
     pub lanes: Vec<Lane>,
     pub markers: Vec<PointEvent>,
@@ -542,6 +650,243 @@ struct Row {
     /// Filled in once the axis unit is known: `dut_us`, `rx_utc_ms` or
     /// `frame_index`.
     t: u64,
+}
+
+/// Builds the tie between the two clocks from **the rows this view kept**,
+/// not from the raw file, and drops a stale pre-reset prefix if there is one.
+///
+/// One anchor per frame, because the host stamps frames and the DUT stamps
+/// records. Sorted and deduplicated by arrival so a binary search over it is
+/// valid: two frames can share a millisecond, and a projection that searched
+/// a non-monotone key would land anywhere.
+fn clock_anchors(rows: &[Row]) -> Vec<ClockAnchor> {
+    let mut by_frame: std::collections::HashMap<u64, (u64, u64)> = std::collections::HashMap::new();
+    let mut order: Vec<u64> = Vec::new();
+    for r in rows {
+        let (Some(rx), Some(us)) = (r.rx_utc_ms, r.dut_us) else { continue };
+        match by_frame.entry(r.frame_index) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert((rx, us));
+                order.push(r.frame_index);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let cur = slot.get_mut();
+                cur.1 = cur.1.max(us);
+            }
+        }
+    }
+    let mut anchors: Vec<ClockAnchor> = order
+        .iter()
+        .filter_map(|f| by_frame.get(f).map(|&(rx_utc_ms, dut_us)| ClockAnchor { rx_utc_ms, dut_us }))
+        .collect();
+
+    // The stale prefix ends at the single largest backward step in DUT time.
+    // Sign is the signal here and magnitude is the filter: see
+    // `STALE_PREFIX_MIN_US` for why the two kinds of backward step are not
+    // the same thing.
+    let mut worst: Option<(u64, usize)> = None;
+    for i in 1..anchors.len() {
+        if anchors[i].dut_us < anchors[i - 1].dut_us {
+            let step = anchors[i - 1].dut_us - anchors[i].dut_us;
+            if worst.is_none_or(|(w, _)| step > w) {
+                worst = Some((step, i));
+            }
+        }
+    }
+    if let Some((step, at)) = worst {
+        if step > STALE_PREFIX_MIN_US {
+            anchors.drain(..at);
+        }
+    }
+
+    anchors.sort_by_key(|a| a.rx_utc_ms);
+    anchors.dedup_by_key(|a| a.rx_utc_ms);
+    anchors
+}
+
+/// Projects one host-clock instant onto the DUT's counter, by linear
+/// interpolation between the two anchors that bracket it.
+///
+/// Returns `None` outside the anchors' own range rather than extrapolating: a
+/// step that began before this capture did has no position *in* it, and the
+/// caller draws that as a clipped edge instead of a confident one.
+fn project_ms(anchors: &[ClockAnchor], ms: u64) -> Option<u64> {
+    if anchors.len() < 2 {
+        return None;
+    }
+    if ms < anchors[0].rx_utc_ms || ms > anchors[anchors.len() - 1].rx_utc_ms {
+        return None;
+    }
+    let i = anchors.partition_point(|a| a.rx_utc_ms <= ms);
+    if i == 0 {
+        return Some(anchors[0].dut_us);
+    }
+    let lo = anchors[i - 1];
+    if i >= anchors.len() {
+        return Some(lo.dut_us);
+    }
+    let hi = anchors[i];
+    let span_ms = hi.rx_utc_ms.saturating_sub(lo.rx_utc_ms);
+    if span_ms == 0 {
+        return Some(lo.dut_us);
+    }
+    let f = (ms - lo.rx_utc_ms) as f64 / span_ms as f64;
+    // Signed, because the DUT's counter can step backwards by a few
+    // microseconds between two frames for the benign reason above; a `u64`
+    // subtraction the other way round would wrap into nonsense.
+    let delta = hi.dut_us as i128 - lo.dut_us as i128;
+    let at = lo.dut_us as i128 + (delta as f64 * f) as i128;
+    Some(at.max(0) as u64)
+}
+
+/// The study-action row, from Core's per-step stamps and this view's own axis.
+///
+/// **Three cases, each named rather than guessed:**
+///
+/// - `"us"` — the axis is the DUT's own counter and the stamps are the host's,
+///   so every band is *projected* through [`clock_anchors`] and carries the
+///   capture's `resolution_ms` as its accuracy. It is good to about 12 ms on a
+///   real capture, which against seconds-long steps is invisible — but it is
+///   said out loud, because the spans beneath these bands are microsecond-exact
+///   and a row that looked aligned to them would be claiming a precision it
+///   does not have.
+/// - `"ms"` — the axis already *is* embarch-core's receipt clock, in the same
+///   absolute UTC milliseconds these stamps are in. No projection, no caveat,
+///   exact alignment.
+/// - `"frame"` — there is no time base at all, so a step **cannot be placed**.
+///   Said, with no bands drawn.
+fn project_steps(
+    steps: &[StepStamp],
+    rows: &[Row],
+    unit: &str,
+    t_from: u64,
+    t_to: u64,
+    resolution_ms: Option<f64>,
+) -> Option<StepRow> {
+    if steps.is_empty() {
+        return None;
+    }
+    let untimed = |note: String| StepRow {
+        placeable: false,
+        projected: false,
+        accuracy_ms: None,
+        note,
+        bands: Vec::new(),
+    };
+
+    let anchors;
+    let (projected, accuracy_ms) = match unit {
+        "ms" => (false, None),
+        "us" => {
+            (true, resolution_ms)
+        }
+        _ => {
+            return Some(untimed(
+                "This capture has no time base — its axis is a frame index, which is an order and \
+                 not a clock — so which study step was running at a given instant cannot be placed \
+                 on it. The steps and their outcomes are in the study's own result; nothing is \
+                 drawn here rather than bands at invented positions."
+                    .to_string(),
+            ))
+        }
+    };
+
+    if projected {
+        anchors = clock_anchors(rows);
+        if anchors.len() < 2 {
+            return Some(untimed(
+                "This capture is drawn on the DUT's own counter and carries no host arrival stamps \
+                 to tie that counter to embarch-core's clock, which is the clock the study's steps \
+                 are stamped on. The two cannot be related, so no step band is drawn."
+                    .to_string(),
+            ));
+        }
+    } else {
+        anchors = Vec::new();
+    }
+
+    let place = |ms: u64| -> Option<u64> {
+        if projected {
+            project_ms(&anchors, ms)
+        } else {
+            (ms >= t_from && ms <= t_to).then_some(ms)
+        }
+    };
+
+    let mut bands = Vec::new();
+    for s in steps {
+        // A step is drawn if any part of its window overlaps the capture. Its
+        // edges clamp to the capture's, and each clamped edge says so — the
+        // trace covers the study's declared tap scope, which is routinely
+        // narrower than the study itself.
+        let from_raw = place(s.started_utc_ms);
+        let to_raw = place(s.ended_utc_ms);
+        let (from, clipped_start) = match from_raw {
+            Some(v) => (v, false),
+            // No position: either before the capture or after it. Only the
+            // former can still produce a visible band.
+            None if s.ended_utc_ms > s.started_utc_ms && to_raw.is_some() => (t_from, true),
+            None => continue,
+        };
+        let (to, clipped_end) = match to_raw {
+            Some(v) => (v, false),
+            None if from_raw.is_some() => (t_to, true),
+            None => continue,
+        };
+        if to < from {
+            continue;
+        }
+        // The delay falls at the start of the step's window, in host
+        // milliseconds, and is projected the same way the edges are. A delay
+        // that runs past the capture's edge simply consumes the whole band.
+        let delay_end_ms = s.started_utc_ms.saturating_add(s.delay_before_ms as u64);
+        let exec_from = if s.delay_before_ms == 0 {
+            from
+        } else {
+            place(delay_end_ms.min(s.ended_utc_ms)).unwrap_or(to).clamp(from, to)
+        };
+        bands.push(StepBand {
+            index: s.index,
+            name: s.name.clone(),
+            outcome: s.outcome.clone(),
+            reason: s.reason.clone(),
+            delay_before_ms: s.delay_before_ms,
+            started_utc_ms: s.started_utc_ms,
+            ended_utc_ms: s.ended_utc_ms,
+            from,
+            to,
+            exec_from,
+            clipped_start,
+            clipped_end,
+        });
+    }
+
+    if bands.is_empty() {
+        return Some(untimed(
+            "None of this study's steps overlaps this capture's own window, so there is nothing to \
+             draw above the lanes. A tap's scope is a step range, and a capture that opened after \
+             the last step or closed before the first covers none of them."
+                .to_string(),
+        ));
+    }
+
+    let note = if projected {
+        format!(
+            "The step row is on embarch-core's clock, not the DUT's. Each band is Core's own \
+             arrival stamp for that step, projected onto this capture's DUT counter through the \
+             frames that carry both clocks — good to about {} ms, which is this capture's own \
+             resolution. The lanes below it are microsecond-exact; the row above them is not, and \
+             a band's edge should not be read as aligned to a span's.",
+            accuracy_ms.map(|v| format!("{v}")).unwrap_or_else(|| "?".to_string())
+        )
+    } else {
+        "The step row is on embarch-core's own receipt clock — which is also this capture's axis, \
+         because the DUT's counter did not reach every record. So each band is exactly aligned to \
+         the lanes below it, and needs no projection."
+            .to_string()
+    };
+
+    Some(StepRow { placeable: true, projected, accuracy_ms, note, bands })
 }
 
 /// Splits one CSV line, honouring the double-quoting `name` may carry: a
@@ -708,6 +1053,7 @@ pub fn parse(
     timed: bool,
     self_excluded: Option<bool>,
     note: Option<String>,
+    steps: &[StepStamp],
 ) -> Result<TraceView, String> {
     let mut lines = csv.split('\n');
     let header = lines.next().unwrap_or_default().trim_end_matches('\r');
@@ -1341,6 +1687,7 @@ pub fn parse(
         resolution_ms,
         records_lost,
         out_of_order_rows,
+        steps: project_steps(steps, &rows, unit, t_from, t_to, resolution_ms),
         gaps,
         lanes,
         markers,
@@ -1414,7 +1761,7 @@ mod tests {
     /// `unit == "us"`, `dual_clock`. The normal state of a real layout-3
     /// capture, and the state the Trace tab is built for.
     pub(super) fn stamped() -> TraceView {
-        parse("study-1", "outpost", STAMPED_TRACE, true, true, Some(true), None)
+        parse("study-1", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[])
             .expect("the stamped trace parses")
     }
 
@@ -1424,20 +1771,20 @@ mod tests {
     /// cannot do is be placed against another stream, which is what
     /// `dual_clock == false` says.
     pub(super) fn real() -> TraceView {
-        parse("study-1", "outpost", REAL_TRACE, true, false, Some(true), None).expect("the real trace parses")
+        parse("study-1", "outpost", REAL_TRACE, true, false, Some(true), None, &[]).expect("the real trace parses")
     }
 
     /// Core's clock only — the layout-2 axis. A frame is the resolution, and
     /// `below_resolution` does the work it was written to do.
     pub(super) fn host_only() -> TraceView {
-        parse("study-1", "outpost", &without_dut_clock(STAMPED_TRACE), true, true, Some(true), None)
+        parse("study-1", "outpost", &without_dut_clock(STAMPED_TRACE), true, true, Some(true), None, &[])
             .expect("the host-clock-only trace parses")
     }
 
     /// Neither clock. Frame indices, a complete and real coordinate, said as
     /// such rather than drawn as a time.
     pub(super) fn no_clock() -> TraceView {
-        parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, Some(true), None)
+        parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, Some(true), None, &[])
             .expect("the clockless trace parses")
     }
 
@@ -1505,7 +1852,7 @@ mod tests {
              1,1,1700000000020,1000087,1000087.000,thread_switch_out,4096,0,worker\n\
              2,2,1700000000040,1000200,1000200.000,isr_exit,7,0,irq\n"
         );
-        let view = parse("s", "t", &small, true, true, Some(true), None).expect("parses");
+        let view = parse("s", "t", &small, true, true, Some(true), None, &[]).expect("parses");
         assert_eq!(view.unit, "us", "a 13 us inversion must not cost the DUT clock");
         assert_eq!(view.dut_backsteps, 1);
         assert_eq!(view.dut_backstep_max_us, 13);
@@ -1526,7 +1873,7 @@ mod tests {
              1,1,1700000000020,534000000,534000000.000,isr_enter,7,0,irq\n\
              2,2,1700000000040,534000200,534000200.000,isr_exit,7,0,irq\n"
         );
-        let view = parse("s", "t", &stale_forward, true, true, Some(true), None).expect("parses");
+        let view = parse("s", "t", &stale_forward, true, true, Some(true), None, &[]).expect("parses");
         assert_eq!(view.unit, "ms", "a +525 s step inside a 40 ms capture must not draw the axis");
         assert!(view.dut_clock_refused);
         assert_eq!(view.dut_backsteps, 0, "nothing went backwards; sign is not the signal");
@@ -1541,7 +1888,7 @@ mod tests {
              1,1,1700000000020,9000000,9000000.000,isr_enter,7,0,irq\n\
              2,2,1700000000040,9000200,9000200.000,isr_exit,7,0,irq\n"
         );
-        let view = parse("s", "t", &reset, true, true, Some(true), None).expect("parses");
+        let view = parse("s", "t", &reset, true, true, Some(true), None, &[]).expect("parses");
         assert_eq!(view.unit, "ms", "a capture spanning a DUT reset must not be timed by it");
         assert_eq!(view.axis_clock, "host-arrival");
         assert!(view.dut_clock_refused);
@@ -1884,6 +2231,7 @@ mod tests {
             false,
             Some(true),
             Some("decoded but NOT named: manifest build_id \"a\" != firmware build_id \"b\"".to_string()),
+            &[],
         )
         .expect("an unnamed trace still parses");
 
@@ -1899,6 +2247,242 @@ mod tests {
         assert_eq!(view.gaps.len(), 3);
     }
 
+    // ---- the study-action row ------------------------------------------
+
+    fn step(index: usize, name: &str, outcome: &str, delay_ms: u32, from_ms: u64, to_ms: u64) -> StepStamp {
+        StepStamp {
+            index,
+            name: name.to_string(),
+            outcome: outcome.to_string(),
+            reason: None,
+            delay_before_ms: delay_ms,
+            started_utc_ms: from_ms,
+            ended_utc_ms: to_ms,
+        }
+    }
+
+    fn anchor_row(frame_index: u64, rx_utc_ms: u64, dut_us: u64) -> Row {
+        Row {
+            frame_index,
+            rx_utc_ms: Some(rx_utc_ms),
+            dut_us: Some(dut_us),
+            dut_cycles: Some(dut_us),
+            kind: None,
+            a: 0,
+            b: 0,
+            name: String::new(),
+            t: dut_us,
+        }
+    }
+
+    /// The reference capture's own base: `rx_utc_ms` and the DUT's counter run
+    /// 1:1 in the stamped fixture, offset by the epoch.
+    const STAMPED_EPOCH_MS: u64 = 1_700_000_000_020;
+
+    /// **A step is projected from Core's clock onto the DUT's, through the
+    /// frames that carry both.** The axis is DUT microseconds and the study's
+    /// steps are host milliseconds; the mapping exists because the capture is
+    /// dual-clock, and the row says so rather than looking exact.
+    #[test]
+    fn a_step_on_the_dut_clock_is_projected_and_says_it_was() {
+        let steps = [
+            step(0, "ble-speed-fast", "Pass", 0, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 300),
+            step(1, "drain-bds", "TimedOut", 0, STAMPED_EPOCH_MS + 300, STAMPED_EPOCH_MS + 500),
+        ];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+            .expect("parses");
+        assert_eq!(view.unit, "us");
+        let row = view.steps.expect("a dual-clock capture can place a step");
+        assert!(row.placeable);
+        assert!(row.projected, "the axis is the DUT's counter and the stamps are the host's");
+        assert_eq!(row.accuracy_ms, view.resolution_ms, "the tie between the clocks is the accuracy");
+        assert!(row.note.contains("embarch-core"), "the row must name the clock it is on");
+        assert_eq!(row.bands.len(), 2);
+        // Checkable exactly, because this fixture carries both clocks and the
+        // expected values are read off its own frames rather than assumed
+        // linear — the fixture's two clocks drift against each other by tens
+        // of milliseconds across it, which is the whole reason the projection
+        // interpolates between anchors instead of fitting one line.
+        assert_eq!(row.bands[0].from, 120_000);
+        assert_eq!(row.bands[0].to, 310_000);
+        assert_eq!(row.bands[1].outcome, "TimedOut");
+        assert!(!row.bands[0].clipped_start && !row.bands[0].clipped_end);
+    }
+
+    /// **The delay is part of the step and is not part of its execution.**
+    /// dev-bench sleeps `delay_before_ms` as part of dispatching a step, so
+    /// the delay genuinely falls inside the step's window — and a band that
+    /// did not separate the two would report a step carrying a 5 s delay as a
+    /// 5 s step, which is most of what a `close-nus-window` band would
+    /// otherwise appear to measure.
+    #[test]
+    fn a_declared_delay_is_split_out_of_a_steps_execution() {
+        let steps = [step(0, "close-nus-window", "Pass", 200, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 400)];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+            .expect("parses");
+        let band = &view.steps.expect("placed").bands[0];
+        assert_eq!(band.from, 120_000, "the window opens when Core started waiting");
+        assert_eq!(band.exec_from, 310_000, "200 ms of declared delay, then execution");
+        assert_eq!(band.to, 410_000);
+        assert_eq!(band.delay_before_ms, 200);
+    }
+
+    /// A step with no delay has nothing to split, and `exec_from == from`
+    /// rather than a zero-width hatch nobody can see the point of.
+    #[test]
+    fn a_step_with_no_delay_is_all_execution() {
+        let steps = [step(0, "connect", "Pass", 0, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 200)];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+            .expect("parses");
+        let band = &view.steps.expect("placed").bands[0];
+        assert_eq!(band.exec_from, band.from);
+    }
+
+    /// **A trace covers the study's declared tap scope, which is routinely
+    /// narrower than the study.** A step that began before the capture opened
+    /// is drawn from the capture's own edge, marked as clipped — not moved to
+    /// where it would fit, and not dropped.
+    #[test]
+    fn a_step_that_overruns_the_capture_is_clipped_at_both_ends_and_says_so() {
+        let steps = [
+            step(0, "before", "Pass", 0, STAMPED_EPOCH_MS - 5_000, STAMPED_EPOCH_MS - 4_000),
+            step(1, "straddles-the-start", "Pass", 0, STAMPED_EPOCH_MS - 1_000, STAMPED_EPOCH_MS + 200),
+            step(2, "straddles-the-end", "Fail", 0, STAMPED_EPOCH_MS + 600, STAMPED_EPOCH_MS + 9_000),
+        ];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+            .expect("parses");
+        let row = view.steps.expect("placed");
+        // The step that ended before the capture opened has no position in it
+        // at all and is left out, rather than being drawn squashed at t_from.
+        assert_eq!(row.bands.len(), 2);
+        assert!(row.bands[0].clipped_start && !row.bands[0].clipped_end);
+        assert_eq!(row.bands[0].from, view.t_from);
+        assert!(!row.bands[1].clipped_start && row.bands[1].clipped_end);
+        assert_eq!(row.bands[1].to, view.t_to);
+    }
+
+    /// **When the axis already is Core's clock, there is nothing to project.**
+    /// The `dut_clock_refused` case: the axis is host arrival milliseconds, in
+    /// the same absolute UTC the step stamps are in, so a band is exactly
+    /// aligned to the lanes beneath it and carries no accuracy caveat.
+    #[test]
+    fn on_the_host_clock_a_step_needs_no_projection_and_no_caveat() {
+        let steps = [step(0, "connect", "Pass", 0, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 300)];
+        let view = parse(
+            "s",
+            "outpost",
+            &without_dut_clock(STAMPED_TRACE),
+            true,
+            true,
+            Some(true),
+            None,
+            &steps,
+        )
+        .expect("parses");
+        assert_eq!(view.unit, "ms");
+        let row = view.steps.expect("placed");
+        assert!(row.placeable);
+        assert!(!row.projected);
+        assert_eq!(row.accuracy_ms, None);
+        assert_eq!(row.bands[0].from, STAMPED_EPOCH_MS + 100, "the axis is these very milliseconds");
+        assert_eq!(row.bands[0].to, STAMPED_EPOCH_MS + 300);
+    }
+
+    /// **With no time base at all, a step cannot be placed — so it is not.**
+    /// The axis is a frame index, which is an order and not a clock. Saying so
+    /// and drawing nothing is the honest answer; bands at guessed positions
+    /// would be a picture that looks like a measurement.
+    #[test]
+    fn with_no_time_base_the_step_row_refuses_rather_than_inventing_positions() {
+        let steps = [step(0, "connect", "Pass", 0, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 300)];
+        let view = parse(
+            "s",
+            "outpost",
+            &without_dut_clock(REAL_TRACE),
+            true,
+            false,
+            Some(true),
+            None,
+            &steps,
+        )
+        .expect("parses");
+        assert_eq!(view.unit, "frame");
+        let row = view.steps.expect("the stamps exist even where the axis cannot take them");
+        assert!(!row.placeable);
+        assert!(row.bands.is_empty(), "nothing may be drawn without a clock to draw it on");
+        assert!(row.note.contains("frame index"));
+    }
+
+    /// A study whose steps predate the stamps hands this view nothing, and
+    /// `None` is a different answer from "the stamps exist and this axis
+    /// cannot take them" — the tab says a different sentence for each.
+    #[test]
+    fn a_study_with_no_recorded_stamps_produces_no_step_row_at_all() {
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[])
+            .expect("parses");
+        assert!(view.steps.is_none());
+    }
+
+    /// **The projection is built from a stale-prefix-free anchor list.** A
+    /// capture can open with bytes that were already inside the USB-UART
+    /// bridge from before the DUT reset — Core's port flush cannot reach
+    /// those — and the DUT's counter restarts at a reset. Anchoring off that
+    /// prefix puts every band in the wrong place.
+    #[test]
+    fn a_stale_pre_reset_prefix_does_not_anchor_the_projection() {
+        let rows = vec![
+            // Three frames of pre-reset bytes: a counter that is *ahead*,
+            // arriving *before* the fresh stream.
+            anchor_row(1, 1_000, 900_000),
+            anchor_row(2, 1_010, 901_000),
+            anchor_row(3, 1_020, 902_000),
+            // The reset: the counter restarts.
+            anchor_row(4, 1_030, 0),
+            anchor_row(5, 1_040, 10_000),
+            anchor_row(6, 1_050, 20_000),
+        ];
+        let anchors = clock_anchors(&rows);
+        assert_eq!(anchors.len(), 3, "the prefix ends at the single largest backward step");
+        assert_eq!(anchors[0].rx_utc_ms, 1_030);
+        assert_eq!(project_ms(&anchors, 1_045), Some(15_000));
+        // And the prefix's own arrivals are outside the anchors' range, so a
+        // step there gets no position rather than a wrong one.
+        assert_eq!(project_ms(&anchors, 1_015), None);
+    }
+
+    /// The *other* reason this counter goes backwards is benign and must be
+    /// left alone: a hook stamps the counter before it reserves its ring slot,
+    /// so an interrupt preempting a thread publishes after it and is stamped
+    /// before it — by tens of microseconds. Treating that as a reset would
+    /// throw away most of a real capture's anchors.
+    #[test]
+    fn a_benign_microsecond_backstep_is_not_a_reset() {
+        let rows = vec![
+            anchor_row(1, 1_000, 100_000),
+            anchor_row(2, 1_010, 109_950),
+            // 50 µs backwards — the shape a preempted hook produces.
+            anchor_row(3, 1_020, 109_900),
+            anchor_row(4, 1_030, 120_000),
+        ];
+        let anchors = clock_anchors(&rows);
+        assert_eq!(anchors.len(), 4, "no anchor may be dropped over a microsecond inversion");
+    }
+
+    /// An anchor is a frame's arrival against the **last** DUT stamp in it: a
+    /// frame is sent once the last record it batched is in, so that record is
+    /// the one closest to the instant the host stamped its arrival.
+    #[test]
+    fn a_frames_anchor_is_its_last_record_not_its_first() {
+        let rows = vec![
+            anchor_row(1, 2_000, 500),
+            anchor_row(1, 2_000, 9_500),
+            anchor_row(2, 2_010, 12_000),
+        ];
+        let anchors = clock_anchors(&rows);
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(anchors[0].dut_us, 9_500);
+    }
+
     /// Named and timed are independent, and a trace can be named and untimed —
     /// which is exactly what the committed unstamped fixture is.
     #[test]
@@ -1912,6 +2496,7 @@ mod tests {
             Some(true),
             Some("decoded but NOT timed: no arrival stamps were recorded for this capture."
                 .to_string()),
+            &[],
         )
         .expect("parses");
         assert!(view.named, "an untimed trace is still a named one");
@@ -1925,7 +2510,7 @@ mod tests {
     /// code will meet in old results directories.
     #[test]
     fn an_unfamiliar_column_list_is_refused() {
-        let err = parse("s", "t", "cycles,us,kind,a,b,name\n0,0,idle,0,0,\n", true, true, None, None)
+        let err = parse("s", "t", "cycles,us,kind,a,b,name\n0,0,idle,0,0,\n", true, true, None, None, &[])
             .expect_err("must refuse");
         assert!(err.contains("refusing to guess"), "{err}");
     }
@@ -1946,7 +2531,7 @@ mod tests {
              0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
              1,1,1700000000020,20,,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &csv, true, true, None, None).expect("parses");
+        let view = parse("s", "t", &csv, true, true, None, None, &[]).expect("parses");
         assert_eq!(view.unit, "ms", "one undated row must not mix a us axis");
         assert_eq!(view.undated_rows, 1);
         assert_eq!(view.unstamped_rows, 0);
@@ -1958,7 +2543,7 @@ mod tests {
              0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
              1,1,,20,,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &csv, true, true, None, None).expect("parses");
+        let view = parse("s", "t", &csv, true, true, None, None, &[]).expect("parses");
         assert_eq!(view.unit, "frame");
         assert!(!view.has_time_base);
         assert_eq!(view.unstamped_rows, 1);
@@ -2199,7 +2784,7 @@ mod scratch_view {
     fn summarise_a_capture_from_disk() {
         let path = std::env::var("EMBARCH_VIEW_CSV").unwrap();
         let csv = std::fs::read_to_string(&path).unwrap();
-        let view = super::parse("scratch", "outpost", &csv, true, true, None, None).expect("parses");
+        let view = super::parse("scratch", "outpost", &csv, true, true, None, None, &[]).expect("parses");
         println!(
             "unit={} axis_clock={} dual_clock={} rows={} frames={} undated={} unstamped={} \
              resolution_ms={:?} records_lost={} out_of_order={}",

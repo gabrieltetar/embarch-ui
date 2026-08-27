@@ -463,6 +463,38 @@ async fn api_trace_view(
     };
     let csv = String::from_utf8_lossy(&bytes);
 
+    // A third call to Core, and it is what puts the study's own steps above
+    // the lanes. Its absence is not an error: a study that ran before Core
+    // recorded per-step stamps, or one whose `events.json` has been swept,
+    // still has a perfectly good timeline to draw — the row is what goes
+    // missing, and the view says so itself rather than failing the request.
+    let steps: Vec<trace::StepStamp> = match state.core.study_steps(&study_id).await {
+        Ok(Some(steps)) if steps.timed => steps
+            .steps
+            .into_iter()
+            .filter_map(|s| {
+                Some(trace::StepStamp {
+                    index: s.index,
+                    name: s.step_name,
+                    outcome: s.outcome,
+                    reason: s.reason,
+                    delay_before_ms: s.delay_before_ms.unwrap_or(0),
+                    started_utc_ms: s.started_utc_ms?,
+                    ended_utc_ms: s.ended_utc_ms?,
+                })
+            })
+            .collect(),
+        // `timed: false` is Core saying this study predates the stamps. Not
+        // partially filled in and not guessed at — an untimed study hands
+        // back no steps at all, and the tab renders its "no per-step arrival
+        // stamps" sentence.
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            tracing::warn!("could not read study '{study_id}' steps for the trace's step row: {e:#}");
+            Vec::new()
+        }
+    };
+
     match trace::parse(
         &study_id,
         &name,
@@ -471,6 +503,7 @@ async fn api_trace_view(
         entry.is_timed(),
         entry.self_excluded,
         entry.note.clone(),
+        &steps,
     ) {
         Ok(view) => (StatusCode::OK, Json(view)).into_response(),
         Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
