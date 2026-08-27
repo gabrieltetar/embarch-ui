@@ -3447,6 +3447,21 @@
           : "Neither clock reached this capture, so it has no time base at all: every total below " +
             "counts frames, and every share is a fraction of frames rather than of time. The " +
             "order is real; the durations are not available.";
+    // The firmware's own statement that this trace is deliberately incomplete
+    // (`embarch-outpost/design.md` §3 decision 19). Rendered against the
+    // unaccounted total specifically, because that is the number it explains:
+    // without it a reader sees a hole between the idle thread switching out
+    // and switching back in, and has nothing to attribute it to.
+    var selfNote =
+      view.self_excluded === true
+        ? " The firmware kept the outpost's own drain thread and its own UART's interrupt out " +
+          "of this trace (CONFIG_EMBARCH_OUTPOST_TRACE_SELF=n), so the unaccounted total above " +
+          "is largely the instrument's own runs rather than anything unexplained."
+        : view.self_excluded === false
+          ? " This trace includes the outpost's own drain thread and its own UART's interrupt " +
+            "(CONFIG_EMBARCH_OUTPOST_TRACE_SELF=y), so a large part of what it describes is the " +
+            "instrument describing its own transmission."
+          : "";
     var subFrame = s.below_resolution_spans > 0
       ? " " + s.below_resolution_spans + " span(s) fall below what this capture's clock can " +
         "resolve — they are counted as entries and excluded from every total. On the frame clock " +
@@ -3465,7 +3480,7 @@
         s.records_lost + " record(s) lost across " + view.gaps.length + " band(s). " +
         "Window " + fmtSpanLen(view, s.window_extent) + "; " +
         fmtSpanLen(view, s.thread_extent) + " of it accounted for by measured thread spans, " +
-        fmtSpanLen(view, s.unaccounted_extent) + " not. " + basis + subFrame
+        fmtSpanLen(view, s.unaccounted_extent) + " not. " + basis + subFrame + selfNote
       ) +
       "</div>" +
       (s.idle_record_extent > 0

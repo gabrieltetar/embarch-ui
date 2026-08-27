@@ -394,6 +394,10 @@ async fn api_trace_taps(
                         // decisions 9, 16).
                         "named": e.is_named(),
                         "timed": e.is_timed(),
+                        // A third, and the only one the firmware decided:
+                        // whether the outpost kept itself out of the trace
+                        // (`embarch-outpost/design.md` §3 decision 19).
+                        "self_excluded": e.self_excluded,
                     })
                 })
                 .collect();
@@ -465,6 +469,7 @@ async fn api_trace_view(
         &csv,
         entry.is_named(),
         entry.is_timed(),
+        entry.self_excluded,
         entry.note.clone(),
     ) {
         Ok(view) => (StatusCode::OK, Json(view)).into_response(),

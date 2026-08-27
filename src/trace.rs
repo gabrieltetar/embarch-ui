@@ -394,6 +394,18 @@ pub struct TraceView {
     /// Core can have stamped some frames and not others, which this view will
     /// not draw as milliseconds (see [`Self::unstamped_rows`]).
     pub timed: bool,
+    /// Whether the **firmware** kept itself out of this trace: no record of the
+    /// outpost's own drain thread or its own UART's interrupt
+    /// (`embarch-outpost/design.md` §3 decision 19). Core's finding, read off
+    /// the header frame's flags — never re-derived here from whether the drain
+    /// thread happens to appear, which would be inferring a build option from
+    /// a measurement.
+    ///
+    /// `Some(true)` is what makes [`LoadSummary::unaccounted_extent`] readable:
+    /// the interval between the idle thread switching out and switching back
+    /// in, with no lane covering it, is the instrument's own run rather than an
+    /// unexplained hole.
+    pub self_excluded: Option<bool>,
     /// Core's own reason, verbatim, when it had one. Rendered as given — this
     /// tab does not paraphrase a refusal.
     pub note: Option<String>,
@@ -662,12 +674,14 @@ fn summarize(
 /// never from these bytes: whether a manifest applied and whether the frames
 /// were stamped are Core's findings, and re-deriving either from whether a
 /// column happens to be populated would be a guess dressed as a check.
+#[allow(clippy::too_many_arguments)]
 pub fn parse(
     study_id: &str,
     tap: &str,
     csv: &str,
     named: bool,
     timed: bool,
+    self_excluded: Option<bool>,
     note: Option<String>,
 ) -> Result<TraceView, String> {
     let mut lines = csv.split('\n');
@@ -1186,6 +1200,7 @@ pub fn parse(
         tap: tap.to_string(),
         named,
         timed,
+        self_excluded,
         note,
         rows: rows.len(),
         rows_dropped_by_cap,
@@ -1274,7 +1289,7 @@ mod tests {
     /// `unit == "us"`, `dual_clock`. The normal state of a real layout-3
     /// capture, and the state the Trace tab is built for.
     pub(super) fn stamped() -> TraceView {
-        parse("study-1", "outpost", STAMPED_TRACE, true, true, None)
+        parse("study-1", "outpost", STAMPED_TRACE, true, true, Some(true), None)
             .expect("the stamped trace parses")
     }
 
@@ -1284,20 +1299,20 @@ mod tests {
     /// cannot do is be placed against another stream, which is what
     /// `dual_clock == false` says.
     pub(super) fn real() -> TraceView {
-        parse("study-1", "outpost", REAL_TRACE, true, false, None).expect("the real trace parses")
+        parse("study-1", "outpost", REAL_TRACE, true, false, Some(true), None).expect("the real trace parses")
     }
 
     /// Core's clock only — the layout-2 axis. A frame is the resolution, and
     /// `below_resolution` does the work it was written to do.
     pub(super) fn host_only() -> TraceView {
-        parse("study-1", "outpost", &without_dut_clock(STAMPED_TRACE), true, true, None)
+        parse("study-1", "outpost", &without_dut_clock(STAMPED_TRACE), true, true, Some(true), None)
             .expect("the host-clock-only trace parses")
     }
 
     /// Neither clock. Frame indices, a complete and real coordinate, said as
     /// such rather than drawn as a time.
     pub(super) fn no_clock() -> TraceView {
-        parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, None)
+        parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, Some(true), None)
             .expect("the clockless trace parses")
     }
 
@@ -1665,6 +1680,7 @@ mod tests {
             &stripped,
             false,
             false,
+            Some(true),
             Some("decoded but NOT named: manifest build_id \"a\" != firmware build_id \"b\"".to_string()),
         )
         .expect("an unnamed trace still parses");
@@ -1691,6 +1707,7 @@ mod tests {
             REAL_TRACE,
             true,
             false,
+            Some(true),
             Some("decoded but NOT timed: no arrival stamps were recorded for this capture."
                 .to_string()),
         )
@@ -1706,7 +1723,7 @@ mod tests {
     /// code will meet in old results directories.
     #[test]
     fn an_unfamiliar_column_list_is_refused() {
-        let err = parse("s", "t", "cycles,us,kind,a,b,name\n0,0,idle,0,0,\n", true, true, None)
+        let err = parse("s", "t", "cycles,us,kind,a,b,name\n0,0,idle,0,0,\n", true, true, None, None)
             .expect_err("must refuse");
         assert!(err.contains("refusing to guess"), "{err}");
     }
@@ -1727,7 +1744,7 @@ mod tests {
              0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
              1,1,1700000000020,20,,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &csv, true, true, None).expect("parses");
+        let view = parse("s", "t", &csv, true, true, None, None).expect("parses");
         assert_eq!(view.unit, "ms", "one undated row must not mix a us axis");
         assert_eq!(view.undated_rows, 1);
         assert_eq!(view.unstamped_rows, 0);
@@ -1739,7 +1756,7 @@ mod tests {
              0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
              1,1,,20,,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &csv, true, true, None).expect("parses");
+        let view = parse("s", "t", &csv, true, true, None, None).expect("parses");
         assert_eq!(view.unit, "frame");
         assert!(!view.has_time_base);
         assert_eq!(view.unstamped_rows, 1);
@@ -1980,7 +1997,7 @@ mod scratch_view {
     fn summarise_a_capture_from_disk() {
         let path = std::env::var("EMBARCH_VIEW_CSV").unwrap();
         let csv = std::fs::read_to_string(&path).unwrap();
-        let view = super::parse("scratch", "outpost", &csv, true, true, None).expect("parses");
+        let view = super::parse("scratch", "outpost", &csv, true, true, None, None).expect("parses");
         println!(
             "unit={} axis_clock={} dual_clock={} rows={} frames={} undated={} unstamped={} \
              resolution_ms={:?} records_lost={} out_of_order={}",
