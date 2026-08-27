@@ -2030,6 +2030,49 @@
     sdEl("sd-targets-list").innerHTML =
       html ||
       '<p class="placeholder-note" style="padding:14px;">nothing matches that filter</p>';
+    syncTargetDialog();
+  }
+
+  /* Brings the already-built list in line with the draft **without rebuilding
+   * it** — checked/disabled states, the counter, the note.
+   *
+   * Not an optimization: replacing the list's `innerHTML` on every click
+   * destroys the node that was just clicked, so `document.activeElement`
+   * falls back to `<body>` and a keyboard user pressing Space on a checkbox
+   * is returned to the top of the tab order. Measured against the running
+   * app before this existed. (The inline checkbox list decision 17 replaces
+   * had the same flaw and worse — it re-rendered the entire step table.) */
+  function syncTargetDialog() {
+    if (!sdTargetDraft) return;
+    var selected = sdTargetDraft.selected;
+    var atCap = selected.length >= sdMaxTargets;
+
+    sdEl("sd-targets-list")
+      .querySelectorAll("input[type=checkbox][data-target-uuid]")
+      .forEach(function (box) {
+        var on = selected.indexOf(box.dataset.targetUuid) >= 0;
+        var blocked = !on && atCap;
+        box.checked = on;
+        box.disabled = blocked;
+        box.closest(".sd-targets-row").classList.toggle("disabled", blocked);
+      });
+
+    sdEl("sd-targets-list").querySelectorAll("button[data-bulk]").forEach(function (btn) {
+      var items = sdSubscribable.filter(function (c) {
+        return c.service_uuid === btn.dataset.service;
+      });
+      if (btn.dataset.bulk === "all") {
+        var allPicked = items.every(function (c) {
+          return selected.indexOf(c.characteristic_uuid) >= 0;
+        });
+        btn.disabled = allPicked || atCap;
+      } else {
+        btn.disabled = items.every(function (c) {
+          return selected.indexOf(c.characteristic_uuid) < 0;
+        });
+      }
+    });
+
     sdEl("sd-targets-count").textContent =
       selected.length + " of " + sdSubscribable.length + " · max " + sdMaxTargets;
 
@@ -2041,7 +2084,7 @@
     } else if (!selected.length) {
       note = 'an empty selection is refused, never treated as "everything"';
     }
-    var unknown = sdTargetDraft.selected.filter(function (uuid) {
+    var unknown = selected.filter(function (uuid) {
       return !sdSubscribable.some(function (c) { return c.characteristic_uuid === uuid; });
     });
     if (unknown.length) {
@@ -2061,7 +2104,8 @@
     var at = sdTargetDraft.selected.indexOf(uuid);
     if (ev.target.checked && at < 0) sdTargetDraft.selected.push(uuid);
     else if (!ev.target.checked && at >= 0) sdTargetDraft.selected.splice(at, 1);
-    renderTargetDialog();
+    // Patched, not rebuilt — keeps the clicked checkbox focused.
+    syncTargetDialog();
   }
 
   function onTargetDialogClick(ev) {
@@ -2085,7 +2129,7 @@
         }
       });
     }
-    renderTargetDialog();
+    syncTargetDialog();
   }
 
   function commitTargetDialog() {
