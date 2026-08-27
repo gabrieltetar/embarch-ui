@@ -106,7 +106,7 @@ pub struct Lane {
     /// number. Rendered visibly differently — a pointer that looks like a name
     /// is the defect decision 35 exists to prevent.
     pub unnamed: bool,
-    /// `"thread"`, `"idle"`, or `"isr"`.
+    /// `"thread"`, `"idle"`, `"isr"`, or `"gpio"`.
     pub kind: &'static str,
     pub spans: Vec<Span>,
     /// Point-in-time records on this lane — `thread_create`/`thread_name`.
@@ -213,7 +213,7 @@ pub struct LoadSubject {
     /// raw pointer or vector number, and must not render as though it were a
     /// name.
     pub unnamed: bool,
-    /// `"thread"`, `"idle"`, or `"isr"`.
+    /// `"thread"`, `"idle"`, `"isr"`, or `"gpio"`.
     pub kind: &'static str,
     /// How many times this subject was entered, counting every span — the one
     /// figure none of the four exclusions above can invalidate.
@@ -589,18 +589,25 @@ pub fn parse(
             continue;
         }
         let f = split_row(line);
-        if f.len() < 7 {
+        if f.len() < 9 {
             // A short line is a truncated write, not a row shape to interpret.
             continue;
         }
+        // Positional access is safe only because the header check above already
+        // refused anything whose columns are not exactly `outpost::csv_header()`
+        // — that check is what stands in for parsing the header into a name
+        // map. The indices moved by two when record layout 3 restored the DUT's
+        // `cycles`/`us` columns ahead of `kind`; they are:
+        //   0 frame_index, 1 frame_seq, 2 rx_utc_ms, 3 cycles, 4 us,
+        //   5 kind, 6 a, 7 b, 8 name
         let Ok(frame_index) = f[0].parse::<u64>() else { continue };
         rows.push(Row {
             frame_index,
             rx_utc_ms: if f[2].is_empty() { None } else { f[2].parse::<u64>().ok() },
-            kind: kind_of(&f[3]),
-            a: f[4].parse::<u32>().unwrap_or(0),
-            b: f[5].parse::<u32>().unwrap_or(0),
-            name: f[6].clone(),
+            kind: kind_of(&f[5]),
+            a: f[6].parse::<u32>().unwrap_or(0),
+            b: f[7].parse::<u32>().unwrap_or(0),
+            name: f[8].clone(),
             t: 0,
         });
     }
@@ -900,6 +907,41 @@ pub fn parse(
                     arg: r.b,
                 });
             }
+            RecordKind::GpioDispatch | RecordKind::GpioCallbackDone => {
+                // Point events on a per-subject lane, and deliberately **not**
+                // spans.
+                //
+                // A handler's span is recoverable — it runs from the record
+                // before its `gpio_callback_done` to that record, because
+                // Zephyr places the hook *after* `cb->handler()` returns. That
+                // is exactly why it is not drawn here: reading
+                // `gpio_callback_done` as an *entry* marker attributes every
+                // handler's time to the wrong handler, and the picture stays
+                // entirely readable while it does. Drawing the points is a
+                // true statement about when each dispatch and each completion
+                // happened; drawing spans is a claim this view has not earned
+                // yet, and a wrong span is worse than an honest point.
+                //
+                // `b` is the pin mask on a completion and 0 on a dispatch —
+                // carried as `arg` either way, since Zephyr truncates the mask
+                // through a uint8_t parameter before the firmware ever sees a
+                // dispatch's copy of it.
+                let key = format!("gpio:0x{:08x}", r.a);
+                let named_here = !r.name.is_empty();
+                let label =
+                    if named_here { r.name.clone() } else { format!("0x{:08x}", r.a) };
+                ensure(&mut building, &mut order, key.clone(), label.clone(), !named_here, "gpio");
+                if let Some(bl) = building.get_mut(&key) {
+                    bl.lane.points.push(PointEvent {
+                        t: r.t,
+                        frame_index: r.frame_index,
+                        kind: kind.as_str().to_string(),
+                        label,
+                        unnamed: !named_here,
+                        arg: r.b,
+                    });
+                }
+            }
             RecordKind::Gap => unreachable!("gap rows are filtered out of `timeline`"),
         }
     }
@@ -1006,7 +1048,7 @@ mod tests {
     #[test]
     fn a_real_capture_decodes_into_lanes() {
         let view = real();
-        assert_eq!(view.rows, 941, "the committed capture is 941 records");
+        assert_eq!(view.rows, 831, "the committed capture is 831 records");
         assert_eq!(view.rows_dropped_by_cap, 0);
         assert_eq!(view.frames, 32, "32 of its 41 frames carry records");
         assert_eq!(view.out_of_order_rows, 0);
@@ -1042,7 +1084,7 @@ mod tests {
         assert_eq!(view.unit, "ms");
         assert!(view.has_time_base && view.timed);
         assert_eq!(view.unstamped_rows, 0);
-        assert_eq!(view.rows, 941, "the same records, differently placed");
+        assert_eq!(view.rows, 831, "the same records, differently placed");
         // Absolute UTC milliseconds, so a row here and a `core_rx_utc_ms` on a
         // power sample are directly comparable.
         assert!(view.t_from >= 1_700_000_000_000);
@@ -1112,30 +1154,59 @@ mod tests {
         assert!(isr.unnamed);
         assert!(isr.label.contains("not reported"), "{}", isr.label);
         assert!(!isr.label.contains("4294967295"));
-        assert_eq!(isr.spans.len(), 77, "77 enter/exit pairs");
+        assert_eq!(isr.spans.len(), 75, "75 enter/exit pairs");
     }
 
-    /// **An ISR lives and dies inside one frame**, so its extent is not a
-    /// duration. This is the concrete consequence of taking the DUT's clock
-    /// off the wire, and the view has to state it rather than report an ISR
-    /// load of zero as though it had measured one.
+    /// **A frame boundary is not a time boundary**, and layout 3 is what lets
+    /// this view say so.
+    ///
+    /// Under layout 2 the DUT carried no clock and a record's only time was its
+    /// frame's arrival stamp, so an `isr_enter`/`isr_exit` pair landing in two
+    /// different frames was indistinguishable from an ISR that really ran for a
+    /// frame interval. This capture has five such pairs — and every one of them
+    /// has **identical enter and exit `cycles`**. They took no measurable time
+    /// at all; the ring simply drained between the two records. Reading those
+    /// five as frame-long ISRs would be a load figure invented out of framing.
+    ///
+    /// The view still places spans on a frame/ms axis, so it draws these five
+    /// as crossing — which is honest about what it plotted. What it must not do
+    /// is claim they are all confined to one frame, which is what this test
+    /// asserted while the fixture was a layout-2 capture.
     #[test]
-    fn an_isr_span_is_below_the_captures_resolution_and_says_so() {
+    fn a_frame_boundary_is_not_a_time_boundary() {
         let view = stamped();
         let isr: &Lane = view.lanes.iter().find(|l| l.kind == "isr").expect("an isr lane");
-        assert!(
-            isr.spans.iter().all(|s| s.same_frame),
-            "an ISR span crossed a frame boundary, which would be worth knowing"
-        );
-        assert!(isr.spans.iter().all(|s| s.to == s.from));
+
+        let crossing = isr.spans.iter().filter(|s| !s.same_frame).count();
+        let confined = isr.spans.iter().filter(|s| s.same_frame).count();
+        assert_eq!(confined, 69, "most of this capture's ISRs open and close inside one frame");
+        // Six, not five: this capture has 75 `isr_enter` records and 74
+        // `isr_exit`, so five are genuine straddles and the sixth is the ISR
+        // still open when the capture ended, drawn out to the end and flagged.
+        // Both are "not confined to one frame"; only the five are about timing.
+        assert_eq!(crossing, 6, "five straddle a ring drain, and one never closed");
+        assert_eq!(confined + crossing, isr.spans.len());
+
+        // A span confined to one frame still has zero extent on this axis:
+        // the axis counts frames, and both ends are the same frame.
+        assert!(isr.spans.iter().filter(|s| s.same_frame).all(|s| s.to == s.from));
 
         let row = view.summary.subjects.iter().find(|s| s.kind == "isr").expect("an isr row");
+
         assert_eq!(row.entries, isr.spans.len(), "every ISR span is still counted");
-        assert_eq!(row.measured_spans, 0);
-        assert_eq!(row.same_frame_spans, isr.spans.len());
-        assert_eq!(row.total_extent, 0);
-        assert_eq!(view.summary.isr_extent, 0);
-        assert!(view.summary.same_frame_spans >= isr.spans.len());
+        // Three of the six non-confined spans land on *distinct* arrival
+        // stamps and so get a measured extent on the ms axis; the rest close
+        // inside their own frame or never close. That this is 3 and not 0 is
+        // the whole difference from the layout-2 fixture, where the summary
+        // could only ever report an ISR load of zero -- and it is a number to
+        // read carefully, because those extents are ring-drain intervals, not
+        // ISR durations. The `cycles` column says the ISRs themselves took no
+        // measurable time; see this test's own doc comment.
+        assert_eq!(row.measured_spans, 3);
+        assert_eq!(row.same_frame_spans, confined);
+        assert!(row.total_extent > 0);
+        assert!(view.summary.isr_extent > 0);
+        assert!(view.summary.same_frame_spans >= confined);
     }
 
     /// **A gap band is a bound, not a measurement**: a gap record is the first
@@ -1144,9 +1215,9 @@ mod tests {
     #[test]
     fn a_gap_is_bounded_by_the_frames_around_it() {
         let view = stamped();
-        assert_eq!(view.gaps.len(), 1, "this capture overflowed its ring once");
+        assert_eq!(view.gaps.len(), 3, "this capture overflowed its ring three times");
         let gap = &view.gaps[0];
-        assert_eq!(gap.records_lost, 19_990);
+        assert_eq!(gap.records_lost, 19_991, "the first of three gaps; 20,001 lost in total");
         assert!(!gap.unbounded_start);
         // 40 ms, not 20: a header frame arrived between the two record frames
         // bracketing this gap, and the rendered CSV does not carry header
@@ -1154,12 +1225,12 @@ mod tests {
         // was one. Wider than necessary, never narrower, and that asymmetry is
         // the point.
         assert_eq!(gap.to - gap.from, 40);
-        assert_eq!(view.records_lost, 19_990);
+        assert_eq!(view.records_lost, 20_001);
 
         // The untimed half draws the identical bound in frame indices: the
         // same two-index reach, for the same reason.
         let untimed = real();
-        assert_eq!(untimed.gaps.len(), 1);
+        assert_eq!(untimed.gaps.len(), 3);
         assert_eq!(untimed.gaps[0].to - untimed.gaps[0].from, 2);
     }
 
@@ -1186,7 +1257,7 @@ mod tests {
     #[test]
     fn markers_keep_the_engineers_own_argument_and_name() {
         let view = real();
-        assert_eq!(view.markers.len(), 163);
+        assert_eq!(view.markers.len(), 155);
         let names: std::collections::BTreeSet<&str> =
             view.markers.iter().map(|m| m.label.as_str()).collect();
         assert!(names.contains("WORK_BEGIN"), "{names:?}");
@@ -1208,8 +1279,10 @@ mod tests {
                     line.to_string()
                 } else {
                     let mut f = split_row(line);
-                    if f.len() >= 7 {
-                        f[6] = String::new();
+                    // `name` is the last column, index 8 since record layout 3
+                    // put `cycles`/`us` back ahead of `kind`.
+                    if f.len() >= 9 {
+                        f[8] = String::new();
                     }
                     f.join(",")
                 }
@@ -1235,8 +1308,8 @@ mod tests {
         );
         assert!(view.markers.iter().all(|m| m.unnamed));
         // And it is still a real timeline: the structure survives the refusal.
-        assert_eq!(view.rows, 941);
-        assert_eq!(view.gaps.len(), 1);
+        assert_eq!(view.rows, 831);
+        assert_eq!(view.gaps.len(), 3);
     }
 
     /// Named and timed are independent, and a trace can be named and untimed —
@@ -1277,8 +1350,8 @@ mod tests {
         let header = outpost::csv_header();
         let csv = format!(
             "{header}\n\
-             0,0,1700000000000,thread_switch_in,4096,0,worker\n\
-             1,1,,thread_switch_out,4096,0,worker\n"
+             0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
+             1,1,,20,20.000,thread_switch_out,4096,0,worker\n"
         );
         let view = parse("s", "t", &csv, true, true, None).expect("parses");
         assert_eq!(view.unit, "frame");
@@ -1352,7 +1425,7 @@ mod load_summary_tests {
     #[test]
     fn a_lossy_capture_reports_its_gap_fraction() {
         let view = stamped();
-        assert_eq!(view.records_lost, 19_990, "the committed capture lost 19,990 records");
+        assert_eq!(view.records_lost, 20_001, "the committed capture lost 20,001 records");
         assert_eq!(view.summary.records_lost, view.records_lost);
         assert!(view.summary.gap_extent > 0, "the gap band covers a non-zero interval");
         assert!(
