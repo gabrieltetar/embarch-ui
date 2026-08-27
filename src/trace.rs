@@ -663,6 +663,20 @@ fn clock_anchors(rows: &[Row]) -> Vec<ClockAnchor> {
     let mut by_frame: std::collections::HashMap<u64, (u64, u64)> = std::collections::HashMap::new();
     let mut order: Vec<u64> = Vec::new();
     for r in rows {
+        // **Gap records are excluded, and leaving them in was a real defect.**
+        // A gap record is stamped when the *first dropped* record was lost,
+        // not when the drain thread got around to reporting it, so its stamp
+        // sits outside the run of stamps its own frame carries — measured on
+        // a real capture, up to 487 ms ahead of every other record in the same
+        // frame. One such record makes its frame's anchor jump forward and the
+        // next frame's look like a half-second backward step, which is enough
+        // to reorder the bands projected across it and drop the short ones
+        // entirely. `dut_backsteps` and `dut_step_max` already filter gap
+        // records out for exactly this reason; this is the third place that
+        // rule belongs.
+        if r.kind == Some(RecordKind::Gap) {
+            continue;
+        }
         let (Some(rx), Some(us)) = (r.rx_utc_ms, r.dut_us) else { continue };
         match by_frame.entry(r.frame_index) {
             std::collections::hash_map::Entry::Vacant(slot) => {
@@ -833,9 +847,12 @@ fn project_steps(
             None if from_raw.is_some() => (t_to, true),
             None => continue,
         };
-        if to < from {
-            continue;
-        }
+        // The projection can still invert by a few microseconds across a
+        // benign hook-stamp inversion, which would make a sub-millisecond
+        // step's two edges cross. Collapsed to a zero-width band rather than
+        // dropped: the step ran, and its window is simply finer than the tie
+        // between the two clocks can resolve.
+        let to = to.max(from);
         // The delay falls at the start of the step's window, in host
         // milliseconds, and is projected the same way the edges are. A delay
         // that runs past the capture's edge simply consumes the whole band.
@@ -2323,7 +2340,7 @@ mod tests {
         let band = &view.steps.expect("placed").bands[0];
         assert_eq!(band.from, 120_000, "the window opens when Core started waiting");
         assert_eq!(band.exec_from, 310_000, "200 ms of declared delay, then execution");
-        assert_eq!(band.to, 410_000);
+        assert_eq!(band.to, 400_000);
         assert_eq!(band.delay_before_ms, 200);
     }
 
@@ -2466,6 +2483,34 @@ mod tests {
         ];
         let anchors = clock_anchors(&rows);
         assert_eq!(anchors.len(), 4, "no anchor may be dropped over a microsecond inversion");
+    }
+
+    /// **A gap record must not anchor the projection.** It is stamped when
+    /// the first dropped record was lost rather than when the drain thread
+    /// reported it, so its stamp sits outside the run its own frame carries —
+    /// 487 ms ahead of every other record in the same frame, measured on a
+    /// real 216,919-row capture. Left in, that frame's anchor jumps forward
+    /// and the next frame's reads as a half-second backward step, which
+    /// reorders every band projected across it and collapses the short ones
+    /// out of existence: `batchmgr-start-ppg` vanished and
+    /// `open-bds-data-window` came out starting 0.4 s before the step before
+    /// it had ended.
+    #[test]
+    fn a_gap_records_stamp_does_not_anchor_the_projection() {
+        let mut gap = anchor_row(2, 1_010, 900_000);
+        gap.kind = Some(RecordKind::Gap);
+        let rows = vec![
+            anchor_row(1, 1_000, 10_000),
+            anchor_row(2, 1_010, 20_000),
+            gap,
+            anchor_row(3, 1_020, 30_000),
+        ];
+        let anchors = clock_anchors(&rows);
+        assert_eq!(anchors.len(), 3);
+        assert_eq!(anchors[1].dut_us, 20_000, "the gap's own stamp is not this frame's last record");
+        // And the projection stays monotone across it, which is the property
+        // the bands actually depend on.
+        assert!(anchors.windows(2).all(|w| w[0].dut_us <= w[1].dut_us));
     }
 
     /// An anchor is a frame's arrival against the **last** DUT stamp in it: a

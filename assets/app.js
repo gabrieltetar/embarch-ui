@@ -4275,9 +4275,13 @@
               escapeHtml(detail) + "</title></rect>"
             );
           }
-          if (bx1 > bxd + 0.5) {
+          // The execution block is always drawn, at a visibility floor of
+          // 1.5 px the way a zero-length span is. A step whose whole window
+          // is under this capture's ~12 ms clock tie projects to a
+          // zero-width band, and a step that ran is not a step that did not.
+          {
             hp.push(
-              '<rect x="' + bxd + '" y="' + stepTop + '" width="' + (bx1 - bxd) + '" height="' +
+              '<rect x="' + bxd + '" y="' + stepTop + '" width="' + Math.max(1.5, bx1 - bxd) + '" height="' +
               TRACE_STEP_H + '" rx="2" fill="' + color + '" opacity="0.42" stroke="' + color +
               '" stroke-width="1"><title>' + escapeHtml(detail) + "</title></rect>"
             );
@@ -4296,10 +4300,16 @@
               'stroke-dasharray="2 2"/>'
             );
           }
-          var labelW = bx1 - bxd;
+          // Labelled across the **whole** band, delay included, rather than
+          // across the execution half. Zoomed into the head of a study most
+          // of a step is its declared delay and the execution is a
+          // millisecond sliver — so a label sized to the execution would
+          // vanish exactly where a reader most needs to know which step this
+          // long wait belongs to.
+          var labelW = bx1 - bx0;
           if (labelW > 44) {
             hp.push(
-              '<text x="' + (bxd + labelW / 2) + '" y="' + (stepTop + TRACE_STEP_H / 2 + 4) +
+              '<text x="' + (bx0 + labelW / 2) + '" y="' + (stepTop + TRACE_STEP_H / 2 + 4) +
               '" text-anchor="middle" fill="var(--text-primary)" font-size="10.5" ' +
               'font-family="IBM Plex Mono, monospace" pointer-events="none">' +
               escapeHtml(traceFitLabel(b.name, labelW)) + "</text>"
