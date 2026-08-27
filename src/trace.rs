@@ -29,26 +29,50 @@
 //! the kind vocabulary is read out of [`RecordKind`] rather than written out
 //! here, and `IRQ_UNKNOWN` comes from that crate too.
 //!
-//! # The clock, and what it can and cannot say
+//! # Two clocks, and which one measures what
 //!
-//! **An outpost record carries no timestamp at all** (`embarch-outpost`'s §3
-//! decision 4, reworked 2026-08-26: reading the DUT's cycle counter inside the
-//! context switch and inside `_isr_wrapper()` was the instrument charging its
-//! cost to the code it measures). The only time a trace has is the arrival
-//! stamp of the **frame** that carried each record, which means:
+//! A rendered row carries both (`embarch-outpost/design.md` §3 decision 4's
+//! 2026-08-27 rework, and decision 17 as rewritten the same day):
 //!
-//! - Every record in a frame has the same time. A frame is this view's
-//!   resolution, [`TraceView::resolution_ms`] says how coarse that is in
-//!   milliseconds, and **nothing here spreads a frame's records across an
-//!   interval** to make a smoother picture (decision 17).
-//! - A span whose two ends are in the same frame has **no measurable
-//!   duration** — [`Span::same_frame`] — and is excluded from every total. Most
-//!   ISR spans are this, and saying so is the honest answer for a wire whose
-//!   frames are milliseconds and whose ISRs are microseconds.
-//! - The axis is milliseconds only when **every** row is stamped. One
-//!   unstamped frame drops the whole view to [`TraceView::unit`] `"frame"` —
-//!   frame index, a complete and real coordinate — rather than drawing two
-//!   different axes as one.
+//! - **`cycles`/`us`, the DUT's own**, read per record by `outpost_time.h`
+//!   straight out of the GRTC SYSCOUNTER's low word. Microsecond-exact on this
+//!   target, and it is what **measures** — a span's duration is the difference
+//!   between its two ends' own stamps.
+//! - **`rx_utc_ms`, the host's**, stamped by `embarch-core` per *frame*. It is
+//!   what **places** — the same wall clock `core_rx_utc_ms` carries on a power
+//!   sample or a GATT transcript row, so laying a trace beside another stream
+//!   is an alignment rather than a guess. Millisecond-scale and jittery: a
+//!   USB-serial bridge's latency timer is commonly ~16 ms.
+//!
+//! Neither substitutes for the other, so [`TraceView::unit`] has three tiers
+//! and the view says which clock it drew:
+//!
+//! - `"us"` — every row carries a DUT stamp. Extents are microseconds and
+//!   **nothing is below the resolution**: both ends of every span have their
+//!   own time. This is the normal case for record layout 3.
+//! - `"ms"` — no DUT clock in the file (layout 2, or a capture with no header
+//!   frame anywhere in it), but every frame is stamped. Extents are host
+//!   milliseconds, a **frame is the resolution**, and a span whose two ends
+//!   arrived in one frame has no measurable duration — [`Span::below_resolution`]
+//!   — and is excluded from every total. Most ISR spans are this.
+//! - `"frame"` — neither. Frame index, a complete and real coordinate, said as
+//!   such rather than drawn as a time.
+//!
+//! **Nothing here spreads a frame's records across an interval** in `"ms"`
+//! mode to make a smoother picture, and nothing interpolates in any mode. A
+//! mixed axis is refused the same way it always was: one row missing the stamp
+//! its tier needs drops the whole view to the next tier down, because half a
+//! timeline in milliseconds and half in frame indices is one axis pretending
+//! to be another.
+//!
+//! **This view read only the host's clock until 2026-08-27**, having been
+//! written against layout 2, which had no other. Layout 3 restored `cycles`
+//! the day before and this file did not follow: it timed a span by its
+//! frames' arrivals, so the outpost's own drain thread — which switches in on
+//! one frame and out on the next, 85 µs later — was charged the whole 4 ms
+//! frame interval and reported as **78% of the capture** instead of 1.6%, and
+//! 4286 of 9205 spans read as unmeasurable when every one of them was
+//! measurable to a microsecond.
 //!
 //! # The five lies
 //!
@@ -81,8 +105,10 @@
 //!    [`Span::open_end`] is what stops that extent reading as a measurement.
 //!
 //! 5. **An extent below the capture's resolution is not a duration.** See
-//!    `same_frame` above. This is the lie the timestamp change introduced, and
-//!    it is the one a reader of a load table would otherwise never suspect.
+//!    [`Span::below_resolution`] above. It is the one lie a reader of a load
+//!    table would otherwise never suspect — and, on a layout-3 capture, the
+//!    one that turned out to be avoidable rather than inherent: the resolution
+//!    was the host's, and the DUT was carrying a finer clock the whole time.
 
 use embarch_study_designer::outpost::{self, RecordKind};
 use serde::Serialize;
@@ -127,14 +153,22 @@ pub struct Span {
     /// This interval overlaps a [`Gap`], so events inside it were dropped.
     /// Drawn hatched: the span is real, its continuity is not established.
     pub crosses_gap: bool,
-    /// Both ends arrived in the **same frame**, so this span is real and its
-    /// duration is below what the capture can resolve. `to == from`, and the
-    /// span contributes nothing to any total.
+    /// This span is real and its duration is below what the capture can
+    /// resolve, so `to == from` and it contributes nothing to any total.
     ///
-    /// The normal state of an ISR span: a frame is milliseconds and an
-    /// interrupt is microseconds. A view that quietly totalled these as zero
+    /// **Only ever true on the host clock** (`unit == "ms"`), where it means
+    /// both ends arrived in one frame and a frame is the resolution — the
+    /// normal state of an ISR span there, since a frame is milliseconds and an
+    /// interrupt is microseconds. A view that quietly totalled those as zero
     /// would report an ISR load of 0% and look like a measurement.
-    pub same_frame: bool,
+    ///
+    /// On the DUT clock (`unit == "us"`) it is always false, because both ends
+    /// carry their own microsecond stamp — the frame they arrived in is a fact
+    /// about the transport and has no bearing on the duration. The field was
+    /// named `same_frame` until 2026-08-27, which fused the fact ("one frame")
+    /// with the judgement ("therefore unmeasurable"); layout 3 severed the two
+    /// and only the judgement is what any total depends on.
+    pub below_resolution: bool,
 }
 
 /// A record with no duration — a marker, a thread creation, a name-set.
@@ -157,29 +191,55 @@ pub struct PointEvent {
 /// Records the firmware itself reported dropping, and the interval they were
 /// lost somewhere inside.
 ///
-/// **A bound, and sometimes a loose one.** The band reaches back to the
-/// previous frame *this file carries*, and the file carries only frames that
-/// held records — a header frame arriving in between is a real arrival that
-/// would have narrowed the bound, and it is not in the rendered CSV to be
-/// seen. So a band can be two or three frame intervals wide where the true
-/// bound was one. Too wide is still a bound; too narrow would be a claim.
+/// **How tight the band is depends on which clock drew the axis, and the two
+/// are not close.**
+///
+/// On the **DUT's** clock the start is not a bound at all: a gap record is
+/// stamped when the *first* record was dropped, not when the drain thread got
+/// around to reporting it (`outpost.c`'s own comment at the emit site), so
+/// `from` is a measurement. The end is bounded by the next record to arrive.
+/// The firmware also states the span it saw directly — see [`Self::cycle_span`].
+///
+/// On the **host's** clock it is a bound, and sometimes a loose one: the band
+/// reaches back to the previous frame *this file carries*, and the file carries
+/// only frames that held records — a header frame arriving in between is a real
+/// arrival that would have narrowed the bound, and it is not in the rendered
+/// CSV to be seen. So a band can be two or three frame intervals wide where the
+/// true bound was one. Too wide is still a bound; too narrow would be a claim.
 #[derive(Debug, Clone, Serialize)]
 pub struct Gap {
-    /// The previous record-carrying frame's arrival — the earliest the losses
-    /// can have begun.
+    /// On the DUT's clock, when the first record was dropped — a measurement.
+    /// On the host's, the previous record-carrying frame's arrival — the
+    /// earliest the losses can have begun.
     pub from: u64,
-    /// The arrival of the frame reporting them — the latest they can have
-    /// ended.
+    /// The next event after the losses: on the DUT's clock the next record's
+    /// own stamp, on the host's the arrival of the frame reporting them. The
+    /// latest they can have ended, either way.
     pub to: u64,
     pub records_lost: u32,
+    /// The firmware's own statement of how many **cycles** separated the first
+    /// dropped record from the last (`OUTPOST_KIND_GAP`'s `b`).
+    ///
+    /// Carried and **not** drawn, deliberately. It is in DUT cycles and every
+    /// other number here is in [`TraceView::unit`]s; converting would need the
+    /// header's `cycles_per_sec`, which the rendered CSV does not carry as a
+    /// column, and deriving the rate from a `cycles`/`us` ratio would put a
+    /// rounding error into a band this struct exists to state exactly. So the
+    /// band is drawn from stamps that are already in the axis's own unit, and
+    /// the firmware's figure is reported beside it as what it is.
+    pub cycle_span: u32,
     /// Which frame reported the loss, and where that row sat in the file.
     /// Surfaced so the view can say a band is a bound rather than look
     /// inconsistent.
     pub frame_index: u64,
     pub row_index: usize,
-    /// The gap was reported by the first frame in the capture, so there is no
-    /// earlier arrival to bound it with: `from == to`, and its extent is
-    /// unknown rather than zero.
+    /// Nothing bounds the start of these losses: `from == to`, and the extent
+    /// is unknown rather than zero.
+    ///
+    /// Only reachable on the host's clock, and only for a gap reported by the
+    /// capture's first record-carrying frame — there is no earlier arrival to
+    /// bound it with. On the DUT's clock a gap record stamps its own start, so
+    /// this is always false.
     pub unbounded_start: bool,
 }
 
@@ -198,8 +258,10 @@ pub struct Gap {
 ///   that long;
 /// - a span with **no opening record** ([`Span::open_start`]) began before it
 ///   became observable;
-/// - a span **inside one frame** ([`Span::same_frame`]) is shorter than the
-///   capture can resolve, so its extent is zero and its duration is unknown.
+/// - a span **below the capture's resolution** ([`Span::below_resolution`]) is
+///   shorter than the clock drawing the axis can measure, so its extent is
+///   zero and its duration is unknown. Empty on a layout-3 capture, whose DUT
+///   clock stamps both ends of every span.
 ///
 /// `entries` counts every span regardless, because "this subject ran N times"
 /// survives all four doubts.
@@ -236,9 +298,10 @@ pub struct LoadSubject {
     pub gap_crossing_spans: usize,
     pub open_ended_spans: usize,
     pub open_started_spans: usize,
-    /// Spans wholly inside one frame. On a wire whose frames are
-    /// milliseconds, this is where an ISR's entire life goes.
-    pub same_frame_spans: usize,
+    /// Spans whose extent the axis clock cannot measure. On the host clock,
+    /// where a frame is the resolution, this is where an ISR's entire life
+    /// goes; on the DUT clock it is zero.
+    pub below_resolution_spans: usize,
 }
 
 /// The whole capture's load repartition, plus everything a reader needs to
@@ -248,12 +311,12 @@ pub struct LoadSubject {
 /// 10): a repartition computed across an interval where records were dropped
 /// is not a measurement, and neither is one whose subjects live below the
 /// capture's resolution. [`Self::gap_fraction`] and
-/// [`Self::same_frame_spans`] are what say how much of this window is in each
-/// state, and both are meant to be rendered *beside* the numbers, not in a
-/// footnote.
+/// [`Self::below_resolution_spans`] are what say how much of this window is in
+/// each state, and both are meant to be rendered *beside* the numbers, not in
+/// a footnote.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadSummary {
-    /// `"ms"` or `"frame"` — mirrors [`TraceView::unit`], so a caller
+    /// `"us"`, `"ms"` or `"frame"` — mirrors [`TraceView::unit`], so a caller
     /// formatting this table needs nothing else.
     pub unit: &'static str,
     /// `t_to - t_from`. Zero for a capture too short to have a window, in
@@ -270,8 +333,8 @@ pub struct LoadSummary {
     /// [`TraceView::records_lost`] so a summary row can carry it without the
     /// caller reaching back out to the view.
     pub records_lost: u64,
-    /// Whether the extents here are milliseconds at all. False means every
-    /// number below counts **frames**, and must be said as such.
+    /// Whether the extents here are a time at all. False means every number
+    /// below counts **frames**, and must be said as such.
     pub has_time_base: bool,
     /// Measured extent across **thread lanes only**, which are mutually
     /// exclusive — exactly one thread is the running context at any instant —
@@ -294,21 +357,24 @@ pub struct LoadSummary {
     /// summing past 100% and reading as a bug rather than as the nesting it
     /// is.
     ///
-    /// Expect **zero**, and expect that to stay true on real silicon: an
-    /// interrupt begins and ends inside one frame, so almost every ISR span is
-    /// [`Span::same_frame`] and excluded. That is a property of what this wire
-    /// can resolve, not of this arithmetic — the count in
-    /// [`LoadSubject::same_frame_spans`] is where an ISR's activity shows up.
+    /// On the **host** clock, expect zero: an interrupt begins and ends inside
+    /// one frame, so almost every ISR span is [`Span::below_resolution`] and
+    /// excluded, and [`LoadSubject::below_resolution_spans`] is where its
+    /// activity shows up instead. On the **DUT** clock it is a real number and
+    /// a small one — measured across a whole quiet reference-dut capture, every
+    /// ISR in the system together comes to 0.6% of the window, and the
+    /// outpost's own UARTE handler runs 1540 times at 9.9 µs each.
     pub isr_extent: u64,
     /// `window_extent - thread_extent`, floored at zero: window time no
     /// measured thread span accounts for. Large values mean the exclusions
     /// above ate the picture, not that the CPU was idle — idle is a thread and
     /// is already counted.
     pub unaccounted_extent: u64,
-    /// Spans excluded across every subject for being inside one frame. A large
-    /// number against a small `thread_extent` is the signature of a capture
-    /// whose activity is finer than its frames.
-    pub same_frame_spans: usize,
+    /// Spans excluded across every subject for falling below the axis clock's
+    /// resolution. A large number against a small `thread_extent` is the
+    /// signature of a capture whose activity is finer than its clock — which,
+    /// on the host clock, is every outpost capture ever taken.
+    pub below_resolution_spans: usize,
     /// Per-subject rows, sorted by `total_extent` descending so the heaviest
     /// subject is first. Ties break by `key` so the order is stable across
     /// runs of the same capture.
@@ -334,27 +400,52 @@ pub struct TraceView {
     pub rows: usize,
     /// Rows past [`MAX_ROWS`], never silently discarded.
     pub rows_dropped_by_cap: usize,
-    /// `"ms"` when every row carries an arrival stamp, `"frame"` otherwise.
-    /// Every `t`, `from`, `to` and extent in this struct is in these units.
+    /// `"us"` when every row carries the DUT's own stamp, `"ms"` when it does
+    /// not but every frame carries the host's, `"frame"` when neither. Every
+    /// `t`, `from`, `to` and extent in this struct is in these units.
     pub unit: &'static str,
+    /// Which clock drew the axis: `"dut-cycles"`, `"host-arrival"` or
+    /// `"frame-index"`. Redundant against [`Self::unit`] on purpose — a
+    /// caller labelling an axis needs to name the clock, and "µs" alone does
+    /// not say whose microseconds these are.
+    pub axis_clock: &'static str,
     pub t_from: u64,
     pub t_to: u64,
-    /// True when [`Self::unit`] is `"ms"`. The axis is then Core's own wall
-    /// clock — the same one `core_rx_utc_ms` carries on a sample or transcript
-    /// row, which is what makes laying a trace beside a power capture an
-    /// alignment rather than a guess.
+    /// True when [`Self::unit`] is a time rather than a frame index.
     pub has_time_base: bool,
-    /// Rows whose frame carried no arrival stamp. Non-zero forces `unit` to
-    /// `"frame"` for the whole view: a timeline drawn half in milliseconds and
-    /// half in frame indices is one axis pretending to be another.
+    /// Rows whose frame carried no host arrival stamp. Non-zero rules out
+    /// `unit == "ms"`: a timeline drawn half in milliseconds and half in frame
+    /// indices is one axis pretending to be another. It does **not** rule out
+    /// `"us"` — the two clocks are independent, and a capture nobody stamped
+    /// still measures itself perfectly well.
     pub unstamped_rows: usize,
+    /// Rows carrying no DUT stamp — an empty `us` column. Non-zero rules out
+    /// `unit == "us"` for the whole view, same all-or-nothing rule.
+    ///
+    /// Expected to be zero on a layout-3 capture with a header frame anywhere
+    /// in it. It was **not** zero until `embarch-core` grew a header pre-pass
+    /// on 2026-08-27: `cycles_per_sec` was latched when the decode loop
+    /// reached the header rather than before it started, so every record from
+    /// before the first header repeat rendered an empty `us` — ~490 rows of a
+    /// 9205-row capture, enough to drop this whole view back to the host
+    /// clock.
+    pub undated_rows: usize,
+    /// True when this capture carries **both** clocks, so its own microsecond
+    /// extents can be placed against every other stream in the study. The
+    /// interesting state and the one layout 3 exists to produce; either clock
+    /// alone is a narrower answer.
+    pub dual_clock: bool,
     /// How many frames this capture holds — the number of distinct arrival
     /// instants, and so the number of distinguishable moments in it.
     pub frames: usize,
-    /// Median milliseconds between consecutive record-carrying frames, when
-    /// there is a time base. **This is the resolution of everything above**:
-    /// two records this far apart may be adjacent, and two records in one frame
-    /// are indistinguishable in time.
+    /// Median milliseconds between consecutive record-carrying frames,
+    /// whenever the host stamped them.
+    ///
+    /// **This is the resolution of everything above only when the axis is the
+    /// host's** (`unit == "ms"`). On the DUT clock it stays reported, because
+    /// it remains a real and useful fact — it is how finely this trace can be
+    /// *placed* against another stream in the study, which is the one job the
+    /// host clock has and the DUT clock cannot do.
     ///
     /// Median rather than mean, and over the frames this file has rather than
     /// every frame that arrived — a header frame carries no records and so
@@ -362,10 +453,12 @@ pub struct TraceView {
     /// mean would not.
     pub resolution_ms: Option<f64>,
     pub records_lost: u64,
-    /// Rows whose arrival stamp went backwards. Expected to be zero — frames
-    /// are stamped in arrival order — so a non-zero count means the host clock
-    /// stepped backwards mid-capture (an NTP correction is the realistic
-    /// cause), and it says so instead of drawing confidently.
+    /// Rows whose axis position went backwards. Expected to be zero on either
+    /// clock — frames are stamped in arrival order, and the DUT's counter is
+    /// unwrapped by Core before it reaches the file. Non-zero on the host
+    /// clock means the wall clock stepped back mid-capture (an NTP correction
+    /// is the realistic cause); on the DUT clock it means the unwrap lost a
+    /// wrap. Either way it says so instead of drawing confidently.
     pub out_of_order_rows: usize,
     pub gaps: Vec<Gap>,
     pub lanes: Vec<Lane>,
@@ -396,11 +489,21 @@ fn kind_of(name: &str) -> Option<RecordKind> {
 struct Row {
     frame_index: u64,
     rx_utc_ms: Option<u64>,
+    /// The DUT's own stamp, in whole microseconds. `None` when the `us` column
+    /// is empty, which means no header frame anywhere in the capture said what
+    /// rate to divide `cycles` by — Core refuses to invent one.
+    dut_us: Option<u64>,
+    /// The same instant in raw DUT cycles. Carried only so a gap record can
+    /// convert its own `b` — a **cycle** span — into the axis's microseconds,
+    /// using the ratio between its own two columns. Nothing else needs it:
+    /// `dut_us` is the same instant in the unit everything is drawn in.
+    dut_cycles: Option<u64>,
     kind: Option<RecordKind>,
     a: u32,
     b: u32,
     name: String,
-    /// Filled in once the axis unit is known: `rx_utc_ms` or `frame_index`.
+    /// Filled in once the axis unit is known: `dut_us`, `rx_utc_ms` or
+    /// `frame_index`.
     t: u64,
 }
 
@@ -483,7 +586,7 @@ fn summarize(
             let mut total_extent = 0u64;
             let mut excluded_extent = 0u64;
             let (mut measured, mut excluded) = (0usize, 0usize);
-            let (mut crossing, mut open_end, mut open_start, mut same_frame) =
+            let (mut crossing, mut open_end, mut open_start, mut below_res) =
                 (0usize, 0usize, 0usize, 0usize);
             for span in &lane.spans {
                 let extent = span.to.saturating_sub(span.from);
@@ -496,10 +599,10 @@ fn summarize(
                 if span.open_start {
                     open_start += 1;
                 }
-                if span.same_frame {
-                    same_frame += 1;
+                if span.below_resolution {
+                    below_res += 1;
                 }
-                if span.crosses_gap || span.open_end || span.open_start || span.same_frame {
+                if span.crosses_gap || span.open_end || span.open_start || span.below_resolution {
                     excluded += 1;
                     excluded_extent += extent;
                 } else {
@@ -521,7 +624,7 @@ fn summarize(
                 gap_crossing_spans: crossing,
                 open_ended_spans: open_end,
                 open_started_spans: open_start,
-                same_frame_spans: same_frame,
+                below_resolution_spans: below_res,
             }
         })
         .collect();
@@ -534,7 +637,7 @@ fn summarize(
     let idle_record_extent: u64 =
         subjects.iter().filter(|s| s.kind == "idle").map(|s| s.total_extent).sum();
     let isr_extent: u64 = subjects.iter().filter(|s| s.kind == "isr").map(|s| s.total_extent).sum();
-    let same_frame_spans: usize = subjects.iter().map(|s| s.same_frame_spans).sum();
+    let below_resolution_spans: usize = subjects.iter().map(|s| s.below_resolution_spans).sum();
     let gap_extent = merged_gap_extent(gaps, t_from, t_to);
 
     LoadSummary {
@@ -543,12 +646,12 @@ fn summarize(
         gap_extent,
         gap_fraction: share_of(gap_extent),
         records_lost,
-        has_time_base: unit == "ms",
+        has_time_base: unit != "frame",
         thread_extent,
         idle_record_extent,
         isr_extent,
         unaccounted_extent: window_extent.saturating_sub(thread_extent),
-        same_frame_spans,
+        below_resolution_spans,
         subjects,
     }
 }
@@ -604,6 +707,20 @@ pub fn parse(
         rows.push(Row {
             frame_index,
             rx_utc_ms: if f[2].is_empty() { None } else { f[2].parse::<u64>().ok() },
+            // `us` is rendered by Core with three decimal places, from an
+            // integer cycle count divided by an integer rate. Truncating to
+            // whole microseconds is deliberate: this target's counter ticks at
+            // 1 MHz, so the fraction is always zero and a sub-microsecond axis
+            // would be claiming precision the counter does not have. On a
+            // faster counter the fraction is real and the floor costs at most
+            // one microsecond per span end, which is below the jitter of the
+            // hook that emitted it.
+            dut_us: if f[4].is_empty() {
+                None
+            } else {
+                f[4].parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0).map(|v| v as u64)
+            },
+            dut_cycles: f[3].parse::<u64>().ok(),
             kind: kind_of(&f[5]),
             a: f[6].parse::<u32>().unwrap_or(0),
             b: f[7].parse::<u32>().unwrap_or(0),
@@ -612,14 +729,37 @@ pub fn parse(
         });
     }
 
-    // The axis unit, decided once for the whole view. Milliseconds require
-    // *every* row to be stamped: a mixed axis is the one thing worse than a
-    // coarse one.
+    // The axis unit, decided once for the whole view, finest clock first. Each
+    // tier requires *every* row to carry what it needs: a mixed axis is the
+    // one thing worse than a coarse one.
+    //
+    // The DUT's clock wins where it exists, and the reason is not that it is
+    // finer. It is that it is the clock that *measures*: a span's two ends
+    // carry their own stamps, where the host's clock stamps the frame that
+    // delivered them and charges a span the whole interval between two
+    // frames. The host's clock is not thereby discarded — `resolution_ms`
+    // still reports it, because placing this trace against another stream in
+    // the study is a job only it can do.
     let unstamped_rows = rows.iter().filter(|r| r.rx_utc_ms.is_none()).count();
-    let unit = if !rows.is_empty() && unstamped_rows == 0 { "ms" } else { "frame" };
+    let undated_rows = rows.iter().filter(|r| r.dut_us.is_none()).count();
+    let unit = if rows.is_empty() {
+        "frame"
+    } else if undated_rows == 0 {
+        "us"
+    } else if unstamped_rows == 0 {
+        "ms"
+    } else {
+        "frame"
+    };
+    let axis_clock = match unit {
+        "us" => "dut-cycles",
+        "ms" => "host-arrival",
+        _ => "frame-index",
+    };
     for row in &mut rows {
-        row.t = match (unit, row.rx_utc_ms) {
-            ("ms", Some(ms)) => ms,
+        row.t = match unit {
+            "us" => row.dut_us.unwrap_or(row.frame_index),
+            "ms" => row.rx_utc_ms.unwrap_or(row.frame_index),
             _ => row.frame_index,
         };
     }
@@ -646,9 +786,21 @@ pub fn parse(
     // it can place anything. Median rather than mean because one long pause in
     // a study — a step waiting on a DUT — would drag a mean and misreport the
     // resolution of everything else.
-    let resolution_ms = (unit == "ms" && frame_order.len() > 1).then(|| {
+    // Frame arrivals, not axis positions: this figure is about the host's
+    // clock whichever clock is drawing the axis, so it is computed from
+    // `rx_utc_ms` directly rather than from `t`.
+    let mut frame_rx: Vec<u64> = Vec::new();
+    let mut seen_frame: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for r in &rows {
+        if seen_frame.insert(r.frame_index) {
+            if let Some(ms) = r.rx_utc_ms {
+                frame_rx.push(ms);
+            }
+        }
+    }
+    let resolution_ms = (unstamped_rows == 0 && frame_rx.len() > 1).then(|| {
         let mut deltas: Vec<u64> =
-            frame_order.windows(2).map(|w| w[1].1.saturating_sub(w[0].1)).collect();
+            frame_rx.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
         deltas.sort_unstable();
         let mid = deltas.len() / 2;
         if deltas.len().is_multiple_of(2) {
@@ -668,20 +820,58 @@ pub fn parse(
             continue;
         }
         records_lost += u64::from(r.a);
-        // A gap record is always the first record of its frame, so the losses
-        // happened after the previous frame arrived and before this one did.
-        // "The previous frame" here is the previous one *with records* — a
-        // header frame in between is an arrival this file cannot see, so the
-        // band is occasionally wider than the true bound and never narrower.
-        let pos = frame_pos.get(&r.frame_index).copied().unwrap_or(0);
-        let from = if pos == 0 { r.t } else { frame_order[pos - 1].1 };
+        let (from, to, unbounded_start) = if unit == "us" {
+            // Both ends measured, and neither from a frame.
+            //
+            // `outpost.c` sets `rec.cycles = first` explicitly -- "stamped when
+            // the losses started, not when the drain thread got around to
+            // reporting them" -- and `rec.b = span`, the cycles between the
+            // first drop and the last. So the DUT stated the whole interval and
+            // this is arithmetic, not a bound.
+            //
+            // **A gap's stamp legitimately runs ahead of the records printed
+            // after it**, which is why the end cannot come from "the next
+            // record" the way a frame bound could: the ring is FIFO, so records
+            // reserved before the overflow are still draining behind the gap
+            // record that reports it. `OUTPOST_KIND_GAP`'s own comment calls
+            // this out as the one record whose cycles can go backwards, and the
+            // committed fixture does exactly that -- a gap at 410000 followed
+            // by records at 380000.
+            //
+            // `b` is in cycles and the axis is in microseconds, so it is scaled
+            // by the ratio between this row's *own* two columns rather than by
+            // a rate derived globally: Core computed `us` from `cycles` with the
+            // header's real rate, so inverting it here on the same row is exact
+            // to its three decimal places, and no second source of truth for
+            // the clock rate enters this file.
+            let span_us = match (r.dut_cycles, r.dut_us) {
+                (Some(c), Some(u)) if c > 0 => {
+                    ((f64::from(r.b) * (u as f64) / (c as f64)).round()) as u64
+                }
+                // No ratio to invert -- a gap at cycle 0. The span is unknown
+                // rather than zero, and `unbounded_start` is how that is said.
+                _ => 0,
+            };
+            (r.t, r.t.saturating_add(span_us), span_us == 0 && r.b > 0)
+        } else {
+            // A gap record is always the first record of its frame, so the
+            // losses happened after the previous frame arrived and before this
+            // one did. "The previous frame" here is the previous one *with
+            // records* -- a header frame in between is an arrival this file
+            // cannot see, so the band is occasionally wider than the true bound
+            // and never narrower.
+            let pos = frame_pos.get(&r.frame_index).copied().unwrap_or(0);
+            let from = if pos == 0 { r.t } else { frame_order[pos - 1].1 };
+            (from, r.t, pos == 0)
+        };
         gaps.push(Gap {
             from,
-            to: r.t,
+            to,
             records_lost: r.a,
+            cycle_span: r.b,
             frame_index: r.frame_index,
             row_index: i,
-            unbounded_start: pos == 0,
+            unbounded_start,
         });
     }
     gaps.sort_by_key(|g| g.from);
@@ -739,9 +929,16 @@ pub fn parse(
         }
     };
 
-    /// One closed span. `same_frame` is computed here, in the one place that
-    /// knows both ends' frames, so no caller can forget it.
-    fn close(from: (u64, u64, bool), to_t: u64, to_frame: u64, open_end: bool) -> Span {
+    /// One closed span. `below_resolution` is computed here, in the one place
+    /// that knows both ends' frames *and* which clock is drawing the axis, so
+    /// no caller can forget either half.
+    fn close(
+        from: (u64, u64, bool),
+        to_t: u64,
+        to_frame: u64,
+        open_end: bool,
+        unit: &'static str,
+    ) -> Span {
         let (from_t, from_frame, open_start) = from;
         Span {
             from: from_t,
@@ -749,7 +946,9 @@ pub fn parse(
             open_start,
             open_end,
             crosses_gap: false,
-            same_frame: from_frame == to_frame,
+            // On the DUT's clock both ends stamped themselves, so which frame
+            // carried them says nothing about how long the span was.
+            below_resolution: unit != "us" && from_frame == to_frame,
         }
     }
 
@@ -785,7 +984,7 @@ pub fn parse(
                 // note: there is no idle-exit hook to define.
                 if let Some(idle) = building.get_mut(IDLE_LANE) {
                     if let Some(open) = idle.open.pop() {
-                        idle.lane.spans.push(close(open, r.t, r.frame_index, false));
+                        idle.lane.spans.push(close(open, r.t, r.frame_index, false, unit));
                     }
                 }
             }
@@ -797,18 +996,22 @@ pub fn parse(
                 if let Some(b) = building.get_mut(&key) {
                     match b.open.pop() {
                         Some(open) => {
-                            b.lane.spans.push(close(open, r.t, r.frame_index, false));
+                            b.lane.spans.push(close(open, r.t, r.frame_index, false, unit));
                         }
                         // Its switch-in was among the losses. The run is real
                         // and its start is not known, which is exactly what
                         // `open_start` says.
+                        // `open_start` is the reason this contributes
+                        // nothing, on either clock: `from == to` because
+                        // nothing observed where it began, not because the
+                        // clock could not resolve it.
                         None => b.lane.spans.push(Span {
                             from: r.t,
                             to: r.t,
                             open_start: true,
                             open_end: false,
                             crosses_gap: false,
-                            same_frame: true,
+                            below_resolution: false,
                         }),
                     }
                 }
@@ -844,7 +1047,7 @@ pub fn parse(
                     } else {
                         match b.open.pop() {
                             Some(open) => {
-                                b.lane.spans.push(close(open, r.t, r.frame_index, false));
+                                b.lane.spans.push(close(open, r.t, r.frame_index, false, unit));
                             }
                             None => b.lane.spans.push(Span {
                                 from: r.t,
@@ -852,7 +1055,7 @@ pub fn parse(
                                 open_start: true,
                                 open_end: false,
                                 crosses_gap: false,
-                                same_frame: true,
+                                below_resolution: false,
                             }),
                         }
                     }
@@ -873,7 +1076,7 @@ pub fn parse(
                     // stopped being observable rather than nesting idle
                     // inside itself.
                     if let Some(open) = b.open.pop() {
-                        b.lane.spans.push(close(open, r.t, r.frame_index, true));
+                        b.lane.spans.push(close(open, r.t, r.frame_index, true, unit));
                     }
                     b.open.push((r.t, r.frame_index, false));
                 }
@@ -953,10 +1156,11 @@ pub fn parse(
     for key in order {
         if let Some(mut b) = building.remove(&key) {
             let open: Vec<(u64, u64, bool)> = b.open.drain(..).collect();
-            // `_from_frame` goes unused on purpose: an open span has no closing
-            // frame to compare against, so `same_frame` is not the reason it is
-            // excluded — `open_end` is. Claiming both would double-count it in
-            // the reason columns a reader uses to judge a total.
+            // `_from_frame` goes unused on purpose: an open span has no
+            // closing frame to compare against, so `below_resolution` is not
+            // the reason it is excluded — `open_end` is. Claiming both would
+            // double-count it in the reason columns a reader uses to judge a
+            // total.
             for (from_t, _from_frame, open_start) in open {
                 b.lane.spans.push(Span {
                     from: from_t,
@@ -964,7 +1168,7 @@ pub fn parse(
                     open_start,
                     open_end: true,
                     crosses_gap: false,
-                    same_frame: false,
+                    below_resolution: false,
                 });
             }
             b.lane.spans.sort_by_key(|s| s.from);
@@ -986,10 +1190,13 @@ pub fn parse(
         rows: rows.len(),
         rows_dropped_by_cap,
         unit,
+        axis_clock,
         t_from,
         t_to,
-        has_time_base: unit == "ms",
+        has_time_base: unit != "frame",
         unstamped_rows,
+        undated_rows,
+        dual_clock: !rows.is_empty() && undated_rows == 0 && unstamped_rows == 0,
         frames: frame_order.len(),
         resolution_ms,
         records_lost,
@@ -1030,19 +1237,68 @@ mod tests {
     /// hardware.
     ///
     /// It is worth having anyway: everything about the millisecond axis — the
-    /// resolution figure, `same_frame` exclusion, a gap band bounded by two
+    /// resolution figure, `below_resolution` exclusion, a gap band bounded by two
     /// arrivals — is arithmetic over frame stamps, and this exercises all of
     /// it against frames a DUT really produced.
     const STAMPED_TRACE: &str =
         include_str!("../tests/fixtures/outpost-native-sim-stamped.trace.csv");
 
+    /// The same CSV with its `us` column blanked — what a **layout-2** stream
+    /// looks like, and what a layout-3 capture with no header frame anywhere
+    /// in it looks like. Both are real states this view still has to draw, and
+    /// both stopped being the fixtures' own state when layout 3 restored the
+    /// DUT's clock: with `us` on every row, `REAL_TRACE` and `STAMPED_TRACE`
+    /// now exercise the DUT axis and nothing else.
+    ///
+    /// Derived here rather than committed as a third file, so the frames,
+    /// records, gaps and names are provably the *same* capture and the only
+    /// difference is which clocks it carries. A fixture that differed in two
+    /// ways could not isolate either.
+    fn without_dut_clock(csv: &str) -> String {
+        let mut out = String::with_capacity(csv.len());
+        for (i, line) in csv.split('\n').enumerate() {
+            if i == 0 || line.is_empty() {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            let mut fields = split_row(line);
+            fields[4].clear();
+            out.push_str(&fields.join(","));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Both clocks: the DUT's per-record stamps and Core's per-frame arrivals.
+    /// `unit == "us"`, `dual_clock`. The normal state of a real layout-3
+    /// capture, and the state the Trace tab is built for.
+    pub(super) fn stamped() -> TraceView {
+        parse("study-1", "outpost", STAMPED_TRACE, true, true, None)
+            .expect("the stamped trace parses")
+    }
+
+    /// The DUT's clock only — nobody received these bytes, so no frame has an
+    /// arrival stamp. Still `unit == "us"`: the two clocks are independent,
+    /// and a capture nobody timed measures itself perfectly well. What it
+    /// cannot do is be placed against another stream, which is what
+    /// `dual_clock == false` says.
     pub(super) fn real() -> TraceView {
         parse("study-1", "outpost", REAL_TRACE, true, false, None).expect("the real trace parses")
     }
 
-    pub(super) fn stamped() -> TraceView {
-        parse("study-1", "outpost", STAMPED_TRACE, true, true, None)
-            .expect("the stamped trace parses")
+    /// Core's clock only — the layout-2 axis. A frame is the resolution, and
+    /// `below_resolution` does the work it was written to do.
+    pub(super) fn host_only() -> TraceView {
+        parse("study-1", "outpost", &without_dut_clock(STAMPED_TRACE), true, true, None)
+            .expect("the host-clock-only trace parses")
+    }
+
+    /// Neither clock. Frame indices, a complete and real coordinate, said as
+    /// such rather than drawn as a time.
+    pub(super) fn no_clock() -> TraceView {
+        parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, None)
+            .expect("the clockless trace parses")
     }
 
     #[test]
@@ -1059,16 +1315,19 @@ mod tests {
         assert!(view.lanes.iter().any(|l| l.kind == "isr"));
     }
 
-    /// **An unstamped capture is drawn against frames, and says so.** The
-    /// alternative — millisecond labels over frame indices — is the one lie
-    /// this axis can tell.
+    /// **A capture with neither clock is drawn against frames, and says so.**
+    /// The alternative — millisecond labels over frame indices — is the one
+    /// lie this axis can tell.
     #[test]
-    fn an_unstamped_capture_is_drawn_against_frames() {
-        let view = real();
+    fn a_capture_with_no_clock_at_all_is_drawn_against_frames() {
+        let view = no_clock();
         assert_eq!(view.unit, "frame");
+        assert_eq!(view.axis_clock, "frame-index");
         assert!(!view.has_time_base);
         assert!(!view.timed, "Core said it stamped nothing");
-        assert_eq!(view.unstamped_rows, view.rows, "no row in this capture has a time");
+        assert_eq!(view.unstamped_rows, view.rows, "no row in this capture has a host time");
+        assert_eq!(view.undated_rows, view.rows, "and none has a DUT time either");
+        assert!(!view.dual_clock);
         assert_eq!(view.resolution_ms, None, "a resolution in ms with no ms to measure");
         // And the axis is still a real coordinate: frame indices, in order.
         assert!(view.t_to > view.t_from);
@@ -1076,14 +1335,62 @@ mod tests {
         assert!(!view.summary.has_time_base);
     }
 
-    /// The stamped half: every extent is milliseconds of Core's own wall
-    /// clock, which is the clock every other stream in the study is on.
+    /// **The DUT's clock is used even when nobody received the bytes**, which
+    /// is the whole point of it being the DUT's: the two clocks answer
+    /// different questions, and losing the arrival stamps costs the *placement*
+    /// of this trace against other streams, not its ability to measure itself.
     #[test]
-    fn a_stamped_capture_is_drawn_against_core_s_own_clock() {
+    fn an_unstamped_capture_still_measures_itself_on_the_dut_s_clock() {
+        let view = real();
+        assert_eq!(view.unit, "us");
+        assert_eq!(view.axis_clock, "dut-cycles");
+        assert!(view.has_time_base, "microseconds are a time base");
+        assert!(!view.timed, "Core still said it stamped nothing");
+        assert_eq!(view.unstamped_rows, view.rows, "no row has a host time");
+        assert_eq!(view.undated_rows, 0, "every row has a DUT time");
+        assert!(!view.dual_clock, "one clock is not two");
+        assert_eq!(view.resolution_ms, None, "no arrival stamps, so no placement resolution");
+        assert!(view.t_to > view.t_from);
+    }
+
+    /// **Both clocks, each doing its own job.** Extents are the DUT's
+    /// microseconds; `resolution_ms` still reports how finely Core's arrivals
+    /// could place this trace beside a power capture, which is the one thing
+    /// the DUT's counter can never say.
+    #[test]
+    fn a_dual_clock_capture_measures_in_dut_us_and_still_reports_its_placement() {
         let view = stamped();
+        assert_eq!(view.unit, "us");
+        assert_eq!(view.axis_clock, "dut-cycles");
+        assert!(view.has_time_base && view.timed && view.dual_clock);
+        assert_eq!(view.unstamped_rows, 0);
+        assert_eq!(view.undated_rows, 0);
+        assert_eq!(view.rows, 831, "the same records, differently placed");
+        // Still 20 ms per frame — measured from `rx_utc_ms`, not from the axis,
+        // so which clock draws the axis does not move it.
+        assert_eq!(view.resolution_ms, Some(20.0));
+        // And the axis itself is now the DUT's counter, which starts near zero
+        // rather than in UTC milliseconds.
+        assert!(view.t_from < 1_000_000, "a DUT counter, not a wall clock: {}", view.t_from);
+        assert_eq!(
+            host_only().t_to - host_only().t_from,
+            20 * 38,
+            "the host axis is unchanged where it is still the one in use"
+        );
+    }
+
+    /// The layout-2 axis, still supported and still tested: every extent is
+    /// milliseconds of Core's own wall clock, which is the clock every other
+    /// stream in the study is on.
+    #[test]
+    fn a_capture_with_only_host_stamps_is_drawn_against_core_s_own_clock() {
+        let view = host_only();
         assert_eq!(view.unit, "ms");
+        assert_eq!(view.axis_clock, "host-arrival");
         assert!(view.has_time_base && view.timed);
         assert_eq!(view.unstamped_rows, 0);
+        assert_eq!(view.undated_rows, view.rows, "the DUT clock was removed from this fixture");
+        assert!(!view.dual_clock);
         assert_eq!(view.rows, 831, "the same records, differently placed");
         // Absolute UTC milliseconds, so a row here and a `core_rx_utc_ms` on a
         // power sample are directly comparable.
@@ -1104,7 +1411,7 @@ mod tests {
     /// time — only as ordered.
     #[test]
     fn records_in_one_frame_share_one_instant() {
-        let view = stamped();
+        let view = host_only();
         let mut by_t: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
         for lane in &view.lanes {
             for p in &lane.points {
@@ -1157,28 +1464,31 @@ mod tests {
         assert_eq!(isr.spans.len(), 75, "75 enter/exit pairs");
     }
 
-    /// **A frame boundary is not a time boundary**, and layout 3 is what lets
-    /// this view say so.
+    /// **A frame boundary is not a time boundary, and on the DUT's clock it is
+    /// not a resolution limit either.**
     ///
-    /// Under layout 2 the DUT carried no clock and a record's only time was its
-    /// frame's arrival stamp, so an `isr_enter`/`isr_exit` pair landing in two
-    /// different frames was indistinguishable from an ISR that really ran for a
-    /// frame interval. This capture has five such pairs — and every one of them
-    /// has **identical enter and exit `cycles`**. They took no measurable time
-    /// at all; the ring simply drained between the two records. Reading those
-    /// five as frame-long ISRs would be a load figure invented out of framing.
+    /// This test is the whole of the 2026-08-27 change, stated twice over one
+    /// capture. Under layout 2 a record's only time was its frame's arrival
+    /// stamp, so an `isr_enter`/`isr_exit` pair landing in two different frames
+    /// was indistinguishable from an ISR that really ran for a frame interval.
+    /// This capture has five such pairs — and every one of them has
+    /// **identical enter and exit `cycles`**. They took no measurable time at
+    /// all; the ring simply drained between the two records.
     ///
-    /// The view still places spans on a frame/ms axis, so it draws these five
-    /// as crossing — which is honest about what it plotted. What it must not do
-    /// is claim they are all confined to one frame, which is what this test
-    /// asserted while the fixture was a layout-2 capture.
+    /// On the host clock the view draws those five as crossing, which is honest
+    /// about what it plotted and is still wrong about the ISRs — three of them
+    /// pick up a measured extent that is a ring-drain interval wearing an ISR's
+    /// name. On the DUT clock the same five measure zero, which is what they
+    /// were, and the 69 that arrived inside one frame stop being excluded at
+    /// all: both their ends carry their own microsecond stamp.
     #[test]
     fn a_frame_boundary_is_not_a_time_boundary() {
-        let view = stamped();
-        let isr: &Lane = view.lanes.iter().find(|l| l.kind == "isr").expect("an isr lane");
+        // ---- the host clock, where a frame is the resolution ---------------
+        let host = host_only();
+        let isr: &Lane = host.lanes.iter().find(|l| l.kind == "isr").expect("an isr lane");
 
-        let crossing = isr.spans.iter().filter(|s| !s.same_frame).count();
-        let confined = isr.spans.iter().filter(|s| s.same_frame).count();
+        let crossing = isr.spans.iter().filter(|s| !s.below_resolution).count();
+        let confined = isr.spans.iter().filter(|s| s.below_resolution).count();
         assert_eq!(confined, 69, "most of this capture's ISRs open and close inside one frame");
         // Six, not five: this capture has 75 `isr_enter` records and 74
         // `isr_exit`, so five are genuine straddles and the sixth is the ISR
@@ -1187,34 +1497,50 @@ mod tests {
         assert_eq!(crossing, 6, "five straddle a ring drain, and one never closed");
         assert_eq!(confined + crossing, isr.spans.len());
 
-        // A span confined to one frame still has zero extent on this axis:
-        // the axis counts frames, and both ends are the same frame.
-        assert!(isr.spans.iter().filter(|s| s.same_frame).all(|s| s.to == s.from));
+        // A span below the resolution has zero extent on that axis: the axis
+        // counts frame arrivals, and both ends are the same frame.
+        assert!(isr.spans.iter().filter(|s| s.below_resolution).all(|s| s.to == s.from));
 
-        let row = view.summary.subjects.iter().find(|s| s.kind == "isr").expect("an isr row");
-
+        let row = host.summary.subjects.iter().find(|s| s.kind == "isr").expect("an isr row");
         assert_eq!(row.entries, isr.spans.len(), "every ISR span is still counted");
-        // Three of the six non-confined spans land on *distinct* arrival
-        // stamps and so get a measured extent on the ms axis; the rest close
-        // inside their own frame or never close. That this is 3 and not 0 is
-        // the whole difference from the layout-2 fixture, where the summary
-        // could only ever report an ISR load of zero -- and it is a number to
-        // read carefully, because those extents are ring-drain intervals, not
-        // ISR durations. The `cycles` column says the ISRs themselves took no
-        // measurable time; see this test's own doc comment.
+        // Three of the six non-confined spans land on *distinct* arrival stamps
+        // and so get a measured extent — and those extents are ring-drain
+        // intervals, not ISR durations. This is the figure the DUT clock exists
+        // to replace, not to corroborate.
         assert_eq!(row.measured_spans, 3);
-        assert_eq!(row.same_frame_spans, confined);
+        assert_eq!(row.below_resolution_spans, confined);
         assert!(row.total_extent > 0);
-        assert!(view.summary.isr_extent > 0);
-        assert!(view.summary.same_frame_spans >= confined);
+        assert!(host.summary.isr_extent > 0);
+        assert!(host.summary.below_resolution_spans >= confined);
+
+        // ---- the DUT clock, where the frame does not enter into it ---------
+        let dut = stamped();
+        let isr: &Lane = dut.lanes.iter().find(|l| l.kind == "isr").expect("an isr lane");
+        assert!(
+            isr.spans.iter().all(|sp| !sp.below_resolution),
+            "a span cannot be below a resolution that stamped both of its ends"
+        );
+        let row = dut.summary.subjects.iter().find(|s| s.kind == "isr").expect("an isr row");
+        assert_eq!(row.below_resolution_spans, 0);
+        assert_eq!(dut.summary.below_resolution_spans, 0, "nothing in this capture is unmeasurable");
+        // 74 of the 75 spans measure; the one still open when the capture ended
+        // is excluded for `open_end`, which is a different doubt entirely.
+        assert_eq!(row.measured_spans, 74);
+        assert_eq!(row.open_ended_spans, 1);
+        // And what they measure is zero: this `native_sim` capture's ISR
+        // enter/exit pairs share a cycle count, so the honest ISR load is 0 µs
+        // across 75 entries — a real answer, and not the one the host axis gave.
+        assert_eq!(row.total_extent, 0, "these ISRs really did take no measurable time");
+        assert_eq!(dut.summary.isr_extent, 0);
+        assert_eq!(row.entries, 75, "every entry is still counted regardless");
     }
 
-    /// **A gap band is a bound, not a measurement**: a gap record is the first
-    /// record of its frame, so the losses fall between the previous frame's
-    /// arrival and its own.
+    /// **On the host's clock a gap band is a bound, and a deliberately loose
+    /// one**: a gap record is the first record of its frame, so the losses fall
+    /// between the previous frame's arrival and its own.
     #[test]
     fn a_gap_is_bounded_by_the_frames_around_it() {
-        let view = stamped();
+        let view = host_only();
         assert_eq!(view.gaps.len(), 3, "this capture overflowed its ring three times");
         let gap = &view.gaps[0];
         assert_eq!(gap.records_lost, 19_991, "the first of three gaps; 20,001 lost in total");
@@ -1227,11 +1553,54 @@ mod tests {
         assert_eq!(gap.to - gap.from, 40);
         assert_eq!(view.records_lost, 20_001);
 
-        // The untimed half draws the identical bound in frame indices: the
+        // The clockless half draws the identical bound in frame indices: the
         // same two-index reach, for the same reason.
-        let untimed = real();
+        let untimed = no_clock();
         assert_eq!(untimed.gaps.len(), 3);
         assert_eq!(untimed.gaps[0].to - untimed.gaps[0].from, 2);
+    }
+
+    /// **On the DUT's clock the gap's start is a measurement, not a bound.**
+    /// `outpost.c` stamps a gap record with the cycle count of the *first*
+    /// dropped record, so the band begins where the losses did, and the same
+    /// capture's band is nowhere near the frame-bounded one — it reaches back
+    /// through however long the ring was overflowing rather than to the
+    /// previous frame.
+    #[test]
+    fn on_the_dut_clock_a_gap_states_where_its_losses_began() {
+        let dut = stamped();
+        let host = host_only();
+        assert_eq!(dut.gaps.len(), 3);
+        assert_eq!(dut.records_lost, host.records_lost, "the same losses, differently placed");
+
+        for gap in &dut.gaps {
+            assert!(
+                !gap.unbounded_start,
+                "a gap record stamps its own start, so nothing about it is unbounded"
+            );
+            assert!(gap.to >= gap.from);
+        }
+        // The big overflow spans 10,000 cycles and is drawn that wide. The two
+        // small ones report a span of **zero** — four and six records dropped
+        // inside one cycle each — and a zero-width band is the right drawing
+        // for that: the firmware measured the interval, and the interval was
+        // nothing. Zero here is a measurement, which is why it does not set
+        // `unbounded_start`.
+        assert_eq!(dut.gaps[0].records_lost, 19_991);
+        assert_eq!(dut.gaps[0].cycle_span, 10_000);
+        assert_eq!(dut.gaps[0].to - dut.gaps[0].from, 10_000, "1 MHz, so cycles are microseconds");
+        assert_eq!(
+            dut.gaps.iter().filter(|g| g.cycle_span == 0).count(),
+            2,
+            "the two four-and-six-record overflows happened inside a single cycle each"
+        );
+        // And the bands differ from the host's, which is the whole point: one
+        // is where the frames were, the other is where the losses were.
+        assert_ne!(
+            dut.gaps[0].to - dut.gaps[0].from,
+            host.gaps[0].to - host.gaps[0].from,
+            "the two clocks bounded the same gap identically, so one of them is not being read"
+        );
     }
 
     /// The finding that survived the reshape: a gap band is **not** an empty
@@ -1240,7 +1609,7 @@ mod tests {
     /// touches is flagged instead.
     #[test]
     fn a_gap_marks_spans_incomplete_rather_than_erasing_them() {
-        let view = stamped();
+        let view = host_only();
         let crossing: usize = view
             .lanes
             .iter()
@@ -1342,16 +1711,33 @@ mod tests {
         assert!(err.contains("refusing to guess"), "{err}");
     }
 
-    /// One unstamped frame drops the whole view to the frame axis. Half a
-    /// timeline in milliseconds and half in frame indices is one axis
-    /// pretending to be another.
+    /// One row missing the stamp its tier needs drops the whole view to the
+    /// next tier down. Half a timeline in milliseconds and half in frame
+    /// indices is one axis pretending to be another — and the same argument
+    /// applies one tier up, so this exercises both fallbacks over the same two
+    /// rows.
     #[test]
-    fn a_partly_stamped_capture_falls_back_to_frames_rather_than_mixing_axes() {
+    fn a_partly_stamped_capture_falls_back_rather_than_mixing_axes() {
         let header = outpost::csv_header();
+
+        // A DUT clock on one row and not the other: falls back to the host's,
+        // which is complete here.
         let csv = format!(
             "{header}\n\
              0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
-             1,1,,20,20.000,thread_switch_out,4096,0,worker\n"
+             1,1,1700000000020,20,,thread_switch_out,4096,0,worker\n"
+        );
+        let view = parse("s", "t", &csv, true, true, None).expect("parses");
+        assert_eq!(view.unit, "ms", "one undated row must not mix a us axis");
+        assert_eq!(view.undated_rows, 1);
+        assert_eq!(view.unstamped_rows, 0);
+        assert!(!view.dual_clock);
+
+        // Neither clock complete: frame indices.
+        let csv = format!(
+            "{header}\n\
+             0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
+             1,1,,20,,thread_switch_out,4096,0,worker\n"
         );
         let view = parse("s", "t", &csv, true, true, None).expect("parses");
         assert_eq!(view.unit, "frame");
@@ -1395,7 +1781,7 @@ mod tests {
 
 #[cfg(test)]
 mod load_summary_tests {
-    use super::tests::{real, stamped};
+    use super::tests::{no_clock, real, stamped};
     use super::*;
 
     /// The summary is arithmetic over the same spans the timeline draws, so
@@ -1440,6 +1826,7 @@ mod load_summary_tests {
     #[test]
     fn overlapping_gap_bands_are_counted_as_a_union() {
         let gap = |from, to, row_index| Gap {
+            cycle_span: 0,
             from,
             to,
             records_lost: 1,
@@ -1532,17 +1919,31 @@ mod load_summary_tests {
         assert_eq!(totals, sorted);
     }
 
-    /// With no arrival stamps there is no time base, so every extent counts
+    /// With no clock at all there is no time base, so every extent counts
     /// **frames** and the summary says which unit it is in rather than letting
     /// a caller assume milliseconds.
     #[test]
     fn an_untimed_capture_reports_its_totals_in_frames() {
-        let view = real();
+        let view = no_clock();
         assert_eq!(view.summary.unit, "frame");
         assert!(!view.summary.has_time_base);
         assert!(view.summary.window_extent > 0);
         for s in &view.summary.subjects {
             assert!(s.share >= 0.0 && s.share <= 1.0);
+        }
+    }
+
+    /// And with the DUT's clock the same totals are microseconds, said as
+    /// such. `unit` is the only thing a caller should ever key off — the three
+    /// tiers are otherwise identical arithmetic.
+    #[test]
+    fn a_dut_clocked_capture_reports_its_totals_in_microseconds() {
+        let view = stamped();
+        assert_eq!(view.summary.unit, "us");
+        assert!(view.summary.has_time_base);
+        assert!(view.summary.window_extent > 0);
+        for s in &view.summary.subjects {
+            assert!(s.share >= 0.0 && s.share <= 1.0, "{} claims a share of {}", s.label, s.share);
         }
     }
 
@@ -1564,6 +1965,58 @@ mod load_summary_tests {
                 assert_eq!(s.key, "isr-unidentified");
                 assert_eq!(s.label, "ISR (vector not reported)");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod scratch_view {
+    /// Summarises an arbitrary rendered `*.trace.csv` on disk, so a change to
+    /// [`super::parse`] can be measured against a real study's capture without
+    /// a deploy. Ignored by default; drive it with
+    /// `EMBARCH_VIEW_CSV=<path> cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs EMBARCH_VIEW_CSV pointing at a rendered trace"]
+    fn summarise_a_capture_from_disk() {
+        let path = std::env::var("EMBARCH_VIEW_CSV").unwrap();
+        let csv = std::fs::read_to_string(&path).unwrap();
+        let view = super::parse("scratch", "outpost", &csv, true, true, None).expect("parses");
+        println!(
+            "unit={} axis_clock={} dual_clock={} rows={} frames={} undated={} unstamped={} \
+             resolution_ms={:?} records_lost={} out_of_order={}",
+            view.unit,
+            view.axis_clock,
+            view.dual_clock,
+            view.rows,
+            view.frames,
+            view.undated_rows,
+            view.unstamped_rows,
+            view.resolution_ms,
+            view.records_lost,
+            view.out_of_order_rows
+        );
+        let s = &view.summary;
+        println!(
+            "window={} {} thread={} idle_rec={} isr={} unaccounted={} below_resolution_spans={}",
+            s.window_extent,
+            s.unit,
+            s.thread_extent,
+            s.idle_record_extent,
+            s.isr_extent,
+            s.unaccounted_extent,
+            s.below_resolution_spans
+        );
+        for x in s.subjects.iter().take(14) {
+            println!(
+                "  {:>6.2}%  {:<30} {:>10} {}  entries {:>5}  measured {:>5}  excl {:>5}",
+                x.share * 100.0,
+                x.label,
+                x.total_extent,
+                s.unit,
+                x.entries,
+                x.measured_spans,
+                x.excluded_spans
+            );
         }
     }
 }

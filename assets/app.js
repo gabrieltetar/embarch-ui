@@ -3366,13 +3366,19 @@
 
   // An axis value, in whatever unit the view is actually in.
   //
-  // **There is no DUT clock to format.** An outpost record carries no
-  // timestamp (`embarch-outpost/design.md` §3 decision 4); the axis is either
-  // Core's own receipt time per frame, in milliseconds, or — when a row went
-  // unstamped — frame indices, which are a real coordinate and are labelled as
-  // one. Nothing here converts between the two.
+  // Three tiers, and `view.unit` is the only thing to key off (`src/trace.rs`):
+  // `"us"` is the DUT's own counter, read per record — microseconds, and what
+  // measures; `"ms"` is embarch-core's receipt time per frame — milliseconds,
+  // and what places a trace against other streams; `"frame"` is a frame index,
+  // a real coordinate, labelled as one. **Nothing here converts between
+  // tiers** — they are different clocks, not different scales of one.
   function fmtT(view, t) {
-    if (view.unit !== "ms") return "frame " + String(t);
+    if (view.unit === "frame") return "frame " + String(t);
+    if (view.unit === "us") {
+      if (Math.abs(t) >= 1000000) return (t / 1000000).toFixed(3) + " s";
+      if (Math.abs(t) >= 1000) return (t / 1000).toFixed(3) + " ms";
+      return String(t) + " \u00b5s";
+    }
     if (Math.abs(t) >= 1000) return (t / 1000).toFixed(3) + " s";
     return String(t) + " ms";
   }
@@ -3381,7 +3387,12 @@
   // position and "3 frames" is a length, and a tooltip that says the first
   // where it means the second is how a bound gets read as a measurement.
   function fmtSpanLen(view, t) {
-    if (view.unit !== "ms") return String(t) + " frame(s)";
+    if (view.unit === "frame") return String(t) + " frame(s)";
+    if (view.unit === "us") {
+      if (t >= 1000000) return (t / 1000000).toFixed(3) + " s";
+      if (t >= 1000) return (t / 1000).toFixed(3) + " ms";
+      return String(t) + " \u00b5s";
+    }
     if (t >= 1000) return (t / 1000).toFixed(3) + " s";
     return String(t) + " ms";
   }
@@ -3416,18 +3427,30 @@
     var s = view.summary;
     var lossy = s.gap_fraction > 0 || s.records_lost > 0;
     var coverage = trEl("trace-load-coverage");
-    var basis = s.has_time_base
-      ? "Totals are milliseconds of embarch-core's own receipt clock — the same clock every other " +
-        "stream in this study is stamped with. A frame is " +
-        (view.resolution_ms == null ? "this capture's" : view.resolution_ms + " ms") +
-        " wide and nothing inside one frame has a measurable duration."
-      : "No arrival stamps reached this capture, so it has no clock at all: every total below " +
-        "counts frames, and every share is a fraction of frames rather than of time. The order " +
-        "is real; the durations are not available.";
-    var subFrame = s.same_frame_spans > 0
-      ? " " + s.same_frame_spans + " span(s) began and ended inside one frame, so their duration " +
-        "is below what this capture can resolve — they are counted as entries and excluded from " +
-        "every total. Most ISR spans are this by construction."
+    var basis =
+      view.unit === "us"
+        ? "Totals are microseconds of the DUT's own counter, read per record — so both ends of " +
+          "every span carry their own stamp and nothing here is below the resolution." +
+          (view.dual_clock
+            ? " This capture also carries embarch-core's receipt time per frame (" +
+              (view.resolution_ms == null ? "unmeasured" : view.resolution_ms + " ms") +
+              " apart), which is what places it against the other streams in this study — it is " +
+              "not what measures these durations."
+            : " Nobody stamped this capture's frames, so it measures itself but cannot be laid " +
+              "against another stream in this study.")
+        : view.unit === "ms"
+          ? "This capture carries no DUT clock, so totals are milliseconds of embarch-core's own " +
+            "receipt clock — the same clock every other stream in this study is stamped with. A " +
+            "frame is " +
+            (view.resolution_ms == null ? "this capture's" : view.resolution_ms + " ms") +
+            " wide and nothing inside one frame has a measurable duration."
+          : "Neither clock reached this capture, so it has no time base at all: every total below " +
+            "counts frames, and every share is a fraction of frames rather than of time. The " +
+            "order is real; the durations are not available.";
+    var subFrame = s.below_resolution_spans > 0
+      ? " " + s.below_resolution_spans + " span(s) fall below what this capture's clock can " +
+        "resolve — they are counted as entries and excluded from every total. On the frame clock " +
+        "most ISR spans are this by construction."
       : "";
     coverage.innerHTML =
       '<div class="card" style="border-color:' + (lossy ? "var(--warning)" : "var(--border)") +
@@ -3474,7 +3497,7 @@
                 escapeHtml(
                   x.gap_crossing_spans + " crossing a gap, " + x.open_ended_spans +
                   " with no closing record, " + x.open_started_spans + " with no opening record, " +
-                  x.same_frame_spans + " inside a single frame" +
+                  x.below_resolution_spans + " below the clock's resolution" +
                   " — " + fmtSpanLen(view, x.excluded_extent) + " of extent, not counted as duration"
                 ) + '"><span style="color:var(--warning);">' + x.excluded_spans + " span(s)</span></td>"
               : '<td style="text-align:right; color:var(--text-tertiary);">&mdash;</td>';
@@ -3525,12 +3548,18 @@
       statCard("Records lost", String(view.records_lost),
         view.gaps.length + " gap(s) reported by the firmware", lostTone) +
       statCard("Span", fmtSpanLen(view, view.t_to - view.t_from),
-        view.has_time_base
-          ? "embarch-core's receipt clock, " + view.frames + " frames"
-          : "no arrival stamps — " + view.frames + " frames, no time base") +
+        view.unit === "us"
+          ? "the DUT's own counter, " + view.frames + " frames"
+          : view.unit === "ms"
+            ? "embarch-core's receipt clock, " + view.frames + " frames"
+            : "neither clock — " + view.frames + " frames, no time base") +
       statCard("Resolution",
-        view.has_time_base ? view.resolution_ms + " ms" : "1 frame",
-        "one frame; nothing inside one is measurable");
+        view.unit === "us" ? "1 \u00b5s" : view.unit === "ms" ? view.resolution_ms + " ms" : "1 frame",
+        view.unit === "us"
+          ? "per record; " + view.rows + " of " + view.rows + " stamped by the DUT"
+          : view.unit === "ms"
+            ? "one frame; nothing inside one is measurable"
+            : "frame index; nothing has a duration");
 
     // A backwards arrival stamp means the host clock stepped mid-capture (an
     // NTP correction is the realistic cause). It was unreportable while the
@@ -3541,13 +3570,25 @@
         "before them, which means this host's clock stepped backwards during the capture — " +
         "positions across that step are not comparable"
       : "";
-    trEl("trace-axis-note").textContent = (view.has_time_base
-      ? "embarch-core's own receipt time per frame — a frame is " + view.resolution_ms +
-        " ms wide, and every record in one shares its instant"
-      : view.unstamped_rows > 0 && view.timed
-        ? view.unstamped_rows + " of " + view.rows + " rows carried no arrival stamp, so the " +
-          "axis is frame index rather than half a millisecond axis"
-        : "nothing stamped this capture, so the axis is frame index: order without duration") +
+    trEl("trace-axis-note").textContent = (view.unit === "us"
+      ? "the DUT's own cycle counter, read per record — microsecond-exact, and what measures" +
+        (view.dual_clock
+          ? "; embarch-core's receipt time places this capture against the study's other " +
+            "streams to within " + view.resolution_ms + " ms"
+          : "; nothing stamped its frames, so it cannot be placed against another stream")
+      : view.unit === "ms"
+        ? "embarch-core's own receipt time per frame — a frame is " + view.resolution_ms +
+          " ms wide, and every record in one shares its instant" +
+          (view.undated_rows > 0
+            ? "; " + view.undated_rows + " of " + view.rows + " rows carried no DUT stamp, so the " +
+              "finer axis is unavailable"
+            : "")
+        : view.unstamped_rows > 0 && view.timed
+          ? view.unstamped_rows + " of " + view.rows + " rows carried no arrival stamp and " +
+            view.undated_rows + " carried no DUT stamp, so the axis is frame index rather than " +
+            "half a millisecond axis"
+          : "neither clock reached this capture, so the axis is frame index: order without " +
+            "duration") +
       clockNote;
 
     trEl("trace-gaps").innerHTML = view.gaps.length
@@ -3684,15 +3725,17 @@
         var sx = x(sp.from);
         // A zero-length span still happened, so it is drawn at a minimum
         // width to stay visible. That width is a visibility floor, not a
-        // duration — which is what the tooltip's own numbers are for, and it
-        // is now the *common* case rather than an edge one: a span that begins
-        // and ends inside one frame has no measurable length at all.
+        // duration — which is what the tooltip's own numbers are for. On the
+        // frame clock it is the *common* case, because a span that begins and
+        // ends inside one frame has no measurable length at all; on the DUT's
+        // clock it is an edge case again, and a span drawn at the floor really
+        // did take under a microsecond.
         var sw = Math.max(1.5, x(sp.to) - sx);
         var fill = sp.crosses_gap ? "url(#tr-cross)" : "var(--accent)";
         var title =
           fmtT(view, sp.from - view.t_from) + " → " +
           fmtT(view, sp.to - view.t_from) +
-          (sp.same_frame
+          (sp.below_resolution
             ? " (one frame: duration below this capture's resolution)"
             : " (" + fmtSpanLen(view, sp.to - sp.from) + ")") +
           (sp.open_start ? " · no switch-in record: this run was already going when it became observable" : "") +
@@ -3701,7 +3744,7 @@
         parts.push(
           '<rect x="' + sx + '" y="' + barTop + '" width="' + sw + '" height="' + TRACE_BAR_H +
           '" rx="2" fill="' + fill + '"' +
-          (sp.open_end || sp.open_start || sp.same_frame ? ' opacity="0.62"' : "") +
+          (sp.open_end || sp.open_start || sp.below_resolution ? ' opacity="0.62"' : "") +
           "><title>" + escapeHtml(title) + "</title></rect>"
         );
         // Ragged edges: dashed where a record is missing, so an extent never
