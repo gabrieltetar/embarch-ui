@@ -465,6 +465,25 @@ pub struct TraceView {
     /// mean would not.
     pub resolution_ms: Option<f64>,
     pub records_lost: u64,
+    /// How many times the DUT's own clock stepped backwards between
+    /// consecutive records, and by how much at worst (microseconds).
+    ///
+    /// **Small values are expected and harmless.** A hook reads the counter and
+    /// then reserves its ring slot, so an interrupt preempting a thread between
+    /// those two operations reserves after it and stamps before it; the ring
+    /// publishes in reservation order, so the pair emerges inverted by the
+    /// width of that window. Microseconds.
+    ///
+    /// A step longer than the whole capture took is a different thing: the
+    /// counter restarted, so the capture spans a DUT reset and holds two
+    /// epochs. That disqualifies the DUT clock as an axis
+    /// ([`Self::dut_clock_refused`]) rather than being drawn across.
+    pub dut_backsteps: usize,
+    pub dut_backstep_max_us: u64,
+    /// Set when the DUT clock was available on every row and refused anyway,
+    /// because a backwards step exceeded the capture's own duration. The axis
+    /// falls to the host's clock, which is monotonic.
+    pub dut_clock_refused: bool,
     /// Rows whose axis position went backwards. Expected to be zero on either
     /// clock — frames are stamped in arrival order, and the DUT's counter is
     /// unwrapped by Core before it reaches the file. Non-zero on the host
@@ -756,9 +775,64 @@ pub fn parse(
     // the study is a job only it can do.
     let unstamped_rows = rows.iter().filter(|r| r.rx_utc_ms.is_none()).count();
     let undated_rows = rows.iter().filter(|r| r.dut_us.is_none()).count();
+
+    // ---- is the DUT's clock usable as an axis at all? --------------------
+    //
+    // It is the only one of the three that can go **backwards**, and it does
+    // so for two completely different reasons that must not be conflated.
+    //
+    // **Small steps are inherent and harmless.** A hook reads the counter and
+    // *then* reserves its ring slot, so an interrupt that preempts a thread
+    // between those two operations reserves after it but stamps before it. The
+    // ring publishes in reservation order, so the pair comes out inverted by
+    // however long that window is -- microseconds. Refusing the clock over
+    // that would refuse every real capture.
+    //
+    // **A large step means the counter restarted**, i.e. the capture spans a
+    // DUT reset and contains two epochs. Timing anything across that boundary
+    // is meaningless: measured on a real study, six stale pre-reset records at
+    // the head of a capture made the window read as 11 ms instead of 1.2 s and
+    // gave two lanes a 9159% share.
+    //
+    // The line between them is drawn by **the other clock**, not by a
+    // threshold picked here: a backwards step longer than the whole capture
+    // took is a contradiction between two independent clocks, and the host's
+    // is monotonic. With no host stamps to compare against, the DUT's own
+    // total forward span stands in -- a capture cannot contain a backwards
+    // step longer than itself either way.
+    let dut_backsteps: Vec<u64> = {
+        let mut steps = Vec::new();
+        let mut prev: Option<u64> = None;
+        for r in rows.iter().filter(|r| r.kind != Some(RecordKind::Gap)) {
+            if let Some(us) = r.dut_us {
+                if let Some(p) = prev {
+                    if us < p {
+                        steps.push(p - us);
+                    }
+                }
+                prev = Some(us);
+            }
+        }
+        steps
+    };
+    let dut_backstep_max = dut_backsteps.iter().copied().max().unwrap_or(0);
+    let dut_span = {
+        let vals = rows.iter().filter_map(|r| r.dut_us);
+        let (lo, hi) = vals.fold((u64::MAX, 0u64), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        hi.saturating_sub(if lo == u64::MAX { 0 } else { lo })
+    };
+    let host_span = {
+        let vals = rows.iter().filter_map(|r| r.rx_utc_ms);
+        let (lo, hi) = vals.fold((u64::MAX, 0u64), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        // Milliseconds against the DUT's microseconds.
+        hi.saturating_sub(if lo == u64::MAX { 0 } else { lo }).saturating_mul(1000)
+    };
+    let capture_bound = if host_span > 0 { host_span } else { dut_span };
+    let dut_clock_broken = dut_backstep_max > 0 && dut_backstep_max > capture_bound;
+
     let unit = if rows.is_empty() {
         "frame"
-    } else if undated_rows == 0 {
+    } else if undated_rows == 0 && !dut_clock_broken {
         "us"
     } else if unstamped_rows == 0 {
         "ms"
@@ -893,7 +967,17 @@ pub fn parse(
     let timeline: Vec<&Row> = rows.iter().filter(|r| r.kind != Some(RecordKind::Gap)).collect();
     let out_of_order_rows = timeline.windows(2).filter(|w| w[1].t < w[0].t).count();
 
-    let t_from = timeline.first().map(|r| r.t).unwrap_or(0);
+    // Minimum rather than "the first row's", because the DUT's clock can step
+    // backwards by a few microseconds between a thread and the interrupt that
+    // preempted it (see the axis-unit comment above) -- so the earliest instant
+    // in a capture is not reliably in its first row. On the host and frame
+    // axes the two are the same thing.
+    let t_from = timeline
+        .iter()
+        .map(|r| r.t)
+        .min()
+        .unwrap_or(0)
+        .min(gaps.iter().map(|g| g.from).min().unwrap_or(u64::MAX));
     let t_to = timeline
         .iter()
         .map(|r| r.t)
@@ -1211,7 +1295,11 @@ pub fn parse(
         has_time_base: unit != "frame",
         unstamped_rows,
         undated_rows,
-        dual_clock: !rows.is_empty() && undated_rows == 0 && unstamped_rows == 0,
+        dut_backsteps: dut_backsteps.len(),
+        dut_backstep_max_us: dut_backstep_max,
+        dut_clock_refused: dut_clock_broken,
+        dual_clock: !rows.is_empty() && undated_rows == 0 && unstamped_rows == 0
+            && !dut_clock_broken,
         frames: frame_order.len(),
         resolution_ms,
         records_lost,
@@ -1348,6 +1436,66 @@ mod tests {
         assert!(view.t_to > view.t_from);
         assert_eq!(view.summary.unit, "frame");
         assert!(!view.summary.has_time_base);
+    }
+
+    /// **The DUT's clock goes backwards for two unrelated reasons, and only one
+    /// of them disqualifies it.**
+    ///
+    /// A hook reads the counter and then reserves its ring slot, so an
+    /// interrupt preempting a thread between those two operations reserves
+    /// after it and stamps before it — a microsecond-scale inversion that every
+    /// real capture contains. A real study's capture showed one of 13 µs.
+    ///
+    /// A capture that spans a DUT reset holds two epochs, and the step between
+    /// them is the age of the older one. The same real study showed one of
+    /// **195 seconds**, from six stale pre-reset records the OS had buffered
+    /// before Core opened the port: it made an 1.2-second capture's window
+    /// read as 11 ms and gave two lanes a 9159% share. Core now clears the
+    /// port's input buffer on open, and this is the second line of defence.
+    ///
+    /// The threshold is not a number chosen here — it is the other clock. A
+    /// backwards step longer than the whole capture took is two independent
+    /// clocks contradicting each other, and the host's is monotonic.
+    #[test]
+    fn a_backwards_dut_clock_is_tolerated_when_small_and_refused_when_it_means_a_reset() {
+        let header = outpost::csv_header();
+
+        // 13 µs backwards, inside a capture spanning 40 ms of host time.
+        let small = format!(
+            "{header}\n\
+             0,0,1700000000000,1000000,1000000.000,thread_switch_in,4096,0,worker\n\
+             1,1,1700000000020,1000100,1000100.000,isr_enter,7,0,irq\n\
+             1,1,1700000000020,1000087,1000087.000,thread_switch_out,4096,0,worker\n\
+             2,2,1700000000040,1000200,1000200.000,isr_exit,7,0,irq\n"
+        );
+        let view = parse("s", "t", &small, true, true, Some(true), None).expect("parses");
+        assert_eq!(view.unit, "us", "a 13 us inversion must not cost the DUT clock");
+        assert_eq!(view.dut_backsteps, 1);
+        assert_eq!(view.dut_backstep_max_us, 13);
+        assert!(!view.dut_clock_refused);
+        assert!(view.dual_clock);
+        // And the window is taken from the minimum, not from the first row,
+        // which is exactly what the inversion breaks.
+        assert_eq!(view.t_from, 1_000_000);
+        assert_eq!(view.t_to, 1_000_200);
+
+        // 195 s backwards, inside a capture spanning 40 ms of host time: the
+        // counter restarted, so the DUT clock is refused and the host's draws.
+        let reset = format!(
+            "{header}\n\
+             0,0,1700000000000,204000000,204000000.000,thread_switch_in,4096,0,worker\n\
+             1,1,1700000000020,9000000,9000000.000,isr_enter,7,0,irq\n\
+             2,2,1700000000040,9000200,9000200.000,isr_exit,7,0,irq\n"
+        );
+        let view = parse("s", "t", &reset, true, true, Some(true), None).expect("parses");
+        assert_eq!(view.unit, "ms", "a capture spanning a DUT reset must not be timed by it");
+        assert_eq!(view.axis_clock, "host-arrival");
+        assert!(view.dut_clock_refused);
+        assert_eq!(view.undated_rows, 0, "every row HAS a DUT stamp; they just disagree");
+        assert!(!view.dual_clock, "two clocks that contradict each other are not a pair");
+        assert_eq!(view.dut_backstep_max_us, 195_000_000);
+        // The host axis is intact and the window is the real one.
+        assert_eq!(view.t_to - view.t_from, 40);
     }
 
     /// **The DUT's clock is used even when nobody received the bytes**, which

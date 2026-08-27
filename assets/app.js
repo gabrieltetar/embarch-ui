@@ -3580,6 +3580,20 @@
     // NTP correction is the realistic cause). It was unreportable while the
     // axis was the DUT's own monotonic counter; on a wall clock it is a real
     // failure mode, so it is said out loud rather than drawn over.
+    // A DUT clock that stepped back further than the capture lasted means the
+    // counter restarted mid-capture. Said out loud, because the axis silently
+    // became the coarser clock and the reader needs to know which one they are
+    // looking at.
+    var dutNote = view.dut_clock_refused
+      ? " · the DUT's own clock stepped backwards by " +
+        (view.dut_backstep_max_us / 1000000).toFixed(3) + " s, which is longer than this capture " +
+        "lasted — the counter restarted, so this trace spans a DUT reset and is drawn on " +
+        "embarch-core's clock instead"
+      : view.dut_backsteps > 0
+        ? " · the DUT's clock inverted " + view.dut_backsteps + " time(s), at most " +
+          view.dut_backstep_max_us + " \u00b5s: a hook stamps before it reserves its ring slot, " +
+          "so an interrupt preempting a thread can publish after it and be stamped before it"
+        : "";
     var clockNote = view.out_of_order_rows > 0
       ? " · " + view.out_of_order_rows + " row(s) arrived with a stamp earlier than the row " +
         "before them, which means this host's clock stepped backwards during the capture — " +
@@ -3604,7 +3618,7 @@
             "half a millisecond axis"
           : "neither clock reached this capture, so the axis is frame index: order without " +
             "duration") +
-      clockNote;
+      dutNote + clockNote;
 
     trEl("trace-gaps").innerHTML = view.gaps.length
       ? view.gaps
