@@ -381,7 +381,7 @@
           "<td>" + routeCell(sig) + "</td>" +
           "<td>" + carrierCell(snapshot, sig) + "</td>" +
           '<td style="text-align:right; white-space:nowrap;">' +
-          '<button class="btn" data-signal-edit=""' + escapeHtml(sig.name) + '">Move route</button> ' +
+          '<button class="btn" data-signal-edit="' + escapeHtml(sig.name) + '">Move route</button> ' +
           '<button class="btn" data-signal-remove="' + escapeHtml(sig.name) + '">Remove</button>' +
           "</td></tr>"
       )
@@ -711,10 +711,25 @@
     el.querySelector("p").textContent = message;
   }
 
+  // Bumped on every source switch. A backlog fetch is asynchronous and the
+  // console it lands in is whichever one is mounted when it *resolves*, not
+  // the one that was mounted when it was issued — so the fetch carries the
+  // generation it was issued under and drops its answer if that has moved on.
+  //
+  // **The ordering in `attachLogSource` is not what prevents this**, though a
+  // comment there used to claim it was: closing the stream and clearing the
+  // console first does nothing about a `/recent` request already in flight.
+  // Switching Core -> embarch-api while Core's backlog was still arriving
+  // spliced 200 of Core's lines into embarch-api's console, under
+  // embarch-api's heading, with no timestamp order between them.
+  let logGeneration = 0;
+
   async function loadLogBacklog() {
+    const generation = logGeneration;
     try {
       const resp = await fetch(LOG_SOURCES[logSource].recent);
       const text = await resp.text();
+      if (generation !== logGeneration) return;
       if (!resp.ok) {
         renderLogsError(text);
         return;
@@ -723,15 +738,17 @@
       const data = JSON.parse(text);
       appendLogLines(data.lines || []);
     } catch (e) {
+      if (generation !== logGeneration) return;
       renderLogsError(String(e));
     }
   }
 
   // Tears down whatever was streaming, resets the console to the new
-  // source's placeholder, then reloads backlog and reopens the stream. Kept
-  // in this order so a slow backlog fetch can never land lines into a
-  // console the user has since switched away from.
+  // source's placeholder, then reloads backlog and reopens the stream —
+  // invalidating any backlog fetch still in flight for the old source on the
+  // way past (`logGeneration`).
   function attachLogSource() {
+    logGeneration += 1;
     const config = LOG_SOURCES[logSource];
     if (logStream) {
       logStream.close();
@@ -3825,13 +3842,41 @@
   // record order off a clock the view has already vetted for monotonicity), so
   // finding the window is a binary search rather than a scan of the lane.
 
-  /// Index of the first span whose `from` is at or after `t`.
-  function traceLowerBound(spans, t) {
+  /// Index of the first span in this lane that can still reach `t`.
+  ///
+  /// **Not a lower bound on `from`, and that distinction was a real defect.**
+  /// Searching for the first `from >= t` and then stepping back over
+  /// neighbours that end at or after `t` assumes a lane's spans do not
+  /// overlap — and a lane's spans overlap exactly when the capture lost a
+  /// record. A switch-out among the losses leaves its span open to the end of
+  /// the capture (`trace.rs` draws every still-open span out to `t_to`) while
+  /// later, shorter spans on the same lane sit inside it; the step-back then
+  /// halts on the first of those and the enclosing span vanishes from every
+  /// zoomed window past it. A lane silently missing its longest run is the
+  /// kind of quiet lie this view exists to refuse.
+  ///
+  /// So the search is over the lane's running maximum of `to`, which is
+  /// non-decreasing by construction and therefore binary-searchable, rather
+  /// than over `from`. Computed once per lane and cached on it — the view
+  /// object is replaced wholesale on every load, so the cache cannot outlive
+  /// the spans it summarises.
+  function traceFirstReaching(lane, t) {
+    var spans = lane.spans;
+    var maxTo = lane.maxToPrefix;
+    if (!maxTo || maxTo.length !== spans.length) {
+      maxTo = new Float64Array(spans.length);
+      var running = -Infinity;
+      for (var k = 0; k < spans.length; k += 1) {
+        if (spans[k].to > running) running = spans[k].to;
+        maxTo[k] = running;
+      }
+      lane.maxToPrefix = maxTo;
+    }
     var lo = 0;
     var hi = spans.length;
     while (lo < hi) {
       var mid = (lo + hi) >> 1;
-      if (spans[mid].from < t) lo = mid + 1;
+      if (maxTo[mid] < t) lo = mid + 1;
       else hi = mid;
     }
     return lo;
@@ -3875,11 +3920,9 @@
     var scale = cols / Math.max(1, win.to - win.from);
     var visible = 0;
     if (spans.length) {
-      var i = traceLowerBound(spans, win.from);
-      // One step back covers the span already running when the window opens.
-      // Exactly one, because spans within a lane do not overlap: the one
-      // before that ends no later than this one begins.
-      while (i > 0 && spans[i - 1].to >= win.from) i -= 1;
+      // Every span from here on may reach into the window; everything before
+      // it provably ends before the window opens.
+      var i = traceFirstReaching(lane, win.from);
       for (; i < spans.length; i += 1) {
         var sp = spans[i];
         if (sp.from > win.to) break;
