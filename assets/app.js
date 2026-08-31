@@ -1836,6 +1836,12 @@
       sdAdoptDiscovery(data);
       renderSdUnregistered();
       renderSdRows();
+      // The tap table picks its characteristics and its decoder layouts out
+      // of the same response, so it goes stale on exactly this call and no
+      // other. Without this a GATT tap row kept reading "no notify-capable
+      // characteristic known — run Discover GATT" *after* a discovery that
+      // had just found several, which reads as the discovery having failed.
+      renderSdTaps();
     } catch (e) {
       sdShowBuildError("discover failed: " + String(e));
     } finally {
@@ -2509,7 +2515,13 @@
       var input = sdEl(f.input);
       input.disabled = checked;
       if (checked) {
-        input.dataset.stated = input.dataset.stated || input.value;
+        // Remember whatever real version the field is holding *now*.
+        // `dataset.stated || input.value` kept the first one ever stashed, so
+        // ticking, unticking, retyping and ticking again restored the version
+        // from two edits ago on the way back — silently replacing a version
+        // requirement with a stale one, which is the one thing decision 11's
+        // mandatory field exists to stop.
+        if (input.value !== sdAnyLiteral) input.dataset.stated = input.value;
         input.value = sdAnyLiteral;
       } else if (input.value === sdAnyLiteral) {
         input.value = input.dataset.stated || "";
@@ -3086,12 +3098,12 @@
       if (!btn) return;
       // Sets the address as well as the field, so what the button does and
       // what a shared link does are the same one thing.
+      var study = btn.getAttribute("data-open-study");
+      var tap = btn.getAttribute("data-open-trace");
       location.hash =
-        "trace?study=" + encodeURIComponent(btn.getAttribute("data-open-study")) +
-        "&tap=" + encodeURIComponent(btn.getAttribute("data-open-trace"));
-      document.getElementById("trace-study").value = btn.getAttribute("data-open-study");
+        "trace?study=" + encodeURIComponent(study) + "&tap=" + encodeURIComponent(tap);
       showTab("trace");
-      document.getElementById("trace-load").click();
+      traceOpen(study, tap);
     });
     sdEl("sd-new-study").addEventListener("click", sdNewStudy);
     sdEl("sd-save").addEventListener("click", sdSaveStudy);
@@ -3379,6 +3391,40 @@
     }
     traceView = JSON.parse(text);
     renderTrace();
+  }
+
+  /// Opens one named tap of one study — the single path behind both the
+  /// `#trace?study=…&tap=…` deep link and the run card's "Open in Trace"
+  /// button.
+  ///
+  /// **Shared because the button used to skip the tap half entirely**: it set
+  /// the study id and clicked Load, and `traceLoadTaps` then drew whichever
+  /// outpost trace happened to be *first*. On a study with two of them, or on
+  /// a click against a non-trace stream like `gatt`, the view that came up was
+  /// not the one the button named and said nothing about the substitution.
+  async function traceOpen(studyId, tap) {
+    trEl("trace-study").value = studyId;
+    await traceLoadTaps();
+    if (!tap) return;
+    var select = trEl("trace-tap");
+    var offered = Array.prototype.some.call(select.options, function (o) {
+      return o.value === tap;
+    });
+    if (!offered) {
+      // The caller had this stream's name, so it is in the study — it is just
+      // not an outpost trace, and there is no timeline to draw for it. Said,
+      // rather than quietly drawing a different tap under its name.
+      traceShowError(
+        "'" + tap + "' is not an outpost trace, so it has no timeline to draw. " +
+        (select.disabled
+          ? "This study declares no outpost trace at all."
+          : "Showing '" + select.value + "' instead — pick another above.")
+      );
+      return;
+    }
+    if (select.value === tap) return;
+    select.value = tap;
+    return traceLoadView();
   }
 
   // An axis value, in whatever unit the view is actually in.
@@ -4633,14 +4679,7 @@
     var params = hashParams();
     var study = params.get("study") || new URLSearchParams(location.search).get("study");
     if (study) {
-      trEl("trace-study").value = study;
-      var wantedTap = params.get("tap") || new URLSearchParams(location.search).get("tap");
-      traceLoadTaps().then(function () {
-        if (wantedTap && trEl("trace-tap").querySelector('[value="' + CSS.escape(wantedTap) + '"]')) {
-          trEl("trace-tap").value = wantedTap;
-          traceLoadView();
-        }
-      });
+      traceOpen(study, params.get("tap") || new URLSearchParams(location.search).get("tap"));
     }
     trEl("trace-study").addEventListener("keydown", function (ev) {
       if (ev.key === "Enter") traceLoadTaps();
