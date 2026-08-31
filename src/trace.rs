@@ -1509,6 +1509,30 @@ pub fn parse(
                 let label = if named_here { r.name.clone() } else { key.clone() };
                 ensure(&mut building, &mut order, key.clone(), label, !named_here, "thread");
                 if let Some(b) = building.get_mut(&key) {
+                    // **A switch-in with one already open means this thread's
+                    // switch-out was among the losses**, and the old run is
+                    // closed where it stopped being observable rather than
+                    // left open beside the new one. Same rule and same reason
+                    // as the idle branch below.
+                    //
+                    // Nesting the two was a real lie of the kind this module
+                    // exists to refuse: one CPU runs one thread, so a thread
+                    // cannot be inside itself — and leaving the first run open
+                    // draws it out to `t_to`, claiming this thread ran
+                    // continuously from that switch-in to the end of the
+                    // capture, straight across every later run of it. The
+                    // committed `native_sim` fixture contains exactly this:
+                    // two of `0x08058240`'s 65 spans overlapped.
+                    //
+                    // **Deliberately not done for an ISR lane.** A vector
+                    // cannot preempt itself, but `isr-unidentified` is a
+                    // *bucket* — every vector the firmware could not name
+                    // shares it — so two of its spans overlapping is real
+                    // nesting rather than a lost record, and a stack is the
+                    // right shape there.
+                    if let Some(open) = b.open.pop() {
+                        b.lane.spans.push(close(open, r.t, r.frame_index, true, unit));
+                    }
                     b.open.push((r.t, r.frame_index, false));
                 }
                 // A switch-in is also what ends idle, per the firmware's own
@@ -1851,6 +1875,68 @@ mod tests {
         assert_eq!(threads.len(), 7, "this capture mentions seven distinct thread pointers");
         assert!(view.lanes.iter().any(|l| l.kind == "idle"));
         assert!(view.lanes.iter().any(|l| l.kind == "isr"));
+    }
+
+    /// **A thread cannot be inside itself.** A second switch-in with no
+    /// switch-out between them means the switch-out was among the losses; the
+    /// first run is closed where it stopped being observable rather than left
+    /// open beside the second. Left open it ran to `t_to`, claiming the thread
+    /// was running continuously straight across every later run of itself —
+    /// and the committed fixture really contains that shape.
+    #[test]
+    fn a_second_switch_in_closes_the_run_the_lost_switch_out_left_open() {
+        let header = outpost::csv_header();
+        let csv = format!(
+            "{header}\n\
+             0,0,1700000000000,1000,1000.000,thread_switch_in,4096,0,worker\n\
+             1,1,1700000000010,2000,2000.000,thread_switch_in,4096,0,worker\n\
+             2,2,1700000000020,3000,3000.000,thread_switch_out,4096,0,worker\n\
+             3,3,1700000000030,4000,4000.000,thread_switch_in,8192,0,other\n"
+        );
+        let view = parse("s", "t", &csv, true, true, Some(true), None, &[]).expect("parses");
+        let worker = view
+            .lanes
+            .iter()
+            .find(|l| l.label == "worker")
+            .expect("the worker lane exists");
+        assert_eq!(worker.spans.len(), 2, "two runs, not one nested pair");
+        assert_eq!((worker.spans[0].from, worker.spans[0].to), (1000, 2000));
+        assert!(worker.spans[0].open_end, "its switch-out was never seen");
+        assert_eq!((worker.spans[1].from, worker.spans[1].to), (2000, 3000));
+        assert!(!worker.spans[1].open_end);
+        for pair in worker.spans.windows(2) {
+            assert!(pair[0].to <= pair[1].from, "a thread lane's spans must not overlap");
+        }
+    }
+
+    /// The counterpart, and why the rule above is not applied to every lane:
+    /// `isr-unidentified` is a **bucket** for every vector the firmware could
+    /// not name, so two of its spans overlapping is real nesting — a
+    /// higher-priority vector inside a lower one — rather than a lost record.
+    /// A stack is the right shape there, and closing on entry would invent a
+    /// missing record out of an ordinary preemption.
+    #[test]
+    fn the_unidentified_isr_bucket_keeps_genuine_nesting() {
+        let header = outpost::csv_header();
+        let unknown = outpost::IRQ_UNKNOWN;
+        let csv = format!(
+            "{header}\n\
+             0,0,1700000000000,1000,1000.000,isr_enter,{unknown},0,\n\
+             1,1,1700000000010,2000,2000.000,isr_enter,{unknown},0,\n\
+             2,2,1700000000020,3000,3000.000,isr_exit,{unknown},0,\n\
+             3,3,1700000000030,4000,4000.000,isr_exit,{unknown},0,\n"
+        );
+        let view = parse("s", "t", &csv, true, true, Some(true), None, &[]).expect("parses");
+        let isr = view
+            .lanes
+            .iter()
+            .find(|l| l.key == "isr-unidentified")
+            .expect("the bucket lane exists");
+        assert_eq!(isr.spans.len(), 2);
+        // The inner one closed first and the outer one wraps it: nesting, kept.
+        assert!(isr.spans.iter().any(|s| (s.from, s.to) == (2000, 3000)));
+        assert!(isr.spans.iter().any(|s| (s.from, s.to) == (1000, 4000)));
+        assert!(isr.spans.iter().all(|s| !s.open_end));
     }
 
     /// **A capture with neither clock is drawn against frames, and says so.**

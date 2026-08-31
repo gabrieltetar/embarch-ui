@@ -250,7 +250,17 @@ async fn api_snapshot(State(state): State<AppState>) -> Json<Snapshot> {
 /// immediately on connect, then again every time `poll_loop` publishes a
 /// new one — a client never has to poll to find out something changed.
 async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.snapshot_rx.clone();
+    let mut rx = state.snapshot_rx.clone();
+    // The same `mark_unchanged` `sse_lines` documents below, and missing here
+    // for the same reason: a clone of a receiver whose `changed()` was never
+    // awaited inherits that receiver's version, which is still the channel's
+    // *initial* one — `borrow()` does not mark a value seen. So the first
+    // `changed()` after the on-connect send returned immediately with the
+    // snapshot just sent, and every tab opened got that one twice. Benign to
+    // render, because a snapshot is idempotent, which is exactly why it went
+    // unnoticed; it is still one wasted serialize-and-repaint per connection
+    // and the loop below reads as though it cannot happen.
+    rx.mark_unchanged();
     let stream = futures_util::stream::unfold((rx, true), |(mut rx, first)| async move {
         if !first && rx.changed().await.is_err() {
             // The sender (poll_loop) is gone — process is shutting down.

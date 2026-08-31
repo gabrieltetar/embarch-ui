@@ -1454,11 +1454,13 @@ fn version_field(value: &serde_json::Value, field: &str) -> String {
 /// `_embarch_ui_taps` sidecar — one saved before that key existed, or written
 /// by hand.
 ///
-/// Only `StreamSource::Signal` taps come back, because those are the only ones
-/// this tab authors. A study carrying a `PowerFrontEnd` or `GattTranscript`
-/// tap loads with its steps and *not* its taps, which is the same honest
+/// Only the two sources this tab authors come back — `Signal` and
+/// `GattNotify`. A study carrying a `PowerFrontEnd` or `GattTranscript` tap
+/// loads with its steps and *not* that tap, which is the same honest
 /// limitation `editable` already reports for a hand-written study's rows —
-/// better than presenting a row this table cannot faithfully round-trip.
+/// better than presenting a row this table cannot faithfully round-trip. The
+/// auto-declared `GattTranscript` is re-added on the next build anyway
+/// ([`auto_transcript_tap`]), so nothing is lost by leaving it out here.
 fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
     let Some(streams) = value.get("streams").and_then(|s| s.as_array()) else {
         return Vec::new();
@@ -1474,13 +1476,12 @@ fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
                 return Some(TapInput::Outpost { name, signal: signal.to_string() });
             }
             let gatt = source.get("GattNotify")?;
-            // The *decoder name* is not recoverable from a `Study.streams`
-            // entry — the encoding carries an index into `Study.decoders`,
-            // and the layout there has a name but nothing ties it back to
-            // the `study-structs.toml` entry it was resolved from. The
-            // sidecar is what preserves that; a study loaded without one
-            // gets the tap with its layout blank rather than a name this
-            // function guessed at.
+            // The decoder name comes back off `Study.decoders[i].name`,
+            // which is the `study-structs.toml` entry's own name —
+            // `StructRegistry::resolve` carries it onto the layout, so the
+            // round trip is a lookup and not a guess. A tap whose encoding is
+            // not `Struct`, or whose index is past the decoder list, gets a
+            // blank layout: raw bytes, which is what such a tap captures.
             let decoder = value
                 .get("decoders")
                 .and_then(|d| d.as_array())
