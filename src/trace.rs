@@ -827,25 +827,47 @@ fn project_steps(
         }
     };
 
+    // The capture's own window **in host milliseconds** — the unit the step
+    // stamps are in, whichever clock draws the axis. On the DUT clock that is
+    // the anchors' own range, which is exactly where `project_ms` stops
+    // answering; on the host clock the axis already is those milliseconds.
+    //
+    // Carried explicitly because "`place` returned `None`" is two different
+    // facts — before the capture, or after it — and every decision below turns
+    // on which one it was.
+    let (window_from_ms, window_to_ms) = if projected {
+        (anchors[0].rx_utc_ms, anchors[anchors.len() - 1].rx_utc_ms)
+    } else {
+        (t_from, t_to)
+    };
+
     let mut bands = Vec::new();
     for s in steps {
         // A step is drawn if any part of its window overlaps the capture. Its
         // edges clamp to the capture's, and each clamped edge says so — the
         // trace covers the study's declared tap scope, which is routinely
         // narrower than the study itself.
-        let from_raw = place(s.started_utc_ms);
-        let to_raw = place(s.ended_utc_ms);
-        let (from, clipped_start) = match from_raw {
+        //
+        // **Decided by overlap rather than by whether an edge could be
+        // placed, and the difference was a real defect.** A step *enclosing*
+        // the capture — one long step, with the tap opened and closed inside
+        // it, which is the ordinary shape of a `drain-bds` that runs for
+        // minutes — has neither edge inside the window, so both placements
+        // return `None` and the old code dropped the band outright. The one
+        // step actually running for the whole trace was the one step the row
+        // never showed.
+        if s.ended_utc_ms < window_from_ms || s.started_utc_ms > window_to_ms {
+            continue;
+        }
+        // Past the overlap test, an unplaceable edge can only be outside on
+        // its own side: the start before the window, the end after it.
+        let (from, clipped_start) = match place(s.started_utc_ms) {
             Some(v) => (v, false),
-            // No position: either before the capture or after it. Only the
-            // former can still produce a visible band.
-            None if s.ended_utc_ms > s.started_utc_ms && to_raw.is_some() => (t_from, true),
-            None => continue,
+            None => (t_from, true),
         };
-        let (to, clipped_end) = match to_raw {
+        let (to, clipped_end) = match place(s.ended_utc_ms) {
             Some(v) => (v, false),
-            None if from_raw.is_some() => (t_to, true),
-            None => continue,
+            None => (t_to, true),
         };
         // The projection can still invert by a few microseconds across a
         // benign hook-stamp inversion, which would make a sub-millisecond
@@ -854,13 +876,25 @@ fn project_steps(
         // between the two clocks can resolve.
         let to = to.max(from);
         // The delay falls at the start of the step's window, in host
-        // milliseconds, and is projected the same way the edges are. A delay
-        // that runs past the capture's edge simply consumes the whole band.
-        let delay_end_ms = s.started_utc_ms.saturating_add(s.delay_before_ms as u64);
+        // milliseconds, and is projected the same way the edges are.
+        //
+        // **An unplaceable delay end has two opposite answers, and collapsing
+        // them to one was a real defect.** A delay running past the capture's
+        // far edge does consume the whole band — but a delay that was already
+        // over before the capture opened means every drawn microsecond here is
+        // execution, and the old `unwrap_or(to)` drew that band as 100% delay.
+        // That is the common case, not the rare one: a step's delay runs first,
+        // so a tap scoped to open partway into a step opens *after* it.
+        let delay_end_ms =
+            s.started_utc_ms.saturating_add(s.delay_before_ms as u64).min(s.ended_utc_ms);
         let exec_from = if s.delay_before_ms == 0 {
             from
         } else {
-            place(delay_end_ms.min(s.ended_utc_ms)).unwrap_or(to).clamp(from, to)
+            match place(delay_end_ms) {
+                Some(v) => v.clamp(from, to),
+                None if delay_end_ms < window_from_ms => from,
+                None => to,
+            }
         };
         bands.push(StepBand {
             index: s.index,
@@ -2376,6 +2410,65 @@ mod tests {
         assert_eq!(row.bands[0].from, view.t_from);
         assert!(!row.bands[1].clipped_start && row.bands[1].clipped_end);
         assert_eq!(row.bands[1].to, view.t_to);
+    }
+
+    /// **A delay that was over before the capture opened leaves a band that
+    /// is all execution, not all delay.** The old code could not tell an
+    /// unplaceable delay end that fell *before* the window from one that fell
+    /// after it, and answered "after" for both — drawing a step whose delay
+    /// had long since elapsed as though the whole visible band were a sleep.
+    #[test]
+    fn a_delay_that_ended_before_the_capture_opened_is_not_drawn_as_delay() {
+        let steps = [step(
+            0,
+            "settle-then-run",
+            "Pass",
+            2_000,
+            STAMPED_EPOCH_MS - 5_000,
+            STAMPED_EPOCH_MS + 300,
+        )];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+            .expect("parses");
+        let band = &view.steps.expect("placed").bands[0];
+        assert!(band.clipped_start);
+        assert_eq!(band.exec_from, band.from, "the 2 s delay ended 3 s before the first record");
+        assert!(band.to > band.from);
+    }
+
+    /// The other side of the same fork, which was always right and stays so: a
+    /// delay still running when the capture closed consumes the whole band.
+    #[test]
+    fn a_delay_still_running_at_the_captures_end_consumes_the_band() {
+        let steps = [step(
+            0,
+            "long-settle",
+            "Pass",
+            60_000,
+            STAMPED_EPOCH_MS + 100,
+            STAMPED_EPOCH_MS + 90_000,
+        )];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+            .expect("parses");
+        let band = &view.steps.expect("placed").bands[0];
+        assert_eq!(band.exec_from, band.to, "the declared delay outlasts the capture");
+    }
+
+    /// **A step that encloses the whole capture is the one most worth
+    /// drawing, and it used to be the one that vanished.** Neither of its
+    /// edges is inside the window, so neither can be placed — which the old
+    /// code read as "no position at all" and dropped. A tap opened and closed
+    /// inside one long step is an ordinary scope, not an exotic one.
+    #[test]
+    fn a_step_enclosing_the_whole_capture_is_drawn_clipped_at_both_ends() {
+        let steps =
+            [step(0, "drain-bds", "Pass", 0, STAMPED_EPOCH_MS - 5_000, STAMPED_EPOCH_MS + 60_000)];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+            .expect("parses");
+        let row = view.steps.expect("placed");
+        assert_eq!(row.bands.len(), 1, "the step running for the whole trace must be drawn");
+        assert!(row.bands[0].clipped_start && row.bands[0].clipped_end);
+        assert_eq!(row.bands[0].from, view.t_from);
+        assert_eq!(row.bands[0].to, view.t_to);
     }
 
     /// **When the axis already is Core's clock, there is nothing to project.**

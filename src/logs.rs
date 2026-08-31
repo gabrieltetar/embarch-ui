@@ -105,23 +105,32 @@ fn publish_new_lines(previous: &mut Vec<String>, latest: Vec<String>, tx: &watch
 }
 
 /// `previous`/`new` are both "last `POLL_TAIL` lines of the same
-/// append-only file," fetched a `POLL_INTERVAL` apart. Anchors on
-/// `previous`'s last line, found by scanning `new` from the end backward
-/// (the most recent matching occurrence, in case that exact line repeats
-/// earlier in the window too) — everything after it is genuinely new.
-/// If that anchor line isn't found in `new` at all — either nothing
-/// changed (`new == previous`) or more than `POLL_TAIL` lines were
-/// appended in one interval, aging the anchor out of the window entirely
-/// — falls back to replaying the whole new window rather than silently
-/// dropping content; a few duplicate lines in a debug viewer is a smaller
-/// problem than missing ones.
+/// append-only file," fetched a `POLL_INTERVAL` apart. The window can only
+/// have slid forward, so the two overlap as a *run*: some suffix of
+/// `previous` is the same stretch of file as the matching-length prefix of
+/// `new`. Finds the longest such overlap and publishes whatever follows it.
+/// If there is no overlap at all — more than `POLL_TAIL` lines were appended
+/// in one interval, aging the whole previous window out — falls back to
+/// replaying the whole new window rather than silently dropping content; a
+/// few duplicate lines in a debug viewer is a smaller problem than missing
+/// ones.
+///
+/// **Matching a run rather than one anchor line is load-bearing.** This used
+/// to anchor on `previous`'s last line alone, found by scanning `new`
+/// backward for its most recent occurrence — which silently swallowed every
+/// line between the real anchor and a *later* identical line, and log lines
+/// repeat verbatim all the time (a retry, a heartbeat, a stack frame). The
+/// window is a contiguous run of one file, so the position of the previous
+/// window's end is pinned by the whole overlap, not by one line that happens
+/// to appear twice.
 fn diff_new_lines(previous: &[String], new: &[String]) -> Vec<String> {
     if previous == new {
         return Vec::new();
     }
-    if let Some(anchor) = previous.last() {
-        if let Some(pos) = new.iter().rposition(|line| line == anchor) {
-            return new[pos + 1..].to_vec();
+    let max_overlap = previous.len().min(new.len());
+    for k in (1..=max_overlap).rev() {
+        if previous[previous.len() - k..] == new[..k] {
+            return new[k..].to_vec();
         }
     }
     new.to_vec()
@@ -170,10 +179,23 @@ mod tests {
         assert_eq!(diff_new_lines(&[], &new), new);
     }
 
+    /// The regression the one-line anchor got wrong: "repeat" appears again
+    /// later in the new window, and anchoring on its *last* occurrence
+    /// swallowed "middle" and the second "repeat" outright. Every line after
+    /// the previous window is new, however often any of them repeats.
     #[test]
-    fn repeated_anchor_line_uses_the_most_recent_occurrence() {
+    fn a_line_repeating_later_in_the_window_does_not_swallow_what_precedes_it() {
         let previous = lines(&["start", "repeat"]);
         let new = lines(&["start", "repeat", "middle", "repeat", "end"]);
-        assert_eq!(diff_new_lines(&previous, &new), lines(&["end"]));
+        assert_eq!(diff_new_lines(&previous, &new), lines(&["middle", "repeat", "end"]));
+    }
+
+    /// A window made entirely of identical lines still advances by exactly
+    /// what was appended — the longest overlap is the whole previous window.
+    #[test]
+    fn identical_repeated_lines_advance_by_what_was_appended() {
+        let previous = lines(&["tick", "tick", "tick"]);
+        let new = lines(&["tick", "tick", "tick", "tick"]);
+        assert_eq!(diff_new_lines(&previous, &new), lines(&["tick"]));
     }
 }
