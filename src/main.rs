@@ -102,6 +102,25 @@ pub(crate) struct AppState {
     /// them by arrival order, not by the timestamps on the lines — the Debug
     /// tab picks a source instead.
     api_logs_rx: watch::Receiver<Vec<String>>,
+    /// The most recently decoded trace, kept whole and server-side.
+    ///
+    /// **This is what makes the windowed route affordable** (design.md §3
+    /// decision 18). Binning a window is arithmetic over spans that are
+    /// already decoded; re-fetching a 13 MB CSV from Core and re-decoding it
+    /// per pan would move the cost the decision removes rather than remove it.
+    /// One entry, because the tab shows one trace at a time and a second
+    /// entry would only ever hold the one before it — and `GET
+    /// /api/trace/{study}/{tap}` re-decodes unconditionally, so **loading the
+    /// view is the refresh**, rather than there being a staleness rule nobody
+    /// can see.
+    trace_cache: Arc<tokio::sync::Mutex<Option<CachedTrace>>>,
+}
+
+/// One decoded capture, keyed by the study and tap it was decoded from.
+struct CachedTrace {
+    study_id: String,
+    tap: String,
+    view: Arc<trace::TraceView>,
 }
 
 /// `main` spawns the whole tokio runtime on a dedicated big-stack thread
@@ -157,7 +176,15 @@ async fn async_main() -> anyhow::Result<()> {
     let (api_logs_tx, api_logs_rx) = watch::channel(Vec::new());
     tokio::spawn(logs::api_poll_loop(api_logs_tx));
 
-    let state = AppState { snapshot_rx: rx, core, poke, study_designer, logs_rx, api_logs_rx };
+    let state = AppState {
+        snapshot_rx: rx,
+        core,
+        poke,
+        study_designer,
+        logs_rx,
+        api_logs_rx,
+        trace_cache: Arc::new(tokio::sync::Mutex::new(None)),
+    };
 
     let app = Router::new()
         .route("/", get(index))
@@ -170,6 +197,7 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/signals/{name}", axum::routing::delete(api_remove_signal))
         .route("/api/trace/{study_id}", get(api_trace_taps))
         .route("/api/trace/{study_id}/{name}", get(api_trace_view))
+        .route("/api/trace/{study_id}/{name}/bins", get(api_trace_bins))
         .route(
             "/api/study-designer/project",
             get(study_designer::api_project).post(study_designer::api_open_project),
@@ -436,40 +464,113 @@ async fn api_trace_view(
     State(state): State<AppState>,
     axum::extract::Path((study_id, name)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
-    let index = match state.core.study_streams(&study_id).await {
+    match decode_trace(&state, &study_id, &name).await {
+        Ok(view) => {
+            // Loading the view *is* the refresh: this route always re-fetches
+            // and re-decodes, and what it decoded is what `/bins` then answers
+            // from until the next load.
+            let body = (StatusCode::OK, Json(view.as_ref())).into_response();
+            *state.trace_cache.lock().await =
+                Some(CachedTrace { study_id, tap: name, view });
+            body
+        }
+        Err(resp) => resp,
+    }
+}
+
+/// One window of one tap's timeline, binned server-side — the route the tab
+/// actually draws from (design.md §3 decision 18).
+///
+/// `from`/`to` are in the view's own [`trace::TraceView::unit`]s and default
+/// to the whole capture; `width` is the number of bins, which is the plot's
+/// width in pixels. At most `width` runs come back per lane, whatever the
+/// dataset holds.
+async fn api_trace_bins(
+    State(state): State<AppState>,
+    axum::extract::Path((study_id, name)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<TraceBinsQuery>,
+) -> impl IntoResponse {
+    let cached = {
+        let guard = state.trace_cache.lock().await;
+        guard
+            .as_ref()
+            .filter(|c| c.study_id == study_id && c.tap == name)
+            .map(|c| c.view.clone())
+    };
+    // A miss is a deep link straight into a window, or a UI process that was
+    // restarted under an open tab. Decoding it here rather than answering
+    // `409` keeps that case working; it is the slow path by construction,
+    // since the next request for the same tap hits the cache.
+    let view = match cached {
+        Some(view) => view,
+        None => match decode_trace(&state, &study_id, &name).await {
+            Ok(view) => {
+                *state.trace_cache.lock().await = Some(CachedTrace {
+                    study_id: study_id.clone(),
+                    tap: name.clone(),
+                    view: view.clone(),
+                });
+                view
+            }
+            Err(resp) => return resp,
+        },
+    };
+    let from = q.from.unwrap_or(view.t_from);
+    let to = q.to.unwrap_or(view.t_to);
+    match trace::bin_window(&view, from, to, q.width.unwrap_or(1)) {
+        Ok(bins) => (StatusCode::OK, Json(bins)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceBinsQuery {
+    from: Option<u64>,
+    to: Option<u64>,
+    width: Option<usize>,
+}
+
+/// Fetches one tap's rendered CSV from Core and decodes it into a
+/// [`trace::TraceView`]. The error arm is the HTTP response to send.
+async fn decode_trace(
+    state: &AppState,
+    study_id: &str,
+    name: &str,
+) -> Result<Arc<trace::TraceView>, axum::response::Response> {
+    let index = match state.core.study_streams(study_id).await {
         Ok(Some(index)) => index,
         Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("study '{study_id}' recorded no streams"))
-                .into_response()
+            return Err((StatusCode::NOT_FOUND, format!("study '{study_id}' recorded no streams"))
+                .into_response())
         }
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()),
     };
     let Some(entry) = index.streams.iter().find(|e| e.name == name) else {
         let declared: Vec<&str> = index.streams.iter().map(|e| e.name.as_str()).collect();
-        return (
+        return Err((
             StatusCode::NOT_FOUND,
             format!("study '{study_id}' declared no tap named '{name}' — it declared: {}",
                 if declared.is_empty() { "(none)".to_string() } else { declared.join(", ") }),
         )
-            .into_response();
+            .into_response());
     };
     if !entry.rendered {
         // Without a rendering there is nothing decoded to draw, and drawing
         // the raw bytes as if they were a timeline is the one thing this view
         // must not do. Core's own note usually says why.
-        return (
+        return Err((
             StatusCode::CONFLICT,
             format!(
                 "tap '{name}' has no decoded rendering, so there is no timeline to draw. {}",
                 entry.note.clone().unwrap_or_else(|| "Core recorded no reason.".to_string())
             ),
         )
-            .into_response();
+            .into_response());
     }
 
-    let bytes = match state.core.get_study_stream(&study_id, &name, false).await {
+    let bytes = match state.core.get_study_stream(study_id, name, false).await {
         Ok(bytes) => bytes,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()),
     };
     let csv = String::from_utf8_lossy(&bytes);
 
@@ -478,7 +579,7 @@ async fn api_trace_view(
     // recorded per-step stamps, or one whose `events.json` has been swept,
     // still has a perfectly good timeline to draw — the row is what goes
     // missing, and the view says so itself rather than failing the request.
-    let steps: Vec<trace::StepStamp> = match state.core.study_steps(&study_id).await {
+    let steps: Vec<trace::StepStamp> = match state.core.study_steps(study_id).await {
         Ok(Some(steps)) if steps.timed => steps
             .steps
             .into_iter()
@@ -506,8 +607,8 @@ async fn api_trace_view(
     };
 
     match trace::parse(
-        &study_id,
-        &name,
+        study_id,
+        name,
         &csv,
         entry.is_named(),
         entry.is_timed(),
@@ -515,8 +616,8 @@ async fn api_trace_view(
         entry.note.clone(),
         &steps,
     ) {
-        Ok(view) => (StatusCode::OK, Json(view)).into_response(),
-        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
+        Ok(view) => Ok(Arc::new(view)),
+        Err(e) => Err((StatusCode::UNPROCESSABLE_ENTITY, e).into_response()),
     }
 }
 

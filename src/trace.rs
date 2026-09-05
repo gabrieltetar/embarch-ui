@@ -134,13 +134,29 @@ pub struct Lane {
     pub unnamed: bool,
     /// `"thread"`, `"idle"`, `"isr"`, or `"gpio"`.
     pub kind: &'static str,
+    /// **Never serialized** — this is the 13 MB (§3 decision 18). The spans
+    /// stay server-side and reach the browser already binned, through
+    /// [`bin_window`], for the window it is about to draw. Every other field
+    /// on this struct is small and goes out whole.
+    #[serde(skip_serializing)]
     pub spans: Vec<Span>,
+    /// `spans.len()`, kept because it *is* serialized: the lane panel and the
+    /// lane label both report how many runs a subject has in the whole
+    /// capture, which is a fact about the capture rather than about a window.
+    pub span_count: usize,
+    /// Running maximum of `spans[..=i].to`, so [`first_reaching`] can binary
+    /// search it. Built once here rather than per request, and **not** over
+    /// `from`: a lane's spans overlap exactly when the capture lost a record,
+    /// and searching a lower bound on `from` loses the enclosing span (§3
+    /// decision 10's chart half). Never serialized.
+    #[serde(skip_serializing)]
+    pub max_to_prefix: Vec<u64>,
     /// Point-in-time records on this lane — `thread_create`/`thread_name`.
     pub points: Vec<PointEvent>,
 }
 
 /// One interval a subject was running, in [`TraceView::unit`]s.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Span {
     pub from: u64,
     pub to: u64,
@@ -1444,7 +1460,16 @@ pub fn parse(
             building.insert(
                 key.clone(),
                 Building {
-                    lane: Lane { key, label, unnamed, kind, spans: Vec::new(), points: Vec::new() },
+                    lane: Lane {
+                        key,
+                        label,
+                        unnamed,
+                        kind,
+                        spans: Vec::new(),
+                        span_count: 0,
+                        max_to_prefix: Vec::new(),
+                        points: Vec::new(),
+                    },
                     open: Vec::new(),
                 },
             );
@@ -1730,6 +1755,17 @@ pub fn parse(
             for span in &mut b.lane.spans {
                 span.crosses_gap = gaps.iter().any(|g| span.from < g.to && g.from < span.to);
             }
+            b.lane.span_count = b.lane.spans.len();
+            let mut running = 0u64;
+            b.lane.max_to_prefix = b
+                .lane
+                .spans
+                .iter()
+                .map(|sp| {
+                    running = running.max(sp.to);
+                    running
+                })
+                .collect();
             lanes.push(b.lane);
         }
     }
@@ -1767,6 +1803,212 @@ pub fn parse(
         lanes,
         markers,
         summary,
+    })
+}
+
+// ---- windowed binning -------------------------------------------------------
+//
+// **The last remaining cost of this view was the transfer, not the drawing.**
+// §3 decision 10's aggregation made the element count a function of pixels
+// times lanes rather than of the dataset — but it ran in the browser, so the
+// whole capture still had to get there first: 112,801 spans on the reference
+// capture, ~115 bytes of JSON each, which is essentially the entire 13 MB the
+// tab used to block on. Decision 18 moves that same aggregation to this side
+// of the wire and leaves the spans here.
+//
+// **The binning below is a transcription, not a redesign.** Every rule the
+// browser applied — attribute a span to every column it covers, count it only
+// on the column it starts in, split a run wherever a gap, a below-resolution
+// flag or an open edge changes, report a single-span run as itself and a
+// merged one as a block that refuses to state a duration — is the rule
+// applied here, because the alternative to transcribing it is two aggregations
+// that agree on the reference capture and diverge somewhere nobody looked.
+// `bins_match_the_browser_aggregation_they_replace` holds the browser's
+// version and compares the two window by window.
+
+/// The widest bin grid one request may ask for.
+///
+/// A bin is a pixel column, so a legitimate request is the plot's width — a
+/// four-figure number. The cap exists so a hand-written query cannot make the
+/// server allocate an arbitrary grid, not because a view approaches it.
+pub const MAX_BINS: usize = 8_192;
+
+/// This column is covered by at least one span. Every other flag qualifies
+/// this one; a zero-flag column is drawn as nothing at all.
+pub const BIN_ON: u8 = 1;
+/// At least one span in this run overlaps a [`Gap`], so its continuity is not
+/// established. Drawn hatched.
+pub const BIN_CROSSES_GAP: u8 = 2;
+/// At least one span in this run is below the capture's resolution.
+pub const BIN_BELOW_RESOLUTION: u8 = 4;
+/// At least one span in this run is missing an opening or a closing record, so
+/// its extent is a shape rather than a measurement.
+pub const BIN_OPEN_EDGE: u8 = 8;
+
+/// One lane's occupancy over a contiguous stretch of bins that all carry the
+/// same flags.
+///
+/// `count` counts the spans that **begin** inside the run, not the spans that
+/// touch it — so a span covering forty columns is counted once, and the total
+/// over a lane's runs is the number of runs visible in the window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BinRun {
+    /// First bin, inclusive, in `0..width`.
+    pub c0: usize,
+    /// Last bin, inclusive.
+    pub c1: usize,
+    /// `BIN_*`, or-ed over every span touching the run.
+    pub flags: u8,
+    pub count: usize,
+    /// The one span this run is, when it is exactly one. `None` on a merged
+    /// block — which is what stops the tab reporting a block's width as a
+    /// duration (§3 decision 10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one: Option<Span>,
+}
+
+/// One lane, binned over the requested window.
+#[derive(Debug, Clone, Serialize)]
+pub struct BinnedLane {
+    /// [`Lane::key`], which is what the caller matches against the lane list
+    /// it already has from the view.
+    pub key: String,
+    /// At most `width` of them: runs are disjoint stretches of bins.
+    pub runs: Vec<BinRun>,
+    /// How many spans of this lane fell in the window, before merging.
+    pub visible: usize,
+}
+
+/// Every lane binned over one window — the reply to `?from&to&width`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BinnedWindow {
+    pub study_id: String,
+    pub tap: String,
+    /// The window actually binned, after clamping into the capture. A caller
+    /// that asked for something outside it is told what it got rather than
+    /// being given bins whose positions it would misplace.
+    pub from: u64,
+    pub to: u64,
+    pub width: usize,
+    /// [`TraceView::unit`], repeated so a reply is self-describing.
+    pub unit: &'static str,
+    pub lanes: Vec<BinnedLane>,
+}
+
+/// Index of the first span in this lane that can still reach `t`.
+///
+/// **Not a lower bound on `from`, and that distinction was a real defect** —
+/// a lane's spans overlap exactly when the capture lost a record, and a
+/// step-back search over `from` halts on the first nested span and loses the
+/// enclosing one (§3 decision 10's chart half). The search is over
+/// [`Lane::max_to_prefix`], which is non-decreasing by construction.
+fn first_reaching(lane: &Lane, t: u64) -> usize {
+    lane.max_to_prefix.partition_point(|&m| m < t)
+}
+
+/// One lane's spans in `[from, to]`, merged into per-bin occupancy runs.
+fn bin_lane(lane: &Lane, from: u64, to: u64, width: usize) -> BinnedLane {
+    let mut flags = vec![0u8; width];
+    let mut starts = vec![0usize; width];
+    let mut one: Vec<Option<&Span>> = vec![None; width];
+    let scale = width as f64 / (to - from).max(1) as f64;
+    let mut visible = 0usize;
+
+    // Everything before this provably ends before the window opens.
+    for sp in &lane.spans[first_reaching(lane, from).min(lane.spans.len())..] {
+        if sp.from > to {
+            break;
+        }
+        if sp.to < from {
+            continue;
+        }
+        let mut c0 = ((sp.from.max(from) - from) as f64 * scale).floor() as usize;
+        let mut c1 = ((sp.to.min(to) - from) as f64 * scale).floor() as usize;
+        if c0 > width - 1 {
+            c0 = width - 1;
+        }
+        if c1 < c0 {
+            c1 = c0;
+        }
+        if c1 > width - 1 {
+            c1 = width - 1;
+        }
+        let mut f = BIN_ON;
+        if sp.crosses_gap {
+            f |= BIN_CROSSES_GAP;
+        }
+        if sp.below_resolution {
+            f |= BIN_BELOW_RESOLUTION;
+        }
+        if sp.open_start || sp.open_end {
+            f |= BIN_OPEN_EDGE;
+        }
+        for c in flags.iter_mut().take(c1 + 1).skip(c0) {
+            *c |= f;
+        }
+        // Counted on the column it starts in only, so a wide span is one run
+        // and not one per column it covers.
+        starts[c0] += 1;
+        one[c0] = if starts[c0] == 1 { Some(sp) } else { None };
+        visible += 1;
+    }
+
+    let mut runs: Vec<BinRun> = Vec::new();
+    let mut col = 0usize;
+    while col < width {
+        let f = flags[col];
+        if f == 0 {
+            col += 1;
+            continue;
+        }
+        let start = col;
+        let mut count = 0usize;
+        let mut only: Option<&Span> = None;
+        while col < width && flags[col] == f {
+            count += starts[col];
+            if starts[col] == 1 && only.is_none() {
+                only = one[col];
+            }
+            col += 1;
+        }
+        runs.push(BinRun {
+            c0: start,
+            c1: col - 1,
+            flags: f,
+            count,
+            one: if count == 1 { only.cloned() } else { None },
+        });
+    }
+    BinnedLane { key: lane.key.clone(), runs, visible }
+}
+
+/// Bins every lane of `view` over one window.
+///
+/// **The window is clamped rather than refused**, and the reply says what it
+/// clamped to: a caller that asked for a window reaching past the capture is
+/// asking a sensible question about the edge of it, and the alternative is a
+/// `400` in the middle of a drag. A `width` of zero, or one past
+/// [`MAX_BINS`], is refused — neither is a window, it is a malformed request.
+pub fn bin_window(
+    view: &TraceView,
+    from: u64,
+    to: u64,
+    width: usize,
+) -> Result<BinnedWindow, String> {
+    if width == 0 || width > MAX_BINS {
+        return Err(format!("width must be between 1 and {MAX_BINS}, not {width}"));
+    }
+    let full_to = view.t_to.max(view.t_from + 1);
+    let from = from.clamp(view.t_from, full_to);
+    let to = to.clamp(from, full_to);
+    Ok(BinnedWindow {
+        study_id: view.study_id.clone(),
+        tap: view.tap.clone(),
+        from,
+        to,
+        width,
+        unit: view.unit,
+        lanes: view.lanes.iter().map(|l| bin_lane(l, from, to, width)).collect(),
     })
 }
 
@@ -2780,6 +3022,14 @@ mod tests {
     /// the browser half can be driven against real data instead of a
     /// hand-written object.
     ///
+    /// **Two files now, because the tab makes two calls** (§3 decision 18):
+    /// the view carries everything but the spans, and the chart is drawn from
+    /// a window of bins. `EMBARCH_TRACE_BINS_JSON` is what
+    /// `/api/trace/{study}/{tap}/bins` answers for the whole capture at a
+    /// 1,170-bin plot — the harness's first paint. Optional, so the older
+    /// one-file invocation still works for anything that only needs the
+    /// panels.
+    ///
     /// `#[ignore]`d: it writes a file, and its only consumer is a manual
     /// check. There is no `node` on this bench, so the render path is exercised
     /// by re-evaluating `app.js`'s IIFE body in headless Firefox against these
@@ -2788,6 +3038,7 @@ mod tests {
     ///
     /// ```text
     /// EMBARCH_TRACE_VIEW_JSON=$HOME/.embarch-uicheck/view.json \
+    /// EMBARCH_TRACE_BINS_JSON=$HOME/.embarch-uicheck/bins.json \
     ///     cargo test dump_a_view_for_the_browser_harness -- --ignored
     /// ```
     #[test]
@@ -2795,8 +3046,13 @@ mod tests {
     fn dump_a_view_for_the_browser_harness() {
         let path = std::env::var("EMBARCH_TRACE_VIEW_JSON")
             .expect("set EMBARCH_TRACE_VIEW_JSON to an output path");
-        let json = serde_json::to_string(&stamped()).expect("serializes");
-        std::fs::write(&path, json).expect("writes");
+        let view = stamped();
+        std::fs::write(&path, serde_json::to_string(&view).expect("serializes")).expect("writes");
+        if let Ok(bins_path) = std::env::var("EMBARCH_TRACE_BINS_JSON") {
+            let bins = bin_window(&view, view.t_from, view.t_to, 1_170).expect("bins");
+            std::fs::write(&bins_path, serde_json::to_string(&bins).expect("serializes"))
+                .expect("writes");
+        }
     }
 
     #[test]
@@ -2997,6 +3253,310 @@ mod load_summary_tests {
     }
 }
 
+/// **The browser's aggregation, kept, so the server's cannot drift from it.**
+///
+/// `assets/app.js` did this arithmetic on the whole capture until §3 decision
+/// 18 moved it behind `?from&to&width`. The version below is a transcription
+/// of the `traceAggregateLane` that shipped — same clamping order, same
+/// float scale, same four split flags, same "counted on the column it starts
+/// in" rule — and `bins_match_the_browser_aggregation_they_replace` runs the
+/// two against each other window by window over both committed captures.
+///
+/// **It is deliberately the naive shape.** It scans every span of a lane
+/// rather than binary searching `max_to_prefix`, and it re-derives the runs by
+/// a plain forward pass, so the production binner's search is under test
+/// rather than being restated by its own reference. Losing the enclosing span
+/// of an overlapping pair is the exact defect §3 decision 10 records finding
+/// on the browser side, and it is invisible to a reference that shares the
+/// search.
+#[cfg(test)]
+mod browser_reference {
+    // The indexing below is the JavaScript's, kept literally: an idiomatic
+    // iterator rewrite is exactly the sort of tidying that turns a reference
+    // implementation into a second guess at the thing it is supposed to pin.
+    #![allow(clippy::needless_range_loop)]
+    use super::*;
+
+    pub(super) fn aggregate_lane(lane: &Lane, from: u64, to: u64, cols: usize) -> Vec<BinRun> {
+        let mut flags = vec![0u8; cols];
+        let mut starts = vec![0usize; cols];
+        let mut one: Vec<Option<Span>> = vec![None; cols];
+        let scale = cols as f64 / std::cmp::max(1, to - from) as f64;
+
+        for sp in &lane.spans {
+            if sp.from > to {
+                break;
+            }
+            if sp.to < from {
+                continue;
+            }
+            let mut c0 = ((std::cmp::max(sp.from, from) - from) as f64 * scale).floor() as i64;
+            let mut c1 = ((std::cmp::min(sp.to, to) - from) as f64 * scale).floor() as i64;
+            if c0 < 0 {
+                c0 = 0;
+            }
+            if c0 > cols as i64 - 1 {
+                c0 = cols as i64 - 1;
+            }
+            if c1 < c0 {
+                c1 = c0;
+            }
+            if c1 > cols as i64 - 1 {
+                c1 = cols as i64 - 1;
+            }
+            let (c0, c1) = (c0 as usize, c1 as usize);
+            let mut f = 1u8;
+            if sp.crosses_gap {
+                f |= 2;
+            }
+            if sp.below_resolution {
+                f |= 4;
+            }
+            if sp.open_start || sp.open_end {
+                f |= 8;
+            }
+            for c in c0..=c1 {
+                flags[c] |= f;
+            }
+            starts[c0] += 1;
+            one[c0] = if starts[c0] == 1 { Some(sp.clone()) } else { None };
+        }
+
+        let mut runs = Vec::new();
+        let mut col = 0usize;
+        while col < cols {
+            let f = flags[col];
+            if f == 0 {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            let mut count = 0usize;
+            let mut only: Option<Span> = None;
+            while col < cols && flags[col] == f {
+                count += starts[col];
+                if starts[col] == 1 && only.is_none() {
+                    only = one[col].clone();
+                }
+                col += 1;
+            }
+            runs.push(BinRun {
+                c0: start,
+                c1: col - 1,
+                flags: f,
+                count,
+                one: if count == 1 { only } else { None },
+            });
+        }
+        runs
+    }
+}
+
+#[cfg(test)]
+mod binning_tests {
+    use super::tests::{no_clock, real, stamped};
+    use super::*;
+
+    /// Windows worth binning: the whole capture, each half, each quarter, and
+    /// a few narrow ones near both edges and in the middle — the shapes a
+    /// reader's wheel and drag actually produce.
+    fn windows(view: &TraceView) -> Vec<(u64, u64)> {
+        let (a, b) = (view.t_from, view.t_to.max(view.t_from + 1));
+        let extent = b - a;
+        let mut out = vec![(a, b)];
+        for parts in [2u64, 4, 8, 32] {
+            let step = (extent / parts).max(1);
+            for k in 0..parts {
+                out.push((a + k * step, a + (k + 1) * step));
+            }
+        }
+        out.push((a, a + 1));
+        out.push((b.saturating_sub(1), b));
+        out
+    }
+
+    /// **The pinning test the move is only safe because of.** The picture the
+    /// server bins and the picture the browser used to bin are the same
+    /// picture — every run, every flag, every count, every single-span
+    /// tooltip — across both committed captures and every window shape a
+    /// reader can produce.
+    #[test]
+    fn bins_match_the_browser_aggregation_they_replace() {
+        for view in [real(), stamped(), no_clock()] {
+            for (from, to) in windows(&view) {
+                for width in [1usize, 7, 128, 1_170] {
+                    let binned = bin_window(&view, from, to, width).expect("bins");
+                    assert_eq!(binned.lanes.len(), view.lanes.len(), "one reply row per lane");
+                    for (lane, got) in view.lanes.iter().zip(&binned.lanes) {
+                        assert_eq!(lane.key, got.key);
+                        let want =
+                            browser_reference::aggregate_lane(lane, binned.from, binned.to, width);
+                        assert_eq!(
+                            got.runs, want,
+                            "lane {} window {from}..{to} width {width}",
+                            lane.key
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The endpoint's own contract: **at most `width` bins**, whatever the
+    /// dataset holds. Runs are disjoint stretches of the grid, so this is a
+    /// property rather than a cap that could truncate anything.
+    #[test]
+    fn a_lane_never_returns_more_runs_than_bins_asked_for() {
+        let view = stamped();
+        for width in [1usize, 3, 64, 900] {
+            let binned = bin_window(&view, view.t_from, view.t_to, width).expect("bins");
+            for lane in &binned.lanes {
+                assert!(lane.runs.len() <= width, "{} runs into {width} bins", lane.runs.len());
+                let mut last: Option<usize> = None;
+                for run in &lane.runs {
+                    assert!(run.c0 <= run.c1 && run.c1 < width);
+                    if let Some(prev) = last {
+                        assert!(run.c0 > prev, "runs are disjoint and ordered");
+                    }
+                    last = Some(run.c1);
+                }
+            }
+        }
+    }
+
+    /// Every span in the window is counted exactly once — the property that
+    /// makes a merged block's "N run(s)" a real number rather than a count of
+    /// columns.
+    #[test]
+    fn every_visible_span_is_counted_once() {
+        let view = stamped();
+        let extent = view.t_to - view.t_from;
+        let (from, to) = (view.t_from + extent / 5, view.t_from + extent / 2);
+        let binned = bin_window(&view, from, to, 400).expect("bins");
+        for (lane, got) in view.lanes.iter().zip(&binned.lanes) {
+            let expected =
+                lane.spans.iter().filter(|s| s.from <= to && s.to >= from).count();
+            assert_eq!(got.visible, expected, "lane {}", lane.key);
+            assert_eq!(
+                got.runs.iter().map(|r| r.count).sum::<usize>(),
+                expected,
+                "lane {}",
+                lane.key
+            );
+        }
+    }
+
+    /// A run that is exactly one span carries that span, so zooming in still
+    /// gets the numbers; a merged one carries none, so nothing can read a
+    /// block's width as a duration (§3 decision 10).
+    #[test]
+    fn only_an_unmerged_run_carries_its_span() {
+        let view = stamped();
+        let wide = bin_window(&view, view.t_from, view.t_to, 4).expect("bins");
+        let mut merged = 0;
+        for lane in &wide.lanes {
+            for run in &lane.runs {
+                assert_eq!(run.one.is_some(), run.count == 1, "{run:?}");
+                if run.count > 1 {
+                    merged += 1;
+                }
+            }
+        }
+        assert!(merged > 0, "four bins over the whole capture must merge something");
+    }
+
+    /// A span whose continuity is not established must never share a run with
+    /// one that is — the quiet lie the split flags exist to prevent, checked
+    /// on the side of the wire it now happens on.
+    #[test]
+    fn a_gap_crossing_span_never_merges_into_a_clean_run() {
+        let view = stamped();
+        assert!(
+            view.lanes.iter().any(|l| l.spans.iter().any(|s| s.crosses_gap)),
+            "the committed capture has gap-crossing spans to test with"
+        );
+        for width in [16usize, 256] {
+            let binned = bin_window(&view, view.t_from, view.t_to, width).expect("bins");
+            for (lane, got) in view.lanes.iter().zip(&binned.lanes) {
+                for run in &got.runs {
+                    let touching: Vec<&Span> = lane
+                        .spans
+                        .iter()
+                        .filter(|s| {
+                            let scale = width as f64 / (binned.to - binned.from).max(1) as f64;
+                            if s.to < binned.from || s.from > binned.to {
+                                return false;
+                            }
+                            let c0 = ((s.from.max(binned.from) - binned.from) as f64 * scale)
+                                .floor() as usize;
+                            let c1 = ((s.to.min(binned.to) - binned.from) as f64 * scale).floor()
+                                as usize;
+                            c0.min(width - 1) <= run.c1 && c1.min(width - 1) >= run.c0
+                        })
+                        .collect();
+                    if run.flags & BIN_CROSSES_GAP == 0 {
+                        assert!(
+                            touching.iter().all(|s| !s.crosses_gap),
+                            "lane {} run {run:?} is drawn clean over a gap-crossing span",
+                            lane.key
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A window past the ends of the capture is clamped and **says so**, so a
+    /// caller places the bins it gets rather than the bins it asked for.
+    #[test]
+    fn a_window_outside_the_capture_is_clamped_and_reported() {
+        let view = stamped();
+        let binned = bin_window(&view, 0, u64::MAX, 100).expect("bins");
+        assert_eq!(binned.from, view.t_from);
+        assert_eq!(binned.to, view.t_to);
+        assert_eq!(binned.unit, view.unit);
+    }
+
+    /// A width of zero is not a narrow window, it is a malformed request.
+    #[test]
+    fn a_zero_or_oversized_width_is_refused() {
+        let view = stamped();
+        assert!(bin_window(&view, view.t_from, view.t_to, 0).is_err());
+        assert!(bin_window(&view, view.t_from, view.t_to, MAX_BINS + 1).is_err());
+        assert!(bin_window(&view, view.t_from, view.t_to, MAX_BINS).is_ok());
+    }
+
+    /// **The measurement the whole decision rests on.** The spans are what the
+    /// browser was waiting for: with them out of the payload, what a view
+    /// costs stops tracking the dataset. Ratios rather than absolute bytes, so
+    /// the assertion survives an added field.
+    #[test]
+    fn the_view_payload_no_longer_carries_the_dataset() {
+        let view = stamped();
+        let json = serde_json::to_string(&view).expect("serializes");
+        assert!(!json.contains("\"spans\""), "spans must not reach the browser");
+        assert!(json.contains("\"span_count\""), "how many runs a lane has still does");
+
+        let spans: usize = view.lanes.iter().map(|l| l.spans.len()).sum();
+        let span_bytes: usize = view
+            .lanes
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| serde_json::to_string(s).expect("serializes").len() + 1)
+            .sum();
+        assert!(
+            span_bytes > json.len(),
+            "the {spans} spans ({span_bytes} B) were the payload, not the {} B beside them",
+            json.len()
+        );
+
+        // And what replaces them is bounded by the grid, not by the capture.
+        let bins = serde_json::to_string(&bin_window(&view, view.t_from, view.t_to, 1_170).unwrap())
+            .expect("serializes");
+        assert!(bins.len() < span_bytes, "a window costs less than the whole capture");
+    }
+}
+
 #[cfg(test)]
 mod scratch_view {
     /// Summarises an arbitrary rendered `*.trace.csv` on disk, so a change to
@@ -3023,6 +3583,24 @@ mod scratch_view {
             view.records_lost,
             view.out_of_order_rows
         );
+        // What the tab actually pays, which is the thing §3 decision 18 moved.
+        let spans: usize = view.lanes.iter().map(|l| l.spans.len()).sum();
+        let span_bytes: usize = view
+            .lanes
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|sp| serde_json::to_string(sp).expect("serializes").len() + 1)
+            .sum();
+        let view_bytes = serde_json::to_string(&view).expect("serializes").len();
+        let bins_bytes = serde_json::to_string(
+            &super::bin_window(&view, view.t_from, view.t_to, 1_170).expect("bins"),
+        )
+        .expect("serializes")
+        .len();
+        println!(
+            "spans={spans} span_json={span_bytes} view_json={view_bytes} bins_json_1170={bins_bytes}"
+        );
+
         let s = &view.summary;
         println!(
             "window={} {} thread={} idle_rec={} isr={} unaccounted={} below_resolution_spans={}",

@@ -3390,6 +3390,7 @@
       return traceShowError(resp.status + " " + text);
     }
     traceView = JSON.parse(text);
+    traceForgetBins();
     renderTrace();
   }
 
@@ -3814,10 +3815,6 @@
   var traceLaneOrder = null;
   var traceHidden = null;
   var traceDrawQueued = false;
-  /// Reused per-column aggregation buffers. Allocated once per plot width and
-  /// cleared per lane — a fresh `Uint8Array` per lane per frame would allocate
-  /// 26 arrays sixty times a second while a reader is dragging.
-  var traceScratch = null;
 
   function traceFullWin(view) {
     return { from: view.t_from, to: Math.max(view.t_from + 1, view.t_to) };
@@ -3843,7 +3840,16 @@
     var extent = full.to - full.from;
     var w = Math.min(extent, Math.max(traceMinWin(view), win.to - win.from));
     var from = Math.min(Math.max(win.from, full.from), full.to - w);
-    return { from: from, to: from + w };
+    // **Rounded to whole units, and that is load-bearing rather than tidy.**
+    // The axis is integers (`traceMinWin` says why), but zooming at the
+    // pointer computes an anchor from a pixel fraction, so every wheel notch
+    // produced a fractional window. That was invisible while aggregation
+    // happened here and float bounds only shifted a rect by a sub-pixel; now
+    // the window is a request the server answers, and `?from=1234.56` is not a
+    // narrower window, it is a malformed query. Rounding the width first and
+    // the origin second keeps the zoom floor exact.
+    w = Math.round(w);
+    return { from: Math.round(from), to: Math.round(from) + w };
   }
 
   function traceResetWindow(view) {
@@ -3873,147 +3879,100 @@
     return n;
   }
 
-  // ---- windowed culling and pixel-column aggregation ------------------------
+  // ---- windowed binning: the server bins, this draws ------------------------
   //
-  // **What bounds this drawing is pixels times lanes, not the dataset.** The
-  // reference capture holds 112,801 spans and, aggregated onto a 1,170 px plot
-  // across 26 lanes, draws under 2,600 rects at *every* zoom level — fewer as
-  // you zoom in, because fewer spans are in the window. That measurement is
-  // why this view is still SVG rather than a canvas: a canvas would have cost
-  // CSS-variable theming, hand-written hit-testing and the browser harness's
-  // ability to inspect what was drawn, to solve an element count that
-  // aggregation had already bounded.
+  // **What bounds this drawing is pixels times lanes, not the dataset** — and
+  // as of §3 decision 18 that bound is applied before the wire rather than
+  // after it. The view this tab loads carries no spans at all: it asks
+  // `/api/trace/{study}/{tap}/bins?from&to&width` for the window it is about
+  // to draw and gets back at most one occupancy run per pixel column per lane,
+  // whatever the capture holds. Decision 10's aggregation is unchanged and now
+  // lives in `src/trace.rs` — a span is attributed to every column it covers
+  // and counted only on the column it starts in, and a run splits wherever a
+  // gap, a below-resolution flag or an open edge changes, so a block still
+  // cannot fold an unvouched-for span into a clean-looking bar.
   //
-  // Spans arrive sorted by `from` within a lane (`trace.rs` builds them in
-  // record order off a clock the view has already vetted for monotonicity), so
-  // finding the window is a binary search rather than a scan of the lane.
+  // **Why the move was worth making at all:** the aggregation had already made
+  // *drawing* independent of dataset size, which left the transfer as the only
+  // term that still tracked it. The reference capture's 112,801 spans are
+  // essentially the whole of the 13 MB JSON the tab used to block on.
 
-  /// Index of the first span in this lane that can still reach `t`.
-  ///
-  /// **Not a lower bound on `from`, and that distinction was a real defect.**
-  /// Searching for the first `from >= t` and then stepping back over
-  /// neighbours that end at or after `t` assumes a lane's spans do not
-  /// overlap — and a lane's spans overlap exactly when the capture lost a
-  /// record. A switch-out among the losses leaves its span open to the end of
-  /// the capture (`trace.rs` draws every still-open span out to `t_to`) while
-  /// later, shorter spans on the same lane sit inside it; the step-back then
-  /// halts on the first of those and the enclosing span vanishes from every
-  /// zoomed window past it. A lane silently missing its longest run is the
-  /// kind of quiet lie this view exists to refuse.
-  ///
-  /// So the search is over the lane's running maximum of `to`, which is
-  /// non-decreasing by construction and therefore binary-searchable, rather
-  /// than over `from`. Computed once per lane and cached on it — the view
-  /// object is replaced wholesale on every load, so the cache cannot outlive
-  /// the spans it summarises.
-  function traceFirstReaching(lane, t) {
-    var spans = lane.spans;
-    var maxTo = lane.maxToPrefix;
-    if (!maxTo || maxTo.length !== spans.length) {
-      maxTo = new Float64Array(spans.length);
-      var running = -Infinity;
-      for (var k = 0; k < spans.length; k += 1) {
-        if (spans[k].to > running) running = spans[k].to;
-        maxTo[k] = running;
-      }
-      lane.maxToPrefix = maxTo;
-    }
-    var lo = 0;
-    var hi = spans.length;
-    while (lo < hi) {
-      var mid = (lo + hi) >> 1;
-      if (maxTo[mid] < t) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
-
-  // The four facts a merged run has to carry out of aggregation. They are
-  // flags on a byte rather than fields on an object because a run is split
-  // wherever they change: merging a vouched-for span into the same block as
-  // one that crosses a gap would fold an unestablished continuity into a
-  // clean-looking bar, which is exactly the quiet lie decision 10 exists to
-  // prevent. Measured on the reference capture, splitting on all four costs
-  // **nothing** — 1,937 rects either way, because open and gap-crossing spans
-  // are rare — so the honest version is also the cheap one.
-  var TRACE_F_ON = 1;
+  // Flag bits, matching `trace.rs`'s `BIN_*`. The server sets them; this file
+  // only reads them.
   var TRACE_F_GAP = 2;
   var TRACE_F_SUBRES = 4;
   var TRACE_F_OPEN = 8;
 
-  function traceScratchFor(cols) {
-    if (!traceScratch || traceScratch.cols !== cols) {
-      traceScratch = {
-        cols: cols,
-        flags: new Uint8Array(cols),
-        starts: new Int32Array(cols),
-        one: new Array(cols),
-      };
-    }
-    return traceScratch;
+  /// The bins currently held, and the window they were binned for.
+  var traceBins = null;
+  /// The window a request is currently outstanding for, as its own key.
+  var traceBinsWanted = null;
+  /// Sequence number of the newest request. A drag fires one per animation
+  /// frame and replies can land out of order; only the newest may become
+  /// `traceBins`, or a stale reply would paint an older window over a newer.
+  var traceBinsSeq = 0;
+
+  function traceBinsKey(win, cols) {
+    return win.from + ":" + win.to + ":" + cols;
   }
 
-  /// One lane's visible spans, merged into per-pixel-column occupancy runs.
+  function traceForgetBins() {
+    traceBins = null;
+    traceBinsWanted = null;
+    traceBinsSeq += 1;
+  }
+
+  /// The bins for exactly this window, or `null` after asking for them.
   ///
-  /// A span is attributed to every column it covers (so the drawing is right)
-  /// and *counted* only on the column it starts in (so a run's "N runs here"
-  /// counts each span once rather than once per column it spans).
-  function traceAggregateLane(lane, win, cols) {
-    var spans = lane.spans;
-    var s = traceScratchFor(cols);
-    s.flags.fill(0);
-    s.starts.fill(0);
-    var scale = cols / Math.max(1, win.to - win.from);
-    var visible = 0;
-    if (spans.length) {
-      // Every span from here on may reach into the window; everything before
-      // it provably ends before the window opens.
-      var i = traceFirstReaching(lane, win.from);
-      for (; i < spans.length; i += 1) {
-        var sp = spans[i];
-        if (sp.from > win.to) break;
-        if (sp.to < win.from) continue;
-        var c0 = Math.floor((Math.max(sp.from, win.from) - win.from) * scale);
-        var c1 = Math.floor((Math.min(sp.to, win.to) - win.from) * scale);
-        if (c0 < 0) c0 = 0;
-        if (c0 > cols - 1) c0 = cols - 1;
-        if (c1 < c0) c1 = c0;
-        if (c1 > cols - 1) c1 = cols - 1;
-        var f = TRACE_F_ON;
-        if (sp.crosses_gap) f |= TRACE_F_GAP;
-        if (sp.below_resolution) f |= TRACE_F_SUBRES;
-        if (sp.open_start || sp.open_end) f |= TRACE_F_OPEN;
-        for (var c = c0; c <= c1; c += 1) s.flags[c] |= f;
-        s.starts[c0] += 1;
-        s.one[c0] = s.starts[c0] === 1 ? sp : null;
-        visible += 1;
-      }
-    }
-    var runs = [];
-    var col = 0;
-    while (col < cols) {
-      var flags = s.flags[col];
-      if (!flags) {
-        col += 1;
-        continue;
-      }
-      var start = col;
-      var count = 0;
-      var only = null;
-      while (col < cols && s.flags[col] === flags) {
-        count += s.starts[col];
-        if (s.starts[col] === 1 && only === null) only = s.one[col];
-        col += 1;
-      }
-      runs.push({
-        c0: start,
-        c1: col - 1,
-        flags: flags,
-        count: count,
-        one: count === 1 ? only : null,
+  /// **Nothing is ever drawn from a different window's bins.** A held set
+  /// could be rescaled into position and would be approximately right, which
+  /// is the one thing this view does not do: a merged block's width would then
+  /// be neither its own nor any span's, and "this block's width is not any one
+  /// run's duration" would stop being the only caveat on it. So a draw with no
+  /// matching bins leaves the last correct picture on screen and returns, and
+  /// the reply schedules the redraw. The server holds the decoded capture, so
+  /// that round trip is a millisecond or two on loopback.
+  function traceBinsFor(view, win, cols) {
+    var key = traceBinsKey(win, cols);
+    if (traceBins && traceBins.key === key) return traceBins;
+    if (traceBinsWanted === key) return null;
+    traceBinsWanted = key;
+    var seq = (traceBinsSeq += 1);
+    fetch(
+      "/api/trace/" + encodeURIComponent(view.study_id) + "/" +
+      encodeURIComponent(view.tap) + "/bins?from=" + win.from + "&to=" + win.to +
+      "&width=" + cols
+    )
+      .then(function (resp) {
+        if (resp.ok) return resp.json();
+        return resp.text().then(function (t) { throw new Error(resp.status + " " + t); });
+      })
+      .then(function (data) {
+        if (seq !== traceBinsSeq || traceView !== view) return;
+        // The server clamps a window into the capture and says what it
+        // clamped to; this file clamps to the same bounds before asking, so
+        // the two agree by construction. Said out loud rather than assumed —
+        // if they ever stop agreeing the picture stalls with a reason, which
+        // is the right failure for a view whose whole point is not drawing
+        // things it cannot vouch for.
+        if (data.from !== win.from || data.to !== win.to || data.width !== cols) {
+          return traceShowError(
+            "the server binned " + data.from + "–" + data.to + " at " + data.width +
+            " bins, not the " + win.from + "–" + win.to + " at " + cols +
+            " this window asked for, so nothing was redrawn"
+          );
+        }
+        var byKey = {};
+        (data.lanes || []).forEach(function (l) { byKey[l.key] = l.runs || []; });
+        traceBins = { key: key, from: data.from, to: data.to, width: data.width, byKey: byKey };
+        traceScheduleDraw();
+      })
+      .catch(function (e) {
+        if (seq !== traceBinsSeq) return;
+        traceBinsWanted = null;
+        traceShowError("could not bin this window: " + e.message);
       });
-    }
-    return { runs: runs, visible: visible };
+    return null;
   }
 
   // ---- the study-action row -------------------------------------------------
@@ -4092,6 +4051,12 @@
       return fmtAxisT(view, t - view.t_from, span, tier);
     }
 
+    // The grid is fixed from here, so this is the first point at which the
+    // right window can be asked for. A miss leaves the previous picture up
+    // rather than clearing to an empty axis (`traceBinsFor`).
+    var bins = traceBinsFor(view, win, cols);
+    if (!bins) return;
+
     var stepped = traceStepsPlaced(view);
     var headH = TRACE_AXIS_H + (stepped ? TRACE_STEP_H + TRACE_STEP_GAP * 2 : 0);
     var bodyH = Math.max(TRACE_ROW_H, lanes.length * TRACE_ROW_H) + TRACE_BODY_PAD;
@@ -4166,7 +4131,7 @@
         'fill="' + (lane.unnamed ? "var(--text-tertiary)" : "var(--text-primary)") + '" ' +
         'font-size="11.5" font-family="IBM Plex Mono, monospace"' +
         (lane.unnamed ? ' font-style="italic"' : "") + ">" +
-        "<title>" + escapeHtml(lane.label + " — " + lane.kind + ", " + lane.spans.length + " run(s) in the whole capture") +
+        "<title>" + escapeHtml(lane.label + " — " + lane.kind + ", " + lane.span_count + " run(s) in the whole capture") +
         "</title>" + escapeHtml(lane.label) + "</text>"
       );
       if (lane.unnamed) {
@@ -4181,8 +4146,7 @@
         '" stroke="var(--border)" stroke-width="1" stroke-dasharray="2 4"/>'
       );
 
-      var agg = traceAggregateLane(lane, win, cols);
-      agg.runs.forEach(function (run) {
+      (bins.byKey[lane.key] || []).forEach(function (run) {
         var rx = plotLeft + run.c0;
         var rw = Math.max(1.5, run.c1 - run.c0 + 1);
         var crosses = (run.flags & TRACE_F_GAP) !== 0;
@@ -4581,7 +4545,7 @@
           '<span class="trace-lane-name' + (lane.unnamed ? " trace-key-unnamed" : "") + '">' +
           escapeHtml(lane.label) + "</span>" +
           '<span class="trace-lane-kind">' + escapeHtml(lane.kind) + "</span>" +
-          '<span class="trace-lane-count mono">' + lane.spans.length + "</span>" +
+          '<span class="trace-lane-count mono">' + lane.span_count + "</span>" +
           '<button class="btn btn-tiny" data-lane-up="' + escapeHtml(key) + '"' +
           (i === 0 ? " disabled" : "") + ' title="move up">&#9650;</button>' +
           '<button class="btn btn-tiny" data-lane-down="' + escapeHtml(key) + '"' +
