@@ -499,6 +499,20 @@ struct ClockAnchor {
 /// below a restart, which puts seconds between the two epochs.
 const STALE_PREFIX_MIN_US: u64 = 10_000;
 
+/// How long a leading stale prefix may be before this stops reading it as one.
+///
+/// **Assumed, not measured.** The two real prefixes anyone has seen were 6 and
+/// 18 records, and a USB-UART bridge's own FIFO plus the driver's buffer holds
+/// a few hundred bytes to a few kilobytes — hundreds of records at the very
+/// most, at an outpost record's size. 512 sits an order of magnitude above
+/// what has been observed and far below any real capture's length.
+///
+/// It is a **bound on damage, not a detector**: a splice deeper into a capture
+/// than this is not a bridge's buffer, and the answer there is the one this
+/// view already gave — refuse the DUT clock and draw on the host's, which is
+/// monotonic.
+const STALE_PREFIX_MAX_ROWS: usize = 512;
+
 /// A study's outpost tap, decoded into something drawable.
 #[derive(Debug, Clone, Serialize)]
 pub struct TraceView {
@@ -608,6 +622,19 @@ pub struct TraceView {
     /// because a backwards step exceeded the capture's own duration. The axis
     /// falls to the host's clock, which is monotonic.
     pub dut_clock_refused: bool,
+    /// How many leading rows were dropped as a stale pre-reset prefix, and how
+    /// far their clock sat from the capture's own, in microseconds.
+    ///
+    /// **Zero on every capture whose DUT clock was usable as it stood.** The
+    /// drop is a repair of a refusal, never a routine filter: see
+    /// [`stale_prefix_end`] for what has to be true before a single row goes.
+    ///
+    /// Non-zero is a fact the reader is owed rather than a tidier picture —
+    /// `rows` counts what was kept, so a view that dropped a prefix silently
+    /// would be a shorter capture with no explanation. The tab says how many
+    /// went and how far away they were.
+    pub stale_prefix_rows: usize,
+    pub stale_prefix_step_us: u64,
     /// Rows whose axis position went backwards. Expected to be zero on either
     /// clock — frames are stamped in arrival order, and the DUT's counter is
     /// unwrapped by Core before it reaches the file. Non-zero on the host
@@ -666,6 +693,137 @@ struct Row {
     /// Filled in once the axis unit is known: `dut_us`, `rx_utc_ms` or
     /// `frame_index`.
     t: u64,
+}
+
+/// Everything the axis decision needs to know about the DUT's clock over a set
+/// of rows. One pass, because it is asked **twice** — once about the whole
+/// capture, and once about what would be left after dropping a leading prefix.
+struct DutClockHealth {
+    /// Every backwards step between consecutive dated rows, microseconds.
+    ///
+    /// **Small ones are inherent and harmless.** A hook reads the counter and
+    /// *then* reserves its ring slot, so an interrupt that preempts a thread
+    /// between those two operations reserves after it but stamps before it.
+    /// The ring publishes in reservation order, so the pair comes out inverted
+    /// by however long that window is — microseconds. Refusing the clock over
+    /// that would refuse every real capture.
+    backsteps: Vec<u64>,
+    /// The largest step in **either** direction, microseconds.
+    ///
+    /// **Measured in both directions, and the second one is why.** A stale
+    /// prefix's sign depends on whether the DUT was reset in between: after a
+    /// reset the buffered pre-reset bytes are *ahead* of the fresh stream and
+    /// the step is backwards, but with no reset they are *behind* it and the
+    /// step is forwards. A backwards-only check caught the first case on a
+    /// real study and sailed straight past the second, reporting a 38-second
+    /// capture as a 563-second one. Sign is not the signal; magnitude against
+    /// the other clock is.
+    step_max: u64,
+    /// How long these rows can possibly have taken, microseconds — **the other
+    /// clock, not a threshold picked here.** The host's where there is one,
+    /// since it is monotonic; the DUT's own total span where there is not,
+    /// where the comparison degrades to "is one step most of the whole span",
+    /// which still catches a splice between two short epochs far apart.
+    bound: u64,
+    /// A step longer than these rows can have taken: two independent clocks
+    /// contradicting each other, which means the counter restarted and this
+    /// set of rows holds **two epochs**. Timing anything across that boundary
+    /// is meaningless — measured on a real study, six stale pre-reset records
+    /// at the head of a capture made the window read as 11 ms instead of 1.2 s
+    /// and gave two lanes a 9159% share.
+    broken: bool,
+}
+
+/// Reads the DUT's clock over `rows`, ignoring gap records throughout: a gap
+/// record is stamped when the *first dropped* record was lost rather than when
+/// the drain thread reported it, so its stamp legitimately sits outside the run
+/// its own frame carries and is not a step in this clock at all.
+fn dut_clock_health(rows: &[Row]) -> DutClockHealth {
+    let mut backsteps = Vec::new();
+    let mut step_max = 0u64;
+    let mut prev: Option<u64> = None;
+    for r in rows.iter().filter(|r| r.kind != Some(RecordKind::Gap)) {
+        if let Some(us) = r.dut_us {
+            if let Some(p) = prev {
+                step_max = step_max.max(us.abs_diff(p));
+                if us < p {
+                    backsteps.push(p - us);
+                }
+            }
+            prev = Some(us);
+        }
+    }
+    let span = |vals: &mut dyn Iterator<Item = u64>| {
+        let (lo, hi) = vals.fold((u64::MAX, 0u64), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        hi.saturating_sub(if lo == u64::MAX { 0 } else { lo })
+    };
+    let dut_span = span(&mut rows.iter().filter_map(|r| r.dut_us));
+    // Milliseconds against the DUT's microseconds.
+    let host_span = span(&mut rows.iter().filter_map(|r| r.rx_utc_ms)).saturating_mul(1000);
+    let bound = if host_span > 0 { host_span } else { dut_span };
+    DutClockHealth { backsteps, step_max, bound, broken: step_max > 0 && step_max > bound }
+}
+
+/// Where the capture's own stream starts, when it opens with records from
+/// before the DUT reset — the index of the first row to keep, and how far the
+/// prefix's clock sat from it.
+///
+/// **The prefix is real and `embarch-core` cannot reach it.** Core clears the
+/// signal port's input on open (`embarch-core` decision 30) and a capture still
+/// began with 18 stale records carrying a cycle count seconds from the rest,
+/// with the purge reporting no error: those bytes were already inside the
+/// USB-UART bridge or in flight, where an OS-level purge does not go. At render
+/// time the whole file is in hand, which is what makes the prefix identifiable
+/// here and not there.
+///
+/// **This runs only on a capture whose clock is already refused**, and that is
+/// the whole discrimination rather than an optimisation:
+///
+/// - The DUT's clock legitimately steps backwards by microseconds — a real
+///   capture showed 13 µs ([`DutClockHealth::backsteps`]) — and a step that
+///   small can never make [`DutClockHealth::broken`] true, so a capture
+///   carrying one is **never searched at all**. Nothing here can cost a record
+///   on a capture that renders correctly as it stands.
+/// - What is searched for is a step **longer than the rows after it took**,
+///   which is two independent clocks contradicting each other rather than a
+///   magnitude anyone chose.
+/// - It must be a **leading run**: within [`STALE_PREFIX_MAX_ROWS`], and no
+///   longer than the bulk it precedes. A prefix is a prefix only if what
+///   follows it is larger than it is.
+/// - And the drop must **fix** the contradiction — the rows after the split
+///   must read as one epoch. A capture that still contradicts itself once its
+///   head is off does not have a stale prefix; it has a reset somewhere this
+///   cannot repair, and the DUT clock is refused for it exactly as before.
+fn stale_prefix_end(rows: &[Row]) -> Option<(usize, u64)> {
+    if !dut_clock_health(rows).broken {
+        return None;
+    }
+    let dated: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.kind != Some(RecordKind::Gap) && r.dut_us.is_some())
+        .map(|(i, _)| i)
+        .collect();
+    let us = |k: usize| rows[dated[k]].dut_us.unwrap_or(0);
+    for k in 1..dated.len() {
+        // All three are monotone in `k`, so the first `k` that fails one ends
+        // the search rather than skipping a candidate.
+        if k > STALE_PREFIX_MAX_ROWS || k > dated.len() - k || dated.len() - k < 2 {
+            break;
+        }
+        let step = us(k).abs_diff(us(k - 1));
+        if step <= STALE_PREFIX_MIN_US {
+            continue;
+        }
+        let after = dut_clock_health(&rows[dated[k]..]);
+        if step > after.bound && !after.broken {
+            // Everything before this row goes, including any undated or gap
+            // rows interleaved in the prefix: they arrived in the same stale
+            // bytes and belong to the same dead epoch.
+            return Some((dated[k], step));
+        }
+    }
+    None
 }
 
 /// Builds the tie between the two clocks from **the rows this view kept**,
@@ -1181,6 +1339,21 @@ pub fn parse(
         });
     }
 
+    // ---- a stale leading prefix, dropped before any clock is read ---------
+    //
+    // See `stale_prefix_end`. Everything below — the axis tier, the anchors,
+    // the window, the spans — reads `rows` after this drop, because a prefix
+    // from before the DUT reset is not a shorter capture, it is a different
+    // one, and leaving it in is what forced the whole view onto the coarser
+    // clock.
+    let (stale_prefix_rows, stale_prefix_step_us) = match stale_prefix_end(&rows) {
+        Some((end, step)) => {
+            rows.drain(..end);
+            (end, step)
+        }
+        None => (0, 0),
+    };
+
     // The axis unit, decided once for the whole view, finest clock first. Each
     // tier requires *every* row to carry what it needs: a mixed axis is the
     // one thing worse than a coarse one.
@@ -1197,87 +1370,16 @@ pub fn parse(
 
     // ---- is the DUT's clock usable as an axis at all? --------------------
     //
-    // It is the only one of the three that can go **backwards**, and it does
-    // so for two completely different reasons that must not be conflated.
-    //
-    // **Small steps are inherent and harmless.** A hook reads the counter and
-    // *then* reserves its ring slot, so an interrupt that preempts a thread
-    // between those two operations reserves after it but stamps before it. The
-    // ring publishes in reservation order, so the pair comes out inverted by
-    // however long that window is -- microseconds. Refusing the clock over
-    // that would refuse every real capture.
-    //
-    // **A large step means the counter restarted**, i.e. the capture spans a
-    // DUT reset and contains two epochs. Timing anything across that boundary
-    // is meaningless: measured on a real study, six stale pre-reset records at
-    // the head of a capture made the window read as 11 ms instead of 1.2 s and
-    // gave two lanes a 9159% share.
-    //
-    // The line between them is drawn by **the other clock**, not by a
-    // threshold picked here: a step longer than the whole capture took is a
-    // contradiction between two independent clocks, and the host's is
-    // monotonic. With no host stamps to compare against, the DUT's own total
-    // span stands in -- a capture cannot contain a step longer than itself
-    // either way.
-    //
-    // **Measured in both directions, and the second one is why.** A stale
-    // prefix's sign depends on whether the DUT was reset in between: after a
-    // reset the buffered pre-reset bytes are *ahead* of the fresh stream and
-    // the step is backwards, but with no reset they are *behind* it and the
-    // step is forwards. A backwards-only check caught the first case on a real
-    // study and sailed straight past the second, reporting a 38-second capture
-    // as a 563-second one. Sign is not the signal; magnitude against the other
-    // clock is.
-    let dut_backsteps: Vec<u64> = {
-        let mut steps = Vec::new();
-        let mut prev: Option<u64> = None;
-        for r in rows.iter().filter(|r| r.kind != Some(RecordKind::Gap)) {
-            if let Some(us) = r.dut_us {
-                if let Some(p) = prev {
-                    if us < p {
-                        steps.push(p - us);
-                    }
-                }
-                prev = Some(us);
-            }
-        }
-        steps
-    };
+    // `dut_clock_health` answers that, and it is asked here about the rows
+    // that survived the prefix drop above. A capture that still contradicts
+    // itself after that drop holds two epochs somewhere other than its head —
+    // which is not something a render-time filter can repair, so the axis
+    // falls to the host's clock exactly as it did before.
+    let health = dut_clock_health(&rows);
+    let dut_backsteps = health.backsteps;
     let dut_backstep_max = dut_backsteps.iter().copied().max().unwrap_or(0);
-    // The largest step in *either* direction. A legitimate forward gap is a
-    // DUT that stopped emitting for a while, which is real and bounded by the
-    // capture; one longer than the capture itself is two epochs spliced
-    // together.
-    let dut_step_max = {
-        let mut worst = 0u64;
-        let mut prev: Option<u64> = None;
-        for r in rows.iter().filter(|r| r.kind != Some(RecordKind::Gap)) {
-            if let Some(us) = r.dut_us {
-                if let Some(p) = prev {
-                    worst = worst.max(us.abs_diff(p));
-                }
-                prev = Some(us);
-            }
-        }
-        worst
-    };
-    let dut_span = {
-        let vals = rows.iter().filter_map(|r| r.dut_us);
-        let (lo, hi) = vals.fold((u64::MAX, 0u64), |(lo, hi), v| (lo.min(v), hi.max(v)));
-        hi.saturating_sub(if lo == u64::MAX { 0 } else { lo })
-    };
-    let host_span = {
-        let vals = rows.iter().filter_map(|r| r.rx_utc_ms);
-        let (lo, hi) = vals.fold((u64::MAX, 0u64), |(lo, hi), v| (lo.min(v), hi.max(v)));
-        // Milliseconds against the DUT's microseconds.
-        hi.saturating_sub(if lo == u64::MAX { 0 } else { lo }).saturating_mul(1000)
-    };
-    let capture_bound = if host_span > 0 { host_span } else { dut_span };
-    // `dut_span` is itself inflated by a splice, so it can only be the bound
-    // when there is no host clock at all — and there the comparison degrades
-    // to "is one step most of the whole span", which still catches a splice
-    // between two short epochs far apart.
-    let dut_clock_broken = dut_step_max > 0 && dut_step_max > capture_bound;
+    let dut_step_max = health.step_max;
+    let dut_clock_broken = health.broken;
 
     let unit = if rows.is_empty() {
         "frame"
@@ -1792,6 +1894,8 @@ pub fn parse(
         dut_backstep_max_us: dut_backstep_max,
         dut_step_max_us: dut_step_max,
         dut_clock_refused: dut_clock_broken,
+        stale_prefix_rows,
+        stale_prefix_step_us,
         dual_clock: !rows.is_empty() && undated_rows == 0 && unstamped_rows == 0
             && !dut_clock_broken,
         frames: frame_order.len(),
@@ -2208,19 +2312,16 @@ mod tests {
     /// interrupt preempting a thread between those two operations reserves
     /// after it and stamps before it — a microsecond-scale inversion that every
     /// real capture contains. A real study's capture showed one of 13 µs.
-    ///
-    /// A capture that spans a DUT reset holds two epochs, and the step between
-    /// them is the age of the older one. The same real study showed one of
-    /// **195 seconds**, from six stale pre-reset records the OS had buffered
-    /// before Core opened the port: it made an 1.2-second capture's window
-    /// read as 11 ms and gave two lanes a 9159% share. Core now clears the
-    /// port's input buffer on open, and this is the second line of defence.
+    /// **Refusing the clock over that would refuse every real capture**, and
+    /// dropping records over it would be worse: this is the case that must
+    /// survive the stale-prefix rule below completely untouched, which is why
+    /// this test asserts not one row went.
     ///
     /// The threshold is not a number chosen here — it is the other clock. A
-    /// backwards step longer than the whole capture took is two independent
-    /// clocks contradicting each other, and the host's is monotonic.
+    /// step longer than the whole capture took is two independent clocks
+    /// contradicting each other, and the host's is monotonic.
     #[test]
-    fn a_backwards_dut_clock_is_tolerated_when_small_and_refused_when_it_means_a_reset() {
+    fn a_small_backwards_step_on_the_dut_clock_is_tolerated_and_costs_no_record() {
         let header = outpost::csv_header();
 
         // 13 µs backwards, inside a capture spanning 40 ms of host time.
@@ -2237,45 +2338,127 @@ mod tests {
         assert_eq!(view.dut_backstep_max_us, 13);
         assert!(!view.dut_clock_refused);
         assert!(view.dual_clock);
+        assert_eq!(view.rows, 4);
+        assert_eq!(
+            view.stale_prefix_rows, 0,
+            "an inversion inside the bulk is not a stale prefix and costs no row"
+        );
         // And the window is taken from the minimum, not from the first row,
         // which is exactly what the inversion breaks.
         assert_eq!(view.t_from, 1_000_000);
         assert_eq!(view.t_to, 1_000_200);
+    }
 
-        // A stale prefix with NO reset between it and the fresh stream steps
-        // *forwards*, and a backwards-only check sails straight past it. This
-        // is the case a real study hit: 26 buffered rows, a +525 s step, and a
-        // 38-second capture reported as 563 seconds.
-        let stale_forward = format!(
+    /// **A capture that opens with records from before the DUT reset loses the
+    /// prefix, not the microsecond axis.**
+    ///
+    /// `embarch-core` clears the signal port's input on open (decision 30) and a
+    /// real capture still began with 18 stale records carrying a cycle count
+    /// seconds from the rest, the purge reporting no error: the bytes were
+    /// inside the USB-UART bridge, where an OS-level purge does not reach. The
+    /// defence used to be refusing the DUT clock for the whole capture, which
+    /// paid the microsecond axis of every row to answer a handful of them.
+    ///
+    /// Both signs, because a stale prefix has both. With no reset between the
+    /// buffered bytes and the fresh stream the prefix is *behind* it and the
+    /// step is forwards; after one it is *ahead* and the step is backwards.
+    #[test]
+    fn a_stale_leading_prefix_is_dropped_and_the_dut_clock_survives_it() {
+        let header = outpost::csv_header();
+
+        // Three buffered rows, then the capture: a +525 s step, and the small
+        // steps *inside* the prefix are not mistaken for the splice.
+        let forward = format!(
             "{header}\n\
              0,0,1700000000000,9000000,9000000.000,thread_switch_in,4096,0,worker\n\
-             1,1,1700000000020,534000000,534000000.000,isr_enter,7,0,irq\n\
-             2,2,1700000000040,534000200,534000200.000,isr_exit,7,0,irq\n"
+             0,0,1700000000000,9000050,9000050.000,isr_enter,7,0,irq\n\
+             0,0,1700000000000,9000090,9000090.000,isr_exit,7,0,irq\n\
+             1,1,1700000000020,534000000,534000000.000,thread_switch_in,4096,0,worker\n\
+             2,2,1700000000040,534000200,534000200.000,isr_enter,7,0,irq\n\
+             3,3,1700000000060,534000400,534000400.000,isr_exit,7,0,irq\n\
+             4,4,1700000000080,534000600,534000600.000,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &stale_forward, true, true, Some(true), None, &[]).expect("parses");
-        assert_eq!(view.unit, "ms", "a +525 s step inside a 40 ms capture must not draw the axis");
-        assert!(view.dut_clock_refused);
-        assert_eq!(view.dut_backsteps, 0, "nothing went backwards; sign is not the signal");
-        assert_eq!(view.dut_step_max_us, 525_000_000);
-        assert_eq!(view.t_to - view.t_from, 40, "the host axis is intact");
+        let view = parse("s", "t", &forward, true, true, Some(true), None, &[]).expect("parses");
+        assert_eq!(view.unit, "us", "the fresh stream keeps its own microsecond axis");
+        assert_eq!(view.axis_clock, "dut-cycles");
+        assert!(!view.dut_clock_refused, "the contradiction left with the prefix");
+        assert!(view.dual_clock);
+        assert_eq!(view.stale_prefix_rows, 3);
+        assert_eq!(view.stale_prefix_step_us, 524_999_910);
+        assert_eq!(view.rows, 4, "`rows` counts what was kept, and the tab says what went");
+        assert_eq!(view.t_from, 534_000_000, "the window is the fresh stream's, not the splice's");
+        assert_eq!(view.t_to, 534_000_600);
 
-        // 195 s backwards, inside a capture spanning 40 ms of host time: the
-        // counter restarted, so the DUT clock is refused and the host's draws.
-        let reset = format!(
+        // The same thing after a reset: the buffered records are 195 s *ahead*
+        // of the stream that follows them. This is the real study's capture.
+        let after_reset = format!(
             "{header}\n\
              0,0,1700000000000,204000000,204000000.000,thread_switch_in,4096,0,worker\n\
              1,1,1700000000020,9000000,9000000.000,isr_enter,7,0,irq\n\
              2,2,1700000000040,9000200,9000200.000,isr_exit,7,0,irq\n"
         );
-        let view = parse("s", "t", &reset, true, true, Some(true), None, &[]).expect("parses");
-        assert_eq!(view.unit, "ms", "a capture spanning a DUT reset must not be timed by it");
+        let view = parse("s", "t", &after_reset, true, true, Some(true), None, &[]).expect("parses");
+        assert_eq!(view.unit, "us");
+        assert_eq!(view.stale_prefix_rows, 1);
+        assert_eq!(view.stale_prefix_step_us, 195_000_000);
+        assert_eq!(
+            view.dut_backstep_max_us, 0,
+            "the step is not reported as an inversion any more — the rows it sat between are gone, \
+             and it is reported as the prefix it was"
+        );
+        assert_eq!(view.t_to - view.t_from, 200);
+    }
+
+    /// **A splice that is not a leading prefix is still refused, and that is the
+    /// half of this rule that keeps it honest.**
+    ///
+    /// Two epochs in a capture are meaningless to time across however they got
+    /// there. What render-time trimming can repair is a *head* — bytes that
+    /// were in the bridge when the port opened, bounded by that buffer's own
+    /// size. So a step deeper in than the bulk that follows it, and a head
+    /// whose removal leaves the rest still contradicting itself, both fall back
+    /// to the host's clock exactly as before, and no row is dropped.
+    #[test]
+    fn a_splice_that_is_not_a_leading_prefix_still_costs_the_dut_clock() {
+        let header = outpost::csv_header();
+
+        // The reset is two thirds of the way in: the head is bigger than the
+        // tail, so the head is not a prefix.
+        let late = format!(
+            "{header}\n\
+             0,0,1700000000000,9000000,9000000.000,thread_switch_in,4096,0,worker\n\
+             1,1,1700000000020,9000100,9000100.000,isr_enter,7,0,irq\n\
+             2,2,1700000000040,9000200,9000200.000,isr_exit,7,0,irq\n\
+             3,3,1700000000060,9000300,9000300.000,thread_switch_out,4096,0,worker\n\
+             4,4,1700000000080,534000000,534000000.000,thread_switch_in,4096,0,worker\n\
+             5,5,1700000000100,534000200,534000200.000,isr_enter,7,0,irq\n"
+        );
+        let view = parse("s", "t", &late, true, true, Some(true), None, &[]).expect("parses");
+        assert_eq!(view.unit, "ms", "a capture spliced in its middle is drawn on the host's clock");
         assert_eq!(view.axis_clock, "host-arrival");
         assert!(view.dut_clock_refused);
+        assert_eq!(view.stale_prefix_rows, 0, "nothing was dropped; the axis changed instead");
         assert_eq!(view.undated_rows, 0, "every row HAS a DUT stamp; they just disagree");
         assert!(!view.dual_clock, "two clocks that contradict each other are not a pair");
-        assert_eq!(view.dut_backstep_max_us, 195_000_000);
-        // The host axis is intact and the window is the real one.
-        assert_eq!(view.t_to - view.t_from, 40);
+        assert_eq!(view.rows, 6, "and every record is still there");
+        assert_eq!(view.t_to - view.t_from, 100, "the host axis is intact");
+
+        // A head whose removal would leave a second contradiction behind is not
+        // a stale prefix either: the drop has to *fix* the clock or it does not
+        // happen.
+        let twice = format!(
+            "{header}\n\
+             0,0,1700000000000,9000000,9000000.000,thread_switch_in,4096,0,worker\n\
+             1,1,1700000000020,300000000,300000000.000,isr_enter,7,0,irq\n\
+             2,2,1700000000040,300000200,300000200.000,isr_exit,7,0,irq\n\
+             3,3,1700000000060,700000000,700000000.000,thread_switch_in,4096,0,worker\n\
+             4,4,1700000000080,700000200,700000200.000,isr_enter,7,0,irq\n"
+        );
+        let view = parse("s", "t", &twice, true, true, Some(true), None, &[]).expect("parses");
+        assert_eq!(view.unit, "ms");
+        assert!(view.dut_clock_refused);
+        assert_eq!(view.stale_prefix_rows, 0);
+        assert_eq!(view.rows, 5);
     }
 
     /// **The DUT's clock is used even when nobody received the bytes**, which

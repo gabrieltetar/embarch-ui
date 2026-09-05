@@ -3684,6 +3684,18 @@
     // counter restarted mid-capture. Said out loud, because the axis silently
     // became the coarser clock and the reader needs to know which one they are
     // looking at.
+    // A dropped stale prefix is reported rather than shown as a shorter
+    // capture. It is the one note here that describes records the reader
+    // cannot see: `rows` counts what was kept, so without this line the
+    // capture would simply be N records shorter than the file, with the
+    // microsecond axis it only has *because* they went.
+    var staleNote = view.stale_prefix_rows > 0
+      ? " · the first " + view.stale_prefix_rows + " record(s) were dropped: their DUT clock sat " +
+        (view.stale_prefix_step_us / 1000000).toFixed(3) + " s from the capture that follows them, " +
+        "which is longer than that capture lasted — bytes already inside the USB-UART bridge when " +
+        "embarch-core opened the port, from before the DUT reset. Dropping them is what keeps the " +
+        "microsecond axis for everything after"
+      : "";
     var dutNote = view.dut_clock_refused
       ? " · the DUT's own clock jumped by " +
         (view.dut_step_max_us / 1000000).toFixed(3) + " s between two consecutive records, which " +
@@ -3724,7 +3736,7 @@
             "half a millisecond axis"
           : "neither clock reached this capture, so the axis is frame index: order without " +
             "duration") +
-      dutNote + clockNote;
+      staleNote + dutNote + clockNote;
 
     trEl("trace-gaps").innerHTML = view.gaps.length
       ? view.gaps
