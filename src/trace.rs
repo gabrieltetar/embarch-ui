@@ -544,6 +544,20 @@ pub struct TraceView {
     pub rows: usize,
     /// Rows past [`MAX_ROWS`], never silently discarded.
     pub rows_dropped_by_cap: usize,
+    /// Rows this parser **refused**: a line carrying fewer than nine fields (a
+    /// truncated write — realistically the file's last line, cut where the
+    /// renderer stopped), or a `frame_index` that is not a number. Neither is a
+    /// row shape to interpret, so both are dropped; this is the count that says
+    /// they were, because a capture whose tail was skipped otherwise renders
+    /// identically to a complete one and the Records card claimed "every row in
+    /// the capture" over the hole.
+    ///
+    /// Deliberately **not** merged into [`Self::rows_dropped_by_cap`]: that one
+    /// is this view's own limit applied to a file it read fine, and this one is
+    /// a file it could not read. A row past the cap is never counted here — the
+    /// cap is checked first and the line is never split, so it is dropped unread
+    /// rather than refused.
+    pub rows_unparsed: usize,
     /// `"us"` when every row carries the DUT's own stamp, `"ms"` when it does
     /// not but every frame carries the host's, `"frame"` when neither. Every
     /// `t`, `from`, `to` and extent in this struct is in these units.
@@ -1292,6 +1306,7 @@ pub fn parse(
 
     let mut rows: Vec<Row> = Vec::new();
     let mut rows_dropped_by_cap = 0usize;
+    let mut rows_unparsed = 0usize;
     for line in lines {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
@@ -1304,6 +1319,10 @@ pub fn parse(
         let f = split_row(line);
         if f.len() < 9 {
             // A short line is a truncated write, not a row shape to interpret.
+            // Counted, not merely skipped: a capture cut off mid-write is the
+            // realistic case, and it is the one where staying quiet would let
+            // the tab claim it held every row of the file.
+            rows_unparsed += 1;
             continue;
         }
         // Positional access is safe only because the header check above already
@@ -1313,7 +1332,13 @@ pub fn parse(
         // `cycles`/`us` columns ahead of `kind`; they are:
         //   0 frame_index, 1 frame_seq, 2 rx_utc_ms, 3 cycles, 4 us,
         //   5 kind, 6 a, 7 b, 8 name
-        let Ok(frame_index) = f[0].parse::<u64>() else { continue };
+        // The only field with no defensible fallback: every `t` below is a
+        // frame index or is anchored against one, so a row without it has no
+        // place on the axis. Refused and counted, for the same reason as above.
+        let Ok(frame_index) = f[0].parse::<u64>() else {
+            rows_unparsed += 1;
+            continue;
+        };
         rows.push(Row {
             frame_index,
             rx_utc_ms: if f[2].is_empty() { None } else { f[2].parse::<u64>().ok() },
@@ -1883,6 +1908,7 @@ pub fn parse(
         note,
         rows: rows.len(),
         rows_dropped_by_cap,
+        rows_unparsed,
         unit,
         axis_clock,
         t_from,
@@ -2214,6 +2240,9 @@ mod tests {
         let view = real();
         assert_eq!(view.rows, 831, "the committed capture is 831 records");
         assert_eq!(view.rows_dropped_by_cap, 0);
+        assert_eq!(view.rows_unparsed, 0, "a clean capture refuses nothing, and says so");
+        assert_eq!(stamped().rows_unparsed, 0);
+        assert_eq!(host_only().rows_unparsed, 0, "dropping a column is not a truncated row");
         assert_eq!(view.frames, 32, "32 of its 41 frames carry records");
         assert_eq!(view.out_of_order_rows, 0);
 
@@ -2221,6 +2250,58 @@ mod tests {
         assert_eq!(threads.len(), 7, "this capture mentions seven distinct thread pointers");
         assert!(view.lanes.iter().any(|l| l.kind == "idle"));
         assert!(view.lanes.iter().any(|l| l.kind == "isr"));
+    }
+
+    /// **A row the parser refused is a hole, and a hole gets counted.** Both
+    /// arms that drop a line reached this view's stat card as nothing at all:
+    /// `rows` fell by one and the card went on claiming "every row in the
+    /// capture", so a capture cut off mid-write was indistinguishable from a
+    /// complete one. `embarch-ui/spec.md`'s "unreadable is rendered as
+    /// unreadable" is the standard, and this was the one place in this view
+    /// that failed it.
+    ///
+    /// Both causes in one counter on purpose: the reader's question is whether
+    /// anything in the file went unread, not which of two malformations did it,
+    /// and neither can be repaired here.
+    #[test]
+    fn a_truncated_or_malformed_row_is_counted_rather_than_vanishing() {
+        let header = outpost::csv_header();
+
+        // The realistic one: a capture whose final write was cut mid-line.
+        let truncated = format!(
+            "{header}\n\
+             0,0,1700000000000,1000,1000.000,thread_switch_in,4096,0,worker\n\
+             1,1,1700000000010,2000,2000.000,thread_switch_out,4096,0,worker\n\
+             2,2,1700000000020,3000,3000.000,thread_sw"
+        );
+        let view = parse("s", "t", &truncated, true, true, Some(true), None, &[]).expect("parses");
+        assert_eq!(view.rows, 2, "two rows survived");
+        assert_eq!(view.rows_unparsed, 1, "and the third is reported, not forgotten");
+        assert_eq!(view.rows_dropped_by_cap, 0, "the cap is a different fact and stays zero");
+
+        // A `frame_index` that is not a number — the second arm, which has no
+        // fallback because every axis tier is anchored against it.
+        let bad_index = format!(
+            "{header}\n\
+             0,0,1700000000000,1000,1000.000,thread_switch_in,4096,0,worker\n\
+             ?,1,1700000000010,2000,2000.000,isr_enter,7,0,irq\n\
+             2,2,1700000000020,3000,3000.000,thread_switch_out,4096,0,worker\n"
+        );
+        let view = parse("s", "t", &bad_index, true, true, Some(true), None, &[]).expect("parses");
+        assert_eq!(view.rows, 2);
+        assert_eq!(view.rows_unparsed, 1);
+
+        // Both at once, and a blank trailing line, which is not a refused row.
+        let both = format!(
+            "{header}\n\
+             0,0,1700000000000,1000,1000.000,thread_switch_in,4096,0,worker\n\
+             ?,1,1700000000010,2000,2000.000,isr_enter,7,0,irq\n\
+             \n\
+             2,2,1700000000020,3000,3000.0"
+        );
+        let view = parse("s", "t", &both, true, true, Some(true), None, &[]).expect("parses");
+        assert_eq!(view.rows, 1);
+        assert_eq!(view.rows_unparsed, 2, "an empty line is absence of a row, not a broken one");
     }
 
     /// **A thread cannot be inside itself.** A second switch-in with no

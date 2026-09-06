@@ -3655,11 +3655,26 @@
     }
 
     var lostTone = view.records_lost > 0 ? "var(--warning)" : "var(--success)";
+
+    // **"every row in the capture" is a claim, and it has to be earned.** Two
+    // separate counts can falsify it: this view's own 250,000-row cap, and rows
+    // the decoder refused outright — a truncated final write, or a row whose
+    // frame index is not a number. Only the cap was ever reported, so a capture
+    // cut off mid-write read as complete, which is exactly the hole
+    // `embarch-ui/spec.md`'s "unreadable is rendered as unreadable" forbids.
+    // Both are stated when non-zero; the sentence is unchanged when neither is.
+    var recordsNotes = [];
+    if (view.rows_dropped_by_cap > 0) {
+      recordsNotes.push(view.rows_dropped_by_cap + " more not read — this view caps at 250,000");
+    }
+    if (view.rows_unparsed > 0) {
+      recordsNotes.push(view.rows_unparsed + " row(s) unreadable — truncated or malformed, " +
+        "refused rather than guessed at");
+    }
     trEl("trace-stats").innerHTML =
       statCard("Records", String(view.rows),
-        view.rows_dropped_by_cap > 0
-          ? view.rows_dropped_by_cap + " more not read — this view caps at 250,000"
-          : "every row in the capture") +
+        recordsNotes.length ? recordsNotes.join(" · ") : "every row in the capture",
+        view.rows_unparsed > 0 ? "var(--warning)" : null) +
       statCard("Records lost", String(view.records_lost),
         view.gaps.length + " gap(s) reported by the firmware", lostTone) +
       statCard("Span", fmtSpanLen(view, view.t_to - view.t_from),
