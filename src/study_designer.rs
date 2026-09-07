@@ -246,7 +246,19 @@ struct StaticGatt {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RunState {
     Idle,
-    Running { study_id: String, current_step: Option<u32>, total_steps: Option<u32> },
+    Running {
+        study_id: String,
+        /// Core's field passed through verbatim, and it is **the 0-based
+        /// index of the last step that *finished*** — `None` until one has,
+        /// which is not the same as "how many steps are done"
+        /// (`embarch-core/interfaces.md`, `GET /study/{id}`; embarch-core
+        /// decision 43). Nothing on this path renumbers it. The run badge in
+        /// `assets/app.js` is the only place that turns it into a
+        /// human-facing number, and it names the step *now running*
+        /// (`embarch-ui/decisions/study-designer.md` decision 20).
+        current_step: Option<u32>,
+        total_steps: Option<u32>,
+    },
     Completed {
         study_id: String,
         result: Box<StudyResult>,
@@ -1741,6 +1753,39 @@ pub async fn api_gatt_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A text guard, not a behavioural test, and it is the only thing
+    /// covering this at all.** `assets/app.js` is served as bytes and never
+    /// evaluated by `cargo test` — there is no JS engine on this bench, which
+    /// is why `trace.rs`'s browser harness dumps JSON for a manual headless
+    /// Firefox run instead. So the badge's arithmetic can only be pinned by
+    /// its source text.
+    ///
+    /// What it pins: the counter still goes through one named helper, still
+    /// adds *two* to Core's last-finished index, and is still clamped — so a
+    /// later reader who "corrects" it back to the count convention trips a
+    /// test rather than shipping a badge that is one step short again
+    /// (`embarch-ui/decisions/study-designer.md` decision 20).
+    #[test]
+    fn run_badge_counter_names_the_step_now_running() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert!(
+            APP_JS.contains("function sdRunningStepLabel(currentStep, totalSteps)"),
+            "the badge's arithmetic lives in one named helper"
+        );
+        assert!(
+            APP_JS.contains("var step = currentStep == null ? 1 : currentStep + 2;"),
+            "the step now running is Core's last-finished index + 2, or 1 before any has finished"
+        );
+        assert!(
+            APP_JS.contains("if (step > totalSteps) step = totalSteps;"),
+            "clamped for the window between the last step landing and Core reporting `completed`"
+        );
+        assert!(
+            !APP_JS.contains("(state.current_step + 1)"),
+            "the count-convention `+ 1` is exactly the defect decision 20 closes"
+        );
+    }
 
     /// A scratch directory under the system temp dir, unique per test. No
     /// `tempfile` dev-dependency for four lines, matching this crate's

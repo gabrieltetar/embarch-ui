@@ -2423,6 +2423,30 @@
       "</tbody></table>";
   }
 
+  // The run badge's counter names **the step now running**, not the count of
+  // steps finished (decisions/study-designer.md decision 20). During a run
+  // this badge is the *only* thing on the card that says where the study is —
+  // the step rows are not filled in until it completes — so it answers "which
+  // step am I waiting on".
+  //
+  // Core's `current_step` is the 0-based index of the last step that
+  // *finished*, and is absent until one has (`embarch-core/interfaces.md`,
+  // `GET /study/{id}`; embarch-core decision 43). So the 1-based step now in
+  // flight is `current_step + 2`, and `1` while it is still null — not the
+  // `+ 1` this used to do, which was written for a count convention Core does
+  // not send and read one step short at every moment a step was in flight.
+  //
+  // The clamp is load-bearing: after the last step lands there is a window,
+  // up to one poll long, in which Core still reports `running`, and `3/2`
+  // would be nonsense. A zero-step study (`total_steps: 0`) has no step to
+  // name, so it gets no counter rather than `1/0`.
+  function sdRunningStepLabel(currentStep, totalSteps) {
+    if (totalSteps == null || totalSteps < 1) return "";
+    var step = currentStep == null ? 1 : currentStep + 2;
+    if (step > totalSteps) step = totalSteps;
+    return " " + step + "/" + totalSteps;
+  }
+
   function renderRunState(state) {
     var card = sdEl("sd-run-card");
     var badge = sdEl("sd-run-status");
@@ -2450,10 +2474,8 @@
 
     if (state.status === "running") {
       badge.className = "badge badge-warning";
-      var progress = state.current_step != null && state.total_steps != null
-        ? " " + (state.current_step + 1) + "/" + state.total_steps
-        : "";
-      badge.textContent = "running" + progress;
+      badge.textContent =
+        "running" + sdRunningStepLabel(state.current_step, state.total_steps);
       return;
     }
 
