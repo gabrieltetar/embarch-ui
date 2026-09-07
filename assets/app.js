@@ -4106,10 +4106,15 @@
     if (decoded.kind === "pass") return "var(--success)";
     if (decoded.kind === "fail") return "var(--danger)";
     if (decoded.kind === "timedout") return "var(--warning)";
-    // Unknown: same red as a fail, but the band is drawn with the `tr-gap`
-    // hatch instead of a solid fill (decision 23) — the same "data this
-    // view cannot vouch for" idiom already used for a dropped-record gap,
-    // reused here because an unparsed outcome is exactly that.
+    // Unknown: same red stroke as a fail — this must still read as wrong,
+    // never as a calm fourth state — but the fill is `tr-cross`, not
+    // `tr-gap` (decision 23, amended). `tr-gap` is reserved for a span the
+    // *firmware* reported losing records in; an outcome this code failed to
+    // parse is a client-side fact with nothing to do with the DUT's ring
+    // buffer, and reusing `tr-gap` for it would draw a hardware fault that
+    // did not happen. `tr-cross` already means "this view cannot vouch for
+    // this span" — true here for the honest reason (unparseable), not the
+    // dropped-record one.
     return "var(--danger)";
   }
 
@@ -4420,7 +4425,11 @@
           var bxd = clampX(x(b.exec_from));
           var decoded = decodeOutcome(b.outcome, b.reason);
           var color = traceOutcomeColor(decoded);
-          var fill = decoded.kind === "unknown" ? "url(#tr-gap)" : color;
+          // `tr-cross`, not `tr-gap` — see the comment on traceOutcomeColor.
+          // The stroke stays `color` (danger-red for "unknown"), so the band
+          // reads as wrong first and as "not vouched for" second, rather than
+          // borrowing the pattern that specifically means the DUT lost data.
+          var fill = decoded.kind === "unknown" ? "url(#tr-cross)" : color;
           var detail =
             "step " + b.index + " · " + b.name + " → " +
             (decoded.kind === "unknown" ? "unrecognised outcome (" + b.outcome + ")" : b.outcome) +
