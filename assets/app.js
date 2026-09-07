@@ -2317,13 +2317,41 @@
 
   // --- run and watch ---
 
-  function outcomeBadge(outcome) {
-    if (outcome === "Pass") return '<span class="badge badge-success">Pass</span>';
-    if (outcome === "TimedOut") return '<span class="badge badge-warning">TimedOut</span>';
-    if (outcome && outcome.Fail) {
-      return '<span class="badge badge-danger">Fail</span> <span class="mono" style="font-size:11.5px;">' + escapeHtml(outcome.Fail.reason) + "</span>";
+  /// One decoder for a step outcome, whichever of the two wire shapes it
+  /// arrived in (embarch-ui decision 23):
+  ///   - **tagged**, from `events.json`, `GET /study/{id}`'s `result`, and the
+  ///     SSE `StepCompleted`: `"Pass"` | `{"Fail":{"reason":…}}` | `"TimedOut"`.
+  ///   - **flattened**, from `GET /study/{id}/steps`: a bare `"Pass"` /
+  ///     `"Fail"` / `"TimedOut"` string with `reason` as a sibling field.
+  /// `reason` is that sibling field; it is ignored when `outcome` is the
+  /// tagged `Fail` shape, which carries its own.
+  ///
+  /// Anything that is not one of those three variants — `undefined`, `null`,
+  /// a number, an object without `.Fail`, a typo'd string — comes back
+  /// `kind: "unknown"` rather than being folded into "pass" or "neutral".
+  /// The two call sites below both render "unknown" as visibly wrong: a
+  /// step that failed must never read as a step that did not, and neither
+  /// may a step this code simply failed to parse.
+  function decodeOutcome(outcome, reason) {
+    if (outcome === "Pass") return { kind: "pass", reason: null };
+    if (outcome === "TimedOut") return { kind: "timedout", reason: null };
+    if (outcome === "Fail") return { kind: "fail", reason: reason || null };
+    if (outcome && typeof outcome === "object" && outcome.Fail) {
+      return { kind: "fail", reason: (outcome.Fail && outcome.Fail.reason) || null };
     }
-    return '<span class="badge badge-neutral">—</span>';
+    return { kind: "unknown", reason: null };
+  }
+
+  function outcomeBadge(outcome, reason) {
+    var d = decodeOutcome(outcome, reason);
+    if (d.kind === "pass") return '<span class="badge badge-success">Pass</span>';
+    if (d.kind === "timedout") return '<span class="badge badge-warning">TimedOut</span>';
+    if (d.kind === "fail") {
+      return '<span class="badge badge-danger">Fail</span> <span class="mono" style="font-size:11.5px;">' + escapeHtml(d.reason || "no reason given") + "</span>";
+    }
+    // Unknown shape: a red "?" badge, never the neutral dash this used to
+    // fall through to — see decision 23.
+    return '<span class="badge badge-danger">?</span> <span class="mono" style="font-size:11.5px;">unrecognised outcome</span>';
   }
 
   function stepDetail(step) {
@@ -2515,7 +2543,7 @@
       tr.innerHTML =
         "<td>" + (i + 1) + "</td>" +
         '<td class="mono">' + escapeHtml(step.step_name) + "</td>" +
-        "<td>" + outcomeBadge(step.outcome) + "</td>" +
+        "<td>" + outcomeBadge(step.outcome, step.reason) + "</td>" +
         "<td>" + stepDetail(step) + "</td>";
       rows.appendChild(tr);
     });
@@ -4069,12 +4097,20 @@
 
   /// Outcome colours, in the vocabulary Core reports them in. `Pass`, `Fail`
   /// and `TimedOut` are all present in a single real capture, so all three are
-  /// distinguishable rather than "green or not green".
-  function traceOutcomeColor(outcome) {
-    if (outcome === "Pass") return "var(--success)";
-    if (outcome === "Fail") return "var(--danger)";
-    if (outcome === "TimedOut") return "var(--warning)";
-    return "var(--info)";
+  /// distinguishable rather than "green or not green". Takes a decoded
+  /// outcome (`decodeOutcome`), not the raw wire value — this lane's data is
+  /// always the flattened shape, but routing it through the same decoder
+  /// means an unrecognised value can no longer fall through to `--info`,
+  /// which used to read as a fourth, unlabelled, perfectly calm outcome.
+  function traceOutcomeColor(decoded) {
+    if (decoded.kind === "pass") return "var(--success)";
+    if (decoded.kind === "fail") return "var(--danger)";
+    if (decoded.kind === "timedout") return "var(--warning)";
+    // Unknown: same red as a fail, but the band is drawn with the `tr-gap`
+    // hatch instead of a solid fill (decision 23) — the same "data this
+    // view cannot vouch for" idiom already used for a dropped-record gap,
+    // reused here because an unparsed outcome is exactly that.
+    return "var(--danger)";
   }
 
   // ---- drawing --------------------------------------------------------------
@@ -4382,10 +4418,13 @@
           var bx0 = clampX(x(b.from));
           var bx1 = clampX(x(b.to));
           var bxd = clampX(x(b.exec_from));
-          var color = traceOutcomeColor(b.outcome);
+          var decoded = decodeOutcome(b.outcome, b.reason);
+          var color = traceOutcomeColor(decoded);
+          var fill = decoded.kind === "unknown" ? "url(#tr-gap)" : color;
           var detail =
-            "step " + b.index + " · " + b.name + " → " + b.outcome +
-            (b.reason ? " (" + b.reason + ")" : "") +
+            "step " + b.index + " · " + b.name + " → " +
+            (decoded.kind === "unknown" ? "unrecognised outcome (" + b.outcome + ")" : b.outcome) +
+            (decoded.reason ? " (" + decoded.reason + ")" : "") +
             " · " + (b.delay_before_ms > 0
               ? b.delay_before_ms + " ms declared delay, then "
               : "no declared delay, ") +
@@ -4416,7 +4455,7 @@
           {
             hp.push(
               '<rect x="' + bxd + '" y="' + stepTop + '" width="' + Math.max(1.5, bx1 - bxd) + '" height="' +
-              TRACE_STEP_H + '" rx="2" fill="' + color + '" opacity="0.42" stroke="' + color +
+              TRACE_STEP_H + '" rx="2" fill="' + fill + '" opacity="0.42" stroke="' + color +
               '" stroke-width="1"><title>' + escapeHtml(detail) + "</title></rect>"
             );
           }
