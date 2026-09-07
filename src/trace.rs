@@ -544,6 +544,15 @@ pub struct TraceView {
     pub rows: usize,
     /// Rows past [`MAX_ROWS`], never silently discarded.
     pub rows_dropped_by_cap: usize,
+    /// [`MAX_ROWS`] itself, served rather than restated in `app.js`: the cap
+    /// is enforced here and a browser-side copy of the number is a copy that
+    /// drifts silently the day this constant moves (`embarch-ui/spec.md`
+    /// Invariants; the same reasoning as `ActionsResponse::max_monitor_targets`
+    /// in `study_designer.rs`). Always present — this crate serves its own
+    /// `app.js`, so there is no older-server/newer-browser skew to cover; the
+    /// browser still guards the read as if there were, in case a cached page
+    /// outlives a redeploy.
+    pub row_cap: usize,
     /// Rows this parser **refused**: a line carrying fewer than nine fields (a
     /// truncated write — realistically the file's last line, cut where the
     /// renderer stopped), or a `frame_index` that is not a number. Neither is a
@@ -1908,6 +1917,7 @@ pub fn parse(
         note,
         rows: rows.len(),
         rows_dropped_by_cap,
+        row_cap: MAX_ROWS,
         rows_unparsed,
         unit,
         axis_clock,
@@ -2233,6 +2243,15 @@ mod tests {
     pub(super) fn no_clock() -> TraceView {
         parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, Some(true), None, &[])
             .expect("the clockless trace parses")
+    }
+
+    /// The served cap is the enforced cap, not a second number that happens
+    /// to agree with it today. `app.js` renders `view.row_cap` rather than
+    /// restating `250,000` — see `assets/app.js`'s row-cap banner.
+    #[test]
+    fn served_row_cap_is_the_enforced_constant() {
+        assert_eq!(real().row_cap, MAX_ROWS);
+        assert_eq!(stamped().row_cap, MAX_ROWS);
     }
 
     #[test]

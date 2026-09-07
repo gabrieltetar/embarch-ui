@@ -777,6 +777,15 @@ struct ActionsResponse {
     /// the refusal happens where the choice is made rather than as a `400`
     /// after a round trip.
     max_monitor_targets: usize,
+    /// `limits::MAX_STREAM_NAME_LEN` — how long a `StreamTap`/`StreamRef`
+    /// name may be (`embarch-study-designer/design.md` §4.8), also the file
+    /// name a stream becomes under a study's `streams/` directory. Served
+    /// rather than restated in `app.js`: the cap is enforced by
+    /// `build_study`, same reasoning as [`Self::max_monitor_targets`] above.
+    /// The tap-naming default (`initSdTaps`'s `sd-add-gatt-tap` handler)
+    /// slices the characteristic label to this length rather than to a
+    /// literal `32`.
+    max_stream_name_len: usize,
 }
 
 /// One characteristic a study can subscribe to, as the pickers render it.
@@ -894,6 +903,7 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
         ),
         service_names: service_names(&sd.names(), live.as_deref(), static_gatt.as_deref()),
         max_monitor_targets: embarch_study_designer::limits::MAX_MONITOR_TARGETS,
+        max_stream_name_len: MAX_STREAM_NAME_LEN,
         actions,
         live_gatt_available: live.is_some(),
         static_gatt_available: static_gatt.is_some(),
@@ -1784,6 +1794,30 @@ mod tests {
         assert!(
             !APP_JS.contains("(state.current_step + 1)"),
             "the count-convention `+ 1` is exactly the defect decision 20 closes"
+        );
+    }
+
+    /// The served cap is the enforced cap. `app.js`'s `sd-add-gatt-tap`
+    /// handler slices a default tap name to `data.max_stream_name_len` rather
+    /// than to a literal `32` — see `assets/app.js`.
+    #[test]
+    fn served_stream_name_limit_matches_the_constant() {
+        let response = ActionsResponse {
+            actions: Vec::new(),
+            live_gatt_available: false,
+            static_gatt_available: false,
+            subscribable: Vec::new(),
+            struct_layouts: Vec::new(),
+            characteristic_names: BTreeMap::new(),
+            service_names: BTreeMap::new(),
+            max_monitor_targets: embarch_study_designer::limits::MAX_MONITOR_TARGETS,
+            max_stream_name_len: MAX_STREAM_NAME_LEN,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["max_stream_name_len"], MAX_STREAM_NAME_LEN);
+        assert_eq!(
+            json["max_monitor_targets"],
+            embarch_study_designer::limits::MAX_MONITOR_TARGETS
         );
     }
 

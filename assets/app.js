@@ -845,6 +845,13 @@
    * browser and `build_study` cannot disagree about the cap. The fallback
    * only applies to a response written before the field existed. */
   var sdMaxTargets = 16;
+  /* `limits::MAX_STREAM_NAME_LEN`, served on the actions response beside
+   * `max_monitor_targets` (task ui/003). No numeric fallback on purpose,
+   * unlike `sdMaxTargets` above: a wrong guess here would silently re-commit
+   * the exact restated-limit defect this field was added to remove. `null`
+   * means "not yet known, or a server old enough not to send it," and every
+   * reader below treats it as "don't guess the cap" rather than "assume 32." */
+  var sdMaxStreamNameLen = null;
   /* The picker's working copy while its dialog is open (decision 17).
    * Cancel discards it; Done commits it to the row. Held outside the row so
    * a half-made selection never reaches `sdCollectRows`. */
@@ -1043,6 +1050,9 @@
     sdServiceNames = (data && data.service_names) || {};
     if (data && typeof data.max_monitor_targets === "number") {
       sdMaxTargets = data.max_monitor_targets;
+    }
+    if (data && typeof data.max_stream_name_len === "number") {
+      sdMaxStreamNameLen = data.max_stream_name_len;
     }
   }
 
@@ -2742,10 +2752,21 @@
         // Named after the characteristic rather than "gatt": this is the
         // file name, and a study capturing two characteristics needs two
         // names an author can tell apart at a glance.
-        // Sliced to MAX_STREAM_NAME_LEN: a name is a file name here, and a
+        // Sliced to `sdMaxStreamNameLen` — `limits::MAX_STREAM_NAME_LEN`,
+        // served on the actions response rather than restated as a literal
+        // here (task ui/003). A name is a file name in this crate, and a
         // long identifier would be refused by `build_study` at submit time
-        // rather than here, where it was chosen.
-        name: first ? charLabel(first.characteristic_uuid).slice(0, 32) : "notify",
+        // rather than here, where it was chosen. When the cap has not been
+        // served yet (or a server old enough not to send it), this does not
+        // slice at all: a wrong guessed cap would let a still-too-long name
+        // through as confidently as a right one, and `build_study`'s refusal
+        // at submit time is the correct answer for a name we can't check the
+        // real length of yet — never a silently-wrong shorter name either.
+        name: first
+          ? (sdMaxStreamNameLen == null
+              ? charLabel(first.characteristic_uuid)
+              : charLabel(first.characteristic_uuid).slice(0, sdMaxStreamNameLen))
+          : "notify",
         service_uuid: first ? first.service_uuid : "",
         characteristic_uuid: first ? first.characteristic_uuid : "",
         decoder: "",
@@ -3679,15 +3700,26 @@
     var lostTone = view.records_lost > 0 ? "var(--warning)" : "var(--success)";
 
     // **"every row in the capture" is a claim, and it has to be earned.** Two
-    // separate counts can falsify it: this view's own 250,000-row cap, and rows
-    // the decoder refused outright — a truncated final write, or a row whose
-    // frame index is not a number. Only the cap was ever reported, so a capture
-    // cut off mid-write read as complete, which is exactly the hole
-    // `embarch-ui/spec.md`'s "unreadable is rendered as unreadable" forbids.
-    // Both are stated when non-zero; the sentence is unchanged when neither is.
+    // separate counts can falsify it: this view's own row cap (`view.row_cap`,
+    // `MAX_ROWS` in `src/trace.rs` — served rather than restated here, per
+    // `embarch-ui/spec.md`'s Invariants), and rows the decoder refused
+    // outright — a truncated final write, or a row whose frame index is not a
+    // number. Only the cap was ever reported, so a capture cut off mid-write
+    // read as complete, which is exactly the hole `embarch-ui/spec.md`'s
+    // "unreadable is rendered as unreadable" forbids. Both are stated when
+    // non-zero; the sentence is unchanged when neither is.
     var recordsNotes = [];
     if (view.rows_dropped_by_cap > 0) {
-      recordsNotes.push(view.rows_dropped_by_cap + " more not read — this view caps at 250,000");
+      // No literal fallback number: this view and `embarch-core` ship as one
+      // binary, so `row_cap` is always present in practice, but a defaulted
+      // number here would be exactly the restated-limit defect this field
+      // exists to remove — a copy that can silently disagree with the real
+      // cap is no better for being spelled in JS instead of committed twice.
+      // Missing means unknown, said as unknown, never guessed.
+      var capNote = typeof view.row_cap === "number"
+        ? "this view caps at " + view.row_cap.toLocaleString()
+        : "this view has a row cap (unreported by this server)";
+      recordsNotes.push(view.rows_dropped_by_cap + " more not read — " + capNote);
     }
     if (view.rows_unparsed > 0) {
       recordsNotes.push(view.rows_unparsed + " row(s) unreadable — truncated or malformed, " +
