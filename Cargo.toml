@@ -20,13 +20,17 @@ embarch-study-designer = { path = "../embarch-study-designer", features = ["stud
 # 5, milestone-1.md §4.1). ALL hardware-adjacent data — reads (probe/board
 # enumeration, alert history, dev-bench port) as well as writes (enrolling,
 # running a Study) — goes through this over HTTP, never through
-# embarch-topology's hardware-touching functions in-process: embarch-ui
-# never depends on embarch-topology or its `hardware` feature at all, same
-# "never link probe-rs/serialport directly" rule embarch-api already
-# follows (embarch-api/design.md §11) — a read done in-process would query
-# whichever machine embarch-ui itself runs on, not Core's, silently wrong
-# the moment Core runs on a different machine (the exact split-topology
-# case embarch-topology exists to handle in the first place).
+# embarch-topology's hardware-touching functions in-process: embarch-topology
+# is in this tree transitively (via this crate, default/`software` feature
+# only) but embarch-ui never depends on its `hardware` feature, same "never
+# link probe-rs/serialport directly" rule embarch-api already follows
+# (embarch-api/design.md §11) — a read done in-process would query whichever
+# machine embarch-ui itself runs on, not Core's, silently wrong the moment
+# Core runs on a different machine (the exact split-topology case
+# embarch-topology exists to handle in the first place). See
+# embarch-ui/spec.md's Invariants for what is actually measured: the
+# probe-rs/serialport count in `cargo tree -e normal`, not the crate's
+# absence.
 embarch-core-client = { path = "../embarch-api/crates/embarch-core-client" }
 futures-util = "0.3"
 # `Study.streams`/`Study.requires` are `heapless`-backed, so authoring one
