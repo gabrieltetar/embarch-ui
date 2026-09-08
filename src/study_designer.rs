@@ -1,4 +1,4 @@
-//! The Study Designer tab's backend (milestone-1.md §4.6): merged action
+//! The Study Designer tab's backend (`embarch-doc/embarch-ui/spec.md`): merged action
 //! list, custom-action registry, and build/run/watch — all in-process
 //! authoring via `embarch-study-designer` (pure/offline, no hardware
 //! touched), submission/execution via `embarch-core-client` over HTTP+Bearer
@@ -10,7 +10,7 @@
 //! **A project can be opened at runtime** (`embarch-ui/design.md` §3
 //! decision 14) — this used to say the tab was "disabled entirely (every
 //! route below answers `404`) when `[study_designer]` isn't set in config",
-//! because milestone-1.md §4.6 resolved via `AskUserQuestion` that a config
+//! because decision 14's predecessor resolved via `AskUserQuestion` that a config
 //! field, not a UI picker or cwd search, names the firmware repo.
 //!
 //! That reasoning stands and is not being reversed: the thing it rejected was
@@ -54,8 +54,7 @@ use tokio::sync::watch;
 
 /// How long `POST /api/study-designer/discover` waits for a one-step
 /// `BleConnect`->`GattDiscover` study to reach a terminal state before
-/// giving up — matches `study-designer-ui`'s own precedent
-/// (`embarch-study-designer/milestone-11.md` §3.6).
+/// giving up — matches `study-designer-ui`'s own precedent.
 const DISCOVER_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -281,8 +280,8 @@ const NO_PROJECT: &str = "no project is open — open a firmware repo, or set \
 
 /// The answer for a route that needs an open project and hasn't got one.
 ///
-/// Still a `404`, and still the "clear not-configured state" milestone-1.md
-/// §4.6 chose over guessing — but it is no longer a dead end, because
+/// Still a `404`, and still the "clear not-configured state" decision 14's
+/// predecessor chose over guessing — but it is no longer a dead end, because
 /// `POST /api/study-designer/project` is now the way out of it (design.md §3
 /// decision 14).
 fn not_configured() -> axum::response::Response {

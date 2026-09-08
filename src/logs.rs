@@ -1,4 +1,4 @@
-//! The Debug tab's backend (milestone-1.md §4.7): backlog-on-open plus a
+//! The Debug tab's backend (`embarch-doc/embarch-ui/spec.md`): backlog-on-open plus a
 //! live tail, both mediated through `embarch-core-client` — `embarch-ui`
 //! never reads Core's logfile directly, since Core can run on a different
 //! machine than whatever's asking (the whole reason `embarch-topology`
@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// How many trailing lines `POST /logs/recent` is asked for on each poll —
+/// How many trailing lines `GET /logs/recent` is asked for on each poll —
 /// large enough that normal log volume between two polls doesn't outrun the
 /// window (which would make `diff_new_lines` unable to anchor and fall back
 /// to replaying the whole window), small enough to stay a cheap call.

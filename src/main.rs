@@ -1,14 +1,13 @@
 //! embarch-ui: one consolidated human-facing UI for the EmbArch suite.
 //!
-//! Milestone-1 status (embarch-doc/embarch-ui/milestone-1.md): §4.1–4.7
-//! done — the app shell is live against the reviewed mockups, the
-//! Dashboard/Topology tabs render real data from `embarch-core`, the
-//! Enroll tab submits real enrollments, the Study Designer tab builds and
-//! runs a `Study`, and the Debug tab live-tails Core's own log — entirely
-//! through `embarch-core-client` (design.md §3 decision 5's amendment: no
-//! in-process hardware access, and decision 7: never a direct logfile
-//! read). VS Code extension/retirement land in §4.8 onward. See
-//! embarch-doc/embarch-ui/design.md for the full architecture.
+//! The app shell is live against the reviewed mockups, the Dashboard/
+//! Topology tabs render real data from `embarch-core`, the Enroll tab
+//! submits real enrollments, the Study Designer tab builds and runs a
+//! `Study`, and the Debug tab live-tails Core's own log — entirely through
+//! `embarch-core-client` (decision 5's amendment: no in-process hardware
+//! access, and decision 7: never a direct logfile read). See
+//! `embarch-doc/embarch-ui/spec.md` and `embarch-doc/embarch-ui/decisions/`
+//! for the full architecture.
 
 mod config;
 mod logs;
@@ -127,9 +126,9 @@ struct CachedTrace {
 /// rather than using a plain `#[tokio::main]`, proactively — this suite has
 /// already hit a real debug-build stack overflow deserializing a
 /// GATT-sized `StudyResult` on a normal-sized stack twice
-/// (`embarch-api/design.md` decision 36, `study-designer-ui`'s own fix in
-/// `embarch-study-designer/milestone-11.md` §3.3b). `embarch-ui`'s own
-/// Study Designer tab (§4.6) deserializes the identical oversized type on
+/// (`embarch-api/design.md` decision 36, and `study-designer-ui`'s own
+/// earlier fix for the identical crash). `embarch-ui`'s own Study Designer
+/// tab deserializes the identical oversized type on
 /// every `get_study_status` poll — copying only the *first* half of
 /// `embarch-api`'s fix (enlarging the thread that calls `block_on`) still
 /// crashed live here on a real `discover` call, confirming the second half
@@ -165,9 +164,8 @@ async fn async_main() -> anyhow::Result<()> {
     tokio::spawn(poll_loop(core.clone(), tx, poke.clone()));
 
     // Seeded from config when it names a repo — the zero-click default for a
-    // single-repo bench that milestone-1.md §4.6 chose, kept exactly as it
-    // was. What is new is that `None` is now an *openable* state rather than
-    // a dead tab (design.md §3 decision 14).
+    // single-repo bench, kept exactly as it was. What is new is that `None`
+    // is now an *openable* state rather than a dead tab (decision 14).
     let study_designer = StudyDesigner::new(config.study_designer, core.clone());
 
     let (logs_tx, logs_rx) = watch::channel(Vec::new());

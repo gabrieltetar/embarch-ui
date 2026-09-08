@@ -11,11 +11,15 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default = "default_core")]
     pub core: CoreConfig,
-    /// Absent means the Study Designer tab is unavailable — a clear "not
-    /// configured" state, not a guess at which firmware repo was meant
-    /// (`embarch-ui/milestone-1.md` §4.6, resolved via `AskUserQuestion`
-    /// rather than picked silently: a config field, matching how
-    /// `embarch-api`'s own `[dev_bench].source_path` already works).
+    /// Absent means no project is open *by default* — not that the tab is
+    /// unavailable. The Study Designer tab is always present; "Open project"
+    /// can pick a firmware repo at runtime, and this field is only the
+    /// zero-click default for a single-repo bench (decision 14). It used to
+    /// be the only way in — `None` left the whole tab dead, every route
+    /// answering `404` including the one that could have opened a project —
+    /// resolved via `AskUserQuestion` against guessing which firmware repo
+    /// was meant, matching how `embarch-api`'s own
+    /// `[dev_bench].source_path` already works.
     #[serde(default)]
     pub study_designer: Option<StudyDesignerConfig>,
 }
