@@ -3,6 +3,7 @@
   "displayName": "EmbArch UI Launcher",
   "description": "Thin launcher for embarch-ui: starts/stops the server as a subprocess and opens it in the system browser. Renders nothing inside the editor.",
   "version": "0.1.0",
+  "icon": "icon.png",
   "publisher": "embarch",
   "private": true,
   "license": "MIT",

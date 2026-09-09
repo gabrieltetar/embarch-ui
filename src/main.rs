@@ -69,6 +69,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const STYLE_CSS: &str = include_str!("../assets/style.css");
 const APP_JS: &str = include_str!("../assets/app.js");
+/// The EmbArch mark, served as the browser tab icon. 64 px: a tab renders it
+/// at 16 CSS px, which is 32 physical on a 2x display, and 64 covers 4x. The
+/// GIMP master and the full-size export live beside it in `assets/brand/`.
+const FAVICON_PNG: &[u8] = include_bytes!("../assets/brand/favicon-64.png");
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -188,6 +192,7 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/", get(index))
         .route("/style.css", get(style_css))
         .route("/app.js", get(app_js))
+        .route("/favicon.png", get(favicon_png))
         .route("/events", get(events))
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/enroll", post(api_enroll))
@@ -261,6 +266,16 @@ async fn style_css() -> impl IntoResponse {
 
 async fn app_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
+}
+
+async fn favicon_png() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        FAVICON_PNG,
+    )
 }
 
 /// A plain snapshot read — handy for curl/debugging and as the one-off

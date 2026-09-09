@@ -36,6 +36,12 @@ body {
   --accent-strong: oklch(78% 0.15 200);
   --accent-soft-bg: oklch(72% 0.13 200 / 0.16);
   --on-accent: oklch(15% 0.01 200);
+  /* Identity, not interaction. The mark in `assets/brand/` is #E74C3C =
+   * oklch(63% 0.194 29); --danger below is oklch(66% 0.19 25) — the same
+   * colour to the eye. So the mark's red is deliberately NOT the accent: a
+   * red accent would make every primary button read as destructive and stop
+   * failures standing out. Only the wordmark and the sidebar glyph wear it. */
+  --brand: oklch(63% 0.194 29);
   --success: oklch(72% 0.15 150);
   --success-soft-bg: oklch(72% 0.15 150 / 0.16);
   --warning: oklch(78% 0.15 85);
@@ -63,6 +69,8 @@ body {
   --accent-strong: oklch(46% 0.14 200);
   --accent-soft-bg: oklch(52% 0.13 200 / 0.10);
   --on-accent: oklch(98% 0.005 200);
+  /* Darkened off the mark's own red, which is only 3.7:1 on this surface. */
+  --brand: oklch(56% 0.19 29);
   --success: oklch(48% 0.13 150);
   --success-soft-bg: oklch(48% 0.13 150 / 0.10);
   --warning: oklch(55% 0.14 80);
@@ -113,7 +121,7 @@ a:hover {
   font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--text-primary);
+  color: var(--brand);
 }
 .sidebar-header .sub {
   font-size: 10.5px;

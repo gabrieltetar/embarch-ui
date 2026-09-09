@@ -85,12 +85,13 @@ manifest = f"""<?xml version="1.0" encoding="utf-8"?>
     <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" />
     <Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/readme.md" Addressable="true" />
     <Asset Type="Microsoft.VisualStudio.Services.Content.License" Path="extension/LICENSE.txt" Addressable="true" />
+    <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/icon.png" Addressable="true" />
   </Assets>
 </PackageManifest>
 """
 
 content_types = """<?xml version="1.0" encoding="utf-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".js" ContentType="application/javascript"/><Default Extension=".json" ContentType="application/json"/><Default Extension=".md" ContentType="text/markdown"/><Default Extension=".txt" ContentType="text/plain"/><Default Extension=".vsixmanifest" ContentType="text/xml"/></Types>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".js" ContentType="application/javascript"/><Default Extension=".json" ContentType="application/json"/><Default Extension=".md" ContentType="text/markdown"/><Default Extension=".txt" ContentType="text/plain"/><Default Extension=".vsixmanifest" ContentType="text/xml"/><Default Extension=".png" ContentType="image/png"/></Types>
 """
 
 with zipfile.ZipFile(vsix, "w", zipfile.ZIP_DEFLATED) as z:
@@ -100,6 +101,7 @@ with zipfile.ZipFile(vsix, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("extension/out/extension.js", open("out/extension.js", "rb").read())
     z.writestr("extension/readme.md", open("README.md", "rb").read())
     z.writestr("extension/LICENSE.txt", open("LICENSE", "rb").read())
+    z.writestr("extension/icon.png", open("icon.png", "rb").read())
 
 print(vsix)
 PY
