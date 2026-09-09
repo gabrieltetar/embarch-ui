@@ -1,7 +1,7 @@
 // EmbArch UI Launcher: a thin VS Code extension that starts/stops the
 // `embarch-ui` binary as a subprocess and opens it in the system browser.
 // Nothing renders inside the editor — no webview, no custom TreeView/editor
-// (embarch-ui/design.md §3 decision 3). This file is the whole extension.
+// (embarch-ui decision 3). This file is the whole extension.
 
 import * as cp from "child_process";
 import * as vscode from "vscode";

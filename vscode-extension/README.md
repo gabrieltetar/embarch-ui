@@ -3,7 +3,7 @@
 A thin VS Code extension: starts/stops the `embarch-ui` binary as a
 subprocess and opens it in your system browser. It renders nothing inside
 the editor — no webview, no custom panel — see
-[embarch-ui/design.md §3 decision 3](../../embarch-doc/embarch-ui/design.md)
+[embarch-ui decision 3](../../embarch-doc/embarch-ui/decisions/shape.md)
 for why.
 
 ## Commands
@@ -28,6 +28,29 @@ current state and toggles start/stop when clicked.
 | `embarchUi.configPath` | `""` (unset) | Optional path to an embarch-ui TOML config file; sets `EMBARCH_UI_CONFIG` for the spawned process. |
 | `embarchUi.autoStart` | `false` | Start embarch-ui when VS Code starts, stop it when VS Code closes. |
 
+## Installing
+
+```sh
+./reinstall.sh
+```
+
+Compiles if the build is stale, packages the `.vsix`, sideloads it into the
+VS Code server, and tells you to reload the window — the commands and the
+status bar item only appear after a reload. Safe to re-run at any time.
+
+**You will need it again.** The launcher is not on any marketplace, so
+nothing reinstalls it: when the VS Code server re-provisions its extensions
+directory — a server update does — the extension is dropped silently while
+the `embarchUi.*` settings survive, so the symptom is the three commands
+quietly missing from the palette with no error anywhere.
+
+The script depends on nothing outside the box, because this bench has no
+`node`, `npm` or `vsce` on `PATH`: it borrows the `node` bundled inside the
+VS Code server, and builds the `.vsix` with python's `zipfile` instead of
+with `vsce` (a `.vsix` is only a zip holding a manifest and the extension
+directory). It installs into the **WSL remote**, not Windows, which is where
+the extension has to run to spawn the Linux `embarch-ui` binary.
+
 ## Developing
 
 ```sh
@@ -36,18 +59,14 @@ npm run compile
 ```
 
 Then press F5 in VS Code to launch an Extension Development Host with this
-extension loaded.
-
-**Not yet built/packaged in this environment** — the sandbox this extension
-was authored in has no `node`/`npm` available (the same limitation noted in
-[embarch-ui/design.md §5](../../embarch-doc/embarch-ui/design.md) for the
-mockup canvas step). `npm install && npm run compile` needs to be run
-somewhere with Node before this can be loaded into a real Extension
-Development Host or packaged with `vsce`.
+extension loaded — which needs a real `node`/`npm`, and, if this box still
+has neither, is exactly the path `reinstall.sh` exists to avoid. `out/` and
+`node_modules/` are both gitignored, so a fresh clone cannot compile here at
+all; `reinstall.sh` says so plainly rather than failing obscurely.
 
 ## Distribution
 
-Not yet decided — see
-[embarch-ui/design.md §5](../../embarch-doc/embarch-ui/design.md)
-("VS Code extension distribution"). This extension is not published
-anywhere; don't publish it without asking first.
+**An internal `.vsix` only, never the public Marketplace** —
+[embarch-ui decision 3](../../embarch-doc/embarch-ui/decisions/shape.md).
+This extension is not published anywhere; don't publish it without asking
+first.
