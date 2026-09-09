@@ -25,7 +25,12 @@
 
   <div class="sidebar">
     <div class="sidebar-header">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M9 9h2v2H9zM13 9h2v2h-2zM9 13h2v2H9zM13 13h2v2h-2z"/></svg>
+      <!-- The EA mark itself, traced from assets/brand/embarch-icon.xcf by
+           assets/brand/trace_mark.py (union mode, tolerance 1.6) and cropped
+           to the ink so it is not carrying the app icon's padding at 22px.
+           Two fills, not a stroke: the letters take --text-secondary and
+           --brand, so the glyph follows the theme the way a bitmap could not. -->
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M0,16.08 3.26,0 13.75,0 13.17,3.03 6.06,3.03 5.48,6.52 11.65,6.52 11.65,6.87 11.07,9.55 4.78,9.55 4.08,13.28 11.3,13.28 16.31,3.61 21.79,3.61 24,24 19.69,24 19.22,18.99 12.7,18.99 10.37,24 5.83,24 9.67,16.31 0,16.31ZM14.45,15.38 18.87,15.5 18.29,7.46 17.94,7.69Z" fill="var(--text-secondary)" fill-rule="evenodd"/><path d="M5.83,23.88 9.67,16.54 9.44,16.19 10.02,16.19 10.95,14.68 11.18,13.75 10.83,13.28 11.42,13.17 16.19,3.73 21.79,3.61 24,24 19.69,24 19.22,18.99 12.7,18.99 10.37,24ZM14.45,15.38 18.87,15.5 18.29,7.46 17.94,7.69Z" fill="var(--brand)" fill-rule="evenodd"/></svg>
       <div>
         <div class="word">EmbArch</div>
         <div class="sub">embarch-ui</div>
