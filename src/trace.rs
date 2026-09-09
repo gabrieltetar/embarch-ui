@@ -1303,6 +1303,26 @@ pub fn parse(
     note: Option<String>,
     steps: &[StepStamp],
 ) -> Result<TraceView, String> {
+    parse_with_cap(study_id, tap, csv, named, timed, self_excluded, note, steps, MAX_ROWS)
+}
+
+/// [`parse`] with the row cap as a parameter instead of the fixed [`MAX_ROWS`].
+/// Exists only so the row-cap measurement (`scratch_view::measure_cap_candidates`)
+/// can decode a capture past the production cap without a second copy of this
+/// function drifting out of step with it — nothing outside `#[cfg(test)]` calls
+/// this with anything but `MAX_ROWS`, which is exactly what `parse` does above.
+#[allow(clippy::too_many_arguments)]
+fn parse_with_cap(
+    study_id: &str,
+    tap: &str,
+    csv: &str,
+    named: bool,
+    timed: bool,
+    self_excluded: Option<bool>,
+    note: Option<String>,
+    steps: &[StepStamp],
+    cap: usize,
+) -> Result<TraceView, String> {
     let mut lines = csv.split('\n');
     let header = lines.next().unwrap_or_default().trim_end_matches('\r');
     if header != outpost::csv_header() {
@@ -1321,7 +1341,7 @@ pub fn parse(
         if line.is_empty() {
             continue;
         }
-        if rows.len() >= MAX_ROWS {
+        if rows.len() >= cap {
             rows_dropped_by_cap += 1;
             continue;
         }
@@ -1917,7 +1937,7 @@ pub fn parse(
         note,
         rows: rows.len(),
         rows_dropped_by_cap,
-        row_cap: MAX_ROWS,
+        row_cap: cap,
         rows_unparsed,
         unit,
         axis_clock,
@@ -3905,6 +3925,146 @@ mod scratch_view {
                 x.entries,
                 x.measured_spans,
                 x.excluded_spans
+            );
+        }
+    }
+
+    /// Builds a `*.trace.csv` in memory, shaped like the committed
+    /// `outpost-native-sim-stamped` fixture rather than invented from
+    /// nothing: same header, same kind vocabulary, and the same relative
+    /// frequencies (`thread_switch_out`/`in` as the bulk, `marker` and the
+    /// `isr_enter`/`isr_exit` pair as the next tier, `idle` alongside them,
+    /// and `thread_create`/`thread_name`/`gap` as rare one-offs) — measured
+    /// off that file with
+    /// `awk -F, 'NR>1{print $6}' … | sort | uniq -c`. A handful of thread
+    /// pointers rotate through the switch records so the view ends up with a
+    /// realistic lane count instead of one lane repeated `rows` times.
+    ///
+    /// Kept entirely in a `String` — never touches disk — because the task
+    /// this measures is "does raising `MAX_ROWS` cost too much to decode and
+    /// serve", not "can this machine read a file back".
+    fn synth_capture(rows: usize) -> String {
+        // Six thread pointers plus idle's fixed id, matching the fixture's
+        // shape where a handful of subjects account for almost every
+        // schedule record.
+        let threads: [u32; 6] = [0x2000_1000, 0x2000_1400, 0x2000_1800, 0x2000_1c00, 0x2000_2000, 0x2000_2400];
+        let names = ["main", "worker_a", "worker_b", "worker_c", "worker_d", "logger"];
+        let isr_vectors: [u32; 3] = [3, 11, 22];
+
+        let mut out = String::with_capacity(rows * 48 + 64);
+        out.push_str(super::outpost::csv_header());
+        out.push('\n');
+
+        let mut cycles: u64 = 0;
+        let mut cur = 0usize; // which thread is "in"
+        let mut emitted = 0usize;
+        let mut frame_index: u64 = 1;
+        let mut rx_utc_ms: u64 = 1_700_000_000_000;
+
+        // A handful of thread_create rows up front so every lane is named —
+        // the fixture names all but the switch-only ones, and an all-unnamed
+        // synthetic capture would measure a different (cheaper) code path in
+        // `Lane::unnamed` handling than a real one exercises.
+        for (i, &t) in threads.iter().enumerate() {
+            out.push_str(&format!(
+                "{frame_index},1,{rx_utc_ms},{cycles},{cycles}.000,thread_create,{t},0,{}\n",
+                names[i]
+            ));
+            emitted += 1;
+            cycles += 10;
+        }
+
+        let mut step = 0u64;
+        while emitted < rows {
+            step += 1;
+            if step.is_multiple_of(2000) {
+                frame_index += 1;
+                rx_utc_ms += 10;
+            }
+            // 221:220:155:75:75:74:6:3:2 out of 831 in the fixture, rescaled
+            // over a period of 831 synthetic steps so the long tail (rare
+            // gap/thread_name/thread_create rows) still shows up at scale.
+            let slot = step % 831;
+            let (kind, a, b, name): (&str, u32, u32, &str) = if slot < 221 {
+                let t = threads[cur % threads.len()];
+                cur += 1;
+                ("thread_switch_out", t, 0, "")
+            } else if slot < 441 {
+                let t = threads[cur % threads.len()];
+                ("thread_switch_in", t, 0, "")
+            } else if slot < 596 {
+                ("marker", 0, 0, "")
+            } else if slot < 671 {
+                (
+                    "isr_enter",
+                    isr_vectors[(step as usize / 671) % isr_vectors.len()],
+                    0,
+                    "",
+                )
+            } else if slot < 746 {
+                ("idle", 0, 0, "")
+            } else if slot < 820 {
+                (
+                    "isr_exit",
+                    isr_vectors[(step as usize / 746) % isr_vectors.len()],
+                    0,
+                    "",
+                )
+            } else if slot < 826 {
+                ("thread_create", threads[cur % threads.len()], 0, names[cur % names.len()])
+            } else if slot < 829 {
+                ("gap", 3, 1_000, "")
+            } else {
+                ("thread_name", threads[cur % threads.len()], 0, names[cur % names.len()])
+            };
+            out.push_str(&format!(
+                "{frame_index},1,{rx_utc_ms},{cycles},{}.000,{kind},{a},{b},{name}\n",
+                cycles
+            ));
+            cycles += 10;
+            emitted += 1;
+        }
+        out
+    }
+
+    /// **The measurement `embarch-ui/open.md`'s row-cap bullet is blocked
+    /// on.** Builds captures of the committed fixture's shape at 250k / 500k
+    /// / 1M rows — needing no file on disk, see [`synth_capture`] — and
+    /// prints decode time, resident view JSON size and the `/bins` payload
+    /// size at a reference grid width (1,170, the same width
+    /// `summarise_a_capture_from_disk` above uses, chosen to match a
+    /// realistic browser window rather than the `MAX_BINS` ceiling).
+    /// `parse_with_cap` is called with `cap` set to the row count itself so
+    /// the measurement is never truncated by today's 250,000-row limit —
+    /// that limit is exactly the number this test exists to inform.
+    ///
+    /// `EMBARCH_MEASURE_ROW_CAP=1 cargo test -p embarch-ui --release \
+    ///   measure_the_row_cap_at_scale -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a multi-second synthetic-capture measurement, not a correctness check"]
+    fn measure_the_row_cap_at_scale() {
+        for &rows in &[250_000usize, 500_000, 1_000_000] {
+            let csv = synth_capture(rows);
+            let csv_bytes = csv.len();
+
+            let start = std::time::Instant::now();
+            let view =
+                super::parse_with_cap("scratch", "outpost", &csv, true, true, None, None, &[], rows)
+                    .expect("synthetic capture parses");
+            let decode = start.elapsed();
+
+            assert_eq!(view.rows, rows, "the synthetic capture must not be cap-truncated here");
+
+            let view_bytes = serde_json::to_string(&view).expect("serializes").len();
+            let bins_bytes = serde_json::to_string(
+                &super::bin_window(&view, view.t_from, view.t_to, 1_170).expect("bins"),
+            )
+            .expect("serializes")
+            .len();
+
+            println!(
+                "rows={rows:>8} csv_bytes={csv_bytes:>10} decode={decode:>10?} \
+                 view_json_bytes={view_bytes:>10} bins_json_1170_bytes={bins_bytes:>6}"
             );
         }
     }
