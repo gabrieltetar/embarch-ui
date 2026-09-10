@@ -156,6 +156,15 @@
   // below (Topology's Role/Chip/Probe/Status-badge shape, fixed to the
   // two canonical roles) — this one lists every actually-enrolled entry,
   // whatever its role happens to be named.
+  //
+  // The last column is labeled "Enrolled" (never "Validated"/"Confirmed"/
+  // "Verified"): `confirmed_at_utc_ms` is enrolment time, unmoving until
+  // someone re-enrolls, so a header implying a live check would answer a
+  // question this field cannot answer. `embarch-core` decision 54
+  // (decisions/surfaces.md) declined to persist a real last-validation
+  // instant next to it; showing real freshness needs `POST /validate` and
+  // that response's own `validated_at_utc_ms`, a live, hardware-touching
+  // call this snapshot poll never makes.
   function enrolledTableRows(snapshot) {
     const enrolled = snapshot.enrolled || [];
     if (enrolled.length === 0) {

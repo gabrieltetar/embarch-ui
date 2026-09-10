@@ -18,6 +18,14 @@ pub struct Snapshot {
     pub core_reachable: bool,
     pub error: Option<String>,
     pub probes: Vec<ProbeInfo>,
+    /// Carries `confirmed_at_utc_ms` — enrolment time, unmoving until
+    /// re-enrolment. Any UI cell built from this field is labeled
+    /// "Enrolled" / "Enrolled at", never "Validated", "Last validated" or
+    /// "Verified" — those imply a live check this field cannot answer.
+    /// `embarch-core` decision 54 (`decisions/surfaces.md`) declined to
+    /// persist a real last-validation instant next to it; real freshness
+    /// needs a `POST /validate` call and that response's own
+    /// `validated_at_utc_ms`, not a passive read of this snapshot.
     pub enrolled: Vec<EnrolledBoardResponse>,
     pub alerts: Vec<AlertResponse>,
     pub dev_bench_port: Option<DevBenchPortResponse>,
