@@ -73,6 +73,10 @@ const APP_JS: &str = include_str!("../assets/app.js");
 /// at 16 CSS px, which is 32 physical on a 2x display, and 64 covers 4x. The
 /// GIMP master and the full-size export live beside it in `assets/brand/`.
 const FAVICON_PNG: &[u8] = include_bytes!("../assets/brand/favicon-64.png");
+/// The same mark traced to paths, which a tab renders crisply at any DPI. The
+/// PNG stays as the second `<link>`: an SVG icon is the one asset type a
+/// browser is allowed to decline, and a blank tab is a worse default.
+const FAVICON_SVG: &str = include_str!("../assets/brand/embarch-mark.svg");
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -193,6 +197,7 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/style.css", get(style_css))
         .route("/app.js", get(app_js))
         .route("/favicon.png", get(favicon_png))
+        .route("/favicon.svg", get(favicon_svg))
         .route("/events", get(events))
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/enroll", post(api_enroll))
@@ -266,6 +271,16 @@ async fn style_css() -> impl IntoResponse {
 
 async fn app_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
+}
+
+async fn favicon_svg() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        FAVICON_SVG,
+    )
 }
 
 async fn favicon_png() -> impl IntoResponse {
