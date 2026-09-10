@@ -5,9 +5,24 @@ letters, walk the inside/outside boundary as unit edges, stitch them into
 loops (outer loops and the A's counter alike), then Douglas-Peucker the
 staircases back into the straight lines they came from.
 
-Two outputs, chosen by the extension of the third argument: a `.txt` of `d`
-attributes cropped to the ink, for the header glyph to inline, and a `.svg` of
-the whole mark in the master's own box, outline included -- the brand asset.
+Three outputs, chosen by the extension of the third argument: a `.txt` of `d`
+attributes cropped to the ink, for the header glyph to inline; a `.svg` of the
+whole mark in the master's own box, outline included -- the brand asset; and a
+`.png` rasterised from that same vector, so no bitmap is a second tracing of
+the master that could drift from it. What each shipped file is made with, run
+from the repo root (the master is found beside this script either way):
+
+    B=assets/brand/trace_mark.py
+    python3 $B 1.6 union  /tmp/mark-paths.txt                # -> index.html
+    python3 $B 1.6 layers assets/brand/embarch-mark.svg
+    python3 $B 1.6 layers assets/brand/favicon-64.png    64
+    python3 $B 1.6 layers vscode-extension/icon.png     128
+
+Tracing a 256px raster costs half a pixel of edge placement and there is no
+getting it back: measured across four scanlines of the A's left edge, the cut
+lands -0.24, +0.06, -0.43 and -0.11 px off the master's true 50% point. The
+sign varies because that internal edge is one pixel wide in the master, so
+this is grid quantisation rather than a bias worth correcting.
 """
 import os, zlib, struct, sys
 from collections import deque
@@ -127,6 +142,8 @@ TOL = float(sys.argv[1]) if len(sys.argv) > 1 else 0.9
 MODE = sys.argv[2] if len(sys.argv) > 2 else 'bfs'
 OUT = sys.argv[3] if len(sys.argv) > 3 else 'mark-paths.txt'
 SVG = OUT.endswith('.svg')
+PNG = OUT.endswith('.png')
+SIZE = int(sys.argv[4]) if len(sys.argv) > 4 else 64
 
 def despeck(mask, floor=64):
     """Drop connected components below `floor` pixels.
@@ -183,7 +200,7 @@ INK = [(x, y) for y in range(H) for x in range(W) if own[y][x]]
 X0 = min(x for x, y in INK); X1 = max(x for x, y in INK) + 1
 Y0 = min(y for x, y in INK); Y1 = max(y for x, y in INK) + 1
 print('ink bbox %d..%d x %d..%d' % (X0, X1, Y0, Y1))
-if SVG:
+if SVG or PNG:
     # The standalone mark keeps the master's box, padding and all: it is a
     # drop-in for icon-256.png, and an app icon's breathing room is part of the
     # artwork. viewBox units are the master's own pixels, so a coordinate here
@@ -204,6 +221,67 @@ def d_attr(ls):
         pts = [(round((x-OX)*SCALE, ND), round((y-OY)*SCALE, ND)) for x, y in lp]
         parts.append('M' + ' '.join('%g,%g' % p for p in pts) + 'Z')
     return ''.join(parts)
+
+def writepng(path, w, h, px):
+    raw = b''.join(b'\x00' + bytes(v for x in range(w) for v in px[y][x]) for y in range(h))
+    def ch(t, dd):
+        c = t+dd; return struct.pack('>I', len(dd)) + c + struct.pack('>I', zlib.crc32(c))
+    open(path, 'wb').write(
+        b'\x89PNG\r\n\x1a\n'
+        + ch(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+        + ch(b'IDAT', zlib.compress(raw, 9)) + ch(b'IEND', b''))
+
+def s2l(c): c /= 255.0; return c/12.92 if c <= 0.04045 else ((c+0.055)/1.055) ** 2.4
+def l2s(c):
+    c = max(0.0, min(1.0, c))
+    return round((12.92*c if c <= 0.0031308 else 1.055*c ** (1/2.4)-0.055)*255)
+LUT = [s2l(i) for i in range(256)]
+
+def rasterise(layers, size, ss=16):
+    """The paths, scan-converted at ss x and box-filtered down in linear light.
+
+    A bitmap made this way is one resample, not two: the old favicon was the
+    256 master box-filtered to 64, so it carried the master's own antialiasing
+    into the filter and could drift from the vector the moment either changed.
+    Averaging sRGB bytes directly would darken every edge -- hence the LUT --
+    and colour is averaged over the covered samples alone, so a 5%-covered
+    edge pixel keeps the mark's colour at 5% alpha rather than a fifth of it
+    over black.
+    """
+    n = size*ss
+    buf = bytearray(n*n*4)
+    for subs, rgb in layers:
+        edges = []
+        for pts in subs:
+            for i in range(len(pts)):
+                x1, y1 = pts[i]; x2, y2 = pts[(i+1) % len(pts)]
+                if y1 != y2: edges.append((x1, y1, x2, y2))
+        k = n/float(W)                      # master pixels -> samples
+        for sy in range(n):
+            yc = (sy+0.5)/k; xs = []
+            for x1, y1, x2, y2 in edges:
+                if (y1 <= yc < y2) or (y2 <= yc < y1):
+                    xs.append(x1 + (yc-y1)*(x2-x1)/(y2-y1))
+            xs.sort(); row = sy*n*4
+            for i in range(0, len(xs)-1, 2):   # even-odd: fill between pairs
+                a = max(0, int(xs[i]*k + 0.5)); b = min(n, int(xs[i+1]*k + 0.5))
+                for sx in range(a, b):
+                    o = row + sx*4
+                    buf[o] = rgb[0]; buf[o+1] = rgb[1]; buf[o+2] = rgb[2]; buf[o+3] = 255
+    out = [[None]*size for _ in range(size)]
+    tot = ss*ss
+    for y in range(size):
+        for x in range(size):
+            R = G = B = 0.0; cov = 0
+            for dy in range(ss):
+                base = (y*ss+dy)*n*4
+                for dx in range(ss):
+                    o = base + (x*ss+dx)*4
+                    if buf[o+3]:
+                        R += LUT[buf[o]]; G += LUT[buf[o+1]]; B += LUT[buf[o+2]]; cov += 1
+            out[y][x] = (0, 0, 0, 0) if not cov else (
+                l2s(R/cov), l2s(G/cov), l2s(B/cov), round(cov/tot*255))
+    return out
 
 def modal_colour(letter):
     """The class's own colour, straight out of the master -- no hand-picked hex.
@@ -233,13 +311,20 @@ for name, letter in LAYERS:
     res[name] = (letter, ls)
     print(name, len(ls), 'loop(s)', [len(l) for l in ls], 'verts')
 
-if SVG:
-    body = []
+if SVG or PNG:
+    paint = []
     for name, letter in LAYERS:
         fill, n, tot = modal_colour(letter)
         print('%-7s fill %s (%d/%d px)' % (name, fill, n, tot))
-        body.append('  <path d="%s" fill="%s" fill-rule="evenodd"/>'
-                    % (d_attr(res[name][1]), fill))
+        paint.append((res[name][1], fill))
+if PNG:
+    # The favicon and anything else raster comes off the vector, not off the
+    # master render, so the two cannot drift.
+    layers = [(subs, tuple(int(f[i:i+2], 16) for i in (1, 3, 5))) for subs, f in paint]
+    writepng(OUT, SIZE, SIZE, rasterise(layers, SIZE))
+elif SVG:
+    body = ['  <path d="%s" fill="%s" fill-rule="evenodd"/>' % (d_attr(ls), fill)
+            for ls, fill in paint]
     open(OUT, 'w').write(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" '
         'width="%d" height="%d" role="img" aria-label="EmbArch">\n'
@@ -248,6 +333,7 @@ if SVG:
 else:
     open(OUT, 'w').write(''.join(
         '%s %s\n' % (name, d_attr(ls)) for name, (letter, ls) in res.items()))
-for name, (letter, ls) in res.items():
-    print(name, 'd length', len(d_attr(ls)))
+if not PNG:
+    for name, (letter, ls) in res.items():
+        print(name, 'd length', len(d_attr(ls)))
 print('wrote', OUT)
