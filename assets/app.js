@@ -160,7 +160,7 @@
   // The last column is labeled "Enrolled" (never "Validated"/"Confirmed"/
   // "Verified"): `confirmed_at_utc_ms` is enrolment time, unmoving until
   // someone re-enrolls, so a header implying a live check would answer a
-  // question this field cannot answer. `embarch-core` decision 54
+  // question this field cannot answer. `embarch-core` decision 57
   // (decisions/surfaces.md) declined to persist a real last-validation
   // instant next to it; showing real freshness needs `POST /validate` and
   // that response's own `validated_at_utc_ms`, a live, hardware-touching
