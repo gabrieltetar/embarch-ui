@@ -50,13 +50,14 @@ Requires a running [`embarch-core`](https://github.com/gabrieltetar/embarch-core
 cargo run --release      # then open http://127.0.0.1:4890
 ```
 
-No CLI flags — the whole surface is three environment variables:
+No CLI flags — the whole surface is four environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `EMBARCH_UI_HOST` | `127.0.0.1` | Bind address. Loopback-only by default: no TLS, and no reason to expose a tool one engineer runs on their own machine. |
 | `EMBARCH_UI_PORT` | `4890` | Bind port. An unparseable value falls back to the default rather than refusing to start; the address actually bound is logged on every start. |
 | `EMBARCH_UI_CONFIG` | unset | Path to an optional TOML config file (below). |
+| `EMBARCH_UI_STATE` | unset | Path to the recent-projects list, which otherwise lives at `<per-user data dir>/embarch/ui/recent-projects.json`. **Not the config file** — that one an engineer writes and this process only reads; process-written state goes to the per-user data dir instead. An unreadable or unparseable file is an empty list, logged, never an error. |
 
 ## Config
 
