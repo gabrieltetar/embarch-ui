@@ -4068,4 +4068,60 @@ mod scratch_view {
             );
         }
     }
+
+    /// Sibling to [`measure_the_row_cap_at_scale`], asked for by
+    /// `tasks/ui/023`: that measurement times `parse` alone, which is one
+    /// component of what `GET /study/{id}/streams` actually costs a caller,
+    /// not the number itself. This one times the rest of `api_trace_view`'s
+    /// in-process work — `trace::parse` followed by the same
+    /// `serde_json::to_vec` axum's `Json` extractor runs to build the
+    /// response body — at the same three scales, with no file on disk and no
+    /// board.
+    ///
+    /// It deliberately stops there. `decode_trace` (`src/main.rs`) opens with
+    /// three awaited calls into `state.core` —
+    /// `study_streams`/`get_study_stream`/`study_steps` — before `parse` ever
+    /// runs, and closes with an `Arc::new` and a `tokio::sync::Mutex` lock
+    /// after it. The mutex and the `Arc` are negligible; the three Core calls
+    /// are not, and there is no way to put a number on them without a live
+    /// Core answering real HTTP requests over a real `StudyStreamsIndex` —
+    /// exactly the "hardware, no board" boundary this task was scoped to
+    /// respect. So the true end-to-end `/study/{id}/streams` request cost is
+    /// **still unmeasured** after this test; what it adds is the one other
+    /// in-memory component (`Json` encoding) beyond `parse` itself, so what
+    /// remains unaccounted for is named precisely rather than left as one
+    /// opaque gap.
+    ///
+    /// `EMBARCH_MEASURE_ROW_CAP=1 cargo test -p embarch-ui --release \
+    ///   measure_the_request_path_at_scale -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a multi-second synthetic-capture measurement, not a correctness check"]
+    fn measure_the_request_path_at_scale() {
+        for &rows in &[250_000usize, 500_000, 1_000_000] {
+            let csv = synth_capture(rows);
+
+            let decode_start = std::time::Instant::now();
+            let view =
+                super::parse_with_cap("scratch", "outpost", &csv, true, true, None, None, &[], rows)
+                    .expect("synthetic capture parses");
+            let decode = decode_start.elapsed();
+
+            assert_eq!(view.rows, rows, "the synthetic capture must not be cap-truncated here");
+
+            // Mirrors what `api_trace_view` hands to axum's `Json(..)`
+            // wrapper for the response body — the same serialization work,
+            // not an approximation of it.
+            let encode_start = std::time::Instant::now();
+            let body = serde_json::to_vec(&view).expect("serializes");
+            let encode = encode_start.elapsed();
+
+            let handler_in_process = decode + encode;
+
+            println!(
+                "rows={rows:>8} decode={decode:>10?} encode={encode:>10?} \
+                 handler_in_process={handler_in_process:>10?} body_bytes={:>10}",
+                body.len()
+            );
+        }
+    }
 }
