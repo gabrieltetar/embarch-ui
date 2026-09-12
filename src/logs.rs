@@ -2,7 +2,7 @@
 //! live tail, both mediated through `embarch-core-client` — `embarch-ui`
 //! never reads Core's logfile directly, since Core can run on a different
 //! machine than whatever's asking (the whole reason `embarch-topology`
-//! exists, embarch-ui/design.md §3 decision 7).
+//! exists, decision 7).
 //!
 //! A background task polls `GET /logs/recent` on an interval (the same
 //! "server polls, browser only ever holds one SSE connection" shape
@@ -12,7 +12,7 @@
 //! line exactly once, not the whole tail window every tick.
 //!
 //! **`embarch-api`'s logs arrive by a different route, and have to**
-//! (design.md §3 decision 13, `embarch-api/design.md` §3 decision 43).
+//! (decision 13, `embarch-api` decision 43).
 //! `embarch-api` is not a service — it is spawned per Claude Code session
 //! as an MCP server, or run once as a CLI and gone — so there is no
 //! `/logs/recent` to call and, in the case that motivated this, no process
@@ -67,7 +67,7 @@ pub async fn poll_loop(core: Arc<CoreClient>, tx: watch::Sender<Vec<String>>) {
 }
 
 /// The same loop against `embarch-api`'s rolling file instead of Core's HTTP
-/// surface (design.md §3 decision 13). The path comes from
+/// surface (decision 13). The path comes from
 /// `embarch_core_client::api_log`, which is also what `embarch-api` itself
 /// writes through — one definition, so the writer and the reader cannot
 /// drift apart.

@@ -2,13 +2,13 @@
 //! list, custom-action registry, and build/run/watch — all in-process
 //! authoring via `embarch-study-designer` (pure/offline, no hardware
 //! touched), submission/execution via `embarch-core-client` over HTTP+Bearer
-//! (design.md §3 decision 5). Unlike `study-designer-ui`, which shells out
+//! (decision 5). Unlike `study-designer-ui`, which shells out
 //! to `embarch-api`'s CLI for `run-study`/`study-status`, this talks to
 //! `embarch-core` directly through the same shared client the Dashboard/
 //! Topology/Enroll tabs already use.
 //!
-//! **A project can be opened at runtime** (`embarch-ui/design.md` §3
-//! decision 14) — this used to say the tab was "disabled entirely (every
+//! **A project can be opened at runtime** (decision 14) — this used to
+//! say the tab was "disabled entirely (every
 //! route below answers `404`) when `[study_designer]` isn't set in config",
 //! because decision 14's predecessor resolved via `AskUserQuestion` that a config
 //! field, not a UI picker or cwd search, names the firmware repo.
@@ -42,8 +42,8 @@ use heapless::Vec as HVec;
 
 /// `Study.streams`' own type, named once rather than spelled out at each use.
 type StreamList = HVec<StreamTap, MAX_STREAMS_PER_STUDY>;
-/// `Study.decoders`' own type (`embarch-study-designer/design.md` §3
-/// decision 52), named once rather than spelled out at each use.
+/// `Study.decoders`' own type (`embarch-study-designer` decision 52),
+/// named once rather than spelled out at each use.
 type DecoderList = embarch_study_designer::bounded::Bounded<StructLayout, MAX_DECODERS_PER_STUDY>;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -60,7 +60,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 struct Inner {
     /// The project currently open — `None` when neither config named one nor
-    /// anybody has opened one yet (`embarch-ui/design.md` §3 decision 15).
+    /// anybody has opened one yet (decision 14).
     ///
     /// A `Mutex`, not a plain field, and that is the whole shape of decision
     /// 14: `firmware_repo_path` is read by three different things (the saved
@@ -84,7 +84,7 @@ struct Inner {
     /// must not be recomputed on every request.
     ///
     /// Holds the extraction's *names* alongside its table
-    /// (`embarch-study-designer/design.md` §3 decision 56) — cached together
+    /// (`embarch-study-designer` decision 56) — cached together
     /// because they come from one text-scan and are invalidated by the same
     /// event, and a name cache that could outlive its table is the
     /// one-repo's-names-beside-another's-UUIDs failure decision 14 already
@@ -104,8 +104,7 @@ pub struct StudyDesigner(Arc<Inner>);
 impl StudyDesigner {
     /// Constructed unconditionally, with or without a configured project —
     /// the tab's routes now answer for "no project open" instead of the
-    /// process having no Study Designer at all (`embarch-ui/design.md` §3
-    /// decision 14).
+    /// process having no Study Designer at all (decision 14).
     pub fn new(config: Option<StudyDesignerConfig>, core: Arc<CoreClient>) -> StudyDesigner {
         let (run_tx, _) = watch::channel(RunState::Idle);
         StudyDesigner(Arc::new(Inner {
@@ -149,7 +148,7 @@ impl StudyDesigner {
 
     /// The firmware repo's own `embarch/study-structs.toml` — the payload
     /// layouts a `GattNotify` tap can decode with
-    /// (`embarch-study-designer/design.md` §3 decision 52).
+    /// (`embarch-study-designer` decision 52).
     ///
     /// Read fresh on every call rather than cached, same as
     /// [`Self::registry`]: the file is hand-edited beside the running UI,
@@ -165,7 +164,7 @@ impl StudyDesigner {
     /// Runs the configured `static_extractor` at most once per project.
     /// An unrecognized name is a named error the first time it's needed,
     /// not a silent guess — `reference-dut` is the only name this crate
-    /// currently ships an extractor for (design.md §3 decision 33).
+    /// currently ships an extractor for (`embarch-study-designer` decision 33).
     fn static_extraction(&self) -> Option<StaticGatt> {
         let mut cached = self.0.static_gatt.lock().unwrap();
         if let Some(computed) = cached.as_ref() {
@@ -202,7 +201,7 @@ impl StudyDesigner {
     }
 
     /// Every characteristic name this project can resolve
-    /// (`embarch-study-designer/design.md` §3 decision 56): the vendor table
+    /// (`embarch-study-designer` decision 56): the vendor table
     /// unconditionally, plus the firmware's own identifiers when a static
     /// extractor is configured.
     fn names(&self) -> GattNameBook {
@@ -223,23 +222,23 @@ impl StudyDesigner {
 }
 
 /// One static extraction, cached per project: the GATT table plus the C
-/// identifiers behind it (`embarch-study-designer/design.md` §3 decision 56).
+/// identifiers behind it (`embarch-study-designer` decision 56).
 #[derive(Debug, Clone)]
 struct StaticGatt {
     services: Vec<GattServiceInfo>,
     symbols: Vec<(Uuid, String)>,
     /// The identifiers the *services* were declared under
-    /// (`embarch-study-designer/design.md` §3 decision 57) — what the
+    /// (`embarch-study-designer` decision 57) — what the
     /// selective-monitor picker's group headers read
-    /// (`embarch-ui/design.md` §3 decision 17).
+    /// (decision 17).
     service_symbols: Vec<(Uuid, String)>,
 }
 
 // `StudyResult` is `heapless`-backed with large fixed-capacity buffers
 // (`MAX_STEPS_PER_STUDY` steps' worth of `captured_data`/`gatt_services`/
 // `gatt_activity`) — over a megabyte inline, the same "oversized stack
-// frame" shape `embarch-api/design.md` decision 36 and this crate's own
-// design.md §7 already found real stack-overflow risk in. Boxed here so
+// frame" shape `embarch-api` decision 36 and `embarch-study-designer`
+// decision 49 already found real stack-overflow risk in. Boxed here so
 // `RunState` itself stays small regardless.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -282,8 +281,7 @@ const NO_PROJECT: &str = "no project is open — open a firmware repo, or set \
 ///
 /// Still a `404`, and still the "clear not-configured state" decision 14's
 /// predecessor chose over guessing — but it is no longer a dead end, because
-/// `POST /api/study-designer/project` is now the way out of it (design.md §3
-/// decision 14).
+/// `POST /api/study-designer/project` is now the way out of it (decision 14).
 fn not_configured() -> axum::response::Response {
     (StatusCode::NOT_FOUND, NO_PROJECT).into_response()
 }
@@ -371,9 +369,9 @@ fn discovery_failure(result: &StudyResult) -> Option<String> {
 }
 
 /// What a study authored in this tab requires
-/// (`embarch-study-designer/design.md` §3 decision 40), as the browser stated
-/// it — **built 2026-08-26, Milestone 7 Phase D** (`embarch-ui/design.md` §3
-/// decision 11). Until then this function returned `Requirements::any()`
+/// (`embarch-study-designer` decision 40), as the browser stated
+/// it — **built 2026-08-26, Milestone 7 Phase D** (decision 11). Until
+/// then this function returned `Requirements::any()`
 /// unconditionally, honestly, because the tab had no fields to say anything
 /// else in.
 ///
@@ -429,8 +427,8 @@ impl RequirementsInput {
     }
 }
 
-/// One tap, as this tab authors it (`embarch-study-designer/design.md` §3
-/// decisions 39/52/55, `embarch-outpost/design.md` §3 decisions 11/12).
+/// One tap, as this tab authors it (`embarch-study-designer` decisions
+/// 39/52/55, `embarch-outpost` decisions 11/12).
 ///
 /// Two kinds, distinguished by `kind` rather than by which fields happen to
 /// be filled in — an untagged shape would make "no signal" and "no
@@ -552,7 +550,7 @@ fn build_taps(
                 // Resolved here, against the firmware repo's own
                 // `study-structs.toml`, so the submitted `Study` carries the
                 // layout rather than a name Core has no way to look up
-                // (design.md §3 decision 52).
+                // (`embarch-study-designer` decision 52).
                 let encoding = match decoder.trim() {
                     "" => StreamEncoding::Raw,
                     named => {
@@ -604,8 +602,8 @@ fn build_taps(
 
 /// Whether any step in `steps` subscribes to this characteristic — an
 /// unfiltered monitor action (which subscribes to everything notify- or
-/// indicate-capable) or a selective one that names it (design.md §3
-/// decision 53).
+/// indicate-capable) or a selective one that names it
+/// (`embarch-study-designer` decision 53).
 fn any_step_subscribes(steps: &[Step], service: Uuid, characteristic: Uuid) -> bool {
     steps.iter().any(|step| match &step.action {
         Action::GattMonitorAll {} | Action::GattMonitorStart {} => true,
@@ -619,12 +617,12 @@ fn any_step_subscribes(steps: &[Step], service: Uuid, characteristic: Uuid) -> b
 }
 
 /// The `GattTranscript` tap every study with a monitor step gets, appended
-/// after whatever the author declared — `embarch-ui/design.md` §3 decision 15.
+/// after whatever the author declared — decision 15.
 ///
 /// **Auto-declared rather than offered as a checkbox.** Before this, the
 /// Study Designer authored no GATT tap at all, so a monitor step's capture
 /// existed only as `StepResult.gatt_activity`'s first 32 records — and that
-/// field is retired (`embarch-study-designer/design.md` §3 decision 54). A
+/// field is retired (`embarch-study-designer` decision 54). A
 /// study that monitors and captures nothing is not a configuration anyone
 /// wants; making it reachable by leaving a box unticked would only make the
 /// old failure re-authorable.
@@ -672,11 +670,12 @@ fn auto_transcript_tap(streams: &mut StreamList, steps: &[Step]) -> Result<(), S
 const AUTO_TRANSCRIPT_TAP_NAME: &str = "gatt";
 
 /// Every submitter recomputes both of a study's seals immediately before
-/// sending (`embarch-study-designer/design.md` §3 decision 26) — the same
+/// sending (`embarch-study-designer` decision 26) — the same
 /// two lines `embarch-api`'s own `study.rs::reseal_study` uses, inlined here
 /// rather than depending on that crate for them.
 ///
-/// `streams_crc` is decision 39's 2026-08-25 amendment's sibling seal over
+/// `streams_crc` is `embarch-study-designer` decision 39's 2026-08-25
+/// amendment's sibling seal over
 /// `Study.streams`. This tab authors no taps today, so it always reseals to
 /// the empty-list value — which is genuinely 0, not a placeholder — but it
 /// is computed rather than assumed, so the day this tab does author one
@@ -732,7 +731,7 @@ struct ActionsResponse {
     /// Every notify- or indicate-capable characteristic any discovery source
     /// found — what a selective monitor step picks its targets from, and what
     /// a `GattNotify` tap picks its characteristic from
-    /// (`embarch-study-designer/design.md` §3 decisions 53/55).
+    /// (`embarch-study-designer` decisions 53/55).
     ///
     /// A separate list from `actions` rather than a filter over it: `actions`
     /// is keyed by characteristic for *authoring a write*, and its `Vendor`
@@ -741,11 +740,12 @@ struct ActionsResponse {
     /// list carries only observations.
     subscribable: Vec<SubscribableCharacteristic>,
     /// The names in the firmware repo's `embarch/study-structs.toml` — what a
-    /// `GattNotify` tap's decoder dropdown offers (§3 decision 52). Empty when
+    /// `GattNotify` tap's decoder dropdown offers (`embarch-study-designer`
+    /// decision 52). Empty when
     /// the repo declares none, which is the ordinary starting state.
     struct_layouts: Vec<String>,
     /// What every picker that names a characteristic labels its options with
-    /// (`embarch-study-designer/design.md` §3 decision 56), keyed by
+    /// (`embarch-study-designer` decision 56), keyed by
     /// hyphenated characteristic UUID.
     ///
     /// One map for the whole response rather than a `name` field on
@@ -761,23 +761,23 @@ struct ActionsResponse {
     /// do with the characteristic.
     characteristic_names: BTreeMap<String, GattName>,
     /// The same thing one level up, keyed by hyphenated **service** UUID
-    /// (`embarch-study-designer/design.md` §3 decision 57). What the
+    /// (`embarch-study-designer` decision 57). What the
     /// selective-monitor picker's group headers read
-    /// (`embarch-ui/design.md` §3 decision 17) — a picker that groups by
+    /// (decision 17) — a picker that groups by
     /// service needs a name for the group, and `sds_service` is a heading an
     /// engineer can navigate by where `00000001` is not.
     service_names: BTreeMap<String, GattName>,
     /// `limits::MAX_MONITOR_TARGETS` — how many characteristics one selective
-    /// monitor step may name (`embarch-study-designer/design.md` §3 decision
-    /// 53). Served rather than restated in `app.js`: the cap is enforced by
+    /// monitor step may name (`embarch-study-designer` decision 53).
+    /// Served rather than restated in `app.js`: the cap is enforced by
     /// `build_study`, and a browser-side copy of it is a number that drifts
-    /// silently the day the limit moves. The picker
-    /// (`embarch-ui/design.md` §3 decision 17) shows it and stops at it, so
+    /// silently the day the limit moves. The picker (decision 17) shows it
+    /// and stops at it, so
     /// the refusal happens where the choice is made rather than as a `400`
     /// after a round trip.
     max_monitor_targets: usize,
     /// `limits::MAX_STREAM_NAME_LEN` — how long a `StreamTap`/`StreamRef`
-    /// name may be (`embarch-study-designer/design.md` §4.8), also the file
+    /// name may be (`embarch-study-designer/interfaces/types.md` §4.8), also the file
     /// name a stream becomes under a study's `streams/` directory. Served
     /// rather than restated in `app.js`: the cap is enforced by
     /// `build_study`, same reasoning as [`Self::max_monitor_targets`] above.
@@ -803,7 +803,7 @@ pub struct SubscribableCharacteristic {
 }
 
 /// Resolves a display name for every characteristic either discovery source
-/// found (`embarch-study-designer/design.md` §3 decision 56). A characteristic
+/// found (`embarch-study-designer` decision 56). A characteristic
 /// neither the vendor table nor the firmware's source names is simply absent —
 /// the browser renders the UUID for it, exactly as it did for everything
 /// before decision 56.
@@ -823,7 +823,7 @@ fn characteristic_names(
         .collect()
 }
 
-/// The same, for services (`embarch-study-designer/design.md` §3 decision
+/// The same, for services (`embarch-study-designer` decision
 /// 57). Separate from `characteristic_names` because the lookup is: a
 /// service UUID resolves against the vendor table's *services*, and a
 /// merged map would have had to guess which half a UUID wanted.
@@ -935,8 +935,8 @@ pub async fn api_registry(State(state): State<crate::AppState>) -> axum::respons
 }
 
 /// Upserts one `RegisteredAction` by name — never a semantic "what does
-/// this do" field anywhere on this type (`embarch-study-designer/design.md`
-/// §3 decision 35's own non-goal).
+/// this do" field anywhere on this type (`embarch-study-designer`
+/// decision 35's own non-goal).
 pub async fn api_register_action(
     State(state): State<crate::AppState>,
     Json(action): Json<RegisteredAction>,
@@ -987,8 +987,8 @@ pub async fn api_discover(
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
     // `StudyRunOptions::default()` deliberately, and stated rather than
-    // implied: this UI never builds or flashes anything (design.md §3
-    // decision 5's amendment routes every hardware-adjacent operation through
+    // implied: this UI never builds or flashes anything (decision 5's
+    // amendment routes every hardware-adjacent operation through
     // Core), so it has nothing it could honestly claim to have flashed this
     // run and no standing to wave a version requirement through. Core's gate
     // applies to it exactly as before.
@@ -1029,7 +1029,7 @@ pub struct RunRequest {
     #[serde(default)]
     taps: Vec<TapInput>,
     /// Proceed past a version requirement this run does not satisfy
-    /// (`embarch-study-designer/design.md` §3 decision 40). Ticked in the run
+    /// (`embarch-study-designer` decision 40). Ticked in the run
     /// dialog against the actual discrepancy, which decision 11 is explicit
     /// about: the mismatch is shown *before* the run, with both strings, so
     /// the choice is made against the real gap rather than in the abstract.
@@ -1092,7 +1092,7 @@ pub async fn api_run(
         Err((code, e)) => return (code, e).into_response(),
     };
     // `flashed_firmware_version` stays `None`, and that is not an omission:
-    // this UI never builds or flashes anything (design.md §3 decision 5's
+    // this UI never builds or flashes anything (decision 5's
     // amendment routes every hardware-adjacent operation through Core), so it
     // has nothing it could honestly claim to have put on the DUT. Claiming
     // otherwise is exactly what would turn `VersionSource::FlashedThisRun`
@@ -1118,7 +1118,7 @@ pub async fn api_run(
 async fn watch_study(core: Arc<CoreClient>, study_id: String, tx: watch::Sender<RunState>) {
     let start = tokio::time::Instant::now();
     // No hard timeout here, unlike `discover` — a real study can legitimately
-    // run far longer than 30s (embarch-study-designer/design.md §3 decision
+    // run far longer than 30s (`embarch-study-designer` decision
     // 9's own "unbounded BLE wait" reasoning); it ends when Core reports a
     // terminal status, not on a clock this tab invents.
     loop {
@@ -1160,7 +1160,7 @@ async fn watch_study(core: Arc<CoreClient>, study_id: String, tx: watch::Sender<
             }
         }
         // A host-side backstop, not a protocol timeout — Core's own
-        // watchdog (embarch-study-designer/design.md §3 decision 16) is
+        // watchdog (`embarch-study-designer` decision 16) is
         // what actually bounds a hung study; this just stops embarch-ui
         // from polling forever if Core itself never resolves it.
         if start.elapsed() > Duration::from_secs(60 * 30) {
@@ -1194,7 +1194,7 @@ pub async fn api_run_events(State(state): State<crate::AppState>) -> axum::respo
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
-// ---- saved study library (embarch-study-designer/design.md §3 decision 38) --
+// ---- saved study library (`embarch-study-designer` decision 38) ------------
 //
 // One file per saved study at `<firmware-repo>/embarch/studies/<slug>.json`,
 // sibling to the `study-actions.toml` registry — same per-repo convention,
@@ -1223,10 +1223,9 @@ fn study_slug(name: &str) -> Result<String, String> {
     Ok(slug)
 }
 
-/// `<firmware repo>/embarch/studies` (`embarch-study-designer/design.md` §3
-/// decision 38) — taken from the *open project* rather than from config, so
-/// switching projects moves the studies list with it (`embarch-ui/design.md`
-/// §3 decision 14).
+/// `<firmware repo>/embarch/studies` (`embarch-study-designer` decision
+/// 38) — taken from the *open project* rather than from config, so
+/// switching projects moves the studies list with it (decision 14).
 fn studies_dir(project: &StudyDesignerConfig) -> std::path::PathBuf {
     project.firmware_repo_path.join("embarch").join("studies")
 }
@@ -1522,7 +1521,8 @@ fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
 }
 
 /// A `Uuid` in a saved `Study` is a JSON array of 16 bytes (its `Serialize`
-/// is the raw form, design.md §4.3); the table works in the hyphenated text
+/// is the raw form, `embarch-study-designer/interfaces/types.md` §4.3); the
+/// table works in the hyphenated text
 /// an engineer reads. This is the one place that conversion happens on the
 /// load path.
 fn uuid_field(source: &serde_json::Value, field: &str) -> Option<String> {
@@ -1656,7 +1656,7 @@ pub async fn api_version_check(
 /// `ReportedByDevBench`/`ReportedByOutpost`/`FlashedThisRun`, and which
 /// variants count as verified is that enum's own business — a UI re-deriving
 /// it is the easiest place to accidentally reintroduce the exact defect
-/// decision 40 exists to close (`embarch-ui/design.md` §3 decision 11).
+/// `embarch-study-designer` decision 40 exists to close (decision 11).
 #[derive(Debug, Clone, Serialize)]
 pub struct ProvenanceView {
     dev_bench_version: String,
@@ -1729,8 +1729,8 @@ pub async fn api_studies_delete(
 
 // ---- GATT transcript passthrough ------------------------------------------
 
-/// Serves a finished study's GATT transcript (`embarch-study-designer/design.md`
-/// §3 decision 36) straight through from Core, so the browser downloads it
+/// Serves a finished study's GATT transcript (`embarch-study-designer`
+/// decision 36) straight through from Core, so the browser downloads it
 /// over embarch-ui's own origin and never needs Core's bearer token — the
 /// same reason `/api/enroll` exists rather than the browser calling Core.
 ///
@@ -1889,7 +1889,7 @@ mod tests {
         }
     }
 
-    /// `embarch-study-designer/design.md` §3 decision 56: the response names
+    /// `embarch-study-designer` decision 56: the response names
     /// every characteristic either source found and that anything can name,
     /// from both name sources at once — a vendor characteristic on the live
     /// table and a custom one the firmware source declared.
@@ -1919,9 +1919,9 @@ mod tests {
         assert_eq!(resolved.len(), 2);
     }
 
-    /// `embarch-study-designer/design.md` §3 decision 57: the same, one
-    /// level up. A picker that groups by service (`embarch-ui/design.md` §3
-    /// decision 17) needs a heading, and it comes from the identifier
+    /// `embarch-study-designer` decision 57: the same, one
+    /// level up. A picker that groups by service (decision 17) needs a
+    /// heading, and it comes from the identifier
     /// `parse_gatt_services` already had in hand to resolve the service's
     /// UUID at all.
     #[test]
@@ -1996,7 +1996,7 @@ mod tests {
     }
 
     /// The distinction the whole "Open project" validation rests on
-    /// (design.md §3 decision 14): a firmware repo with no `embarch/`
+    /// (decision 14): a firmware repo with no `embarch/`
     /// directory yet is a legitimate first-time state, and must read as
     /// *this repo has no studies yet* rather than *this is not a repo*.
     #[test]
@@ -2320,7 +2320,7 @@ repeat = [{ name = "green", type = "i32le" }]
             .is_empty());
     }
 
-    // ---- GattNotify taps (design.md §3 decisions 52/55) ----
+    // ---- GattNotify taps (`embarch-study-designer` decisions 52/55) ----
 
     #[test]
     fn a_gatt_tap_with_a_named_layout_resolves_it_into_the_study() {
@@ -2412,7 +2412,7 @@ repeat = [{ name = "green", type = "i32le" }]
         assert!(err.contains("ecg_packet"), "{err}");
     }
 
-    // ---- the auto-declared transcript tap (design.md §3 decision 14) ----
+    // ---- the auto-declared transcript tap (decision 15) ----
 
     #[test]
     fn a_study_with_a_monitor_step_gets_a_transcript_tap_it_did_not_author() {
@@ -2603,7 +2603,7 @@ repeat = [{ name = "green", type = "i32le" }]
     }
 }
 
-// ---- projects (design.md §3 decision 14) ------------------------------------
+// ---- projects (decision 14) -------------------------------------------------
 
 /// One entry of the recent-projects list, and one row of the "Open project"
 /// panel. `static_extractor` rides along so reopening a project restores the
@@ -2712,7 +2712,7 @@ pub struct ProjectSurvey {
     /// *is* a signal, where the bare directory is not.
     has_embarch_config: bool,
     /// `<repo>/embarch/study-actions.toml` exists
-    /// (`embarch-study-designer/design.md` §3 decision 34's registry).
+    /// (`embarch-study-designer` decision 35's registry).
     has_action_registry: bool,
     /// How many `*.json` files `<repo>/embarch/studies` holds. `0` with
     /// `has_embarch_dir: false` is the first-time state; `0` with it true is
@@ -2753,7 +2753,7 @@ pub struct ProjectState {
     static_extractor: Option<String>,
     /// `<repo>/embarch/studies`, spelled out rather than left for the browser
     /// to join — one definition of the layout
-    /// (`embarch-study-designer/design.md` §3 decision 38), server-side.
+    /// (`embarch-study-designer` decision 38), server-side.
     studies_dir: Option<String>,
     survey: Option<ProjectSurvey>,
     recents: Vec<RecentProject>,
@@ -2887,8 +2887,8 @@ pub struct NewStudyRequest {
 /// Everything a `Study` needs in order to round-trip is supplied here rather
 /// than left for the author to discover on their first save: `requires` is
 /// mandatory with no serde default, so it is written as an explicit
-/// `REQUIREMENT_ANY` on both fields (`embarch-study-designer/design.md` §3
-/// decision 40 — "I don't care which build" is a real answer that has to be
+/// `REQUIREMENT_ANY` on both fields (`embarch-study-designer` decision 40
+/// — "I don't care which build" is a real answer that has to be
 /// *said*); both CRCs are sealed by the same `build_authored` a save uses, so
 /// the file cannot be a shape only this route produces. A new study with no
 /// steps is legal and does nothing, which is what "new" means.

@@ -1,5 +1,5 @@
 // embarch-ui client-side glue: tab switching, theme toggle, SSE plumbing.
-// Zero-build (embarch-ui/design.md §3 decision 2) — plain vanilla JS, no
+// Zero-build (decision 2) — plain vanilla JS, no
 // bundler, no framework.
 
 (function () {
@@ -42,7 +42,7 @@
 
   // A `#<tab>` fragment names a tab directly, so a link from outside can
   // land on a specific one. embarch-topology's `fix_it_url` is the real
-  // caller (embarch-topology/design.md §3 decision 19): a topology mismatch
+  // caller (`embarch-topology` decision 19): a topology mismatch
   // relayed by embarch-api points a human at `#topology` rather than at
   // whichever tab that browser happened to have open last. Unknown or absent
   // fragment -> null, and the stored/default tab wins as before.
@@ -97,8 +97,8 @@
     }
   }
 
-  // The suite's current hardware-topology scope (embarch-topology/design.md
-  // §3 decision 10): one DUT + one dev-bench per machine — a fixed pair of
+  // The suite's current hardware-topology scope (`embarch-topology`
+  // decision 10): one DUT + one dev-bench per machine — a fixed pair of
   // roles, not a dynamically-discovered list.
   const ROLES = [
     { role: "dev-bench", label: "Dev bench" },
@@ -111,7 +111,7 @@
 
   // A board is "attached" when one of its declared serials (the JTAG
   // probe's own serial, or — for dev-bench — its separate runtime-link
-  // serial, embarch-topology/design.md §3 decision 17) matches a
+  // serial, `embarch-topology` decision 17) matches a
   // currently-enumerated probe's serial number.
   function isAttached(snapshot, board) {
     if (!board) return false;
@@ -420,7 +420,7 @@
 
     // A declared-but-wrong signal shows up in this tab or nowhere: a
     // SignalMismatch is deliberately not written to the alert log rendered
-    // beside it (`embarch-topology/design.md` §3 decision 18's amendment —
+    // beside it (`embarch-topology` decision 18's amendment —
     // Alert's shape is board-specific and a wire has none of those fields).
     // `carrierCell` is where that shows, per row.
   }
@@ -581,7 +581,7 @@
     renderEnroll(snapshot);
   }
 
-  // Suite-wide SSE convergence (embarch-ui/design.md §3 decision 6): one
+  // Suite-wide SSE convergence (decision 6): one
   // `/events` stream, not per-tab polling — a single "snapshot" event
   // carries everything Dashboard and Topology need, pushed by the server's
   // own background poll of embarch-core (main.rs), never fetched on a
@@ -609,10 +609,9 @@
 
   // --- Debug tab (milestone-1.md §4.7) ----------------------------------
   // Backlog via one `/recent` fetch on load, then live lines over a `/events`
-  // SSE stream (never re-fetching `/recent` on a timer — design.md §3
-  // decision 6).
+  // SSE stream (never re-fetching `/recent` on a timer — decision 6).
   //
-  // Two sources, one viewer (design.md §3 decision 13). embarch-core's lines
+  // Two sources, one viewer (decision 13). embarch-core's lines
   // are proxied from its own HTTP surface; embarch-api's come from the
   // rolling file it writes, because it is spawned per session and gone —
   // there is no service to proxy to. Switching source is a full reset of the
@@ -650,7 +649,7 @@
   // only at the writer, because this viewer has to stay readable against the
   // deployed Core as well as a future one. (embarch-api's own file is
   // already clean — it writes a separate un-colored layer for exactly this
-  // reason, embarch-api/design.md §3 decision 43.)
+  // reason, `embarch-api` decision 43.)
   function stripAnsi(line) {
     // eslint-disable-next-line no-control-regex
     return String(line).replace(/\x1b\[[0-9;]*m/g, "");
@@ -837,7 +836,7 @@
   // The one thing it does interpret is byte input — and only mechanically,
   // text -> UTF-8 or hex tokens -> bytes, never a number encoded into a
   // width/endianness nobody here is in a position to know
-  // (embarch-study-designer/design.md §3 decision 35).
+  // (`embarch-study-designer` decision 35).
 
   var sdRows = [];
   var sdActions = [];        // MergedAction[] from GET /api/study-designer/actions
@@ -846,7 +845,7 @@
   // selective monitor row and a GATT tap both pick from (decisions 53/55).
   var sdSubscribable = [];
   /* Group headings for the target picker (decision 17), keyed by hyphenated
-   * *service* UUID — `embarch-study-designer/design.md` §3 decision 56's
+   * *service* UUID — `embarch-study-designer` decision 56's
    * 2026-08-26 amendment. Same fallback rule as `charLabel`: an unnamed
    * service is its UUID head, never an invented name. */
   var sdServiceNames = {};
@@ -868,7 +867,7 @@
   // Names from the firmware repo's own study-structs.toml (decision 52).
   var sdStructLayouts = [];
   // Characteristic display names, keyed by hyphenated characteristic UUID
-  // (embarch-study-designer/design.md §3 decision 56). Empty is the honest
+  // (`embarch-study-designer` decision 56). Empty is the honest
   // starting state and every reader falls back to the UUID.
   var sdCharNames = {};
   var sdNextRowId = 1;
@@ -926,8 +925,8 @@
     return String(hyphenated || "").split("-")[0];
   }
 
-  /* What a picker's option is labelled with (embarch-study-designer/design.md
-   * §3 decision 56): the vendor's name for the characteristic, or the C
+  /* What a picker's option is labelled with (`embarch-study-designer`
+   * decision 56): the vendor's name for the characteristic, or the C
    * identifier the firmware declared it under, or — when nothing named it —
    * the UUID head this showed for everything before decision 56.
    *
@@ -960,7 +959,7 @@
    * the C identifier the firmware declared it under, or — when nothing names
    * it — the UUID head. Same three-step fallback as `charLabel`, because it
    * is the same mechanism one level up
-   * (`embarch-study-designer/design.md` §3 decision 56, amended 2026-08-26). */
+   * (`embarch-study-designer` decision 56, amended 2026-08-26). */
   function serviceLabel(uuid) {
     var name = sdServiceNames[uuid];
     return name ? name.label : shortUuid(uuid);
@@ -1077,8 +1076,8 @@
       .map(function (a) { return a.Unregistered; });
   }
 
-  // Vendor-defined services (embarch-study-designer/design.md §3 decision
-  // 39) — Nordic's UART Service and anything else the crate's `vendor` table
+  // Vendor-defined services (`embarch-study-designer` decision
+  // 41) — Nordic's UART Service and anything else the crate's `vendor` table
   // ships. Always present in the merged list whether or not discovery saw
   // them, since the table is a compile-time fact, not an observation.
   function sdVendorActions() {
@@ -1115,7 +1114,7 @@
       registeredName: "",
       fieldChoices: {},
       // Only meaningful for a `ble_connect` row: the advertised local name
-      // to connect to (embarch-study-designer/design.md §3 decision 41).
+      // to connect to (`embarch-study-designer` decision 43).
       // Blank means "whichever peripheral advertises first", which on a
       // bench with any other BLE device in range is a coin toss.
       targetName: "",
@@ -1157,7 +1156,7 @@
   // window has to be opened *before* the write and closed after it, because
   // steps run strictly in sequence and GattMonitorAll tears its own
   // subscriptions down when its step ends
-  // (embarch-study-designer/design.md §3 decision 36). Getting that order
+  // (`embarch-study-designer` decision 36). Getting that order
   // wrong produces an empty capture and no error, so it's offered as one
   // click rather than left to be rediscovered.
   function sdCaptureTemplate() {
@@ -1902,7 +1901,7 @@
     );
   }
 
-  /* ---- Selective-monitor target picker (design.md §3 decision 17) --------
+  /* ---- Selective-monitor target picker (decision 17) --------------------
    *
    * The step table's Parameters cell used to hold one checkbox per
    * notify/indicate-capable characteristic — eleven on the reference DUT,
@@ -2378,7 +2377,7 @@
       parts.push(step.captured_data.length + " bytes captured");
     }
     // The link's security level at the end of this step
-    // (embarch-study-designer/design.md §3 decision 44). Shown on *every*
+    // (`embarch-study-designer` decision 44). Shown on *every*
     // step, not only a security one, and that is the point: the same
     // failure at L1 and at L4 are different findings, and this column is
     // the only place a reader can tell them apart. Rendered verbatim from
@@ -2532,7 +2531,7 @@
       reason.style.display = "block";
       reason.textContent = state.reason || "no reason given";
       // Still offered on a failure: `gatt.csv` is written incrementally as
-      // entries arrive (design.md §5.1), so a study that failed part-way
+      // entries arrive (`embarch-study-designer/spec.md` §5), so a study that failed part-way
       // usually still captured the traffic that led up to the failure —
       // which is exactly what you want to read when something went wrong.
       if (state.study_id) {
@@ -2696,7 +2695,7 @@
     );
   }
 
-  /* One GATT-notify tap row (embarch-study-designer/design.md §3 decisions
+  /* One GATT-notify tap row (`embarch-study-designer` decisions
    * 52/55): which characteristic's notifications get their own file, and
    * which declared layout — if any — renders them as columns.
    *
@@ -2955,7 +2954,7 @@
     }
   }
 
-  // --- projects (design.md §3 decision 14) -------------------------------
+  // --- projects (decision 14) --------------------------------------------
   //
   // The tab used to decide once, at first paint, whether it was usable at
   // all: `[study_designer]` absent in config meant every route answered 404
@@ -3204,7 +3203,7 @@
     sdEl("sd-register-backdrop").addEventListener("click", closeRegisterDialog);
 
     // Run progress arrives by push, never by client-side polling —
-    // design.md §3 decision 6's suite-wide SSE convergence. One stream for
+    // decision 6's suite-wide SSE convergence. One stream for
     // the process's lifetime: `RunState` is the server's, not a project's,
     // so switching projects doesn't reopen it.
     sdRunSource = new EventSource("/api/study-designer/events");
@@ -3241,7 +3240,7 @@
     sdLoadProject();
   }
 
-  // --- signal routes (design.md §3 decision 10, first half) --------------
+  // --- signal routes (decision 10, first half) ----------------------------
   //
   // Every write goes through embarch-ui's own `/api/signals`, which proxies
   // Core over HTTP+Bearer — never `embarch_topology::hardware::declare_signal`
@@ -3400,7 +3399,7 @@
     });
   }
 
-  // --- Trace view (design.md §3 decision 10, second half) ----------------
+  // --- Trace view (decision 10, second half) ------------------------------
   //
   // Every number drawn here was decoded server-side, through
   // `embarch-study-designer`'s own `outpost` module (src/trace.rs). No trace
@@ -3628,7 +3627,7 @@
             "counts frames, and every share is a fraction of frames rather than of time. The " +
             "order is real; the durations are not available.";
     // The firmware's own statement that this trace is deliberately incomplete
-    // (`embarch-outpost/design.md` §3 decision 19). Rendered against the
+    // (`embarch-outpost` decision 19). Rendered against the
     // unaccounted total specifically, because that is the number it explains:
     // without it a reader sees a hole between the idle thread switching out
     // and switching back in, and has nothing to attribute it to.

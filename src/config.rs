@@ -31,7 +31,7 @@ pub struct StudyDesignerConfig {
     /// configured `static_extractor` runs against.
     pub firmware_repo_path: PathBuf,
     /// Name of a registered `GattConfigExtractor` to run for static GATT
-    /// discovery (`embarch-study-designer/design.md` §3 decision 33) — e.g.
+    /// discovery (`embarch-study-designer` decision 33) — e.g.
     /// `"zephyr-ble-def"`. Absent, static extraction is simply skipped (the
     /// merged action list still works from live discovery + the registry
     /// alone), matching `study-designer-ui`'s own opt-in `--static-extractor`
@@ -41,8 +41,8 @@ pub struct StudyDesignerConfig {
 }
 
 /// Zero-config default: `base_url = "auto"`, the same zero-config ethos
-/// `embarch-api`'s own `base_url = "auto"` follows (`embarch-api/design.md`
-/// §3.11) — no config file needed to find a Core already running on this
+/// `embarch-api`'s own `base_url = "auto"` follows (`embarch-api` decision
+/// 11) — no config file needed to find a Core already running on this
 /// machine. Every other `CoreConfig` field has its own `#[serde(default)]`
 /// (timeouts, token discovery falling through to the machine-wide token
 /// file), so this one-line TOML snippet is enough to fill the whole struct.
@@ -58,8 +58,8 @@ impl Default for Config {
 
 /// `EMBARCH_UI_CONFIG` names an optional TOML file with a `[core]` table —
 /// identical schema to `embarch-api`'s own `[core]`, since both are the
-/// same `embarch_core_client::CoreConfig` (embarch-ui/design.md §3 decision
-/// 5). Absent, the zero-config default above is used — no file needed for
+/// same `embarch_core_client::CoreConfig` (decision 5). Absent, the
+/// zero-config default above is used — no file needed for
 /// the common single-machine case.
 pub fn load() -> Result<Config> {
     match std::env::var_os("EMBARCH_UI_CONFIG") {

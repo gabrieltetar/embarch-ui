@@ -1,6 +1,6 @@
 //! The one data shape both the Dashboard and Topology tabs render from —
-//! fetched entirely through `embarch-core-client` (embarch-ui/design.md §3
-//! decision 5's amendment: no in-process hardware access at all). A
+//! fetched entirely through `embarch-core-client` (decision 5's amendment:
+//! no in-process hardware access at all). A
 //! background task (`main.rs`) polls Core on an interval and publishes a
 //! fresh `Snapshot` on a `tokio::sync::watch` channel; every SSE client and
 //! `GET /api/snapshot` call reads the latest published value — the poll
@@ -22,16 +22,15 @@ pub struct Snapshot {
     /// re-enrolment. Any UI cell built from this field is labeled
     /// "Enrolled" / "Enrolled at", never "Validated", "Last validated" or
     /// "Verified" — those imply a live check this field cannot answer.
-    /// `embarch-core` decision 57 (`decisions/surfaces.md`) declined to
+    /// `embarch-core` decision 57 declined to
     /// persist a real last-validation instant next to it; real freshness
     /// needs a `POST /validate` call and that response's own
     /// `validated_at_utc_ms`, not a passive read of this snapshot.
     pub enrolled: Vec<EnrolledBoardResponse>,
     pub alerts: Vec<AlertResponse>,
     pub dev_bench_port: Option<DevBenchPortResponse>,
-    /// Every declared DUT signal link (`embarch-topology/design.md` §3
-    /// decision 18) — the Topology tab's signal-route rows
-    /// (`embarch-ui/design.md` §3 decision 10).
+    /// Every declared DUT signal link (`embarch-topology` decision 18) —
+    /// the Topology tab's signal-route rows (decision 10).
     pub signals: Vec<SignalLink>,
     /// Why the signal list is empty, when the reason is not "nothing is
     /// declared".
@@ -46,8 +45,7 @@ pub struct Snapshot {
     pub signals_error: Option<String>,
     /// Core's own serial-port enumeration — what a `direct` route's carrier is
     /// picked from. **Core's**, not this process's: a port on the machine
-    /// running the UI is not a port on the machine running Core (design.md §3
-    /// decision 5).
+    /// running the UI is not a port on the machine running Core (decision 5).
     pub serial_ports: Vec<SerialPortResponse>,
     pub serial_ports_error: Option<String>,
 }

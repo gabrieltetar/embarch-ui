@@ -3,9 +3,8 @@
  * Lifted verbatim (2026-08-24) from the five reviewed mockup artboards
  * (Main/Topology/StudyDesigner/Enroll/Debug.dc.html), specifically
  * Main.dc.html's own <style> block and its theme-toggle script's token
- * pairs — not re-derived from design.md's prose description. See
- * embarch-doc/embarch-ui/design.md §3 decision 8 and
- * embarch-doc/embarch-ui/milestone-1.md §4.3.
+ * pairs — not re-derived from a prose description. See
+ * decision 8 and embarch-doc/embarch-ui/milestone-1.md §4.3.
  *
  * Per-tab component classes (chip inputs, pill toggles, the log-line/lvl/
  * search-box family) get added as each tab actually ships (milestone-1.md
@@ -737,12 +736,12 @@ table.data-table {
 
 /* ---- Phase D: signal-route rows, `requires` fields, the Trace view -------
  *
- * embarch-ui/design.md §3 decisions 10 and 11. Unlike the classes above,
+ * Decisions 10 and 11. Unlike the classes above,
  * these were not lifted from a reviewed mockup — decision 10 deferred what a
  * timeline looks like to the first real capture, and these were designed
  * against one: the committed `native_sim` capture (848 records, 7 threads of
  * which 3 resolve to no name, 72 unidentified ISR pairs, 4 gaps). That is
- * closer to real data than a mockup and is not a DUT; see design.md.
+ * closer to real data than a mockup and is not a DUT.
  */
 
 /* `requires` — a checkbox that is a visible, deliberate choice, not an empty
@@ -1078,7 +1077,7 @@ table.data-table {
   border-bottom: 1px dotted var(--text-tertiary);
 }
 
-/* ---- Selective-monitor target picker (design.md §3 decision 17) ---------
+/* ---- Selective-monitor target picker (decision 17) ---------------------
  *
  * Replaces one inline checkbox per notify-capable characteristic in a step
  * table cell — eleven of them on the reference DUT, fourteen once the

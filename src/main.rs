@@ -32,10 +32,9 @@ use study_designer::StudyDesigner;
 use tokio::sync::{watch, Notify};
 
 /// Binds loopback-only by default — same reasoning as `embarch-topology`'s
-/// own local-UI precedent (embarch-doc/embarch-topology/design.md §3
-/// decision 5) and `embarch-core/design.md` §3 decision 6's amendment: no
-/// TLS, no reason to expose past localhost for a tool one engineer runs on
-/// their own machine.
+/// own local-UI precedent (`embarch-topology` decision 5) and `embarch-core`
+/// decision 6's amendment: no TLS, no reason to expose past localhost for a
+/// tool one engineer runs on their own machine.
 const BIND_ADDR: &str = "127.0.0.1";
 const BIND_PORT: u16 = 4890;
 
@@ -88,7 +87,7 @@ pub(crate) struct AppState {
     /// not up to 5 seconds later.
     poke: Arc<Notify>,
     /// Always present, with or without a configured firmware repo
-    /// (design.md §3 decision 14). It used to be `Option`, `None` whenever
+    /// (decision 14). It used to be `Option`, `None` whenever
     /// `[study_designer]` was absent from config, which made the whole tab
     /// unreachable — including the one route that could have fixed that.
     /// Whether a *project is open* is now the `StudyDesigner`'s own state,
@@ -103,16 +102,16 @@ pub(crate) struct AppState {
     /// `events()`'s `Snapshot` stream does — backlog comes from
     /// `/api/logs/recent` instead.
     logs_rx: watch::Receiver<Vec<String>>,
-    /// The same, for `embarch-api`'s own rolling logfile (design.md §3
-    /// decision 13). A separate channel rather than one merged stream: the
+    /// The same, for `embarch-api`'s own rolling logfile (decision 13). A
+    /// separate channel rather than one merged stream: the
     /// two sources rotate independently and a merged view would interleave
     /// them by arrival order, not by the timestamps on the lines — the Debug
     /// tab picks a source instead.
     api_logs_rx: watch::Receiver<Vec<String>>,
     /// The most recently decoded trace, kept whole and server-side.
     ///
-    /// **This is what makes the windowed route affordable** (design.md §3
-    /// decision 18). Binning a window is arithmetic over spans that are
+    /// **This is what makes the windowed route affordable** (decision 18).
+    /// Binning a window is arithmetic over spans that are
     /// already decoded; re-fetching a 13 MB CSV from Core and re-decoding it
     /// per pan would move the cost the decision removes rather than remove it.
     /// One entry, because the tab shows one trace at a time and a second
@@ -134,7 +133,7 @@ struct CachedTrace {
 /// rather than using a plain `#[tokio::main]`, proactively — this suite has
 /// already hit a real debug-build stack overflow deserializing a
 /// GATT-sized `StudyResult` on a normal-sized stack twice
-/// (`embarch-api/design.md` decision 36, and `study-designer-ui`'s own
+/// (`embarch-api` decision 36, and `study-designer-ui`'s own
 /// earlier fix for the identical crash). `embarch-ui`'s own Study Designer
 /// tab deserializes the identical oversized type on
 /// every `get_study_status` poll — copying only the *first* half of
@@ -295,13 +294,13 @@ async fn favicon_png() -> impl IntoResponse {
 
 /// A plain snapshot read — handy for curl/debugging and as the one-off
 /// fetch a page reload can use, though the shell's own JS relies on
-/// `/events` (below) rather than fetching this on a timer (design.md §3
-/// decision 6: push, not client-side interval polling).
+/// `/events` (below) rather than fetching this on a timer (decision 6:
+/// push, not client-side interval polling).
 async fn api_snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     Json(state.snapshot_rx.borrow().clone())
 }
 
-/// Suite-wide SSE convergence (embarch-ui/design.md §3 decision 6): one
+/// Suite-wide SSE convergence (decision 6): one
 /// `/events` stream every tab subscribes to. Sends the current snapshot
 /// immediately on connect, then again every time `poll_loop` publishes a
 /// new one — a client never has to poll to find out something changed.
@@ -341,8 +340,8 @@ struct EnrollRequest {
 /// Submits to `embarch-core`'s existing `POST /probes/enroll` over
 /// HTTP+Bearer via `embarch-core-client` — never a direct in-process call
 /// to `embarch_topology::hardware::enroll`, which would reintroduce the
-/// exact `hw_lock`-bypass bug `embarch-topology/design.md` decision 14
-/// already fixed once (embarch-ui/design.md §3 decision 5).
+/// exact `hw_lock`-bypass bug `embarch-core` decision 25 already fixed once
+/// (decision 5).
 ///
 /// Unlike Core's own `GET /enroll` page — a static page with no server of
 /// its own, so it has no choice but to ask a human to paste in a bearer
@@ -367,7 +366,7 @@ async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest
     }
 }
 
-// ---- signal routes (design.md §3 decision 10) -------------------------------
+// ---- signal routes (decision 10) --------------------------------------------
 
 /// Declares (or re-declares) where a named DUT signal goes, through Core's
 /// `POST /signals`.
@@ -421,7 +420,7 @@ async fn api_remove_signal(
     }
 }
 
-// ---- the Trace view (design.md §3 decision 10's second half) ----------------
+// ---- the Trace view (decision 10's second half) ------------------------------
 
 /// Which of a study's taps are outpost traces, and what Core has to say about
 /// each — read from Core's `GET /study/{id}/streams`.
@@ -456,13 +455,12 @@ async fn api_trace_taps(
                         "note": e.note,
                         // Two facts, not one: a trace can be named and untimed
                         // or timed and unnamed, and the tab draws each
-                        // differently (`embarch-outpost/design.md` §3
-                        // decisions 9, 16).
+                        // differently (`embarch-outpost` decision 18).
                         "named": e.is_named(),
                         "timed": e.is_timed(),
                         // A third, and the only one the firmware decided:
                         // whether the outpost kept itself out of the trace
-                        // (`embarch-outpost/design.md` §3 decision 19).
+                        // (`embarch-outpost` decision 19).
                         "self_excluded": e.self_excluded,
                     })
                 })
@@ -507,7 +505,7 @@ async fn api_trace_view(
 }
 
 /// One window of one tap's timeline, binned server-side — the route the tab
-/// actually draws from (design.md §3 decision 18).
+/// actually draws from (decision 18).
 ///
 /// `from`/`to` are in the view's own [`trace::TraceView::unit`]s and default
 /// to the whole capture; `width` is the number of bins, which is the plot's
@@ -656,7 +654,7 @@ struct LogsRecentQuery {
 
 /// One-shot backlog fetch for the Debug tab's first paint — a thin proxy
 /// over `embarch-core-client`'s own `GET /logs/recent`, never a direct
-/// filesystem read (design.md §3 decision 7). Ongoing live lines come from
+/// filesystem read (decision 7). Ongoing live lines come from
 /// `/api/logs/events` (SSE) instead, not a repeated call to this endpoint.
 async fn api_logs_recent(
     State(state): State<AppState>,
@@ -670,7 +668,7 @@ async fn api_logs_recent(
 }
 
 /// `api_logs_recent`'s counterpart for `embarch-api`'s own rolling logfile
-/// (design.md §3 decision 13) — a direct file read rather than a proxy,
+/// (decision 13) — a direct file read rather than a proxy,
 /// because `embarch-api` is not a service to proxy to. See `logs.rs`'s
 /// module comment for why that does not reopen decision 7's argument.
 ///

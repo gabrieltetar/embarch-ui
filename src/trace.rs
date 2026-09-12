@@ -1,15 +1,14 @@
-//! The Trace view's backend (`embarch-ui/design.md` §3 decision 10's second
-//! half): turning a completed study's recorded outpost timeline into
-//! something a browser can draw, **without any of the five lies a timeline
-//! makes easy**.
+//! The Trace view's backend (decision 10's second half): turning a completed
+//! study's recorded outpost timeline into something a browser can draw,
+//! **without any of the five lies a timeline makes easy**.
 //!
 //! Post-hoc, deliberately: outpost capture is study-scoped with no live feed
-//! (`embarch-outpost/design.md` §3 decision 10), so this renders a finished
+//! (`embarch-outpost` decision 10), so this renders a finished
 //! study's recorded stream and is the one place in this UI that is not live.
 //!
 //! # What this reads, and why it isn't the raw bytes
 //!
-//! Core writes three files per outpost tap (`embarch-outpost/design.md` §4):
+//! Core writes three files per outpost tap (`embarch-outpost/spec.md` §5):
 //! `<tap>.bin`, the framed stream verbatim; `<tap>.arrival.csv`, Core's own
 //! receipt time per frame; and `<tap>.trace.csv`, the decoded rows with names
 //! resolved **through the manifest the flash bound** and those receipt times
@@ -31,8 +30,8 @@
 //!
 //! # Two clocks, and which one measures what
 //!
-//! A rendered row carries both (`embarch-outpost/design.md` §3 decision 4's
-//! 2026-08-27 rework, and decision 17 as rewritten the same day):
+//! A rendered row carries both (`embarch-outpost` decision 4's
+//! 2026-08-27 rework, and `embarch-outpost` decision 17 as rewritten the same day):
 //!
 //! - **`cycles`/`us`, the DUT's own**, read per record by `outpost_time.h`
 //!   straight out of the GRTC SYSCOUNTER's low word. Microsecond-exact on this
@@ -97,7 +96,7 @@
 //! 3. **An unnamed thread or vector renders as the number it is.** No
 //!    interpolation, no "probably the worker thread". Most of a real build's
 //!    threads have no distinguishing symbol and resolve to raw pointers
-//!    (`embarch-outpost/design.md` §3 decision 8), so [`Lane::unnamed`] is a
+//!    (`embarch-outpost` decision 8), so [`Lane::unnamed`] is a
 //!    first-class state, not an error path.
 //!
 //! 4. **A span with no closing record is open-ended and says so.** It is
@@ -260,7 +259,7 @@ pub struct Gap {
 }
 
 /// One traced subject's share of the capture window — the "load repartition"
-/// the Trace view exists to produce (`embarch-ui/design.md` §3 decision 10).
+/// the Trace view exists to produce (decision 10).
 ///
 /// **A total here is deliberately not the sum of everything drawn.** Four
 /// classes of span are excluded from `total_extent` because their extent is
@@ -323,8 +322,8 @@ pub struct LoadSubject {
 /// The whole capture's load repartition, plus everything a reader needs to
 /// know how much of it to believe.
 ///
-/// **The headline honesty constraint** (`embarch-ui/design.md` §3 decision
-/// 10): a repartition computed across an interval where records were dropped
+/// **The headline honesty constraint** (decision 10): a repartition
+/// computed across an interval where records were dropped
 /// is not a measurement, and neither is one whose subjects live below the
 /// capture's resolution. [`Self::gap_fraction`] and
 /// [`Self::below_resolution_spans`] are what say how much of this window is in
@@ -528,7 +527,7 @@ pub struct TraceView {
     pub timed: bool,
     /// Whether the **firmware** kept itself out of this trace: no record of the
     /// outpost's own drain thread or its own UART's interrupt
-    /// (`embarch-outpost/design.md` §3 decision 19). Core's finding, read off
+    /// (`embarch-outpost` decision 19). Core's finding, read off
     /// the header frame's flags — never re-derived here from whether the drain
     /// thread happens to appear, which would be inferring a build option from
     /// a measurement.
