@@ -55,10 +55,10 @@ pub async fn poll_loop(core: Arc<CoreClient>, tx: watch::Sender<Vec<String>>) {
             Ok(latest) => publish_new_lines(&mut previous, latest, &tx),
             Err(e) => {
                 // Core being unreachable is an ordinary, expected state
-                // here too (design.md §3 decision 5's own "confirmed"
-                // reasoning) — logged once server-side, not surfaced as a
-                // client-visible error stream; the Dashboard tab's own
-                // `core_reachable` flag is the one place that's shown.
+                // here too (decision 26) — logged once server-side, not
+                // surfaced as a client-visible error stream; the Dashboard
+                // tab's own `core_reachable` flag is the one place that's
+                // shown.
                 tracing::debug!("logs poll failed: {e:#}");
             }
         }

@@ -70,9 +70,9 @@ impl Snapshot {
 
 /// One round of the background poll. Each call fails independently rather
 /// than short-circuiting the others — Core being unreachable is an expected,
-/// renderable state (§ design.md decision 5's own "confirmed" reasoning: Core
-/// down is not a crash), not something that should leave most of the snapshot
-/// silently empty when only one call actually failed.
+/// renderable state (decision 26: Core down is not a crash), not something
+/// that should leave most of the snapshot silently empty when only one call
+/// actually failed.
 ///
 /// The two signal calls carry their errors instead of degrading to an empty
 /// list, unlike the four above them. The difference is what an empty answer
