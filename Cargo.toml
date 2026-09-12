@@ -3,7 +3,7 @@ name = "embarch-ui"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "One consolidated human-facing UI for the EmbArch suite — Dashboard/Topology/Study Designer/Enroll/Debug tabs behind one shell, replacing embarch-topology's `ui` subcommand, embarch-study-designer's `study-designer-ui` binary, and embarch-core's `/enroll` page outright. embarch-doc/embarch-ui/design.md is the source of truth."
+description = "One consolidated human-facing UI for the EmbArch suite — Dashboard/Topology/Study Designer/Enroll/Debug tabs behind one shell, replacing embarch-topology's `ui` subcommand, embarch-study-designer's `study-designer-ui` binary, and embarch-core's `/enroll` page outright. embarch-doc/embarch-ui/spec.md is current truth; decisions.md says why."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -11,20 +11,19 @@ description = "One consolidated human-facing UI for the EmbArch suite — Dashbo
 anyhow = "1.0.103"
 axum = "0.8"
 # In-process, pure/offline authoring logic only — registry, merged action
-# list, Study-building (embarch-ui/design.md §3 decision 5). No hardware
+# list, Study-building (decision 5). No hardware
 # feature: this crate's `study-ui`/`gatt-extract` features never touch
 # probe-rs/serialport, only files inside the firmware repo being edited.
 embarch-study-designer = { path = "../embarch-study-designer", features = ["study-ui", "gatt-extract"] }
 # The one implementation of "reach embarch-core over HTTP+Bearer," shared
-# with embarch-api rather than duplicated (embarch-ui/design.md §3 decision
-# 5). ALL hardware-adjacent data — reads (probe/board
-# enumeration, alert history, dev-bench port) as well as writes (enrolling,
-# running a Study) — goes through this over HTTP, never through
+# with embarch-api rather than duplicated (decision 5). ALL hardware-adjacent
+# data — reads (probe/board enumeration, alert history, dev-bench port) as
+# well as writes (enrolling, running a Study) — goes through this over HTTP, never through
 # embarch-topology's hardware-touching functions in-process: embarch-topology
 # is in this tree transitively (via this crate, default/`software` feature
 # only) but embarch-ui never depends on its `hardware` feature, same "never
 # link probe-rs/serialport directly" rule embarch-api already follows
-# (embarch-api/design.md §11) — a read done in-process would query whichever
+# (`embarch-api` decisions 37/38) — a read done in-process would query whichever
 # machine embarch-ui itself runs on, not Core's, silently wrong the moment
 # Core runs on a different machine (the exact split-topology case
 # embarch-topology exists to handle in the first place). See
