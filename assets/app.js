@@ -611,6 +611,14 @@
   // Backlog via one `/recent` fetch on load, then live lines over a `/events`
   // SSE stream (never re-fetching `/recent` on a timer — decision 6).
   //
+  // **That SSE stream is embarch-ui's own, served to this browser** — it is
+  // not Core's. Decision 7's amendment retired *Core's* `GET /logs/stream`;
+  // embarch-ui reaches Core by polling `/logs/recent` server-side
+  // (`src/logs.rs::poll_loop`, decision 26) and pushes the diff out over
+  // `/api/logs/events`. Two different things are called SSE in this tab, and
+  // reading the line above as "Core streams to us" has now misled two
+  // readers — hence this paragraph.
+  //
   // Two sources, one viewer (decision 13). embarch-core's lines
   // are proxied from its own HTTP surface; embarch-api's come from the
   // rolling file it writes, because it is spawned per session and gone —
