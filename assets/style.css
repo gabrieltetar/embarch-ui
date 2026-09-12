@@ -4,11 +4,11 @@
  * (Main/Topology/StudyDesigner/Enroll/Debug.dc.html), specifically
  * Main.dc.html's own <style> block and its theme-toggle script's token
  * pairs — not re-derived from a prose description. See
- * decision 8 and embarch-doc/embarch-ui/milestone-1.md §4.3.
+ * decision 8.
  *
  * Per-tab component classes (chip inputs, pill toggles, the log-line/lvl/
- * search-box family) get added as each tab actually ships (milestone-1.md
- * §4.4 onward), lifted from that tab's own mockup at the time — this file
+ * search-box family) get added as each tab actually ships, lifted from
+ * that tab's own mockup at the time — this file
  * only carries the shell + primitives every tab already needs.
  */
 
@@ -410,7 +410,7 @@ table.data-table {
   font-style: italic;
 }
 
-/* Enroll tab (milestone-1.md §4.5) — drag-and-drop probe assignment. */
+/* Enroll tab — drag-and-drop probe assignment. */
 .chip-pool {
   display: flex;
   flex-wrap: wrap;
@@ -466,7 +466,7 @@ table.data-table {
   margin-bottom: 6px;
 }
 
-/* Debug tab (milestone-1.md §4.7) — lifted from Debug.dc.html verbatim. */
+/* Debug tab — lifted from Debug.dc.html verbatim (decision 8). */
 .chip {
   display: inline-flex;
   align-items: center;
@@ -536,7 +536,7 @@ table.data-table {
   overflow-wrap: anywhere;
 }
 
-/* ---- Study Designer tab (milestone-1.md §4.6) ---------------------------
+/* ---- Study Designer tab ---------------------------------------------
  *
  * Built on the same tokens/components as every other tab -- no new colors,
  * no new font stacks. The additions here are the shapes the other four tabs

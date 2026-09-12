@@ -17,7 +17,7 @@ axum = "0.8"
 embarch-study-designer = { path = "../embarch-study-designer", features = ["study-ui", "gatt-extract"] }
 # The one implementation of "reach embarch-core over HTTP+Bearer," shared
 # with embarch-api rather than duplicated (embarch-ui/design.md §3 decision
-# 5, milestone-1.md §4.1). ALL hardware-adjacent data — reads (probe/board
+# 5). ALL hardware-adjacent data — reads (probe/board
 # enumeration, alert history, dev-bench port) as well as writes (enrolling,
 # running a Study) — goes through this over HTTP, never through
 # embarch-topology's hardware-touching functions in-process: embarch-topology

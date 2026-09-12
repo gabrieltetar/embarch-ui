@@ -425,7 +425,7 @@
     // `carrierCell` is where that shows, per row.
   }
 
-  // --- Enroll tab (milestone-1.md §4.5) ---------------------------------
+  // --- Enroll tab ---------------------------------------------------------
   // Drag-and-drop, matching embarch-core's own retired `/enroll` page's
   // interaction model (embarch-core/src/enroll_page.rs) — but submitting
   // through embarch-ui's own `/api/enroll`, which already holds a live
@@ -607,7 +607,7 @@
     }
   }
 
-  // --- Debug tab (milestone-1.md §4.7) ----------------------------------
+  // --- Debug tab (decision 7) ---------------------------------------------
   // Backlog via one `/recent` fetch on load, then live lines over a `/events`
   // SSE stream (never re-fetching `/recent` on a timer — decision 6).
   //
@@ -828,7 +828,7 @@
   }
 
 
-  // --- Study Designer tab (milestone-1.md §4.6) --------------------------
+  // --- Study Designer tab --------------------------------------------------
   //
   // Authoring happens server-side in `embarch-study-designer` (the merged
   // action list, the registry, table-rows -> `Study`); this file's job is
