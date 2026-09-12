@@ -875,25 +875,25 @@
   var sdRunSource = null;
   var sdLastStudyId = null;
 
-  var SD_BUILT_INS = [
-    { value: "ble_connect", label: "BleConnect — connect to the DUT" },
-    // embarch-study-designer/design.md §3 decisions 50/51. Listed right
-    // after BleConnect because that is where they belong in a study: a DUT
-    // that requires an encrypted link needs security established before the
-    // first GATT step, not after it.
-    { value: "ble_security", label: "BleSecurity — establish encryption/pairing" },
-    { value: "ble_unbond", label: "BleUnbond — drop the bond (disconnects)" },
-    { value: "gatt_discover", label: "GattDiscover — walk the GATT table" },
-    { value: "gatt_monitor_all", label: "GattMonitorAll — subscribe to everything + capture for this step" },
-    { value: "gatt_monitor_start", label: "GattMonitorStart — open a capture window on everything" },
-    // embarch-study-designer/design.md §3 decision 53. Listed after the
-    // unfiltered pair because that is the order they are reached for: point
-    // GattMonitorAll at an unfamiliar DUT to see what it does, then narrow
-    // to the two characteristics the study is actually about.
-    { value: "gatt_monitor_selected", label: "GattMonitorSelected — subscribe to chosen characteristics + capture for this step" },
-    { value: "gatt_monitor_selected_start", label: "GattMonitorSelectedStart — open a capture window on chosen characteristics" },
-    { value: "gatt_monitor_stop", label: "GattMonitorStop — close the capture window" },
-  ];
+  /* The built-in action vocabulary used to be written out here as nine
+   * hand-copied {value, label} pairs, while the crate served its own list
+   * that this file filtered out and threw away. The two drifted, exactly the
+   * way decision 17 says a browser-side copy of a server-side fact drifts:
+   * the served list still held seven after decision 53 added two, and
+   * nothing caught it, because a list nobody renders cannot look wrong.
+   *
+   * Now `sdBuiltIns()` reads the served entries, labels and all
+   * (`embarch-study-designer::BuiltInActionKind`, suite/017). Adding a
+   * built-in is one edit, in the crate.
+   *
+   * Empty until the first actions response lands — the picker renders an
+   * empty Built-in group for that moment rather than a stale guess, which is
+   * the same posture `sdMaxStreamNameLen` takes and for the same reason. */
+  function sdBuiltIns() {
+    return sdActions
+      .filter(function (a) { return a.BuiltIn; })
+      .map(function (a) { return { value: a.BuiltIn.which, label: a.BuiltIn.label }; });
+  }
 
   // Which built-ins take a characteristic selection (decision 53).
   function sdIsSelectiveMonitor(which) {
@@ -1201,7 +1201,7 @@
 
   function sdActionOptionsHtml(row) {
     var html = '<optgroup label="Built-in">';
-    SD_BUILT_INS.forEach(function (b) {
+    sdBuiltIns().forEach(function (b) {
       var sel = row.kind === "built_in" && row.which === b.value ? " selected" : "";
       html += '<option value="builtin:' + b.value + '"' + sel + ">" + escapeHtml(b.label) + "</option>";
     });
