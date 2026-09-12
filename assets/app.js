@@ -1133,7 +1133,7 @@
       securityLevel: "l4",
       rawService: "",
       rawChar: "",
-      // Vendor-defined selection (`embarch-study-designer` decision 39): ids, never UUIDs — the
+      // Vendor-defined selection (`embarch-study-designer` decision 41): ids, never UUIDs — the
       // whole point is that nobody transcribes 6e400002-… by hand. The
       // UUIDs come from the server's merged list.
       vendorService: "",
@@ -1176,7 +1176,7 @@
       sdNewRow({ name: "open-capture", kind: "built_in", which: "gatt_monitor_start", timeout_ms: 20000 }),
       // Prefilled against the Nordic UART Service rather than as a raw row:
       // its UUIDs are Nordic's, not the engineer's, so there is nothing to
-      // type here but the payload (`embarch-study-designer` decision 39). The payload is left empty
+      // type here but the payload (`embarch-study-designer` decision 41). The payload is left empty
       // on purpose — what a given DUT expects on NUS, terminator included,
       // is knowledge this tool doesn't have and won't invent.
       sdNewRow({
