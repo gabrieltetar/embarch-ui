@@ -265,7 +265,7 @@ pub enum RunState {
         /// or merely `Declared` (`VersionSource::is_verified`). Redundant with
         /// `result.provenance` on purpose — rendering `Declared` visibly
         /// weaker is decision 11's requirement, and "the easiest place to
-        /// accidentally reintroduce" the defect decision 40 closes is a UI
+        /// accidentally reintroduce" the defect `embarch-study-designer` decision 40 closes is a UI
         /// deciding for itself which variants count.
         provenance: ProvenanceView,
     },
@@ -442,7 +442,7 @@ impl RequirementsInput {
 /// feed by design, and its encoding is the one thing a trace tap can be.
 ///
 /// **A GATT tap names one characteristic and, optionally, the layout to
-/// decode its payloads with** (§3 decision 52). Undeclared, its file is raw
+/// decode its payloads with** (`embarch-study-designer` decision 52). Undeclared, its file is raw
 /// bytes with no CSV, which is the honest rendering of a payload nobody has
 /// described.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,12 +535,12 @@ fn build_taps(
 
                 // A tap whose characteristic no step subscribes captures
                 // nothing, passes, and looks fine — which is the exact
-                // failure decisions 34/36/53/54 were each opened by. Refused
+                // failure `embarch-study-designer` decisions 34/36/53/54 were each opened by. Refused
                 // here, where the author can fix it, rather than discovered
                 // as an empty file after a run.
                 if !any_step_subscribes(steps, service_uuid, characteristic_uuid) {
                     return Err(format!(
-                        "stream tap '{name}' captures {} , but no step in this study subscribes \
+                        "stream tap '{name}' captures {}, but no step in this study subscribes \
                          to it — add a GattMonitorAll/GattMonitorStart step, or name it in a \
                          selective monitor step's targets",
                         characteristic_uuid.to_hyphenated()
@@ -1966,7 +1966,7 @@ mod tests {
 
     /// A characteristic nothing names is **absent**, not present with an
     /// invented label — the browser falls back to the UUID for it, which is
-    /// what every picker showed before decision 56.
+    /// what every picker showed before `embarch-study-designer` decision 56.
     #[test]
     fn an_unnamed_characteristic_is_left_out_rather_than_guessed_at() {
         let live = [service(
@@ -2369,7 +2369,7 @@ repeat = [{ name = "green", type = "i32le" }]
     #[test]
     fn a_gatt_tap_nothing_subscribes_to_is_refused_at_authoring_time() {
         // A tap whose characteristic no step subscribes captures nothing,
-        // passes, and looks fine — the failure decisions 34/36/53/54 were
+        // passes, and looks fine — the failure `embarch-study-designer` decisions 34/36/53/54 were
         // each opened by. Caught where the author can fix it.
         let err = build_taps(&[gatt_tap("ppg", NUS_TX, "")], &plain_steps(1), &structs_toml())
             .expect_err("must refuse");

@@ -850,7 +850,7 @@
   var sdActions = [];        // MergedAction[] from GET /api/study-designer/actions
   var sdRegistry = [];       // RegisteredAction[] — the subset with fields to pick
   // Notify/indicate-capable characteristics, from the same response — what a
-  // selective monitor row and a GATT tap both pick from (decisions 53/55).
+  // selective monitor row and a GATT tap both pick from (`embarch-study-designer` decisions 53/55).
   var sdSubscribable = [];
   /* Group headings for the target picker (decision 17), keyed by hyphenated
    * *service* UUID — `embarch-study-designer` decision 56's
@@ -872,7 +872,7 @@
    * Cancel discards it; Done commits it to the row. Held outside the row so
    * a half-made selection never reaches `sdCollectRows`. */
   var sdTargetDraft = null;
-  // Names from the firmware repo's own study-structs.toml (decision 52).
+  // Names from the firmware repo's own study-structs.toml (`embarch-study-designer` decision 52).
   var sdStructLayouts = [];
   // Characteristic display names, keyed by hyphenated characteristic UUID
   // (`embarch-study-designer` decision 56). Empty is the honest
@@ -886,7 +886,7 @@
    * hand-copied {value, label} pairs, while the crate served its own list
    * that this file filtered out and threw away. The two drifted, exactly the
    * way decision 17 says a browser-side copy of a server-side fact drifts:
-   * the served list still held seven after decision 53 added two, and
+   * the served list still held seven after `embarch-study-designer` decision 53 added two, and
    * nothing caught it, because a list nobody renders cannot look wrong.
    *
    * Now `sdBuiltIns()` reads the served entries, labels and all
@@ -902,7 +902,7 @@
       .map(function (a) { return { value: a.BuiltIn.which, label: a.BuiltIn.label }; });
   }
 
-  // Which built-ins take a characteristic selection (decision 53).
+  // Which built-ins take a characteristic selection (`embarch-study-designer` decision 53).
   function sdIsSelectiveMonitor(which) {
     return which === "gatt_monitor_selected" || which === "gatt_monitor_selected_start";
   }
@@ -936,7 +936,7 @@
   /* What a picker's option is labelled with (`embarch-study-designer`
    * decision 56): the vendor's name for the characteristic, or the C
    * identifier the firmware declared it under, or — when nothing named it —
-   * the UUID head this showed for everything before decision 56.
+   * the UUID head this showed for everything before `embarch-study-designer` decision 56.
    *
    * The UUID never stops being the identity: it is what the checkbox's value
    * carries, what gets sent to the server, and what `charTitle` puts in every
@@ -1051,8 +1051,8 @@
 
   /* Takes the two lists that are about *capture* rather than about writing
    * an action: the notify/indicate-capable characteristics a selective
-   * monitor row and a GATT tap both pick from (decision 53), and the payload
-   * layouts a tap can decode with (decision 52).
+   * monitor row and a GATT tap both pick from (`embarch-study-designer` decision 53), and the payload
+   * layouts a tap can decode with (`embarch-study-designer` decision 52).
    *
    * A characteristic disappearing between discoveries (a different DUT, a
    * Kconfig-gated one) leaves a row's target checked and unrenderable, which
@@ -1126,14 +1126,14 @@
       // Blank means "whichever peripheral advertises first", which on a
       // bench with any other BLE device in range is a coin toss.
       targetName: "",
-      // Only meaningful for a `ble_security` row (decision 44). L4 is the
+      // Only meaningful for a `ble_security` row (`embarch-study-designer` decision 44). L4 is the
       // level that decision was written for; L1 *is* offered, because
       // decision 44 makes it the honest way to say "this DUT needs none"
       // rather than leaving the step out and hoping.
       securityLevel: "l4",
       rawService: "",
       rawChar: "",
-      // Vendor-defined selection (decision 39): ids, never UUIDs — the
+      // Vendor-defined selection (`embarch-study-designer` decision 39): ids, never UUIDs — the
       // whole point is that nobody transcribes 6e400002-… by hand. The
       // UUIDs come from the server's merged list.
       vendorService: "",
@@ -1144,7 +1144,7 @@
       rawOp: "write",
       rawMode: "text",
       rawPayload: "",
-      // Only meaningful for a selective monitor row (decision 53): the
+      // Only meaningful for a selective monitor row (`embarch-study-designer` decision 53): the
       // characteristic UUIDs this step subscribes to. Empty is refused
       // server-side rather than promoted to "everything" — quietly
       // subscribing to the whole table is the flood the action exists to
@@ -1171,12 +1171,12 @@
     return [
       // Left blank deliberately rather than prefilled with some DUT's name:
       // which device is under test is the engineer's to say, and the row
-      // flags itself as "any device!" until they do (decision 41).
+      // flags itself as "any device!" until they do (`embarch-study-designer` decision 41).
       sdNewRow({ name: "connect", kind: "built_in", which: "ble_connect", timeout_ms: 20000 }),
       sdNewRow({ name: "open-capture", kind: "built_in", which: "gatt_monitor_start", timeout_ms: 20000 }),
       // Prefilled against the Nordic UART Service rather than as a raw row:
       // its UUIDs are Nordic's, not the engineer's, so there is nothing to
-      // type here but the payload (decision 39). The payload is left empty
+      // type here but the payload (`embarch-study-designer` decision 39). The payload is left empty
       // on purpose — what a given DUT expects on NUS, terminator included,
       // is knowledge this tool doesn't have and won't invent.
       sdNewRow({
@@ -1189,7 +1189,7 @@
         timeout_ms: 5000,
         // A moment inside the open window before the write, so the
         // transcript separates whatever the DUT was already saying from its
-        // response to the stimulus (decision 40).
+        // response to the stimulus (`embarch-study-designer` decision 40).
         delay_before_ms: 1000,
       }),
       // The old template put a `gatt_monitor_all` step here to hold the run
@@ -1584,7 +1584,7 @@
           // `role` and `target_name` outside `ble_connect`.
           security_level: row.securityLevel || null,
           // Resolved from checked UUIDs back to the {service, characteristic}
-          // pairs the server parses (decision 53). The service comes from the
+          // pairs the server parses (`embarch-study-designer` decision 53). The service comes from the
           // same discovery entry the checkbox was rendered from, so the two
           // can never disagree.
           targets: (row.targets || [])
@@ -1681,7 +1681,7 @@
       var sources = [];
       if (item.sources.live) sources.push("live");
       if (item.sources.static_extraction) sources.push("source");
-      // Named where anything names it (decision 56). The UUID moves to the
+      // Named where anything names it (`embarch-study-designer` decision 56). The UUID moves to the
       // second line rather than out of sight: this pool is the route into the
       // registration form, and matching a characteristic against a vendor's
       // own table is done by UUID.
@@ -2400,7 +2400,7 @@
   // Decision 11: a result renders **how** each version was established, not
   // just what it was. `verified` is decided server-side by
   // `VersionSource::is_verified` — re-deriving it here is the easiest place to
-  // accidentally reintroduce the exact defect decision 40 exists to close, so
+  // accidentally reintroduce the exact defect `embarch-study-designer` decision 40 exists to close, so
   // this file never looks at which variant it is, only at the boolean.
   function provCell(what, version, source, verified) {
     return (

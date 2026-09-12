@@ -2471,7 +2471,7 @@ mod tests {
     /// **A capture that opens with records from before the DUT reset loses the
     /// prefix, not the microsecond axis.**
     ///
-    /// `embarch-core` clears the signal port's input on open (decision 30) and a
+    /// Core clears the signal port's input on open (`embarch-core` decision 30) and a
     /// real capture still began with 18 stale records carrying a cycle count
     /// seconds from the rest, the purge reporting no error: the bytes were
     /// inside the USB-UART bridge, where an OS-level purge does not reach. The

@@ -91,10 +91,10 @@ pub async fn poll(core: &CoreClient) -> Snapshot {
 
     let core_reachable = status.is_ok();
     // `status`'s own error is the most representative "why is Core
-    // unreachable" message — if it failed, the other three almost
+    // unreachable" message — if it failed, the other five almost
     // certainly failed for the same underlying reason (wrong base_url, no
     // process listening, a bad token), so surfacing one clear cause beats
-    // concatenating four near-identical ones.
+    // concatenating five near-identical ones.
     let error = status.as_ref().err().map(|e| format!("{e:#}"));
 
     Snapshot {
