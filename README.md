@@ -46,6 +46,27 @@ vscode-extension/ (thin, TypeScript)
 
 Requires a running [`embarch-core`](https://github.com/gabrieltetar/embarch-core).
 
+**And this repo does not build on its own.** It has the deepest sibling reach in the
+suite — three repos must be cloned into the same parent directory, because they are
+depended on by relative path:
+
+| Sibling | Why |
+|---|---|
+| [`embarch-study-designer`](https://github.com/gabrieltetar/embarch-study-designer) | the shared study/registry type model, named by this repo's own `Cargo.toml` |
+| [`embarch-api`](https://github.com/gabrieltetar/embarch-api) | **not for itself** — for `crates/embarch-core-client`, a crate that lives *inside* that repo |
+| [`embarch-topology`](https://github.com/gabrieltetar/embarch-topology) | named by neither manifest you would think to read: `embarch-core-client` depends on it, so it is needed transitively |
+
+The last two are the trap. Reading this repo's `Cargo.toml` alone gives you a checkout
+that still fails its first build, with `failed to read
+.../embarch-topology/Cargo.toml` — an error naming a path outside this repo, which
+means nothing more than "the sibling is not there".
+
+So the layout cargo expects is `<parent>/embarch-ui`, `<parent>/embarch-study-designer`,
+`<parent>/embarch-api`, `<parent>/embarch-topology`.
+
+Path dependencies rather than git or registry ones is a deliberate choice, not an
+oversight: `embarch-study-designer` decision 8 and `embarch-topology` decision 13.
+
 ```sh
 cargo run --release      # then open http://127.0.0.1:4890
 ```
