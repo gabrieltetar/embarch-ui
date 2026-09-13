@@ -161,7 +161,7 @@
   // "Verified"): `confirmed_at_utc_ms` is enrolment time, unmoving until
   // someone re-enrolls, so a header implying a live check would answer a
   // question this field cannot answer. `embarch-core` decision 57
-  // (decisions/surfaces.md) declined to persist a real last-validation
+  // (decisions/enrollment.md) declined to persist a real last-validation
   // instant next to it; showing real freshness needs `POST /validate` and
   // that response's own `validated_at_utc_ms`, a live, hardware-touching
   // call this snapshot poll never makes.
@@ -1152,7 +1152,7 @@
       targets: [],
       timeout_ms: 15000,
       continue_on_fail: false,
-      // The "when" (decision 40): how long dev-bench waits before starting
+      // The "when" (`embarch-study-designer` decision 42): how long dev-bench waits before starting
       // this step's action. Not deducted from timeout_ms.
       delay_before_ms: 0,
     };
@@ -1189,13 +1189,13 @@
         timeout_ms: 5000,
         // A moment inside the open window before the write, so the
         // transcript separates whatever the DUT was already saying from its
-        // response to the stimulus (`embarch-study-designer` decision 40).
+        // response to the stimulus (`embarch-study-designer` decision 42).
         delay_before_ms: 1000,
       }),
       // The old template put a `gatt_monitor_all` step here to hold the run
       // open while the response arrived. A delay does that without a second
       // action re-subscribing inside an already-open window, which is what
-      // decision 40 made possible.
+      // decision 42 made possible.
       sdNewRow({
         name: "close-capture",
         kind: "built_in",
