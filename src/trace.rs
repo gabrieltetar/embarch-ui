@@ -128,8 +128,8 @@ pub struct Lane {
     /// What to show. Equals `key` when nothing named it.
     pub label: String,
     /// True when the manifest did not name this subject, so `label` is a raw
-    /// number. Rendered visibly differently — a pointer that looks like a name
-    /// is the defect decision 35 exists to prevent.
+    /// number. Rendered visibly differently — muted and italic in both the
+    /// lane chart and the load table — so a raw pointer never reads as a name.
     pub unnamed: bool,
     /// `"thread"`, `"idle"`, `"isr"`, or `"gpio"`.
     pub kind: &'static str,
