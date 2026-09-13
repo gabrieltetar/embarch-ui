@@ -777,7 +777,7 @@ struct ActionsResponse {
     /// after a round trip.
     max_monitor_targets: usize,
     /// `limits::MAX_STREAM_NAME_LEN` — how long a `StreamTap`/`StreamRef`
-    /// name may be (`embarch-study-designer/interfaces/types.md` §4.8), also the file
+    /// name may be (`embarch-study-designer/interfaces/result-types.md`), also the file
     /// name a stream becomes under a study's `streams/` directory. Served
     /// rather than restated in `app.js`: the cap is enforced by
     /// `build_study`, same reasoning as [`Self::max_monitor_targets`] above.
