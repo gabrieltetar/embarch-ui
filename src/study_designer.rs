@@ -1521,10 +1521,9 @@ fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
 }
 
 /// A `Uuid` in a saved `Study` is a JSON array of 16 bytes (its `Serialize`
-/// is the raw form, `embarch-study-designer/interfaces/types.md` §4.3); the
-/// table works in the hyphenated text
-/// an engineer reads. This is the one place that conversion happens on the
-/// load path.
+/// is the raw form, `embarch-study-designer/interfaces/types.md`); the
+/// table works in the hyphenated text an engineer reads. This is the one
+/// place that conversion happens on the load path.
 fn uuid_field(source: &serde_json::Value, field: &str) -> Option<String> {
     let bytes = source.get(field)?.as_array()?;
     if bytes.len() != 16 {
