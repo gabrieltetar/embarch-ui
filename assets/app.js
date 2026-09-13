@@ -4007,7 +4007,7 @@
   // ---- windowed binning: the server bins, this draws ------------------------
   //
   // **What bounds this drawing is pixels times lanes, not the dataset** — and
-  // as of §3 decision 18 that bound is applied before the wire rather than
+  // as of decision 18 that bound is applied before the wire rather than
   // after it. The view this tab loads carries no spans at all: it asks
   // `/api/trace/{study}/{tap}/bins?from&to&width` for the window it is about
   // to draw and gets back at most one occupancy run per pixel column per lane,

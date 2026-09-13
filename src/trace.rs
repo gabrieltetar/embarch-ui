@@ -133,7 +133,7 @@ pub struct Lane {
     pub unnamed: bool,
     /// `"thread"`, `"idle"`, `"isr"`, or `"gpio"`.
     pub kind: &'static str,
-    /// **Never serialized** — this is the 13 MB (§3 decision 18). The spans
+    /// **Never serialized** — this is the 13 MB (decision 18). The spans
     /// stay server-side and reach the browser already binned, through
     /// [`bin_window`], for the window it is about to draw. Every other field
     /// on this struct is small and goes out whole.
@@ -146,8 +146,8 @@ pub struct Lane {
     /// Running maximum of `spans[..=i].to`, so [`first_reaching`] can binary
     /// search it. Built once here rather than per request, and **not** over
     /// `from`: a lane's spans overlap exactly when the capture lost a record,
-    /// and searching a lower bound on `from` loses the enclosing span (§3
-    /// decision 10's chart half). Never serialized.
+    /// and searching a lower bound on `from` loses the enclosing span
+    /// (decision 10's chart half). Never serialized.
     #[serde(skip_serializing)]
     pub max_to_prefix: Vec<u64>,
     /// Point-in-time records on this lane — `thread_create`/`thread_name`.
@@ -673,7 +673,7 @@ pub struct TraceView {
     pub gaps: Vec<Gap>,
     pub lanes: Vec<Lane>,
     pub markers: Vec<PointEvent>,
-    /// The load repartition over `lanes` (§3 decision 10). Arithmetic over the
+    /// The load repartition over `lanes` (decision 10). Arithmetic over the
     /// spans above, not a second decode — every doubt it reports is one the
     /// spans already carried.
     pub summary: LoadSummary,
@@ -1968,7 +1968,7 @@ fn parse_with_cap(
 // ---- windowed binning -------------------------------------------------------
 //
 // **The last remaining cost of this view was the transfer, not the drawing.**
-// §3 decision 10's aggregation made the element count a function of pixels
+// decision 10's aggregation made the element count a function of pixels
 // times lanes rather than of the dataset — but it ran in the browser, so the
 // whole capture still had to get there first: 112,801 spans on the reference
 // capture, ~115 bytes of JSON each, which is essentially the entire 13 MB the
@@ -2021,7 +2021,7 @@ pub struct BinRun {
     pub count: usize,
     /// The one span this run is, when it is exactly one. `None` on a merged
     /// block — which is what stops the tab reporting a block's width as a
-    /// duration (§3 decision 10).
+    /// duration (decision 10).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one: Option<Span>,
 }
@@ -2059,7 +2059,7 @@ pub struct BinnedWindow {
 /// **Not a lower bound on `from`, and that distinction was a real defect** —
 /// a lane's spans overlap exactly when the capture lost a record, and a
 /// step-back search over `from` halts on the first nested span and loses the
-/// enclosing one (§3 decision 10's chart half). The search is over
+/// enclosing one (decision 10's chart half). The search is over
 /// [`Lane::max_to_prefix`], which is non-decreasing by construction.
 fn first_reaching(lane: &Lane, t: u64) -> usize {
     lane.max_to_prefix.partition_point(|&m| m < t)
@@ -3324,7 +3324,7 @@ mod tests {
     /// the browser half can be driven against real data instead of a
     /// hand-written object.
     ///
-    /// **Two files now, because the tab makes two calls** (§3 decision 18):
+    /// **Two files now, because the tab makes two calls** (decision 18):
     /// the view carries everything but the spans, and the chart is drawn from
     /// a window of bins. `EMBARCH_TRACE_BINS_JSON` is what
     /// `/api/trace/{study}/{tap}/bins` answers for the whole capture at a
@@ -3391,7 +3391,7 @@ mod load_summary_tests {
         }
     }
 
-    /// §3 decision 10's headline constraint: this capture really did lose
+    /// decision 10's headline constraint: this capture really did lose
     /// records, so the summary must report the affected fraction rather than
     /// present its totals as a clean measurement.
     #[test]
@@ -3557,7 +3557,7 @@ mod load_summary_tests {
 
 /// **The browser's aggregation, kept, so the server's cannot drift from it.**
 ///
-/// `assets/app.js` did this arithmetic on the whole capture until §3 decision
+/// `assets/app.js` did this arithmetic on the whole capture until decision
 /// 18 moved it behind `?from&to&width`. The version below is a transcription
 /// of the `traceAggregateLane` that shipped — same clamping order, same
 /// float scale, same four split flags, same "counted on the column it starts
@@ -3568,7 +3568,7 @@ mod load_summary_tests {
 /// rather than binary searching `max_to_prefix`, and it re-derives the runs by
 /// a plain forward pass, so the production binner's search is under test
 /// rather than being restated by its own reference. Losing the enclosing span
-/// of an overlapping pair is the exact defect §3 decision 10 records finding
+/// of an overlapping pair is the exact defect decision 10 records finding
 /// on the browser side, and it is invisible to a reference that shares the
 /// search.
 #[cfg(test)]
@@ -3750,7 +3750,7 @@ mod binning_tests {
 
     /// A run that is exactly one span carries that span, so zooming in still
     /// gets the numbers; a merged one carries none, so nothing can read a
-    /// block's width as a duration (§3 decision 10).
+    /// block's width as a duration (decision 10).
     #[test]
     fn only_an_unmerged_run_carries_its_span() {
         let view = stamped();
@@ -3885,7 +3885,7 @@ mod scratch_view {
             view.records_lost,
             view.out_of_order_rows
         );
-        // What the tab actually pays, which is the thing §3 decision 18 moved.
+        // What the tab actually pays, which is the thing decision 18 moved.
         let spans: usize = view.lanes.iter().map(|l| l.spans.len()).sum();
         let span_bytes: usize = view
             .lanes
