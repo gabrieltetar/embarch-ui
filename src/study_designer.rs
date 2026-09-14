@@ -2191,9 +2191,10 @@ mod tests {
         }
     }
 
-    /// The distinction decision 40 rests on: `"any"` is a deliberate answer
-    /// and blank is the not-thought-about case. Turning blank into `"any"`
-    /// here would erase it, so blank is refused with the message the UI shows.
+    /// The distinction `embarch-study-designer` decision 40 rests on: `"any"`
+    /// is a deliberate answer and blank is the not-thought-about case. Turning
+    /// blank into `"any"` here would erase it, so blank is refused with the
+    /// message the UI shows.
     #[test]
     fn a_blank_requirement_is_refused_rather_than_read_as_any() {
         assert_eq!(
@@ -2471,7 +2472,7 @@ repeat = [{ name = "green", type = "i32le" }]
     /// `Declared` has to render visibly weaker than a verified reading, and
     /// which variants count as verified is `VersionSource`'s own business —
     /// re-deriving it in JavaScript is the easiest place to reintroduce the
-    /// defect decision 40 closes.
+    /// defect `embarch-study-designer` decision 40 closes.
     #[test]
     fn declared_is_the_only_unverified_source() {
         use embarch_study_designer::{VersionOverride, VersionSubject};
