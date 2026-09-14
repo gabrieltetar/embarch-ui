@@ -481,11 +481,15 @@ async fn api_trace_taps(
 
 /// One tap's recorded timeline, decoded server-side into lanes and gaps.
 ///
-/// Two calls to Core, and both are needed: the stream index says whether the
-/// trace is named and why not, and the stream route hands back the rendered
-/// CSV. Decoding happens in `trace.rs` through `embarch-study-designer`'s own
-/// `outpost` module rather than in the browser, so no trace knowledge — column
-/// order, record kinds, `IRQ_UNKNOWN` — lives in `app.js`.
+/// Several calls to Core, each for something the other cannot answer: the
+/// stream index says whether the trace is named and why not, the stream
+/// route hands back the rendered CSV, and the load route (`embarch-core`
+/// decision 62) hands back the load repartition computed over that same CSV
+/// — `embarch-ui` stopped recomputing that arithmetic itself in `tasks/ui/051`
+/// (suite decision 4). Chart decoding still happens in `trace.rs` through
+/// `embarch-study-designer`'s own `outpost` module rather than in the
+/// browser, so no trace knowledge — column order, record kinds,
+/// `IRQ_UNKNOWN` — lives in `app.js`.
 async fn api_trace_view(
     State(state): State<AppState>,
     axum::extract::Path((study_id, name)): axum::extract::Path<(String, String)>,
@@ -600,7 +604,23 @@ async fn decode_trace(
     };
     let csv = String::from_utf8_lossy(&bytes);
 
-    // A third call to Core, and it is what puts the study's own steps above
+    // A third call to Core: the load repartition itself (`embarch-core`
+    // decision 62; suite decision 4). `embarch-ui` used to recompute this
+    // from `csv` above (`tasks/ui/051` retired that second implementation),
+    // so unlike `study_steps` below, a failure here is not swallowed into an
+    // empty answer — the tab would otherwise render a populated chart beside
+    // a load table quietly showing nothing. Same status as every other
+    // proxied Core round trip in this function; the one refusal specific to
+    // this route (a `422` when the rendered CSV's columns don't match this
+    // build's) cannot occur silently anyway, because `trace::parse` below
+    // checks the identical columns on the identical bytes and would refuse
+    // the same way.
+    let summary = match state.core.get_study_load(study_id, name).await {
+        Ok(load) => load.summary,
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()),
+    };
+
+    // A fourth call to Core, and it is what puts the study's own steps above
     // the lanes. Its absence is not an error: a study that ran before Core
     // recorded per-step stamps, or one whose `events.json` has been swept,
     // still has a perfectly good timeline to draw — the row is what goes
@@ -641,6 +661,7 @@ async fn decode_trace(
         entry.self_excluded,
         entry.note.clone(),
         &steps,
+        summary,
     ) {
         Ok(view) => Ok(Arc::new(view)),
         Err(e) => Err((StatusCode::UNPROCESSABLE_ENTITY, e).into_response()),

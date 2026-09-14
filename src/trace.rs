@@ -258,144 +258,20 @@ pub struct Gap {
     pub unbounded_start: bool,
 }
 
-/// One traced subject's share of the capture window — the "load repartition"
-/// the Trace view exists to produce (decision 10).
+/// The load repartition — per-subject entries, measured spans, total time,
+/// share of the window, and the coverage line (`gap_fraction`) that says
+/// whether the rest is a measurement at all (decision 10). **Computed once,
+/// on `embarch-core`, over the same rendered CSV this file also parses for
+/// its own chart geometry** — `embarch-core` decision 62 and suite decision 4
+/// — and fetched here through [`embarch_core_client::CoreClient::get_study_load`]
+/// rather than recomputed client-side. This crate carried its own copy of this
+/// arithmetic (`LoadSubject`/`LoadSummary`/`summarize`) until `tasks/ui/051`
+/// retired it: two implementations of one timeline is exactly what suite
+/// decision 4 exists to end, and `LoadSummary`'s own shape —
+/// [`embarch_core_client::LoadSummary`], field-for-field the same as before —
+/// is unchanged, so nothing about `TraceView`'s payload or `app.js`'s reading
+/// of it moved.
 ///
-/// **A total here is deliberately not the sum of everything drawn.** Four
-/// classes of span are excluded from `total_extent` because their extent is
-/// not a duration, and each is counted separately rather than quietly folded
-/// in or quietly dropped:
-///
-/// - a span that **crosses a gap** ([`Span::crosses_gap`]) spent an unknown
-///   part of its extent doing something nobody recorded;
-/// - a span with **no closing record** ([`Span::open_end`]) was drawn out to
-///   the next event so it had a shape, which is not the same as having lasted
-///   that long;
-/// - a span with **no opening record** ([`Span::open_start`]) began before it
-///   became observable;
-/// - a span **below the capture's resolution** ([`Span::below_resolution`]) is
-///   shorter than the clock drawing the axis can measure, so its extent is
-///   zero and its duration is unknown. Empty on a layout-3 capture, whose DUT
-///   clock stamps both ends of every span.
-///
-/// `entries` counts every span regardless, because "this subject ran N times"
-/// survives all four doubts.
-#[derive(Debug, Clone, Serialize)]
-pub struct LoadSubject {
-    /// Mirrors [`Lane::key`], so a row here and a lane there are the same
-    /// subject without the caller matching on labels.
-    pub key: String,
-    pub label: String,
-    /// Same first-class state as [`Lane::unnamed`]: this row's `label` is a
-    /// raw pointer or vector number, and must not render as though it were a
-    /// name.
-    pub unnamed: bool,
-    /// `"thread"`, `"idle"`, `"isr"`, or `"gpio"`.
-    pub kind: &'static str,
-    /// How many times this subject was entered, counting every span — the one
-    /// figure none of the four exclusions above can invalidate.
-    pub entries: usize,
-    /// Spans that contributed to `total_extent`.
-    pub measured_spans: usize,
-    /// Summed extent of the measured spans only, in [`LoadSummary::unit`]s.
-    pub total_extent: u64,
-    /// `total_extent` as a fraction of the capture window, in `0.0..=1.0`.
-    /// Of the **window**, not of the accounted time — see
-    /// [`LoadSummary::isr_extent`] for why these do not sum to 1.
-    pub share: f64,
-    /// Spans left out of `total_extent`, by reason. A subject whose
-    /// `excluded_spans` rivals its `measured_spans` has a total worth
-    /// distrusting, and these are what let a reader see that.
-    pub excluded_spans: usize,
-    /// Summed extent of the excluded spans. Reported so the time is visible
-    /// as unaccounted rather than absent.
-    pub excluded_extent: u64,
-    pub gap_crossing_spans: usize,
-    pub open_ended_spans: usize,
-    pub open_started_spans: usize,
-    /// Spans whose extent the axis clock cannot measure. On the host clock,
-    /// where a frame is the resolution, this is where an ISR's entire life
-    /// goes; on the DUT clock it is zero.
-    pub below_resolution_spans: usize,
-}
-
-/// The whole capture's load repartition, plus everything a reader needs to
-/// know how much of it to believe.
-///
-/// **The headline honesty constraint** (decision 10): a repartition
-/// computed across an interval where records were dropped
-/// is not a measurement, and neither is one whose subjects live below the
-/// capture's resolution. [`Self::gap_fraction`] and
-/// [`Self::below_resolution_spans`] are what say how much of this window is in
-/// each state, and both are meant to be rendered *beside* the numbers, not in
-/// a footnote.
-#[derive(Debug, Clone, Serialize)]
-pub struct LoadSummary {
-    /// `"us"`, `"ms"` or `"frame"` — mirrors [`TraceView::unit`], so a caller
-    /// formatting this table needs nothing else.
-    pub unit: &'static str,
-    /// `t_to - t_from`. Zero for a capture too short to have a window, in
-    /// which case every `share` is zero rather than a division by zero.
-    pub window_extent: u64,
-    /// Extent covered by at least one gap band, counted as a **union** — two
-    /// overlapping bands cover their union, not the sum of their widths, and
-    /// summing would let `gap_fraction` exceed 1 and read as nonsense.
-    pub gap_extent: u64,
-    /// `gap_extent / window_extent`, in `0.0..=1.0`. **The number that decides
-    /// whether the rest of this struct is a measurement.**
-    pub gap_fraction: f64,
-    /// Total records the firmware itself said it lost, mirroring
-    /// [`TraceView::records_lost`] so a summary row can carry it without the
-    /// caller reaching back out to the view.
-    pub records_lost: u64,
-    /// Whether the extents here are a time at all. False means every number
-    /// below counts **frames**, and must be said as such.
-    pub has_time_base: bool,
-    /// Measured extent across **thread lanes only**, which are mutually
-    /// exclusive — exactly one thread is the running context at any instant —
-    /// so this is the one total that is meaningful to compare against the
-    /// window. Zephyr's idle thread is a thread, and is included here.
-    pub thread_extent: u64,
-    /// The `cpu-idle` lane's measured extent — a **corroborating** figure,
-    /// deliberately **not** added to [`Self::thread_extent`].
-    ///
-    /// Found by asserting the opposite and watching it fail against a real
-    /// capture: idle is reported twice by construction, once as
-    /// `RecordKind::Idle` records and once as ordinary switch in/out of the
-    /// thread the manifest names `idle`. Adding them claimed nearly twice the
-    /// window. They are also allowed to *disagree*, and the disagreement is
-    /// worth seeing rather than averaging away.
-    pub idle_record_extent: u64,
-    /// ISR extent, kept **separate and deliberately not added** to the above:
-    /// an ISR runs *inside* whatever it interrupted, so its extent is counted
-    /// twice by construction. Adding these would produce a repartition
-    /// summing past 100% and reading as a bug rather than as the nesting it
-    /// is.
-    ///
-    /// On the **host** clock, expect zero: an interrupt begins and ends inside
-    /// one frame, so almost every ISR span is [`Span::below_resolution`] and
-    /// excluded, and [`LoadSubject::below_resolution_spans`] is where its
-    /// activity shows up instead. On the **DUT** clock it is a real number and
-    /// a small one — measured across a whole quiet reference-dut capture, every
-    /// ISR in the system together comes to 0.6% of the window, and the
-    /// outpost's own UARTE handler runs 1540 times at 9.9 µs each.
-    pub isr_extent: u64,
-    /// `window_extent - thread_extent`, floored at zero: window time no
-    /// measured thread span accounts for. Large values mean the exclusions
-    /// above ate the picture, not that the CPU was idle — idle is a thread and
-    /// is already counted.
-    pub unaccounted_extent: u64,
-    /// Spans excluded across every subject for falling below the axis clock's
-    /// resolution. A large number against a small `thread_extent` is the
-    /// signature of a capture whose activity is finer than its clock — which,
-    /// on the host clock, is every outpost capture ever taken.
-    pub below_resolution_spans: usize,
-    /// Per-subject rows, sorted by `total_extent` descending so the heaviest
-    /// subject is first. Ties break by `key` so the order is stable across
-    /// runs of the same capture.
-    pub subjects: Vec<LoadSubject>,
-}
-
 /// One study step as **embarch-core** recorded it: two wall-clock stamps and
 /// the delay the study declared before it. Nothing here is on the trace's axis
 /// yet — [`project_steps`] is what puts it there, and refuses to when it
@@ -532,7 +408,7 @@ pub struct TraceView {
     /// thread happens to appear, which would be inferring a build option from
     /// a measurement.
     ///
-    /// `Some(true)` is what makes [`LoadSummary::unaccounted_extent`] readable:
+    /// `Some(true)` is what makes [`embarch_core_client::LoadSummary::unaccounted_extent`] readable:
     /// the interval between the idle thread switching out and switching back
     /// in, with no lane covering it, is the instrument's own run rather than an
     /// unexplained hole.
@@ -673,10 +549,12 @@ pub struct TraceView {
     pub gaps: Vec<Gap>,
     pub lanes: Vec<Lane>,
     pub markers: Vec<PointEvent>,
-    /// The load repartition over `lanes` (decision 10). Arithmetic over the
-    /// spans above, not a second decode — every doubt it reports is one the
-    /// spans already carried.
-    pub summary: LoadSummary,
+    /// The load repartition over `lanes` (decision 10) — `embarch-core`'s own
+    /// answer over this same rendered CSV, fetched rather than recomputed
+    /// (`embarch-core` decision 62; suite decision 4). Passed in by the
+    /// caller because it comes from a second Core call
+    /// (`CoreClient::get_study_load`), not from these bytes.
+    pub summary: embarch_core_client::LoadSummary,
 }
 
 /// The `idle` record's own lane. Zephyr traces idle **entry only** — there is
@@ -1159,138 +1037,20 @@ fn split_row(line: &str) -> Vec<String> {
     out
 }
 
-/// Merges gap bands into a set of disjoint intervals clamped to the capture
-/// window, so overlapping bands are counted once. Summing raw band widths
-/// instead would let `gap_fraction` exceed 1 — and gap bands can overlap: two
-/// consecutive frames can each report losses, and each band reaches back to
-/// its predecessor's arrival.
-fn merged_gap_extent(gaps: &[Gap], from: u64, to: u64) -> u64 {
-    let mut bands: Vec<(u64, u64)> = gaps
-        .iter()
-        .filter_map(|g| {
-            let lo = g.from.max(from);
-            let hi = g.to.min(to);
-            (lo < hi).then_some((lo, hi))
-        })
-        .collect();
-    bands.sort_unstable();
-    let mut total = 0u64;
-    let mut cur: Option<(u64, u64)> = None;
-    for (lo, hi) in bands {
-        match cur {
-            Some((clo, chi)) if lo <= chi => cur = Some((clo, chi.max(hi))),
-            Some((clo, chi)) => {
-                total += chi - clo;
-                cur = Some((lo, hi));
-            }
-            None => cur = Some((lo, hi)),
-        }
-    }
-    if let Some((clo, chi)) = cur {
-        total += chi - clo;
-    }
-    total
-}
-
-/// Computes the load repartition. Pure arithmetic over already-built lanes —
-/// it re-derives nothing about the trace, which is why every caveat it reports
-/// is one [`Span`] already carried.
-fn summarize(
-    lanes: &[Lane],
-    gaps: &[Gap],
-    unit: &'static str,
-    t_from: u64,
-    t_to: u64,
-    records_lost: u64,
-) -> LoadSummary {
-    let window_extent = t_to.saturating_sub(t_from);
-    // Guarded rather than assumed non-zero: a capture of one frame has a
-    // zero-width window, and a share of 0.0 is the honest answer there.
-    let share_of =
-        |c: u64| if window_extent == 0 { 0.0 } else { c as f64 / window_extent as f64 };
-
-    let mut subjects: Vec<LoadSubject> = lanes
-        .iter()
-        .map(|lane| {
-            let mut total_extent = 0u64;
-            let mut excluded_extent = 0u64;
-            let (mut measured, mut excluded) = (0usize, 0usize);
-            let (mut crossing, mut open_end, mut open_start, mut below_res) =
-                (0usize, 0usize, 0usize, 0usize);
-            for span in &lane.spans {
-                let extent = span.to.saturating_sub(span.from);
-                if span.crosses_gap {
-                    crossing += 1;
-                }
-                if span.open_end {
-                    open_end += 1;
-                }
-                if span.open_start {
-                    open_start += 1;
-                }
-                if span.below_resolution {
-                    below_res += 1;
-                }
-                if span.crosses_gap || span.open_end || span.open_start || span.below_resolution {
-                    excluded += 1;
-                    excluded_extent += extent;
-                } else {
-                    measured += 1;
-                    total_extent += extent;
-                }
-            }
-            LoadSubject {
-                key: lane.key.clone(),
-                label: lane.label.clone(),
-                unnamed: lane.unnamed,
-                kind: lane.kind,
-                entries: lane.spans.len(),
-                measured_spans: measured,
-                total_extent,
-                share: share_of(total_extent),
-                excluded_spans: excluded,
-                excluded_extent,
-                gap_crossing_spans: crossing,
-                open_ended_spans: open_end,
-                open_started_spans: open_start,
-                below_resolution_spans: below_res,
-            }
-        })
-        .collect();
-    subjects.sort_by(|a, b| b.total_extent.cmp(&a.total_extent).then_with(|| a.key.cmp(&b.key)));
-
-    // Threads only. The `idle` *lane* is the same time seen a second way, so
-    // adding it double-counts — see `LoadSummary::idle_record_extent`.
-    let thread_extent: u64 =
-        subjects.iter().filter(|s| s.kind == "thread").map(|s| s.total_extent).sum();
-    let idle_record_extent: u64 =
-        subjects.iter().filter(|s| s.kind == "idle").map(|s| s.total_extent).sum();
-    let isr_extent: u64 = subjects.iter().filter(|s| s.kind == "isr").map(|s| s.total_extent).sum();
-    let below_resolution_spans: usize = subjects.iter().map(|s| s.below_resolution_spans).sum();
-    let gap_extent = merged_gap_extent(gaps, t_from, t_to);
-
-    LoadSummary {
-        unit,
-        window_extent,
-        gap_extent,
-        gap_fraction: share_of(gap_extent),
-        records_lost,
-        has_time_base: unit != "frame",
-        thread_extent,
-        idle_record_extent,
-        isr_extent,
-        unaccounted_extent: window_extent.saturating_sub(thread_extent),
-        below_resolution_spans,
-        subjects,
-    }
-}
-
 /// Parses a rendered `*.trace.csv` into a drawable view.
 ///
 /// `note`, `named` and `timed` come from the caller (Core's own stream index),
 /// never from these bytes: whether a manifest applied and whether the frames
 /// were stamped are Core's findings, and re-deriving either from whether a
 /// column happens to be populated would be a guess dressed as a check.
+///
+/// `summary` comes from the caller too, from a second Core call
+/// (`CoreClient::get_study_load`, `embarch-core` decision 62) rather than
+/// being recomputed from `csv` here — this file used to carry its own
+/// `summarize`/`merged_gap_extent`/`LoadSubject`/`LoadSummary`, a second
+/// implementation of the same arithmetic `tasks/ui/051` retired (suite
+/// decision 4). This function still builds `lanes`/`gaps`/`markers` from
+/// `csv` for the chart, which Core's answer does not carry.
 #[allow(clippy::too_many_arguments)]
 pub fn parse(
     study_id: &str,
@@ -1301,8 +1061,9 @@ pub fn parse(
     self_excluded: Option<bool>,
     note: Option<String>,
     steps: &[StepStamp],
+    summary: embarch_core_client::LoadSummary,
 ) -> Result<TraceView, String> {
-    parse_with_cap(study_id, tap, csv, named, timed, self_excluded, note, steps, MAX_ROWS)
+    parse_with_cap(study_id, tap, csv, named, timed, self_excluded, note, steps, summary, MAX_ROWS)
 }
 
 /// [`parse`] with the row cap as a parameter instead of the fixed [`MAX_ROWS`].
@@ -1320,6 +1081,7 @@ fn parse_with_cap(
     self_excluded: Option<bool>,
     note: Option<String>,
     steps: &[StepStamp],
+    summary: embarch_core_client::LoadSummary,
     cap: usize,
 ) -> Result<TraceView, String> {
     let mut lines = csv.split('\n');
@@ -1925,8 +1687,6 @@ fn parse_with_cap(
         }
     }
 
-    let summary = summarize(&lanes, &gaps, unit, t_from, t_to, records_lost);
-
     Ok(TraceView {
         study_id: study_id.to_string(),
         tap: tap.to_string(),
@@ -2175,6 +1935,30 @@ pub fn bin_window(
 mod tests {
     use super::*;
 
+    /// A placeholder `LoadSummary` for tests that exercise `parse`'s own
+    /// chart-geometry half (lanes, gaps, the axis, the stale-prefix drop, the
+    /// step row) and have no stake in the load repartition's content — which
+    /// this crate no longer computes (`tasks/ui/051` retired that arithmetic
+    /// to `embarch-core`; see `parse`'s own doc comment). Not a fixture
+    /// standing in for a real answer: every field is a fixed placeholder, and
+    /// no test may assert anything about it beyond "the field is populated".
+    pub(super) fn placeholder_summary() -> embarch_core_client::LoadSummary {
+        embarch_core_client::LoadSummary {
+            unit: "us".to_string(),
+            window_extent: 0,
+            gap_extent: 0,
+            gap_fraction: 0.0,
+            records_lost: 0,
+            has_time_base: true,
+            thread_extent: 0,
+            idle_record_extent: 0,
+            isr_extent: 0,
+            unaccounted_extent: 0,
+            below_resolution_spans: 0,
+            subjects: Vec::new(),
+        }
+    }
+
     /// The real `native_sim` capture, run through **Core's own renderer**
     /// against the manifest its own build produced — regenerated by
     /// `embarch-core`'s `outpost_manifest::regenerate_the_ui_trace_fixtures`
@@ -2237,7 +2021,7 @@ mod tests {
     /// `unit == "us"`, `dual_clock`. The normal state of a real layout-3
     /// capture, and the state the Trace tab is built for.
     pub(super) fn stamped() -> TraceView {
-        parse("study-1", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[])
+        parse("study-1", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[], placeholder_summary())
             .expect("the stamped trace parses")
     }
 
@@ -2247,20 +2031,20 @@ mod tests {
     /// cannot do is be placed against another stream, which is what
     /// `dual_clock == false` says.
     pub(super) fn real() -> TraceView {
-        parse("study-1", "outpost", REAL_TRACE, true, false, Some(true), None, &[]).expect("the real trace parses")
+        parse("study-1", "outpost", REAL_TRACE, true, false, Some(true), None, &[], placeholder_summary()).expect("the real trace parses")
     }
 
     /// Core's clock only — the layout-2 axis. A frame is the resolution, and
     /// `below_resolution` does the work it was written to do.
     pub(super) fn host_only() -> TraceView {
-        parse("study-1", "outpost", &without_dut_clock(STAMPED_TRACE), true, true, Some(true), None, &[])
+        parse("study-1", "outpost", &without_dut_clock(STAMPED_TRACE), true, true, Some(true), None, &[], placeholder_summary())
             .expect("the host-clock-only trace parses")
     }
 
     /// Neither clock. Frame indices, a complete and real coordinate, said as
     /// such rather than drawn as a time.
     pub(super) fn no_clock() -> TraceView {
-        parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, Some(true), None, &[])
+        parse("study-1", "outpost", &without_dut_clock(REAL_TRACE), true, false, Some(true), None, &[], placeholder_summary())
             .expect("the clockless trace parses")
     }
 
@@ -2312,7 +2096,7 @@ mod tests {
              1,1,1700000000010,2000,2000.000,thread_switch_out,4096,0,worker\n\
              2,2,1700000000020,3000,3000.000,thread_sw"
         );
-        let view = parse("s", "t", &truncated, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &truncated, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.rows, 2, "two rows survived");
         assert_eq!(view.rows_unparsed, 1, "and the third is reported, not forgotten");
         assert_eq!(view.rows_dropped_by_cap, 0, "the cap is a different fact and stays zero");
@@ -2325,7 +2109,7 @@ mod tests {
              ?,1,1700000000010,2000,2000.000,isr_enter,7,0,irq\n\
              2,2,1700000000020,3000,3000.000,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &bad_index, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &bad_index, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.rows, 2);
         assert_eq!(view.rows_unparsed, 1);
 
@@ -2337,7 +2121,7 @@ mod tests {
              \n\
              2,2,1700000000020,3000,3000.0"
         );
-        let view = parse("s", "t", &both, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &both, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.rows, 1);
         assert_eq!(view.rows_unparsed, 2, "an empty line is absence of a row, not a broken one");
     }
@@ -2358,7 +2142,7 @@ mod tests {
              2,2,1700000000020,3000,3000.000,thread_switch_out,4096,0,worker\n\
              3,3,1700000000030,4000,4000.000,thread_switch_in,8192,0,other\n"
         );
-        let view = parse("s", "t", &csv, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &csv, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         let worker = view
             .lanes
             .iter()
@@ -2391,7 +2175,7 @@ mod tests {
              2,2,1700000000020,3000,3000.000,isr_exit,{unknown},0,\n\
              3,3,1700000000030,4000,4000.000,isr_exit,{unknown},0,\n"
         );
-        let view = parse("s", "t", &csv, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &csv, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         let isr = view
             .lanes
             .iter()
@@ -2420,8 +2204,6 @@ mod tests {
         assert_eq!(view.resolution_ms, None, "a resolution in ms with no ms to measure");
         // And the axis is still a real coordinate: frame indices, in order.
         assert!(view.t_to > view.t_from);
-        assert_eq!(view.summary.unit, "frame");
-        assert!(!view.summary.has_time_base);
     }
 
     /// **The DUT's clock goes backwards for two unrelated reasons, and only one
@@ -2451,7 +2233,7 @@ mod tests {
              1,1,1700000000020,1000087,1000087.000,thread_switch_out,4096,0,worker\n\
              2,2,1700000000040,1000200,1000200.000,isr_exit,7,0,irq\n"
         );
-        let view = parse("s", "t", &small, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &small, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.unit, "us", "a 13 us inversion must not cost the DUT clock");
         assert_eq!(view.dut_backsteps, 1);
         assert_eq!(view.dut_backstep_max_us, 13);
@@ -2497,7 +2279,7 @@ mod tests {
              3,3,1700000000060,534000400,534000400.000,isr_exit,7,0,irq\n\
              4,4,1700000000080,534000600,534000600.000,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &forward, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &forward, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.unit, "us", "the fresh stream keeps its own microsecond axis");
         assert_eq!(view.axis_clock, "dut-cycles");
         assert!(!view.dut_clock_refused, "the contradiction left with the prefix");
@@ -2516,7 +2298,7 @@ mod tests {
              1,1,1700000000020,9000000,9000000.000,isr_enter,7,0,irq\n\
              2,2,1700000000040,9000200,9000200.000,isr_exit,7,0,irq\n"
         );
-        let view = parse("s", "t", &after_reset, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &after_reset, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.unit, "us");
         assert_eq!(view.stale_prefix_rows, 1);
         assert_eq!(view.stale_prefix_step_us, 195_000_000);
@@ -2552,7 +2334,7 @@ mod tests {
              4,4,1700000000080,534000000,534000000.000,thread_switch_in,4096,0,worker\n\
              5,5,1700000000100,534000200,534000200.000,isr_enter,7,0,irq\n"
         );
-        let view = parse("s", "t", &late, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &late, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.unit, "ms", "a capture spliced in its middle is drawn on the host's clock");
         assert_eq!(view.axis_clock, "host-arrival");
         assert!(view.dut_clock_refused);
@@ -2573,7 +2355,7 @@ mod tests {
              3,3,1700000000060,700000000,700000000.000,thread_switch_in,4096,0,worker\n\
              4,4,1700000000080,700000200,700000200.000,isr_enter,7,0,irq\n"
         );
-        let view = parse("s", "t", &twice, true, true, Some(true), None, &[]).expect("parses");
+        let view = parse("s", "t", &twice, true, true, Some(true), None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.unit, "ms");
         assert!(view.dut_clock_refused);
         assert_eq!(view.stale_prefix_rows, 0);
@@ -2745,18 +2527,11 @@ mod tests {
         // A span below the resolution has zero extent on that axis: the axis
         // counts frame arrivals, and both ends are the same frame.
         assert!(isr.spans.iter().filter(|s| s.below_resolution).all(|s| s.to == s.from));
-
-        let row = host.summary.subjects.iter().find(|s| s.kind == "isr").expect("an isr row");
-        assert_eq!(row.entries, isr.spans.len(), "every ISR span is still counted");
-        // Three of the six non-confined spans land on *distinct* arrival stamps
-        // and so get a measured extent — and those extents are ring-drain
-        // intervals, not ISR durations. This is the figure the DUT clock exists
-        // to replace, not to corroborate.
-        assert_eq!(row.measured_spans, 3);
-        assert_eq!(row.below_resolution_spans, confined);
-        assert!(row.total_extent > 0);
-        assert!(host.summary.isr_extent > 0);
-        assert!(host.summary.below_resolution_spans >= confined);
+        // What each flag means for the load repartition — "entries survives
+        // all four doubts", "below-resolution is zero on the DUT clock",
+        // "an ISR's time is where `below_resolution_spans` goes instead" — is
+        // `embarch-core`'s own arithmetic over these same flags now
+        // (`tasks/ui/051`); this test's job stops at the flags themselves.
 
         // ---- the DUT clock, where the frame does not enter into it ---------
         let dut = stamped();
@@ -2765,19 +2540,9 @@ mod tests {
             isr.spans.iter().all(|sp| !sp.below_resolution),
             "a span cannot be below a resolution that stamped both of its ends"
         );
-        let row = dut.summary.subjects.iter().find(|s| s.kind == "isr").expect("an isr row");
-        assert_eq!(row.below_resolution_spans, 0);
-        assert_eq!(dut.summary.below_resolution_spans, 0, "nothing in this capture is unmeasurable");
         // 74 of the 75 spans measure; the one still open when the capture ended
         // is excluded for `open_end`, which is a different doubt entirely.
-        assert_eq!(row.measured_spans, 74);
-        assert_eq!(row.open_ended_spans, 1);
-        // And what they measure is zero: this `native_sim` capture's ISR
-        // enter/exit pairs share a cycle count, so the honest ISR load is 0 µs
-        // across 75 entries — a real answer, and not the one the host axis gave.
-        assert_eq!(row.total_extent, 0, "these ISRs really did take no measurable time");
-        assert_eq!(dut.summary.isr_extent, 0);
-        assert_eq!(row.entries, 75, "every entry is still counted regardless");
+        assert_eq!(isr.spans.iter().filter(|s| s.open_end).count(), 1);
     }
 
     /// **On the host's clock a gap band is a bound, and a deliberately loose
@@ -2913,6 +2678,7 @@ mod tests {
             Some(true),
             Some("decoded but NOT named: manifest build_id \"a\" != firmware build_id \"b\"".to_string()),
             &[],
+            placeholder_summary(),
         )
         .expect("an unnamed trace still parses");
 
@@ -2970,7 +2736,7 @@ mod tests {
             step(0, "ble-speed-fast", "Pass", 0, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 300),
             step(1, "drain-bds", "TimedOut", 0, STAMPED_EPOCH_MS + 300, STAMPED_EPOCH_MS + 500),
         ];
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
             .expect("parses");
         assert_eq!(view.unit, "us");
         let row = view.steps.expect("a dual-clock capture can place a step");
@@ -2999,7 +2765,7 @@ mod tests {
     #[test]
     fn a_declared_delay_is_split_out_of_a_steps_execution() {
         let steps = [step(0, "close-nus-window", "Pass", 200, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 400)];
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
             .expect("parses");
         let band = &view.steps.expect("placed").bands[0];
         assert_eq!(band.from, 120_000, "the window opens when Core started waiting");
@@ -3013,7 +2779,7 @@ mod tests {
     #[test]
     fn a_step_with_no_delay_is_all_execution() {
         let steps = [step(0, "connect", "Pass", 0, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 200)];
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
             .expect("parses");
         let band = &view.steps.expect("placed").bands[0];
         assert_eq!(band.exec_from, band.from);
@@ -3030,7 +2796,7 @@ mod tests {
             step(1, "straddles-the-start", "Pass", 0, STAMPED_EPOCH_MS - 1_000, STAMPED_EPOCH_MS + 200),
             step(2, "straddles-the-end", "Fail", 0, STAMPED_EPOCH_MS + 600, STAMPED_EPOCH_MS + 9_000),
         ];
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
             .expect("parses");
         let row = view.steps.expect("placed");
         // The step that ended before the capture opened has no position in it
@@ -3057,7 +2823,7 @@ mod tests {
             STAMPED_EPOCH_MS - 5_000,
             STAMPED_EPOCH_MS + 300,
         )];
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
             .expect("parses");
         let band = &view.steps.expect("placed").bands[0];
         assert!(band.clipped_start);
@@ -3077,7 +2843,7 @@ mod tests {
             STAMPED_EPOCH_MS + 100,
             STAMPED_EPOCH_MS + 90_000,
         )];
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
             .expect("parses");
         let band = &view.steps.expect("placed").bands[0];
         assert_eq!(band.exec_from, band.to, "the declared delay outlasts the capture");
@@ -3092,7 +2858,7 @@ mod tests {
     fn a_step_enclosing_the_whole_capture_is_drawn_clipped_at_both_ends() {
         let steps =
             [step(0, "drain-bds", "Pass", 0, STAMPED_EPOCH_MS - 5_000, STAMPED_EPOCH_MS + 60_000)];
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps)
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
             .expect("parses");
         let row = view.steps.expect("placed");
         assert_eq!(row.bands.len(), 1, "the step running for the whole trace must be drawn");
@@ -3117,6 +2883,7 @@ mod tests {
             Some(true),
             None,
             &steps,
+            placeholder_summary(),
         )
         .expect("parses");
         assert_eq!(view.unit, "ms");
@@ -3144,6 +2911,7 @@ mod tests {
             Some(true),
             None,
             &steps,
+            placeholder_summary(),
         )
         .expect("parses");
         assert_eq!(view.unit, "frame");
@@ -3158,7 +2926,7 @@ mod tests {
     /// cannot take them" — the tab says a different sentence for each.
     #[test]
     fn a_study_with_no_recorded_stamps_produces_no_step_row_at_all() {
-        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[])
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[], placeholder_summary())
             .expect("parses");
         assert!(view.steps.is_none());
     }
@@ -3265,6 +3033,7 @@ mod tests {
             Some("decoded but NOT timed: no arrival stamps were recorded for this capture."
                 .to_string()),
             &[],
+            placeholder_summary(),
         )
         .expect("parses");
         assert!(view.named, "an untimed trace is still a named one");
@@ -3278,7 +3047,7 @@ mod tests {
     /// code will meet in old results directories.
     #[test]
     fn an_unfamiliar_column_list_is_refused() {
-        let err = parse("s", "t", "cycles,us,kind,a,b,name\n0,0,idle,0,0,\n", true, true, None, None, &[])
+        let err = parse("s", "t", "cycles,us,kind,a,b,name\n0,0,idle,0,0,\n", true, true, None, None, &[], placeholder_summary())
             .expect_err("must refuse");
         assert!(err.contains("refusing to guess"), "{err}");
     }
@@ -3299,7 +3068,7 @@ mod tests {
              0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
              1,1,1700000000020,20,,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &csv, true, true, None, None, &[]).expect("parses");
+        let view = parse("s", "t", &csv, true, true, None, None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.unit, "ms", "one undated row must not mix a us axis");
         assert_eq!(view.undated_rows, 1);
         assert_eq!(view.unstamped_rows, 0);
@@ -3311,7 +3080,7 @@ mod tests {
              0,0,1700000000000,10,10.000,thread_switch_in,4096,0,worker\n\
              1,1,,20,,thread_switch_out,4096,0,worker\n"
         );
-        let view = parse("s", "t", &csv, true, true, None, None, &[]).expect("parses");
+        let view = parse("s", "t", &csv, true, true, None, None, &[], placeholder_summary()).expect("parses");
         assert_eq!(view.unit, "frame");
         assert!(!view.has_time_base);
         assert_eq!(view.unstamped_rows, 1);
@@ -3362,196 +3131,6 @@ mod tests {
         assert_eq!(kind_of("thread_switch_in"), Some(RecordKind::ThreadSwitchIn));
         assert_eq!(kind_of("gap"), Some(RecordKind::Gap));
         assert_eq!(kind_of("unknown_42"), None);
-    }
-}
-
-#[cfg(test)]
-mod load_summary_tests {
-    use super::tests::{no_clock, real, stamped};
-    use super::*;
-
-    /// The summary is arithmetic over the same spans the timeline draws, so
-    /// every subject the view has a lane for has a row here — no filtering,
-    /// no top-N.
-    #[test]
-    fn every_lane_gets_a_row() {
-        let view = real();
-        assert_eq!(view.summary.subjects.len(), view.lanes.len());
-        for lane in &view.lanes {
-            let row = view
-                .summary
-                .subjects
-                .iter()
-                .find(|s| s.key == lane.key)
-                .expect("every lane has a summary row");
-            assert_eq!(row.label, lane.label);
-            assert_eq!(row.unnamed, lane.unnamed);
-            assert_eq!(row.kind, lane.kind);
-            assert_eq!(row.entries, lane.spans.len());
-        }
-    }
-
-    /// decision 10's headline constraint: this capture really did lose
-    /// records, so the summary must report the affected fraction rather than
-    /// present its totals as a clean measurement.
-    #[test]
-    fn a_lossy_capture_reports_its_gap_fraction() {
-        let view = stamped();
-        assert_eq!(view.records_lost, 20_001, "the committed capture lost 20,001 records");
-        assert_eq!(view.summary.records_lost, view.records_lost);
-        assert!(view.summary.gap_extent > 0, "the gap band covers a non-zero interval");
-        assert!(
-            view.summary.gap_fraction > 0.0 && view.summary.gap_fraction <= 1.0,
-            "a fraction of the window, never more than all of it: {}",
-            view.summary.gap_fraction
-        );
-    }
-
-    /// Overlapping bands are counted once. Summing raw widths instead is the
-    /// bug that lets a fraction exceed 1.
-    #[test]
-    fn overlapping_gap_bands_are_counted_as_a_union() {
-        let gap = |from, to, row_index| Gap {
-            cycle_span: 0,
-            from,
-            to,
-            records_lost: 1,
-            frame_index: row_index as u64,
-            row_index,
-            unbounded_start: false,
-        };
-        let gaps = vec![gap(100, 200, 0), gap(150, 250, 1), gap(400, 450, 2)];
-        // Union is 100..250 (150) plus 400..450 (50), not 100+100+50.
-        assert_eq!(merged_gap_extent(&gaps, 0, 1_000), 200);
-        // And it clamps to the window rather than counting outside it.
-        assert_eq!(merged_gap_extent(&gaps, 0, 120), 20);
-    }
-
-    /// An extent is not a duration. A span that is open at either end, that
-    /// crosses a gap, or that lives inside one frame must not contribute its
-    /// drawn width to a total — but it must still be counted, because "this
-    /// ran" is not in doubt.
-    #[test]
-    fn untrustworthy_spans_are_excluded_but_still_counted() {
-        let view = stamped();
-        for s in &view.summary.subjects {
-            assert_eq!(s.entries, s.measured_spans + s.excluded_spans);
-            assert!(
-                s.total_extent <= view.summary.window_extent,
-                "{} claims more measured time than the window holds",
-                s.label
-            );
-        }
-        let with_exclusions: Vec<&LoadSubject> =
-            view.summary.subjects.iter().filter(|s| s.excluded_spans > 0).collect();
-        assert!(
-            !with_exclusions.is_empty(),
-            "this capture has a gap, open spans and sub-frame spans, so something must be excluded"
-        );
-    }
-
-    /// Threads are mutually exclusive, so their measured time cannot exceed
-    /// the window. Idle records and ISRs both overlap that set and are
-    /// deliberately kept out of the sum.
-    #[test]
-    fn thread_time_fits_the_window_and_overlapping_kinds_stay_separate() {
-        let view = stamped();
-        let s = &view.summary;
-        assert!(
-            s.thread_extent <= s.window_extent,
-            "{} ms of threads in a {} ms window",
-            s.thread_extent,
-            s.window_extent
-        );
-        assert_eq!(s.unaccounted_extent, s.window_extent - s.thread_extent);
-        let isr_sum: u64 =
-            s.subjects.iter().filter(|x| x.kind == "isr").map(|x| x.total_extent).sum();
-        assert_eq!(s.isr_extent, isr_sum);
-    }
-
-    /// The double count this design exists to avoid: idle is reported both as
-    /// `RecordKind::Idle` records and as switches of the thread the manifest
-    /// names `idle`. The two are kept apart, and the `idle` lane is never
-    /// added to the thread total.
-    #[test]
-    fn idle_is_not_counted_twice() {
-        let view = stamped();
-        let s = &view.summary;
-        let idle_thread = s
-            .subjects
-            .iter()
-            .find(|x| x.kind == "thread" && x.label == "idle")
-            .expect("this capture's manifest names an idle thread");
-        assert!(idle_thread.total_extent > 0, "the idle thread ran and was measured");
-        assert!(
-            s.subjects.iter().any(|x| x.kind == "idle"),
-            "the idle *record* lane exists as its own subject"
-        );
-        assert!(
-            !s.subjects.iter().filter(|x| x.kind == "thread").any(|x| x.key == "cpu-idle"),
-            "the idle record lane leaked into the thread total"
-        );
-        // The kept total is the one that fits.
-        assert!(s.thread_extent <= s.window_extent);
-    }
-
-    /// Sorted heaviest-first, so the load repartition reads as one.
-    #[test]
-    fn subjects_are_sorted_by_measured_time() {
-        let view = stamped();
-        let totals: Vec<u64> = view.summary.subjects.iter().map(|s| s.total_extent).collect();
-        let mut sorted = totals.clone();
-        sorted.sort_unstable_by(|a, b| b.cmp(a));
-        assert_eq!(totals, sorted);
-    }
-
-    /// With no clock at all there is no time base, so every extent counts
-    /// **frames** and the summary says which unit it is in rather than letting
-    /// a caller assume milliseconds.
-    #[test]
-    fn an_untimed_capture_reports_its_totals_in_frames() {
-        let view = no_clock();
-        assert_eq!(view.summary.unit, "frame");
-        assert!(!view.summary.has_time_base);
-        assert!(view.summary.window_extent > 0);
-        for s in &view.summary.subjects {
-            assert!(s.share >= 0.0 && s.share <= 1.0);
-        }
-    }
-
-    /// And with the DUT's clock the same totals are microseconds, said as
-    /// such. `unit` is the only thing a caller should ever key off — the three
-    /// tiers are otherwise identical arithmetic.
-    #[test]
-    fn a_dut_clocked_capture_reports_its_totals_in_microseconds() {
-        let view = stamped();
-        assert_eq!(view.summary.unit, "us");
-        assert!(view.summary.has_time_base);
-        assert!(view.summary.window_extent > 0);
-        for s in &view.summary.subjects {
-            assert!(s.share >= 0.0 && s.share <= 1.0, "{} claims a share of {}", s.label, s.share);
-        }
-    }
-
-    /// An unnamed subject stays unnamed in the summary too. A load table is
-    /// exactly where a raw pointer is most tempting to dress up.
-    #[test]
-    fn unnamed_subjects_stay_unnamed_in_the_summary() {
-        let view = real();
-        let unnamed: Vec<&LoadSubject> = view.summary.subjects.iter().filter(|s| s.unnamed).collect();
-        assert!(!unnamed.is_empty(), "this capture has unnamed threads");
-        for s in unnamed {
-            if s.kind == "thread" {
-                assert_eq!(s.label, s.key, "an unnamed thread must render as the pointer it is");
-                assert!(s.label.starts_with("0x"));
-            } else {
-                // The one non-pointer unnamed subject: a vector the firmware
-                // could not report at all. Its label says exactly that and
-                // names nothing.
-                assert_eq!(s.key, "isr-unidentified");
-                assert_eq!(s.label, "ISR (vector not reported)");
-            }
-        }
     }
 }
 
@@ -3861,6 +3440,8 @@ mod binning_tests {
 
 #[cfg(test)]
 mod scratch_view {
+    use super::tests::placeholder_summary;
+
     /// Summarises an arbitrary rendered `*.trace.csv` on disk, so a change to
     /// [`super::parse`] can be measured against a real study's capture without
     /// a deploy. Ignored by default; drive it with
@@ -3870,7 +3451,7 @@ mod scratch_view {
     fn summarise_a_capture_from_disk() {
         let path = std::env::var("EMBARCH_VIEW_CSV").unwrap();
         let csv = std::fs::read_to_string(&path).unwrap();
-        let view = super::parse("scratch", "outpost", &csv, true, true, None, None, &[]).expect("parses");
+        let view = super::parse("scratch", "outpost", &csv, true, true, None, None, &[], placeholder_summary()).expect("parses");
         println!(
             "unit={} axis_clock={} dual_clock={} rows={} frames={} undated={} unstamped={} \
              resolution_ms={:?} records_lost={} out_of_order={}",
@@ -4048,7 +3629,7 @@ mod scratch_view {
 
             let start = std::time::Instant::now();
             let view =
-                super::parse_with_cap("scratch", "outpost", &csv, true, true, None, None, &[], rows)
+                super::parse_with_cap("scratch", "outpost", &csv, true, true, None, None, &[], placeholder_summary(), rows)
                     .expect("synthetic capture parses");
             let decode = start.elapsed();
 
@@ -4101,7 +3682,7 @@ mod scratch_view {
 
             let decode_start = std::time::Instant::now();
             let view =
-                super::parse_with_cap("scratch", "outpost", &csv, true, true, None, None, &[], rows)
+                super::parse_with_cap("scratch", "outpost", &csv, true, true, None, None, &[], placeholder_summary(), rows)
                     .expect("synthetic capture parses");
             let decode = decode_start.elapsed();
 
