@@ -826,7 +826,7 @@ fn characteristic_names(
 }
 
 /// The same, for services (`embarch-study-designer` decision
-/// 57). Separate from `characteristic_names` because the lookup is: a
+/// 56). Separate from `characteristic_names` because the lookup is: a
 /// service UUID resolves against the vendor table's *services*, and a
 /// merged map would have had to guess which half a UUID wanted.
 fn service_names(
