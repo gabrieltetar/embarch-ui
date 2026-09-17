@@ -108,12 +108,14 @@ fn publish_new_lines(previous: &mut Vec<String>, latest: Vec<String>, tx: &watch
 /// append-only file," fetched a `POLL_INTERVAL` apart. The window can only
 /// have slid forward, so the two overlap as a *run*: some suffix of
 /// `previous` is the same stretch of file as the matching-length prefix of
-/// `new`. Finds the longest such overlap and publishes whatever follows it.
-/// If there is no overlap at all — more than `POLL_TAIL` lines were appended
-/// in one interval, aging the whole previous window out — falls back to
-/// replaying the whole new window rather than silently dropping content; a
-/// few duplicate lines in a debug viewer is a smaller problem than missing
-/// ones.
+/// `new`, except that the very last line of that run may have grown —
+/// Core's tail can end mid-line (decision 13), so a poll can catch a line
+/// before its trailing newline. Finds the longest such overlap and publishes
+/// whatever follows it. If there is no overlap at all — more than
+/// `POLL_TAIL` lines were appended in one interval, aging the whole previous
+/// window out — falls back to replaying the whole new window rather than
+/// silently dropping content; a few duplicate lines in a debug viewer is a
+/// smaller problem than missing ones.
 ///
 /// **Matching a run rather than one anchor line is load-bearing.** This used
 /// to anchor on `previous`'s last line alone, found by scanning `new`
@@ -123,13 +125,27 @@ fn publish_new_lines(previous: &mut Vec<String>, latest: Vec<String>, tx: &watch
 /// window is a contiguous run of one file, so the position of the previous
 /// window's end is pinned by the whole overlap, not by one line that happens
 /// to appear twice.
+///
+/// **The overlap's last line only needs to extend, not equal, its
+/// counterpart** (`tasks/ui/059`) — otherwise a still-growing last line
+/// breaks the run's exact equality outright, and the search falls through to
+/// a *shorter*, coincidental overlap on whatever the pre-growth content
+/// repeats earlier in the window, republishing everything in between even
+/// though it was already sent when that longer window was current. Checking
+/// "extends" instead of "equals" only at the run's final position keeps the
+/// longest-run anchor pinned through a growing line instead of abandoning it
+/// for a shorter, repeat-prone one.
 fn diff_new_lines(previous: &[String], new: &[String]) -> Vec<String> {
     if previous == new {
         return Vec::new();
     }
     let max_overlap = previous.len().min(new.len());
     for k in (1..=max_overlap).rev() {
-        if previous[previous.len() - k..] == new[..k] {
+        let prev_tail = &previous[previous.len() - k..];
+        let new_head = &new[..k];
+        let body_matches = prev_tail[..k - 1] == new_head[..k - 1];
+        let last_matches = new_head[k - 1].starts_with(prev_tail[k - 1].as_str());
+        if body_matches && last_matches {
             return new[k..].to_vec();
         }
     }
@@ -197,5 +213,33 @@ mod tests {
         let previous = lines(&["tick", "tick", "tick"]);
         let new = lines(&["tick", "tick", "tick", "tick"]);
         assert_eq!(diff_new_lines(&previous, &new), lines(&["tick"]));
+    }
+
+    /// `tasks/ui/059`: the previous window's last line is still growing
+    /// (Core's tail can end mid-line, decision 13) *and* its pre-growth
+    /// content repeats earlier in the same window. The true overlap is the
+    /// whole previous window with its last line extended, but the old code
+    /// only tested for exact equality, so growth broke that full-length
+    /// match and the search fell through to the shorter, coincidental
+    /// overlap on the earlier "A" — republishing "B", which was already
+    /// sent when the window was `["A", "B", "A"]`.
+    #[test]
+    fn a_growing_trailing_line_does_not_republish_a_line_already_sent() {
+        let previous = lines(&["A", "B", "A"]);
+        let new = lines(&["A", "B", "A2"]);
+        // Nothing genuinely new exists yet — "A2" is the same line as "A",
+        // still being written — so there is nothing to publish, and
+        // critically "B" must not come back.
+        assert_eq!(diff_new_lines(&previous, &new), Vec::<String>::new());
+    }
+
+    /// Same growth, but this time real content follows it in the same poll:
+    /// only the genuinely new line should be published, not the line that
+    /// merely repeats earlier in the window.
+    #[test]
+    fn a_growing_trailing_line_followed_by_a_real_new_line_publishes_only_the_new_line() {
+        let previous = lines(&["A", "B", "A"]);
+        let new = lines(&["A", "B", "A2", "C"]);
+        assert_eq!(diff_new_lines(&previous, &new), lines(&["C"]));
     }
 }
