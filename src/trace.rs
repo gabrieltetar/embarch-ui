@@ -70,7 +70,7 @@
 //! frames' arrivals, so the outpost's own drain thread — which switches in on
 //! one frame and out on the next, 85 µs later — was charged the whole 4 ms
 //! frame interval and reported as **78% of the capture** instead of 1.6%, and
-//! 4286 of 9205 spans read as unmeasurable when every one of them was
+//! 4286 of 4955 spans read as unmeasurable when every one of them was
 //! measurable to a microsecond.
 //!
 //! # The five lies
