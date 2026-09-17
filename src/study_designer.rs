@@ -535,7 +535,7 @@ fn build_taps(
 
                 // A tap whose characteristic no step subscribes captures
                 // nothing, passes, and looks fine — which is the exact
-                // failure `embarch-study-designer` decisions 34/36/53/54 were each opened by. Refused
+                // failure `embarch-study-designer` decisions 34/36/54/55 were each opened by. Refused
                 // here, where the author can fix it, rather than discovered
                 // as an empty file after a run.
                 if !any_step_subscribes(steps, service_uuid, characteristic_uuid) {
@@ -2369,7 +2369,7 @@ repeat = [{ name = "green", type = "i32le" }]
     #[test]
     fn a_gatt_tap_nothing_subscribes_to_is_refused_at_authoring_time() {
         // A tap whose characteristic no step subscribes captures nothing,
-        // passes, and looks fine — the failure `embarch-study-designer` decisions 34/36/53/54 were
+        // passes, and looks fine — the failure `embarch-study-designer` decisions 34/36/54/55 were
         // each opened by. Caught where the author can fix it.
         let err = build_taps(&[gatt_tap("ppg", NUS_TX, "")], &plain_steps(1), &structs_toml())
             .expect_err("must refuse");
