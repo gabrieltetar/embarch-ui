@@ -2453,6 +2453,15 @@ fn refusal(what: &str, name: &str, scan: &ReferenceScan) -> axum::response::Resp
 #[derive(Debug, Serialize)]
 struct ProtocolFileSummary {
     stem: String,
+    /// The file's whole text — what the editor opens.
+    ///
+    /// **Served with the listing, not fetched per file.** `eap_repo::scan`
+    /// has already read every one of them, so a second round trip would
+    /// re-read what is in hand; and a per-select fetch is a request that can
+    /// fail while somebody is switching files with unsaved work, which is
+    /// the one moment this dialog must not be uncertain. These are short
+    /// hand-written text files.
+    text: String,
     /// Every block that resolved, with its states — the same shape the
     /// actions response serves, so the editor and the row pickers read one
     /// vocabulary.
@@ -2511,6 +2520,7 @@ fn protocols_response(repo: &RepoProtocols) -> ProtocolsResponse {
             .iter()
             .map(|file| ProtocolFileSummary {
                 stem: file.stem.clone(),
+                text: file.text.clone(),
                 protocols: file
                     .resolved()
                     .map(|(name, resolved)| ProtocolSummary {
@@ -5108,6 +5118,13 @@ repeat = [{ name = "green", type = "i32le" }]
         assert!(broken.errors[0].line > 0, "the editor bands this line");
         assert!(broken.errors[0].message.starts_with("line "), "{:?}", broken.errors[0]);
         assert!(out.duplicate_names.is_empty());
+
+        // **The listing carries each file's text.** Without it the editor
+        // assigns `undefined` to a textarea, which yields the nine-character
+        // string "undefined" and reports a syntax error on line 1 — found by
+        // driving the real page, and invisible to every other test here.
+        assert_eq!(bds.text, ONE_PROTOCOL);
+        assert_eq!(broken.text, "protocol oops {\n  state go {\n");
     }
 
     /// A block that **parsed but did not resolve** is listed with its name

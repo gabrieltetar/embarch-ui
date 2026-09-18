@@ -3126,7 +3126,11 @@
     sdEapStem = stem;
     sdEapDirty = false;
     var file = sdEapFiles.filter(function (f) { return f.stem === stem; })[0];
-    var text = file ? file.text : "";
+    // `|| ""` is not belt and braces: assigning `undefined` to a textarea's
+    // `.value` yields the nine-character string "undefined", which parses as
+    // a file and reports a syntax error on line 1. That is exactly what
+    // shipped for one commit when the listing did not carry `text`.
+    var text = (file && file.text) || "";
     sdEl("sd-eap-text").value = text;
     sdEapRenderErrors(file ? file.errors : [], false);
     sdEapSyncGutter();
