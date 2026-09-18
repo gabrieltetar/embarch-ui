@@ -46,17 +46,13 @@
   // relayed by embarch-api points a human at `#topology` rather than at
   // whichever tab that browser happened to have open last. Unknown or absent
   // fragment -> null, and the stored/default tab wins as before.
-  // The fragment may carry parameters of its own — `#trace?study=…&tap=…`
-  // (see `traceDeepLink`) — so the tab name is everything up to the first `?`.
+  // Everything up to the first `?`: no fragment carries parameters of its
+  // own any more (the Trace tab's `#trace?study=…&tap=…` went with that tab),
+  // and splitting anyway costs nothing and keeps an old bookmark landing on a
+  // tab rather than nowhere.
   function tabFromHash() {
     const name = (location.hash || "").replace(/^#/, "").split("?")[0];
     return document.querySelector(`.nav-item[data-tab="${CSS.escape(name)}"]`) ? name : null;
-  }
-
-  /// Parameters carried in the fragment, if any.
-  function hashParams() {
-    const raw = (location.hash || "").split("?")[1] || "";
-    return new URLSearchParams(raw);
   }
 
   function initNav() {
@@ -836,6 +832,278 @@
   }
 
 
+  // --- a study's steps and its record, rendered once for every reader ------
+  //
+  // These live here, above both the Study Designer and the Live Study tab,
+  // because **two copies of them is the exact defect decisions 20 and 23
+  // exist to stop.** `decodeOutcome` is the one place a step outcome is read
+  // (23), `sdRunningStepLabel` the one place Core's `current_step` becomes a
+  // human number (20), and `recordsCell` the one place a capture's record
+  // check becomes words. A second rendering of any of them would be a second
+  // chance for a failed step, a short capture or an unchecked one to read as
+  // its opposite.
+
+  /// One decoder for a step outcome, whichever of the two wire shapes it
+  /// arrived in (embarch-ui decision 23):
+  ///   - **tagged**, from `events.json`, `GET /study/{id}`'s `result`, and the
+  ///     SSE `StepCompleted`: `"Pass"` | `{"Fail":{"reason":…}}` | `"TimedOut"`.
+  ///   - **flattened**, from `GET /study/{id}/steps`: a bare `"Pass"` /
+  ///     `"Fail"` / `"TimedOut"` string with `reason` as a sibling field.
+  /// `reason` is that sibling field; it is ignored when `outcome` is the
+  /// tagged `Fail` shape, which carries its own.
+  ///
+  /// Anything that is not one of those three variants — `undefined`, `null`,
+  /// a number, an object without `.Fail`, a typo'd string — comes back
+  /// `kind: "unknown"` rather than being folded into "pass" or "neutral".
+  /// The two call sites below both render "unknown" as visibly wrong: a
+  /// step that failed must never read as a step that did not, and neither
+  /// may a step this code simply failed to parse.
+  function decodeOutcome(outcome, reason) {
+    if (outcome === "Pass") return { kind: "pass", reason: null };
+    if (outcome === "TimedOut") return { kind: "timedout", reason: null };
+    if (outcome === "Fail") return { kind: "fail", reason: reason || null };
+    if (outcome && typeof outcome === "object" && outcome.Fail) {
+      return { kind: "fail", reason: (outcome.Fail && outcome.Fail.reason) || null };
+    }
+    return { kind: "unknown", reason: null };
+  }
+
+  function outcomeBadge(outcome, reason) {
+    var d = decodeOutcome(outcome, reason);
+    if (d.kind === "pass") return '<span class="badge badge-success">Pass</span>';
+    if (d.kind === "timedout") return '<span class="badge badge-warning">TimedOut</span>';
+    if (d.kind === "fail") {
+      return '<span class="badge badge-danger">Fail</span> <span class="mono" style="font-size:11.5px;">' + escapeHtml(d.reason || "no reason given") + "</span>";
+    }
+    // Unknown shape: a red "?" badge, never the neutral dash this used to
+    // fall through to — see decision 23.
+    return '<span class="badge badge-danger">?</span> <span class="mono" style="font-size:11.5px;">unrecognised outcome</span>';
+  }
+
+  function stepDetail(step) {
+    var parts = [];
+    if (step.gatt_services && step.gatt_services.length) {
+      var chars = step.gatt_services.reduce(function (n, s) { return n + s.characteristics.length; }, 0);
+      parts.push(step.gatt_services.length + " services, " + chars + " characteristics");
+    }
+    if (step.gatt_activity && step.gatt_activity.length) {
+      // Named as the capped summary it is, so a reader doesn't take this
+      // count for the full capture — the transcript CSV is the full one.
+      parts.push(step.gatt_activity.length + " notifications (capped summary)");
+    }
+    if (step.captured_data && step.captured_data.length) {
+      parts.push(step.captured_data.length + " bytes captured");
+    }
+    // The link's security level at the end of this step
+    // (`embarch-study-designer` decision 44). Shown on *every*
+    // step, not only a security one, and that is the point: the same
+    // failure at L1 and at L4 are different findings, and this column is
+    // the only place a reader can tell them apart. Rendered verbatim from
+    // the server's own value — this file never maps a level to a claim
+    // about it.
+    if (step.security_level) {
+      parts.push(String(step.security_level).toUpperCase());
+    }
+    var text = parts.length ? escapeHtml(parts.join(" · ")) : "";
+
+    /* What a `RunProtocol` step's machine ended as (`embarch-study-designer`
+     * decision 62), through the same `outcomeBadge` every other outcome goes
+     * through — one decoder, so a protocol that failed cannot read as one
+     * that did not.
+     *
+     * `final_state` is rendered **verbatim and with no claim about it**.
+     * Whether that state was terminal is a lookup in the ProtocolDef the
+     * study carries, which this file does not have; asserting "finished" or
+     * "stopped here" from the name alone would be the kind of plausible,
+     * wrong reading this tab keeps refusing to produce. */
+    if (step.protocol) {
+      var badge = outcomeBadge(step.protocol.outcome, null);
+      var state =
+        '<span class="mono" style="font-size:11.5px;">ended in ' +
+        escapeHtml(step.protocol.final_state || "—") + "</span>";
+      text = (text ? text + " · " : "") + badge + " " + state;
+    }
+    return text || '<span class="placeholder-note">—</span>';
+  }
+
+  // Decision 11: a result renders **how** each version was established, not
+  // just what it was. `verified` is decided server-side by
+  // `VersionSource::is_verified` — re-deriving it here is the easiest place to
+  // accidentally reintroduce the exact defect `embarch-study-designer` decision 40 exists to close, so
+  // this file never looks at which variant it is, only at the boolean.
+  function provCell(what, version, source, verified) {
+    return (
+      '<div class="prov-cell ' + (verified ? "prov-verified" : "prov-unverified") + '">' +
+      '<div class="prov-what">' + escapeHtml(what) + "</div>" +
+      '<div class="prov-version">' + escapeHtml(version || "—") + "</div>" +
+      '<div class="prov-source">' + escapeHtml(source || "") +
+      (verified ? "" : " · unverified") + "</div></div>"
+    );
+  }
+
+  function renderProvenance(el, prov) {
+    if (!el) return;
+    if (!prov) {
+      el.style.display = "none";
+      return;
+    }
+    var overrides = prov.overrides || [];
+    el.style.display = "block";
+    el.innerHTML =
+      '<div class="card-title" style="margin-bottom:8px;">What this run actually ran against</div>' +
+      '<div class="prov-grid">' +
+      provCell("dev-bench", prov.dev_bench_version, prov.dev_bench_source, prov.dev_bench_verified) +
+      provCell("DUT firmware", prov.firmware_version, prov.firmware_source, prov.firmware_verified) +
+      "</div>" +
+      (overrides.length
+        ? '<div class="sd-error" style="margin-top:12px;">' +
+          overrides
+            .map(function (o) {
+              // Both strings, because the whole content of an override is the
+              // gap between them.
+              return (
+                "This run was allowed past <span class=\"mono\">" + escapeHtml(o.subject) +
+                '</span>: it required <span class="mono">' + escapeHtml(o.required) +
+                '</span> and ran against <span class="mono">' + escapeHtml(o.actual) + "</span>."
+              );
+            })
+            .join("<br>") +
+          "</div>"
+        : "");
+  }
+
+  // A run's taps as the study's own record reports them: how many bytes each
+  // wrote, whether the capture is short of what its source produced, and what
+  // its records verified to.
+  //
+  // **No "open in trace" button any more, and its absence is the point.** The
+  // chart is a card further down this same page now, on the same study — the
+  // button existed to carry a study_id from one tab to another, and there is
+  // no longer another tab to carry it to.
+  function renderRunStreams(el, studyId, streams) {
+    if (!el) return;
+    if (!streams || !streams.length) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "block";
+    el.innerHTML =
+      '<div class="card-title" style="margin-bottom:8px;">Captured streams</div>' +
+      '<table class="data-table"><thead><tr><th>Tap</th><th>Bytes</th><th>Complete</th>' +
+      "<th>Records</th><th></th>" +
+      "</tr></thead><tbody>" +
+      streams
+        .map(function (ref) {
+          return (
+            '<tr><td class="mono">' + escapeHtml(ref.name) + "</td>" +
+            '<td class="mono">' + ref.bytes_written + "</td>" +
+            "<td>" +
+            (ref.truncated
+              ? '<span class="badge badge-warning">short of what the source produced</span>'
+              : '<span class="badge badge-success">complete</span>') +
+            "</td>" +
+            "<td>" + recordsCell(ref.records) + "</td>" +
+            '<td style="text-align:right;"><a class="btn" download href="/api/studies/' +
+            encodeURIComponent(studyId || "") + "/stream/" + encodeURIComponent(ref.name) +
+            '/download">Download</a></td></tr>'
+          );
+        })
+        .join("") +
+      "</tbody></table>";
+  }
+
+  /* What checking one capture's records found — a **reading**, not a badge
+   * (decision 12): the interesting answers here are differences, and a
+   * green/red pill collapses "4 of 5 verified, one at offset 2048" into a
+   * colour.
+   *
+   * Three invariants, each of which has a wrong version that looks right:
+   *
+   *   1. `records: null` is NEVER rendered as clean. The study declared no
+   *      framing for this tap, which is a different fact from "every record
+   *      verified" — conflating them is how a short capture read as complete
+   *      in the first place. It reads "not checked".
+   *
+   *   2. `total === 0` is NEVER rendered as verified. `RecordReport`'s own
+   *      `all_verified()` returns true for an empty capture, which is why
+   *      this deliberately does not use it: a tap that captured nothing has
+   *      nothing to verify, and saying so is the honest answer.
+   *
+   *   3. The 32-offset report cap is NEVER written here. It is inferred, by
+   *      comparing how many offsets arrived with how many records failed —
+   *      a literal 32 in this file is a second copy of
+   *      `MAX_BAD_RECORDS_REPORTED` that goes stale the day it moves. */
+  function recordsCell(report) {
+    if (report == null) {
+      return '<span class="placeholder-note">not checked — this tap declared no record framing</span>';
+    }
+    var total = report.total || 0;
+    var verified = report.verified || 0;
+    var bad = total - verified;
+    var offsets = report.bad_offsets || [];
+    var leading = report.leading_bytes || 0;
+
+    if (total === 0) {
+      return (
+        '<span class="placeholder-note">nothing to check — no record found in this capture' +
+        (leading ? " (" + leading + " leading bytes)" : "") +
+        "</span>"
+      );
+    }
+
+    var head =
+      '<span class="mono">' + verified + " of " + total + " verified</span>";
+    var detail = [];
+    if (leading) {
+      detail.push(
+        leading +
+          " byte" + (leading === 1 ? "" : "s") +
+          " before the first record — the capture began mid-record"
+      );
+    }
+    if (bad > 0) {
+      /* Inferred, never read off a constant: fewer offsets than failures
+       * means the report hit its own cap. */
+      var capped = offsets.length < bad;
+      detail.push(
+        bad + " did not verify at " +
+        (capped ? "the first " + offsets.length + " of " + bad + " offsets " : "offsets ") +
+        offsets.join(", ")
+      );
+    }
+    return (
+      head +
+      (detail.length
+        ? '<div class="placeholder-note" style="margin-top:4px;">' +
+          escapeHtml(detail.join(" · ")) + "</div>"
+        : "")
+    );
+  }
+
+  // The run badge's counter names **the step now running**, not the count of
+  // steps finished (decisions/study-designer.md decision 20). During a run
+  // this badge is the *only* thing on the card that says where the study is —
+  // the step rows are not filled in until it completes — so it answers "which
+  // step am I waiting on".
+  //
+  // Core's `current_step` is the 0-based index of the last step that
+  // *finished*, and is absent until one has (`embarch-core/interfaces.md`,
+  // `GET /study/{id}`; embarch-core decision 43). So the 1-based step now in
+  // flight is `current_step + 2`, and `1` while it is still null — not the
+  // `+ 1` this used to do, which was written for a count convention Core does
+  // not send and read one step short at every moment a step was in flight.
+  //
+  // The clamp is load-bearing: after the last step lands there is a window,
+  // up to one poll long, in which Core still reports `running`, and `3/2`
+  // would be nonsense. A zero-step study (`total_steps: 0`) has no step to
+  // name, so it gets no counter rather than `1/0`.
+  function sdRunningStepLabel(currentStep, totalSteps) {
+    if (totalSteps == null || totalSteps < 1) return "";
+    var step = currentStep == null ? 1 : currentStep + 2;
+    if (step > totalSteps) step = totalSteps;
+    return " " + step + "/" + totalSteps;
+  }
+
   // --- Study Designer tab --------------------------------------------------
   //
   // Authoring happens server-side in `embarch-study-designer` (the merged
@@ -937,8 +1205,6 @@
   // starting state and every reader falls back to the UUID.
   var sdCharNames = {};
   var sdNextRowId = 1;
-  var sdRunSource = null;
-  var sdLastStudyId = null;
 
   /* The built-in action vocabulary used to be written out here as nine
    * hand-copied {value, label} pairs, while the crate served its own list
@@ -3378,329 +3644,6 @@
 
   // --- run and watch ---
 
-  /// One decoder for a step outcome, whichever of the two wire shapes it
-  /// arrived in (embarch-ui decision 23):
-  ///   - **tagged**, from `events.json`, `GET /study/{id}`'s `result`, and the
-  ///     SSE `StepCompleted`: `"Pass"` | `{"Fail":{"reason":…}}` | `"TimedOut"`.
-  ///   - **flattened**, from `GET /study/{id}/steps`: a bare `"Pass"` /
-  ///     `"Fail"` / `"TimedOut"` string with `reason` as a sibling field.
-  /// `reason` is that sibling field; it is ignored when `outcome` is the
-  /// tagged `Fail` shape, which carries its own.
-  ///
-  /// Anything that is not one of those three variants — `undefined`, `null`,
-  /// a number, an object without `.Fail`, a typo'd string — comes back
-  /// `kind: "unknown"` rather than being folded into "pass" or "neutral".
-  /// The two call sites below both render "unknown" as visibly wrong: a
-  /// step that failed must never read as a step that did not, and neither
-  /// may a step this code simply failed to parse.
-  function decodeOutcome(outcome, reason) {
-    if (outcome === "Pass") return { kind: "pass", reason: null };
-    if (outcome === "TimedOut") return { kind: "timedout", reason: null };
-    if (outcome === "Fail") return { kind: "fail", reason: reason || null };
-    if (outcome && typeof outcome === "object" && outcome.Fail) {
-      return { kind: "fail", reason: (outcome.Fail && outcome.Fail.reason) || null };
-    }
-    return { kind: "unknown", reason: null };
-  }
-
-  function outcomeBadge(outcome, reason) {
-    var d = decodeOutcome(outcome, reason);
-    if (d.kind === "pass") return '<span class="badge badge-success">Pass</span>';
-    if (d.kind === "timedout") return '<span class="badge badge-warning">TimedOut</span>';
-    if (d.kind === "fail") {
-      return '<span class="badge badge-danger">Fail</span> <span class="mono" style="font-size:11.5px;">' + escapeHtml(d.reason || "no reason given") + "</span>";
-    }
-    // Unknown shape: a red "?" badge, never the neutral dash this used to
-    // fall through to — see decision 23.
-    return '<span class="badge badge-danger">?</span> <span class="mono" style="font-size:11.5px;">unrecognised outcome</span>';
-  }
-
-  function stepDetail(step) {
-    var parts = [];
-    if (step.gatt_services && step.gatt_services.length) {
-      var chars = step.gatt_services.reduce(function (n, s) { return n + s.characteristics.length; }, 0);
-      parts.push(step.gatt_services.length + " services, " + chars + " characteristics");
-    }
-    if (step.gatt_activity && step.gatt_activity.length) {
-      // Named as the capped summary it is, so a reader doesn't take this
-      // count for the full capture — the transcript CSV is the full one.
-      parts.push(step.gatt_activity.length + " notifications (capped summary)");
-    }
-    if (step.captured_data && step.captured_data.length) {
-      parts.push(step.captured_data.length + " bytes captured");
-    }
-    // The link's security level at the end of this step
-    // (`embarch-study-designer` decision 44). Shown on *every*
-    // step, not only a security one, and that is the point: the same
-    // failure at L1 and at L4 are different findings, and this column is
-    // the only place a reader can tell them apart. Rendered verbatim from
-    // the server's own value — this file never maps a level to a claim
-    // about it.
-    if (step.security_level) {
-      parts.push(String(step.security_level).toUpperCase());
-    }
-    var text = parts.length ? escapeHtml(parts.join(" · ")) : "";
-
-    /* What a `RunProtocol` step's machine ended as (`embarch-study-designer`
-     * decision 62), through the same `outcomeBadge` every other outcome goes
-     * through — one decoder, so a protocol that failed cannot read as one
-     * that did not.
-     *
-     * `final_state` is rendered **verbatim and with no claim about it**.
-     * Whether that state was terminal is a lookup in the ProtocolDef the
-     * study carries, which this file does not have; asserting "finished" or
-     * "stopped here" from the name alone would be the kind of plausible,
-     * wrong reading this tab keeps refusing to produce. */
-    if (step.protocol) {
-      var badge = outcomeBadge(step.protocol.outcome, null);
-      var state =
-        '<span class="mono" style="font-size:11.5px;">ended in ' +
-        escapeHtml(step.protocol.final_state || "—") + "</span>";
-      text = (text ? text + " · " : "") + badge + " " + state;
-    }
-    return text || '<span class="placeholder-note">—</span>';
-  }
-
-  // Decision 11: a result renders **how** each version was established, not
-  // just what it was. `verified` is decided server-side by
-  // `VersionSource::is_verified` — re-deriving it here is the easiest place to
-  // accidentally reintroduce the exact defect `embarch-study-designer` decision 40 exists to close, so
-  // this file never looks at which variant it is, only at the boolean.
-  function provCell(what, version, source, verified) {
-    return (
-      '<div class="prov-cell ' + (verified ? "prov-verified" : "prov-unverified") + '">' +
-      '<div class="prov-what">' + escapeHtml(what) + "</div>" +
-      '<div class="prov-version">' + escapeHtml(version || "—") + "</div>" +
-      '<div class="prov-source">' + escapeHtml(source || "") +
-      (verified ? "" : " · unverified") + "</div></div>"
-    );
-  }
-
-  function renderProvenance(prov) {
-    var el = sdEl("sd-provenance");
-    if (!prov) {
-      el.style.display = "none";
-      return;
-    }
-    var overrides = prov.overrides || [];
-    el.style.display = "block";
-    el.innerHTML =
-      '<div class="card-title" style="margin-bottom:8px;">What this run actually ran against</div>' +
-      '<div class="prov-grid">' +
-      provCell("dev-bench", prov.dev_bench_version, prov.dev_bench_source, prov.dev_bench_verified) +
-      provCell("DUT firmware", prov.firmware_version, prov.firmware_source, prov.firmware_verified) +
-      "</div>" +
-      (overrides.length
-        ? '<div class="sd-error" style="margin-top:12px;">' +
-          overrides
-            .map(function (o) {
-              // Both strings, because the whole content of an override is the
-              // gap between them.
-              return (
-                "This run was allowed past <span class=\"mono\">" + escapeHtml(o.subject) +
-                '</span>: it required <span class="mono">' + escapeHtml(o.required) +
-                '</span> and ran against <span class="mono">' + escapeHtml(o.actual) + "</span>."
-              );
-            })
-            .join("<br>") +
-          "</div>"
-        : "");
-  }
-
-  // A completed run's taps, with a link straight into the Trace view for an
-  // outpost one — the Trace tab is post-hoc and takes a study_id, so handing
-  // it over from here is the difference between a view somebody can reach and
-  // one they have to copy a UUID into.
-  function renderRunStreams(studyId, streams) {
-    var el = sdEl("sd-run-streams");
-    if (!streams || !streams.length) {
-      el.style.display = "none";
-      return;
-    }
-    el.style.display = "block";
-    el.innerHTML =
-      '<div class="card-title" style="margin-bottom:8px;">Captured streams</div>' +
-      '<table class="data-table"><thead><tr><th>Tap</th><th>Bytes</th><th>Complete</th>' +
-      "<th>Records</th><th></th>" +
-      "</tr></thead><tbody>" +
-      streams
-        .map(function (ref) {
-          return (
-            '<tr><td class="mono">' + escapeHtml(ref.name) + "</td>" +
-            '<td class="mono">' + ref.bytes_written + "</td>" +
-            "<td>" +
-            (ref.truncated
-              ? '<span class="badge badge-warning">short of what the source produced</span>'
-              : '<span class="badge badge-success">complete</span>') +
-            "</td>" +
-            "<td>" + recordsCell(ref.records) + "</td>" +
-            '<td style="text-align:right;"><button class="btn" data-open-trace="' +
-            escapeHtml(ref.name) + '" data-open-study="' + escapeHtml(studyId || "") +
-            '">Open in Trace</button></td></tr>'
-          );
-        })
-        .join("") +
-      "</tbody></table>";
-  }
-
-  /* What checking one capture's records found — a **reading**, not a badge
-   * (decision 12): the interesting answers here are differences, and a
-   * green/red pill collapses "4 of 5 verified, one at offset 2048" into a
-   * colour.
-   *
-   * Three invariants, each of which has a wrong version that looks right:
-   *
-   *   1. `records: null` is NEVER rendered as clean. The study declared no
-   *      framing for this tap, which is a different fact from "every record
-   *      verified" — conflating them is how a short capture read as complete
-   *      in the first place. It reads "not checked".
-   *
-   *   2. `total === 0` is NEVER rendered as verified. `RecordReport`'s own
-   *      `all_verified()` returns true for an empty capture, which is why
-   *      this deliberately does not use it: a tap that captured nothing has
-   *      nothing to verify, and saying so is the honest answer.
-   *
-   *   3. The 32-offset report cap is NEVER written here. It is inferred, by
-   *      comparing how many offsets arrived with how many records failed —
-   *      a literal 32 in this file is a second copy of
-   *      `MAX_BAD_RECORDS_REPORTED` that goes stale the day it moves. */
-  function recordsCell(report) {
-    if (report == null) {
-      return '<span class="placeholder-note">not checked — this tap declared no record framing</span>';
-    }
-    var total = report.total || 0;
-    var verified = report.verified || 0;
-    var bad = total - verified;
-    var offsets = report.bad_offsets || [];
-    var leading = report.leading_bytes || 0;
-
-    if (total === 0) {
-      return (
-        '<span class="placeholder-note">nothing to check — no record found in this capture' +
-        (leading ? " (" + leading + " leading bytes)" : "") +
-        "</span>"
-      );
-    }
-
-    var head =
-      '<span class="mono">' + verified + " of " + total + " verified</span>";
-    var detail = [];
-    if (leading) {
-      detail.push(
-        leading +
-          " byte" + (leading === 1 ? "" : "s") +
-          " before the first record — the capture began mid-record"
-      );
-    }
-    if (bad > 0) {
-      /* Inferred, never read off a constant: fewer offsets than failures
-       * means the report hit its own cap. */
-      var capped = offsets.length < bad;
-      detail.push(
-        bad + " did not verify at " +
-        (capped ? "the first " + offsets.length + " of " + bad + " offsets " : "offsets ") +
-        offsets.join(", ")
-      );
-    }
-    return (
-      head +
-      (detail.length
-        ? '<div class="placeholder-note" style="margin-top:4px;">' +
-          escapeHtml(detail.join(" · ")) + "</div>"
-        : "")
-    );
-  }
-
-  // The run badge's counter names **the step now running**, not the count of
-  // steps finished (decisions/study-designer.md decision 20). During a run
-  // this badge is the *only* thing on the card that says where the study is —
-  // the step rows are not filled in until it completes — so it answers "which
-  // step am I waiting on".
-  //
-  // Core's `current_step` is the 0-based index of the last step that
-  // *finished*, and is absent until one has (`embarch-core/interfaces.md`,
-  // `GET /study/{id}`; embarch-core decision 43). So the 1-based step now in
-  // flight is `current_step + 2`, and `1` while it is still null — not the
-  // `+ 1` this used to do, which was written for a count convention Core does
-  // not send and read one step short at every moment a step was in flight.
-  //
-  // The clamp is load-bearing: after the last step lands there is a window,
-  // up to one poll long, in which Core still reports `running`, and `3/2`
-  // would be nonsense. A zero-step study (`total_steps: 0`) has no step to
-  // name, so it gets no counter rather than `1/0`.
-  function sdRunningStepLabel(currentStep, totalSteps) {
-    if (totalSteps == null || totalSteps < 1) return "";
-    var step = currentStep == null ? 1 : currentStep + 2;
-    if (step > totalSteps) step = totalSteps;
-    return " " + step + "/" + totalSteps;
-  }
-
-  function renderRunState(state) {
-    var card = sdEl("sd-run-card");
-    var badge = sdEl("sd-run-status");
-    var idEl = sdEl("sd-run-id");
-    var reason = sdEl("sd-run-reason");
-    var rows = sdEl("sd-run-rows");
-    var download = sdEl("sd-gatt-download");
-    if (!card) return;
-
-    if (state.status === "idle") {
-      card.style.display = "none";
-      return;
-    }
-    card.style.display = "block";
-    reason.style.display = "none";
-    rows.innerHTML = "";
-    download.style.display = "none";
-    sdEl("sd-provenance").style.display = "none";
-    sdEl("sd-run-streams").style.display = "none";
-
-    if (state.study_id) {
-      sdLastStudyId = state.study_id;
-      idEl.textContent = state.study_id;
-    }
-
-    if (state.status === "running") {
-      badge.className = "badge badge-warning";
-      badge.textContent =
-        "running" + sdRunningStepLabel(state.current_step, state.total_steps);
-      return;
-    }
-
-    if (state.status === "failed") {
-      badge.className = "badge badge-danger";
-      badge.textContent = "failed";
-      reason.style.display = "block";
-      reason.textContent = state.reason || "no reason given";
-      // Still offered on a failure: `gatt.csv` is written incrementally as
-      // entries arrive (`embarch-study-designer/spec.md` §5), so a study that failed part-way
-      // usually still captured the traffic that led up to the failure —
-      // which is exactly what you want to read when something went wrong.
-      if (state.study_id) {
-        download.href = "/api/study-designer/gatt/" + encodeURIComponent(state.study_id);
-        download.style.display = "inline-flex";
-      }
-      return;
-    }
-
-    badge.className = "badge badge-success";
-    badge.textContent = "completed";
-    var result = state.result || {};
-    renderProvenance(state.provenance);
-    renderRunStreams(state.study_id, result.streams);
-    (result.steps || []).forEach(function (step, i) {
-      var tr = document.createElement("tr");
-      tr.innerHTML =
-        "<td>" + (i + 1) + "</td>" +
-        '<td class="mono">' + escapeHtml(step.step_name) + "</td>" +
-        "<td>" + outcomeBadge(step.outcome, step.reason) + "</td>" +
-        "<td>" + stepDetail(step) + "</td>";
-      rows.appendChild(tr);
-    });
-    download.href = "/api/study-designer/gatt/" + encodeURIComponent(state.study_id);
-    download.style.display = "inline-flex";
-  }
-
   // --- decision 11: `requires`, taps, and the mismatch shown before a run --
   //
   // The one string that means "deliberately unconstrained" is not written
@@ -4199,9 +4142,28 @@
       );
       var text = await resp.text();
       if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
+      sdHandOffToLiveStudy(text);
     } finally {
       btn.disabled = false;
     }
+  }
+
+  /// A run leaves this tab the moment embarch-core accepts it.
+  ///
+  /// The Study Designer authors and saves; running and watching happen on the
+  /// Live Study tab, which is subscribed to this study before this function
+  /// is even called — `POST` registers the session server-side. So there is
+  /// nothing to race here: switching tabs is a view change, not a handover.
+  function sdHandOffToLiveStudy(responseText) {
+    var id;
+    try {
+      id = JSON.parse(responseText).study_id;
+    } catch (e) {
+      return;
+    }
+    if (!id) return;
+    showTab("live-study");
+    lsOpenStudy(id, true);
   }
 
   function closeRunCheck() {
@@ -4364,6 +4326,7 @@
       });
       var text = await resp.text();
       if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
+      sdHandOffToLiveStudy(text);
     } catch (e) {
       return sdShowBuildError(String(e));
     } finally {
@@ -4473,11 +4436,12 @@
       var state = JSON.parse(text);
       sdRenderProject(state);
       // Everything the previous project put on screen is about the previous
-      // project: the table, the taps, the saved-study list and the last run.
-      // The server drops its own per-project caches on the same switch.
+      // project: the table, the taps and the saved-study list. The server
+      // drops its own per-project caches on the same switch. A *run* is not
+      // a project's — a study already in flight keeps running and keeps
+      // being watched on the Live Study tab.
       sdRows = [];
       sdTaps = [];
-      sdLastStudyId = null;
       await sdEnterProject();
     } catch (e) {
       err.textContent = String(e);
@@ -4587,18 +4551,6 @@
       sdDispatchRun(sdEl("sd-runcheck-allow").checked);
     });
     initSdTaps();
-    sdEl("sd-run-streams").addEventListener("click", function (ev) {
-      var btn = ev.target.closest("[data-open-trace]");
-      if (!btn) return;
-      // Sets the address as well as the field, so what the button does and
-      // what a shared link does are the same one thing.
-      var study = btn.getAttribute("data-open-study");
-      var tap = btn.getAttribute("data-open-trace");
-      location.hash =
-        "trace?study=" + encodeURIComponent(study) + "&tap=" + encodeURIComponent(tap);
-      showTab("trace");
-      traceOpen(study, tap);
-    });
     sdEl("sd-new-study").addEventListener("click", sdNewStudy);
     sdEl("sd-save").addEventListener("click", sdSaveStudy);
     sdEl("sd-log-level").addEventListener("change", function (e) {
@@ -4709,19 +4661,6 @@
       sdEapClose(false);
     });
     sdEl("sd-register-backdrop").addEventListener("click", closeRegisterDialog);
-
-    // Run progress arrives by push, never by client-side polling —
-    // decision 6's suite-wide SSE convergence. One stream for
-    // the process's lifetime: `RunState` is the server's, not a project's,
-    // so switching projects doesn't reopen it.
-    sdRunSource = new EventSource("/api/study-designer/events");
-    sdRunSource.addEventListener("run", function (ev) {
-      try {
-        renderRunState(JSON.parse(ev.data));
-      } catch (e) {
-        /* a malformed frame shouldn't kill the stream */
-      }
-    });
   }
 
   function initStudyDesignerTab() {
@@ -4907,6 +4846,1014 @@
     });
   }
 
+  // --- Live Study tab ------------------------------------------------------
+  //
+  // One tab that runs a study, watches everything land as it arrives, and
+  // opens a past one to read it back off disk. Both halves render through the
+  // *same* cards, which is the whole reason the tab exists: a run watched live
+  // and the same run reopened tomorrow must not look like two different
+  // things.
+  //
+  // **The rings are the server's, not this file's.** `src/live_study.rs` holds
+  // one subscription to embarch-core per study and everything that arrived on
+  // it; this file connects to `/api/live/events`, is handed a snapshot of the
+  // run so far, and appends from there. That is what makes reloading this page
+  // mid-run replay the run rather than start at "now".
+
+  var lsStudyId = null;
+  var lsSource = null;
+  var lsFeedFilter = "all";
+  var lsAutoScroll = true;
+  // The taps of whichever study is open, from its own record. Everything in
+  // the Consoles, Trace and Data cards is decided from this — never from the
+  // name or the content of a file.
+  var lsTaps = [];
+  var lsLiveSeries = {};
+  var lsRecord = null;
+  /// The terminal status this tab watched arrive, if it did.
+  ///
+  /// Load-bearing: `GET /study/{id}` is polled again after a run ends, and a
+  /// status read *later* must never replace a terminal one read *earlier*.
+  /// embarch-core's job registry is in memory and can still be reporting
+  /// `running` for the moment between the last step landing and the job
+  /// closing — rendering that over an observed `failed` would un-fail a study
+  /// in front of the person who just watched it fail.
+  var lsTerminal = null;
+
+  function lsEl(id) {
+    return document.getElementById(id);
+  }
+
+  /// An element with an optional class and id.
+  ///
+  /// Built with the DOM rather than an HTML string wherever the id is
+  /// computed — `tests/element_ids.rs` reads this file's `id="…"` literals to
+  /// find duplicates and dangling lookups, and a literal holding a
+  /// concatenation (`id="' + name + '"`) reads to it as one id declared many
+  /// times. That guard is worth more than the template.
+  function lsMake(tag, cls, id) {
+    var el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (id) el.id = id;
+    return el;
+  }
+
+  /// One card, with a title and an optional note line under it.
+  function lsCard(titleHtml, noteId) {
+    var card = lsMake("div", "card");
+    card.style.marginBottom = "16px";
+    var title = lsMake("div", "card-title");
+    title.innerHTML = titleHtml;
+    card.appendChild(title);
+    if (noteId) {
+      var note = lsMake("p", "placeholder-note", noteId);
+      note.style.marginTop = "0";
+      card.appendChild(note);
+    }
+    return card;
+  }
+
+
+  function lsStatusBadge(status) {
+    if (status === "completed") return "badge-success";
+    if (status === "failed") return "badge-danger";
+    if (status === "running" || status === "pending") return "badge-warning";
+    // `interrupted` is its own thing and must never wear either neighbour's
+    // colour: the study did not complete, and nothing said it failed
+    // (embarch-core decision 69). It gets the warning shape and its own word.
+    if (status === "interrupted") return "badge-warning";
+    return "badge-neutral";
+  }
+
+  function lsWhen(ms) {
+    if (ms == null) return '<span class="placeholder-note">—</span>';
+    var d = new Date(ms);
+    return '<span class="mono" title="' + escapeHtml(d.toISOString()) + '">' +
+      escapeHtml(d.toLocaleString()) + "</span>";
+  }
+
+  // ---- the studies list ----------------------------------------------------
+
+  async function lsLoadStudies() {
+    var note = lsEl("ls-studies-note");
+    var rows = lsEl("ls-studies-rows");
+    note.textContent = "loading…";
+    try {
+      var resp = await fetch("/api/studies");
+      var text = await resp.text();
+      if (!resp.ok) {
+        rows.innerHTML = "";
+        note.textContent = resp.status + " " + text;
+        return;
+      }
+      var data = JSON.parse(text);
+      var studies = data.studies || [];
+      note.innerHTML = studies.length
+        ? escapeHtml(
+            studies.length + " stud" + (studies.length === 1 ? "y" : "ies") +
+            ", newest first" +
+            (data.keep ? " — embarch-core keeps the last " + data.keep : " — retention is off, so this is every study on disk")
+          )
+        : "embarch-core has no study results on disk.";
+      rows.innerHTML = studies
+        .map(function (st) {
+          var steps = st.steps
+            ? escapeHtml(
+                st.steps.total + " step" + (st.steps.total === 1 ? "" : "s") +
+                (st.steps.failed ? " · " + st.steps.failed + " failed" : "") +
+                (st.steps.timed_out ? " · " + st.steps.timed_out + " timed out" : "") +
+                (st.steps.unknown ? " · " + st.steps.unknown + " unrecognised" : "")
+              )
+            // Absent, not zero. "Ran no steps" and "we could not read its
+            // steps" are opposite facts and this row says which one it has.
+            : '<span class="placeholder-note">not readable</span>';
+          var taps = st.taps
+            ? escapeHtml(String(st.taps.length))
+            : '<span class="placeholder-note">—</span>';
+          return (
+            '<tr class="ls-study-row" data-study="' + escapeHtml(st.study_id) + '">' +
+            '<td><div class="mono">' + escapeHtml(st.study_name || "(unnamed)") + "</div>" +
+            '<div class="placeholder-note mono" style="font-size:11px;">' + escapeHtml(st.study_id) + "</div>" +
+            (st.note ? '<div class="placeholder-note" style="color:var(--warning);">' + escapeHtml(st.note) + "</div>" : "") +
+            "</td>" +
+            '<td><span class="badge ' + lsStatusBadge(st.status) + '">' + escapeHtml(st.status) + "</span></td>" +
+            "<td>" + steps + "</td>" +
+            "<td>" + taps + "</td>" +
+            "<td>" + lsWhen(st.started_utc_ms) + "</td>" +
+            "</tr>"
+          );
+        })
+        .join("");
+    } catch (e) {
+      note.textContent = String(e);
+    }
+  }
+
+  // ---- the saved-study picker ---------------------------------------------
+
+  async function lsLoadSavedStudies() {
+    var select = lsEl("ls-study-picker");
+    try {
+      var resp = await fetch("/api/study-designer/studies");
+      if (!resp.ok) {
+        // 404 here is "no project open", which is a state, not a failure —
+        // this tab can still open and read every past study without one.
+        select.innerHTML = '<option value="">no project open — open one in the Study Designer</option>';
+        return;
+      }
+      var data = await resp.json();
+      var studies = data.studies || [];
+      select.innerHTML = studies.length
+        ? studies
+            .map(function (st) {
+              return '<option value="' + escapeHtml(st.slug) + '">' + escapeHtml(st.name || st.slug) + "</option>";
+            })
+            .join("")
+        : '<option value="">this project has no saved study yet</option>';
+    } catch (e) {
+      select.innerHTML = '<option value="">' + escapeHtml(String(e)) + "</option>";
+    }
+  }
+
+  async function lsRun() {
+    var slug = lsEl("ls-study-picker").value;
+    var err = lsEl("ls-run-error");
+    err.style.display = "none";
+    if (!slug) {
+      err.textContent = "pick a saved study first";
+      err.style.display = "block";
+      return;
+    }
+    var btn = lsEl("ls-run");
+    btn.disabled = true;
+    try {
+      var resp = await fetch("/api/live/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          slug: slug,
+          allow_version_mismatch: lsEl("ls-allow-mismatch").checked,
+        }),
+      });
+      var text = await resp.text();
+      if (!resp.ok) {
+        err.textContent = resp.status + " " + text;
+        err.style.display = "block";
+        return;
+      }
+      var data = JSON.parse(text);
+      await lsOpenStudy(data.study_id, true);
+      lsLoadStudies();
+    } catch (e) {
+      err.textContent = String(e);
+      err.style.display = "block";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---- opening one study ---------------------------------------------------
+
+  /// Opens `studyId` in every card below, live where it is still running and
+  /// off disk where it is not.
+  ///
+  /// `live` is a hint, not the decision: a study the record says is running
+  /// gets a live session whatever the caller thought. What the caller knows
+  /// that the record does not is the case of a study *just now* submitted,
+  /// whose job embarch-core may not have moved off `pending` yet.
+  async function lsOpenStudy(studyId, live) {
+    if (!studyId) return;
+    lsStudyId = studyId;
+    lsLiveSeries = {};
+    lsTerminal = null;
+    lsEl("ls-body").style.display = "block";
+    lsEl("ls-status-id").textContent = studyId;
+    lsEl("ls-steps-rows").innerHTML = "";
+    lsEl("ls-feed").innerHTML = "";
+    lsEl("ls-consoles").innerHTML = "";
+    lsEl("ls-data").innerHTML = "";
+    lsEl("ls-status-lagged").style.display = "none";
+    lsEl("ls-record-note").style.display = "none";
+    lsDetach();
+
+    await lsLoadRecord(studyId, true);
+    var job = (lsRecord && lsRecord.job) || null;
+    var running = job && (job.status === "running" || job.status === "pending");
+    if (live || running) lsAttach(studyId);
+  }
+
+  /// Reads the study's own record and renders it.
+  ///
+  /// `rebuild` builds the console, trace and data cards from scratch, which is
+  /// right when opening a study and wrong when a run has just ended: tearing
+  /// the cards down there would throw away a console and a plot this tab
+  /// watched arrive, in exchange for whatever the disk read happens to
+  /// return. So a post-run read *refreshes* the same cards instead, and each
+  /// capture replaces its card's contents **only if its own read succeeded**.
+  async function lsLoadRecord(studyId, rebuild) {
+    lsRecord = null;
+    lsTaps = [];
+    try {
+      var resp = await fetch("/api/studies/" + encodeURIComponent(studyId));
+      var text = await resp.text();
+      if (!resp.ok) {
+        lsNote("ls-record-note", resp.status + " " + text);
+        return;
+      }
+      lsRecord = JSON.parse(text);
+    } catch (e) {
+      lsNote("ls-record-note", String(e));
+      return;
+    }
+
+    lsTaps = lsRecord.taps || [];
+    // Each part says for itself whether it could be read. A study whose
+    // events.json this embarch-core cannot parse still has a readable stream
+    // index, and hiding the taps because the steps failed would be losing the
+    // half that worked.
+    lsEl("ls-steps-note").innerHTML = lsRecord.steps_note
+      ? '<span style="color:var(--warning);">' + escapeHtml(lsRecord.steps_note) + "</span>"
+      : "Rows fill in as each step reports, not once the study ends.";
+    if (lsRecord.steps && lsRecord.steps.steps) {
+      lsRenderSteps(
+        lsRecord.steps.steps.map(function (st) {
+          return {
+            index: st.index,
+            step_name: st.step_name,
+            outcome: st.outcome,
+            reason: st.reason,
+          };
+        })
+      );
+      if (lsRecord.steps.study_name) {
+        lsEl("ls-status-name").textContent = lsRecord.steps.study_name;
+      }
+    }
+    if (lsRecord.job) {
+      lsRenderStatus({
+        status: lsRecord.job.status,
+        reason: lsRecord.job.reason,
+        current_step: lsRecord.job.current_step,
+        total_steps: lsRecord.job.total_steps,
+        mode: null,
+        lagged: 0,
+      });
+      renderRunStreams(lsEl("ls-streams"), studyId, (lsRecord.job || {}).streams);
+    } else if (lsRecord.taps_note == null) {
+      // embarch-core 404s a study id its registry has forgotten, which after
+      // a restart is every study that ever ran. That is the ordinary case for
+      // a post-hoc read, not an error — the listing is where such a study's
+      // status comes from, and it is already on screen.
+      lsEl("ls-status-mode").textContent = "read from disk";
+    }
+    renderProvenance(lsEl("ls-provenance"), lsRecord.provenance);
+    if (lsRecord.taps_note) lsNote("ls-record-note", lsRecord.taps_note);
+
+    lsRenderTraceTaps();
+    if (rebuild) {
+      await lsRenderConsoles();
+      await lsRenderData();
+    } else {
+      await lsRefreshCaptures();
+    }
+  }
+
+  /// Re-reads every capture off disk into the cards already on screen.
+  ///
+  /// Each read replaces its own card's contents only on success, so a tap
+  /// whose file embarch-core will not serve keeps what the live feed put
+  /// there — which is less than the file, and is the only thing there is.
+  async function lsRefreshCaptures() {
+    var text = lsTextTaps();
+    for (var i = 0; i < text.length; i++) {
+      await lsLoadConsoleFromDisk(text[i].name);
+    }
+    var data = lsDataTaps();
+    for (var j = 0; j < data.length; j++) {
+      if (data[j].encoding === "Raw") await lsLoadHex(data[j].name);
+      else await lsLoadRows(data[j].name, 0);
+    }
+  }
+
+  function lsNote(id, text) {
+    var el = lsEl(id);
+    if (!text) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = text;
+  }
+
+  // ---- the live stream -----------------------------------------------------
+
+  function lsDetach() {
+    if (lsSource) {
+      lsSource.close();
+      lsSource = null;
+    }
+  }
+
+  function lsAttach(studyId) {
+    lsDetach();
+    lsSource = new EventSource("/api/live/events?study=" + encodeURIComponent(studyId));
+    lsSource.addEventListener("live", function (ev) {
+      var frame;
+      try {
+        frame = JSON.parse(ev.data);
+      } catch (e) {
+        // A malformed frame must not kill the stream.
+        return;
+      }
+      lsApplyFrame(frame);
+    });
+  }
+
+  function lsApplyFrame(frame) {
+    if (frame.kind === "snapshot") return lsApplySnapshot(frame);
+    if (frame.kind === "console") return lsApplyConsole(frame);
+    if (frame.kind === "samples") return lsApplySamples(frame);
+    if (frame.kind === "step") {
+      lsAppendStep(frame.step);
+      lsRenderStatus(frame.status);
+      lsAppendFeed(frame.row);
+      return;
+    }
+    if (frame.kind === "status") {
+      lsRenderStatus(frame.status);
+      if (frame.row) lsAppendFeed(frame.row);
+      if (frame.provenance) renderProvenance(lsEl("ls-provenance"), frame.provenance);
+      if (frame.streams) renderRunStreams(lsEl("ls-streams"), lsStudyId, frame.streams);
+      if (frame.status && frame.status.finished) lsOnFinished();
+      return;
+    }
+    if (frame.kind === "gatt" || frame.kind === "event") {
+      if (frame.row) lsAppendFeed(frame.row);
+      return;
+    }
+    if (frame.kind === "browser_lagged") {
+      // This browser fell behind embarch-ui's own broadcast, which is a
+      // different fact from embarch-core's `lagged` and is not folded into
+      // it. The server's rings are intact, so reloading this page replays
+      // everything — and that is what the note says to do.
+      lsNote(
+        "ls-record-note",
+        "this browser fell behind embarch-ui's own feed and missed " + frame.missed +
+          " frame(s) — the server still has the whole run, so reload this page to catch up"
+      );
+    }
+  }
+
+  function lsApplySnapshot(frame) {
+    lsRenderStatus(frame.status);
+    lsEl("ls-steps-rows").innerHTML = "";
+    (frame.steps || []).forEach(lsAppendStep);
+    lsEl("ls-feed").innerHTML = "";
+    (frame.feed || []).forEach(lsAppendFeed);
+    lsRenderFeedNote(frame.feed_dropped, frame.feed_total);
+    (frame.consoles || []).forEach(function (c) {
+      lsApplyConsole({ tap: c.tap, lines: c.lines, partial: c.partial, dropped: c.dropped, total: c.total, replace: true });
+    });
+    (frame.series || []).forEach(function (sr) {
+      lsLiveSeries[sr.tap] = { points: sr.points || [], stride: sr.stride || 1, total: sr.total || 0 };
+      lsDrawLiveSeries(sr.tap);
+    });
+    if (frame.provenance) renderProvenance(lsEl("ls-provenance"), frame.provenance);
+    if (frame.streams) renderRunStreams(lsEl("ls-streams"), lsStudyId, frame.streams);
+  }
+
+  function lsIsTerminal(status) {
+    return status === "completed" || status === "failed" || status === "interrupted";
+  }
+
+  function lsRenderStatus(status) {
+    if (!status) return;
+    if (lsIsTerminal(status.status)) {
+      lsTerminal = status.status;
+    } else if (lsTerminal) {
+      // A non-terminal reading arriving after a terminal one is stale, not
+      // news — see `lsTerminal`. The rest of this status (its mode, its
+      // lagged count) is still worth taking, so only the verdict is kept.
+      status = Object.assign({}, status, { status: lsTerminal });
+    }
+    var badge = lsEl("ls-status-badge");
+    var text = status.status || "pending";
+    if (text === "running") text += sdRunningStepLabel(status.current_step, status.total_steps);
+    badge.className = "badge " + lsStatusBadge(status.status);
+    badge.textContent = text;
+    if (status.study_name) lsEl("ls-status-name").textContent = status.study_name;
+    lsNote("ls-status-reason", status.reason || "");
+    // Which transport is in force, said rather than implied: a feed being
+    // polled is a feed with a cadence, not a live one.
+    lsEl("ls-status-mode").textContent = status.mode
+      ? status.mode === "polling"
+        ? "polling embarch-core — the live stream is not in use"
+        : "live"
+      : "";
+    if (status.lagged) {
+      lsNote(
+        "ls-status-lagged",
+        "embarch-core dropped " + status.lagged +
+          " event(s) from this feed — the study is unaffected and its record on disk is complete. " +
+          "Reopen this study once it ends to read the complete record."
+      );
+    }
+    if (status.record_note) lsNote("ls-record-note", status.record_note);
+  }
+
+  async function lsOnFinished() {
+    // The run is over, so the file is the better source than the feed: the
+    // plots re-render from the rendered CSV, the consoles from the captured
+    // text, and the trace becomes drawable for the first time.
+    var id = lsStudyId;
+    await lsLoadRecord(id, false);
+    lsLoadStudies();
+  }
+
+  // ---- steps ---------------------------------------------------------------
+
+  function lsRenderSteps(steps) {
+    lsEl("ls-steps-rows").innerHTML = "";
+    (steps || []).forEach(lsAppendStep);
+  }
+
+  function lsAppendStep(step) {
+    if (!step) return;
+    var rows = lsEl("ls-steps-rows");
+    var index = step.index == null ? rows.children.length : step.index;
+    var tr = document.createElement("tr");
+    tr.innerHTML =
+      "<td>" + (index + 1) + "</td>" +
+      '<td class="mono">' + escapeHtml(step.step_name || "") + "</td>" +
+      "<td>" + outcomeBadge(step.outcome, step.reason) + "</td>" +
+      "<td>" + stepDetail(step) + "</td>";
+    rows.appendChild(tr);
+  }
+
+  // ---- the event feed ------------------------------------------------------
+
+  function lsRenderFeedNote(dropped, total) {
+    var note = lsEl("ls-feed-note");
+    if (!dropped) {
+      note.textContent = total ? total + " event(s)" : "";
+      return;
+    }
+    // A capped ring says it is capped. Never a silent drop.
+    note.innerHTML =
+      '<span style="color:var(--warning);">showing the last ' + (total - dropped) +
+      " of " + total + " events — the feed is capped, and embarch-core's own record on disk is not</span>";
+  }
+
+  function lsAppendFeed(row) {
+    if (!row) return;
+    var feed = lsEl("ls-feed");
+    var div = document.createElement("div");
+    div.className = "ls-feed-row ls-feed-" + row.kind;
+    div.setAttribute("data-feed-kind", row.kind);
+    div.innerHTML =
+      '<span class="ls-feed-kind">' + escapeHtml(row.kind) + "</span>" +
+      '<span class="ls-feed-text">' + escapeHtml(row.text) + "</span>";
+    if (lsFeedFilter !== "all" && row.kind !== lsFeedFilter) div.style.display = "none";
+    feed.appendChild(div);
+    if (lsAutoScroll) feed.scrollTop = feed.scrollHeight;
+  }
+
+  function lsApplyFeedFilter() {
+    var rows = lsEl("ls-feed").children;
+    for (var i = 0; i < rows.length; i++) {
+      var kind = rows[i].getAttribute("data-feed-kind");
+      rows[i].style.display = lsFeedFilter === "all" || kind === lsFeedFilter ? "" : "none";
+    }
+  }
+
+  // ---- consoles ------------------------------------------------------------
+  //
+  // One card per `Text`-encoded tap. That is the whole rule — `dev-bench` is
+  // the reserved one every study carries, and a DUT shell is a `Text` tap the
+  // study declared on a notify characteristic. A study that declares neither
+  // gets no console card at all rather than an empty one.
+
+  function lsTextTaps() {
+    return lsTaps.filter(function (t) {
+      return t.is_text;
+    });
+  }
+
+  function lsConsoleId(tap) {
+    return "ls-console-" + tap.replace(/[^A-Za-z0-9_-]/g, "_");
+  }
+
+  async function lsRenderConsoles() {
+    var host = lsEl("ls-consoles");
+    host.innerHTML = "";
+    var taps = lsTextTaps();
+    if (!taps.length) return;
+    taps.forEach(function (t) {
+      host.appendChild(lsConsoleCard(t.name));
+    });
+    // Off disk for a study that has finished. A live one overwrites this the
+    // moment its snapshot arrives.
+    for (var i = 0; i < taps.length; i++) {
+      await lsLoadConsoleFromDisk(taps[i].name);
+    }
+  }
+
+  function lsConsoleCard(tap) {
+    var id = lsConsoleId(tap);
+    var card = lsCard(
+      'Console \u2014 <span class="mono">' + escapeHtml(tap) + "</span>",
+      id + "-note"
+    );
+    card.appendChild(lsMake("div", "ls-console", id));
+    return card;
+  }
+
+  async function lsLoadConsoleFromDisk(tap) {
+    var el = lsEl(lsConsoleId(tap));
+    if (!el) return;
+    try {
+      var resp = await fetch(
+        "/api/studies/" + encodeURIComponent(lsStudyId) + "/stream/" +
+          encodeURIComponent(tap) + "/text?limit=2000"
+      );
+      if (!resp.ok) return;
+      var data = await resp.json();
+      el.innerHTML = (data.lines || [])
+        .map(function (line) {
+          return '<div class="ls-console-line">' + escapeHtml(line) + "</div>";
+        })
+        .join("") +
+        (data.partial
+          ? '<div class="ls-console-line ls-console-partial">' + escapeHtml(data.partial) + "</div>"
+          : "");
+      var note = lsEl(lsConsoleId(tap) + "-note");
+      if (note) {
+        note.textContent =
+          data.total + " line(s), " + data.bytes + " bytes captured" +
+          (data.total > (data.lines || []).length
+            ? " — showing the first " + (data.lines || []).length
+            : "") +
+          (data.partial ? " · the last line never got a newline and is shown as partial" : "");
+      }
+      el.scrollTop = el.scrollHeight;
+    } catch (e) {
+      /* a console that will not load is not worth failing the tab over */
+    }
+  }
+
+  function lsApplyConsole(frame) {
+    var id = lsConsoleId(frame.tap);
+    var el = lsEl(id);
+    if (!el) {
+      // A tap the record did not list — a study whose stream index could not
+      // be read, most likely. Make a card for it rather than dropping the
+      // console on the floor.
+      lsEl("ls-consoles").appendChild(lsConsoleCard(frame.tap));
+      el = lsEl(id);
+    }
+    if (frame.replace) el.innerHTML = "";
+    // The partial line is redrawn every frame — it is not a line yet, and it
+    // grows until a newline arrives.
+    var stale = el.querySelector(".ls-console-partial");
+    if (stale) stale.remove();
+    (frame.lines || []).forEach(function (line) {
+      var div = document.createElement("div");
+      div.className = "ls-console-line" + (line.truncated ? " ls-console-cut" : "");
+      div.textContent = line.text + (line.truncated ? "  … (line cut at 8 KB)" : "");
+      el.appendChild(div);
+    });
+    if (frame.partial) {
+      var p = document.createElement("div");
+      p.className = "ls-console-line ls-console-partial";
+      // Marked as partial, never padded into a line this tap did not send.
+      p.textContent = frame.partial;
+      el.appendChild(p);
+    }
+    var note = lsEl(id + "-note");
+    if (note) {
+      note.textContent =
+        frame.total + " line(s)" +
+        (frame.dropped
+          ? " — showing the last " + (frame.total - frame.dropped) + ", the console ring is capped"
+          : "") +
+        (frame.partial ? " · the last line has not ended yet" : "");
+    }
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // ---- the trace card ------------------------------------------------------
+
+  function lsRenderTraceTaps() {
+    var input = trEl("trace-study");
+    if (!input) return;
+    input.value = lsStudyId || "";
+    var select = trEl("trace-tap");
+    var traces = lsTaps.filter(function (t) {
+      return t.is_outpost_trace;
+    });
+    if (!traces.length) {
+      select.disabled = true;
+      select.innerHTML = '<option value="">this study declared no outpost trace</option>';
+      trEl("trace-body").style.display = "none";
+      trEl("trace-refusal").style.display = "none";
+      traceShowError("");
+      return;
+    }
+    select.disabled = false;
+    select.innerHTML = traces
+      .map(function (t) {
+        return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.name) +
+          (t.named ? "" : " — unnamed") + "</option>";
+      })
+      .join("");
+    traceLoadView();
+  }
+
+  // ---- data cards ----------------------------------------------------------
+  //
+  // One card per tap that is not a console and not the trace: the GATT
+  // transcript, sample and struct tables, and a `Raw` tap's own bytes. **This
+  // file parses no CSV** — the rows, the column names and the plot's bins all
+  // arrive decoded (`src/studies_api.rs`), the same rule the chart above holds.
+
+  function lsDataId(tap) {
+    return "ls-data-" + tap.replace(/[^A-Za-z0-9_-]/g, "_");
+  }
+
+  function lsDataTaps() {
+    return lsTaps.filter(function (t) {
+      return !t.is_text && !t.is_outpost_trace;
+    });
+  }
+
+  async function lsRenderData() {
+    var host = lsEl("ls-data");
+    host.innerHTML = "";
+    var taps = lsDataTaps();
+    if (!taps.length) return;
+    taps.forEach(function (t) {
+      host.appendChild(lsDataCard(t));
+    });
+    for (var i = 0; i < taps.length; i++) {
+      if (taps[i].encoding === "Raw") await lsLoadHex(taps[i].name);
+      else await lsLoadRows(taps[i].name, 0);
+    }
+  }
+
+  function lsDataCard(tap) {
+    var id = lsDataId(tap.name);
+    var card = lsMake("div", "card");
+    card.style.marginBottom = "16px";
+
+    var bar = lsMake("div", "sd-toolbar");
+    var title = lsMake("div", "card-title");
+    title.style.margin = "0";
+    title.innerHTML =
+      escapeHtml(tap.name) +
+      ' <span class="placeholder-note mono" style="font-weight:normal;">' +
+      escapeHtml(lsEncodingLabel(tap.encoding)) + "</span>";
+    bar.appendChild(title);
+    var actions = lsMake("div", "sd-toolbar-actions");
+    var dl = lsMake("a", "btn");
+    dl.setAttribute("download", "");
+    dl.href =
+      "/api/studies/" + encodeURIComponent(lsStudyId) + "/stream/" +
+      encodeURIComponent(tap.name) + "/download";
+    dl.textContent = "Download";
+    actions.appendChild(dl);
+    bar.appendChild(actions);
+    card.appendChild(bar);
+
+    if (tap.note) {
+      var warn = lsMake("p", "placeholder-note");
+      warn.style.color = "var(--warning)";
+      warn.textContent = tap.note;
+      card.appendChild(warn);
+    }
+    var note = lsMake("p", "placeholder-note", id + "-note");
+    note.style.margin = "8px 0";
+    card.appendChild(note);
+
+    if (tap.encoding === "Raw") {
+      card.appendChild(lsMake("div", "ls-console", id + "-hex"));
+      return card;
+    }
+
+    card.appendChild(lsMake("div", null, id + "-plot"));
+    var scroll = lsMake("div", "table-scroll");
+    scroll.style.maxHeight = "360px";
+    scroll.style.marginTop = "10px";
+    var table = lsMake("table", "data-table");
+    table.appendChild(lsMake("thead", null, id + "-head"));
+    table.appendChild(lsMake("tbody", null, id + "-rows"));
+    scroll.appendChild(table);
+    card.appendChild(scroll);
+
+    var more = lsMake("div", "sd-row-actions");
+    more.style.marginTop = "10px";
+    var btn = lsMake("button", "btn btn-tiny");
+    btn.setAttribute("data-rows-more", tap.name);
+    btn.textContent = "Show more rows";
+    more.appendChild(btn);
+    card.appendChild(more);
+    return card;
+  }
+
+  function lsEncodingLabel(encoding) {
+    if (encoding == null) return "";
+    if (typeof encoding === "string") return encoding;
+    // `Samples { layout, unit, … }` and `Struct { decoder }` are tagged
+    // objects. The tag is the part a person reads; the body is the study's
+    // own declaration and is on the Study Designer's Streams card.
+    var keys = Object.keys(encoding);
+    return keys.length ? keys[0] : "";
+  }
+
+  async function lsLoadHex(tap) {
+    var el = lsEl(lsDataId(tap) + "-hex");
+    var note = lsEl(lsDataId(tap) + "-note");
+    if (!el) return;
+    try {
+      var resp = await fetch(
+        "/api/studies/" + encodeURIComponent(lsStudyId) + "/stream/" +
+          encodeURIComponent(tap) + "/head"
+      );
+      if (!resp.ok) return;
+      var data = await resp.json();
+      el.innerHTML = (data.lines || [])
+        .map(function (l) {
+          return '<div class="ls-console-line">' + escapeHtml(l) + "</div>";
+        })
+        .join("");
+      // A `Raw` tap renders nothing because nobody declared anything to
+      // render it as (embarch-study-designer decision 39). The hex head is
+      // the honest view; the download is the whole capture.
+      note.textContent =
+        data.total_bytes + " bytes captured, nothing declared to decode them as — showing the first " +
+        data.shown_bytes;
+    } catch (e) {
+      /* the bytes are on embarch-core's disk either way */
+    }
+  }
+
+  async function lsLoadRows(tap, from) {
+    var id = lsDataId(tap);
+    var head = lsEl(id + "-head");
+    var rows = lsEl(id + "-rows");
+    var note = lsEl(id + "-note");
+    if (!head) return;
+    try {
+      var resp = await fetch(
+        "/api/studies/" + encodeURIComponent(lsStudyId) + "/stream/" +
+          encodeURIComponent(tap) + "/rows?from=" + from + "&limit=100"
+      );
+      var text = await resp.text();
+      if (!resp.ok) {
+        note.innerHTML = '<span style="color:var(--warning);">' + escapeHtml(resp.status + " " + text) + "</span>";
+        return;
+      }
+      var data = JSON.parse(text);
+      if (from === 0) {
+        head.innerHTML =
+          "<tr>" + (data.columns || []).map(function (c) { return "<th>" + escapeHtml(c) + "</th>"; }).join("") + "</tr>";
+        rows.innerHTML = "";
+      }
+      (data.rows || []).forEach(function (row) {
+        var tr = document.createElement("tr");
+        tr.innerHTML = row
+          .map(function (cell) {
+            return '<td class="mono">' + escapeHtml(cell) + "</td>";
+          })
+          .join("");
+        rows.appendChild(tr);
+      });
+      var shown = rows.children.length;
+      note.textContent = data.total
+        ? "showing " + shown + " of " + data.total + " row(s)"
+        : "this tap captured no rows";
+      if (from === 0 && (data.numeric_columns || []).length) {
+        lsLoadSeries(tap, data.numeric_columns, data.numeric_columns[0], data.time_column);
+      }
+    } catch (e) {
+      note.textContent = String(e);
+    }
+  }
+
+  // ---- plots ---------------------------------------------------------------
+
+  async function lsLoadSeries(tap, columns, column, timeColumn) {
+    var host = lsEl(lsDataId(tap) + "-plot");
+    if (!host) return;
+    try {
+      var resp = await fetch(
+        "/api/studies/" + encodeURIComponent(lsStudyId) + "/stream/" +
+          encodeURIComponent(tap) + "/series?width=600&column=" + encodeURIComponent(column)
+      );
+      if (!resp.ok) return;
+      var data = await resp.json();
+      host.innerHTML =
+        '<div class="sd-toolbar" style="margin-bottom:6px;">' +
+        '<label class="sd-field" style="min-width:180px;"><span>Plot column</span>' +
+        '<select class="sd-input mono" data-series-tap="' + escapeHtml(tap) + '">' +
+        columns
+          .map(function (c) {
+            return '<option value="' + escapeHtml(c) + '"' + (c === column ? " selected" : "") + ">" + escapeHtml(c) + "</option>";
+          })
+          .join("") +
+        "</select></label>" +
+        '<span class="placeholder-note" style="margin:0;">' +
+        escapeHtml(
+          data.points + " point(s)" +
+          (timeColumn ? " against " + timeColumn : " against row index — this tap carries no arrival stamp") +
+          (data.unparsed ? " · " + data.unparsed + " value(s) this build could not read as a number" : "")
+        ) +
+        "</span></div>" +
+        lsPlotSvg(data.bins || []);
+    } catch (e) {
+      /* a plot that will not draw leaves the table, which is the data */
+    }
+  }
+
+  /// One min/max band per bin. **Min and max, never an average** — an average
+  /// hides the spike that is usually the reason somebody is looking.
+  function lsPlotSvg(bins, preview) {
+    if (!bins.length) return '<p class="placeholder-note">nothing to plot yet</p>';
+    var w = 600;
+    var h = 160;
+    var lo = Infinity;
+    var hi = -Infinity;
+    bins.forEach(function (b) {
+      if (b.min < lo) lo = b.min;
+      if (b.max > hi) hi = b.max;
+    });
+    if (!(hi > lo)) {
+      hi = lo + 1;
+      lo = lo - 1;
+    }
+    var x0 = bins[0].x;
+    var x1 = bins[bins.length - 1].x;
+    var xspan = x1 - x0 || 1;
+    var path = bins
+      .map(function (b) {
+        var x = ((b.x - x0) / xspan) * (w - 2) + 1;
+        var yTop = h - ((b.max - lo) / (hi - lo)) * (h - 2) - 1;
+        var yBot = h - ((b.min - lo) / (hi - lo)) * (h - 2) - 1;
+        return "M" + x.toFixed(2) + " " + yTop.toFixed(2) + "V" + yBot.toFixed(2);
+      })
+      .join("");
+    return (
+      '<svg class="ls-plot" viewBox="0 0 ' + w + " " + h + '" preserveAspectRatio="none" style="width:100%; height:' + h + 'px;">' +
+      '<path d="' + path + '" stroke="var(--accent)" stroke-width="1.2" fill="none" />' +
+      "</svg>" +
+      '<div class="placeholder-note" style="display:flex; justify-content:space-between;">' +
+      "<span>" + escapeHtml(lo.toPrecision(4)) + "</span>" +
+      (preview ? '<span style="color:var(--warning);">live preview — redrawn from the capture when the run ends</span>' : "") +
+      "<span>" + escapeHtml(hi.toPrecision(4)) + "</span></div>"
+    );
+  }
+
+  function lsApplySamples(frame) {
+    var series = lsLiveSeries[frame.tap];
+    if (!series) {
+      series = { points: [], stride: 1, total: 0 };
+      lsLiveSeries[frame.tap] = series;
+    }
+    (frame.points || []).forEach(function (p) {
+      series.points.push(p);
+    });
+    series.stride = frame.stride || 1;
+    series.total = frame.total || series.total;
+    lsDrawLiveSeries(frame.tap);
+    if (frame.row) lsAppendFeed(frame.row);
+  }
+
+  /// A live plot, drawn from what has arrived so far and **labelled a
+  /// preview**. It is redrawn from the rendered capture the moment the run
+  /// ends (`lsOnFinished`), because the file is complete and this is not.
+  function lsDrawLiveSeries(tap) {
+    var series = lsLiveSeries[tap];
+    if (!series || !series.points.length) return;
+    var id = lsDataId(tap);
+    var host = lsEl(id + "-plot");
+    if (!host) {
+      // A sample tap whose data card does not exist yet — a run started
+      // before the record was read. The console/data cards are rebuilt when
+      // the record arrives, and this plot comes with them.
+      return;
+    }
+    var bins = series.points.map(function (p) {
+      return { x: p[0], min: p[1], max: p[1], count: 1 };
+    });
+    host.innerHTML =
+      '<p class="placeholder-note" style="margin:0 0 6px;">' +
+      escapeHtml(
+        series.total + " sample(s)" +
+        (series.stride > 1
+          ? " — plotting one in " + series.stride + ", this series is decimated"
+          : "")
+      ) +
+      "</p>" +
+      lsPlotSvg(bins, true);
+  }
+
+  // ---- wiring --------------------------------------------------------------
+
+  function initLiveStudyTab() {
+    if (!lsEl("ls-studies-rows")) return;
+
+    lsEl("ls-studies-refresh").addEventListener("click", lsLoadStudies);
+    lsEl("ls-run").addEventListener("click", lsRun);
+    lsEl("ls-open").addEventListener("click", function () {
+      var id = lsEl("ls-open-id").value.trim();
+      if (id) lsOpenStudy(id, false);
+    });
+    lsEl("ls-open-id").addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter") return;
+      var id = lsEl("ls-open-id").value.trim();
+      if (id) lsOpenStudy(id, false);
+    });
+    lsEl("ls-studies-rows").addEventListener("click", function (ev) {
+      var row = ev.target.closest("[data-study]");
+      if (!row) return;
+      lsOpenStudy(row.getAttribute("data-study"), false);
+    });
+    lsEl("ls-feed-filters").addEventListener("click", function (ev) {
+      var chip = ev.target.closest("[data-feed-kind]");
+      if (!chip) return;
+      Array.prototype.forEach.call(lsEl("ls-feed-filters").children, function (c) {
+        c.classList.remove("active-filter");
+      });
+      chip.classList.add("active-filter");
+      lsFeedFilter = chip.getAttribute("data-feed-kind");
+      lsApplyFeedFilter();
+    });
+    // Auto-scroll that pauses when you scroll up: a feed that yanks itself
+    // back to the bottom while somebody is reading it is unreadable.
+    lsEl("ls-feed").addEventListener("scroll", function () {
+      var el = lsEl("ls-feed");
+      lsAutoScroll = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    });
+    lsEl("ls-data").addEventListener("click", function (ev) {
+      var more = ev.target.closest("[data-rows-more]");
+      if (!more) return;
+      var tap = more.getAttribute("data-rows-more");
+      var rows = lsEl(lsDataId(tap) + "-rows");
+      lsLoadRows(tap, rows ? rows.children.length : 0);
+    });
+    lsEl("ls-data").addEventListener("change", function (ev) {
+      var select = ev.target.closest("[data-series-tap]");
+      if (!select) return;
+      var tap = select.getAttribute("data-series-tap");
+      var columns = Array.prototype.map.call(select.options, function (o) {
+        return o.value;
+      });
+      lsLoadSeries(tap, columns, select.value, null);
+    });
+
+    lsLoadStudies();
+    lsLoadSavedStudies();
+  }
+
   // --- Trace view (decision 10, second half) ------------------------------
   //
   // Every number drawn here was decoded server-side, through
@@ -4930,38 +5877,6 @@
     el.textContent = message;
   }
 
-  async function traceLoadTaps() {
-    var studyId = trEl("trace-study").value.trim();
-    var select = trEl("trace-tap");
-    if (!studyId) return traceShowError("give the study_id a run reported");
-    traceShowError("");
-    var resp = await fetch("/api/trace/" + encodeURIComponent(studyId));
-    var text = await resp.text();
-    if (!resp.ok) {
-      select.disabled = true;
-      select.innerHTML = '<option value="">—</option>';
-      return traceShowError(resp.status + " " + text);
-    }
-    var data = JSON.parse(text);
-    var taps = (data.taps || []).filter(function (t) { return t.is_outpost_trace; });
-    if (!taps.length) {
-      select.disabled = true;
-      select.innerHTML = '<option value="">no outpost trace tap in this study</option>';
-      return traceShowError(
-        "this study declared " + (data.taps || []).length + " tap(s), none of them an outpost " +
-        "trace. Author one in the Study Designer's Streams card."
-      );
-    }
-    select.disabled = false;
-    select.innerHTML = taps
-      .map(function (t) {
-        return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.name) +
-          (t.named ? "" : " — unnamed") + "</option>";
-      })
-      .join("");
-    return traceLoadView();
-  }
-
   async function traceLoadView() {
     var studyId = trEl("trace-study").value.trim();
     var tap = trEl("trace-tap").value;
@@ -4979,40 +5894,6 @@
     traceView = JSON.parse(text);
     traceForgetBins();
     renderTrace();
-  }
-
-  /// Opens one named tap of one study — the single path behind both the
-  /// `#trace?study=…&tap=…` deep link and the run card's "Open in Trace"
-  /// button.
-  ///
-  /// **Shared because the button used to skip the tap half entirely**: it set
-  /// the study id and clicked Load, and `traceLoadTaps` then drew whichever
-  /// outpost trace happened to be *first*. On a study with two of them, or on
-  /// a click against a non-trace stream like `gatt`, the view that came up was
-  /// not the one the button named and said nothing about the substitution.
-  async function traceOpen(studyId, tap) {
-    trEl("trace-study").value = studyId;
-    await traceLoadTaps();
-    if (!tap) return;
-    var select = trEl("trace-tap");
-    var offered = Array.prototype.some.call(select.options, function (o) {
-      return o.value === tap;
-    });
-    if (!offered) {
-      // The caller had this stream's name, so it is in the study — it is just
-      // not an outpost trace, and there is no timeline to draw for it. Said,
-      // rather than quietly drawing a different tap under its name.
-      traceShowError(
-        "'" + tap + "' is not an outpost trace, so it has no timeline to draw. " +
-        (select.disabled
-          ? "This study declares no outpost trace at all."
-          : "Showing '" + select.value + "' instead — pick another above.")
-      );
-      return;
-    }
-    if (select.value === tap) return;
-    select.value = tap;
-    return traceLoadView();
   }
 
   // An axis value, in whatever unit the view is actually in.
@@ -6274,25 +7155,12 @@
 
   function initTraceTab() {
     if (!trEl("trace-chart")) return;
-    trEl("trace-load").addEventListener("click", traceLoadTaps);
-    // `#trace?study=<id>&tap=<name>` opens a specific trace directly — the
-    // same deep-link shape `#topology` already gives `embarch-topology`'s
-    // `fix_it_url` (decision 19). A trace is the one thing in this UI worth
-    // sending somebody a link to: it is post-hoc and belongs to one run.
-    //
-    // In the **fragment**, not the query string, for two reasons: the fragment
-    // already selects the tab here, so the whole address stays one mechanism;
-    // and a fragment never reaches the server, so a link to a trace costs no
-    // round trip and leaks no study id into a log. A `?study=` query is
-    // honoured too, for a link somebody hand-writes that way.
-    var params = hashParams();
-    var study = params.get("study") || new URLSearchParams(location.search).get("study");
-    if (study) {
-      traceOpen(study, params.get("tap") || new URLSearchParams(location.search).get("tap"));
-    }
-    trEl("trace-study").addEventListener("keydown", function (ev) {
-      if (ev.key === "Enter") traceLoadTaps();
-    });
+    // Redraws the tap already selected. The study is the Live Study tab's —
+    // this chart is a card on that page now, not a view somebody addresses
+    // on its own, so the `#trace?study=…&tap=…` deep link that used to reach
+    // it is gone with the tab it named. `#live-study` still selects the tab,
+    // like every other.
+    trEl("trace-load").addEventListener("click", traceLoadView);
     trEl("trace-tap").addEventListener("change", traceLoadView);
     var pending = null;
     window.addEventListener("resize", function () {
@@ -6346,6 +7214,7 @@
     initEnrollTab();
     initSignals();
     initStudyDesignerTab();
+    initLiveStudyTab();
     initTraceTab();
     initDebugTab();
     initEvents();

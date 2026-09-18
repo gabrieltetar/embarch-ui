@@ -57,9 +57,9 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M6 8h12l-1 4a5 5 0 0 1-10 0Z"/><path d="M18 18h3M19.5 16.5v3"/></svg>
         <span class="nav-label">Enroll</span>
       </button>
-      <button class="nav-item" data-tab="trace">
+      <button class="nav-item" data-tab="live-study">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h3.2l1.6-6 2 10 2.2-8 1.6 4H21"/></svg>
-        <span class="nav-label">Trace</span>
+        <span class="nav-label">Live Study</span>
       </button>
       <button class="nav-item" data-tab="debug">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
@@ -361,26 +361,6 @@
             <div id="sd-layouts" class="chip-pool">no payload layout in this repo yet</div>
           </div>
 
-          <div id="sd-run-card" class="card" style="display:none;">
-            <div class="card-title">Run</div>
-            <div class="sd-run-head">
-              <span id="sd-run-status" class="badge badge-neutral">idle</span>
-              <span id="sd-run-id" class="mono" style="color:var(--text-secondary);"></span>
-              <span style="flex:1;"></span>
-              <a id="sd-gatt-download" class="btn" style="display:none;" download>Download GATT transcript (CSV)</a>
-            </div>
-            <p id="sd-run-reason" class="sd-error" style="display:none;"></p>
-            <div id="sd-provenance" style="display:none; margin-top:12px;"></div>
-            <div id="sd-run-streams" style="display:none; margin-top:12px;"></div>
-            <div class="table-scroll" style="margin-top:12px;">
-              <table class="data-table">
-                <thead>
-                  <tr><th style="width:34px;">#</th><th style="width:160px;">Step</th><th style="width:110px;">Outcome</th><th>Captured / discovered</th></tr>
-                </thead>
-                <tbody id="sd-run-rows"></tbody>
-              </table>
-            </div>
-          </div>
         </div>
 
         <div id="sd-runcheck-backdrop" class="dialog-backdrop" style="display:none;"></div>
@@ -607,36 +587,125 @@
         </div>
       </div>
 
-      <section class="tab-panel" data-tab="trace">
+      <section class="tab-panel" data-tab="live-study">
         <div class="page-head">
-          <h1>Trace</h1>
-          <p>A completed study's recorded MCU-load timeline — post-hoc, because outpost capture has no live feed</p>
+          <h1>Live Study</h1>
+          <p>Run a study and watch everything land as it arrives &mdash; or open a past one and read it back off disk</p>
         </div>
 
-        <div class="card" style="margin-bottom:16px;">
-          <div class="sd-toolbar">
-            <label class="sd-field" style="flex:1; min-width:280px;">
-              <span>Study ID</span>
-              <input id="trace-study" type="text" class="sd-input mono" spellcheck="false" placeholder="the study_id a run reported" />
+        <!-- 1. Run / open ------------------------------------------------ -->
+        <div style="display:grid; grid-template-columns: minmax(280px, 380px) 1fr; gap:16px; margin-bottom:16px;">
+          <div class="card">
+            <div class="card-title">Run a saved study</div>
+            <p class="placeholder-note" style="margin-top:0;">The Study Designer authors and saves; running and watching happen here. Its own Run button posts the study and lands you on this tab.</p>
+            <label class="sd-field" style="margin-top:10px;">
+              <span>Saved study</span>
+              <select id="ls-study-picker" class="sd-input mono"><option value="">no project open</option></select>
             </label>
-            <label class="sd-field" style="min-width:220px;">
-              <span>Tap</span>
-              <select id="trace-tap" class="sd-input mono" disabled><option value="">load a study first…</option></select>
+            <label class="req-any" style="margin-top:12px;">
+              <input id="ls-allow-mismatch" type="checkbox" />
+              <span>Run even if the bench or DUT version does not match what the study requires. embarch-core records the override in the result, with both strings.</span>
             </label>
-            <div class="sd-toolbar-actions">
-              <button id="trace-load" class="btn btn-primary">Load</button>
+            <div class="sd-row-actions" style="margin-top:14px;">
+              <button id="ls-run" class="btn btn-primary">Run study</button>
+            </div>
+            <p id="ls-run-error" class="sd-error" style="display:none; margin-top:10px;"></p>
+            <div class="card-title" style="margin:18px 0 6px; font-size:13px;">Open one by id</div>
+            <div class="sd-toolbar">
+              <input id="ls-open-id" type="text" class="sd-input mono" spellcheck="false" placeholder="a study_id" style="flex:1; min-width:0;" />
+              <button id="ls-open" class="btn">Open</button>
+            </div>
+            <p class="placeholder-note" style="margin-top:8px;">For a study older than embarch-core&rsquo;s retention window, which the list beside this one can no longer show.</p>
+          </div>
+
+          <div class="card">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Studies on embarch-core</div>
+              <div class="sd-toolbar-actions">
+                <button id="ls-studies-refresh" class="btn">Refresh</button>
+              </div>
+            </div>
+            <p id="ls-studies-note" class="placeholder-note" style="margin:8px 0 10px;">loading&hellip;</p>
+            <div class="table-scroll" style="max-height:320px;">
+              <table class="data-table">
+                <thead><tr><th>Study</th><th>Status</th><th>Steps</th><th>Taps</th><th>When</th></tr></thead>
+                <tbody id="ls-studies-rows"></tbody>
+              </table>
             </div>
           </div>
-          <p class="placeholder-note" style="margin-top:10px;">Nothing here is live. An outpost trace is recorded for the duration of a study and drawn afterwards (<span class="mono">embarch-outpost/decisions.md</span>, decision 10) — the one view in this UI that is not push-driven, and the honest shape for the data rather than an omission.</p>
-          <p id="trace-error" class="sd-error" style="display:none;"></p>
         </div>
 
-        <div id="trace-refusal" class="card" style="display:none; margin-bottom:16px; border-color:var(--warning);"></div>
-
-        <div id="trace-body" style="display:none;">
-          <div id="trace-stats" style="display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:16px; margin-bottom:16px;"></div>
-
+        <div id="ls-body" style="display:none;">
+          <!-- 2. Status ------------------------------------------------- -->
           <div class="card" style="margin-bottom:16px;">
+            <div class="sd-run-head">
+              <span id="ls-status-badge" class="badge badge-neutral">idle</span>
+              <span id="ls-status-name"></span>
+              <span id="ls-status-id" class="mono" style="color:var(--text-secondary);"></span>
+              <span style="flex:1;"></span>
+              <span id="ls-status-mode" class="placeholder-note" style="margin:0;"></span>
+            </div>
+            <p id="ls-status-reason" class="sd-error" style="display:none;"></p>
+            <p id="ls-status-lagged" class="placeholder-note" style="display:none; color:var(--warning);"></p>
+            <p id="ls-record-note" class="placeholder-note" style="display:none; color:var(--warning);"></p>
+            <div id="ls-provenance" style="display:none; margin-top:12px;"></div>
+            <div id="ls-streams" style="display:none; margin-top:12px;"></div>
+          </div>
+
+          <!-- 3. Steps -------------------------------------------------- -->
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">Steps</div>
+            <p id="ls-steps-note" class="placeholder-note" style="margin-top:0;">Rows fill in as each step reports, not once the study ends.</p>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead><tr><th style="width:34px;">#</th><th style="width:180px;">Step</th><th style="width:110px;">Outcome</th><th>Captured / discovered</th></tr></thead>
+                <tbody id="ls-steps-rows"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 4. Event feed --------------------------------------------- -->
+          <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Event feed</div>
+              <div class="sd-toolbar-actions" id="ls-feed-filters">
+                <div class="chip active-filter" data-feed-kind="all">All</div>
+                <div class="chip" data-feed-kind="step">Steps</div>
+                <div class="chip" data-feed-kind="samples">Samples</div>
+                <div class="chip" data-feed-kind="gatt">GATT</div>
+                <div class="chip" data-feed-kind="status">Status</div>
+              </div>
+            </div>
+            <p id="ls-feed-note" class="placeholder-note" style="margin:8px 0;"></p>
+            <div id="ls-feed" class="ls-feed"></div>
+          </div>
+
+          <!-- 5. Consoles ----------------------------------------------- -->
+          <div id="ls-consoles"></div>
+
+          <!-- 6. Trace --------------------------------------------------- -->
+          <input id="trace-study" type="hidden" />
+          <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Trace</div>
+              <label class="sd-field" style="min-width:220px;">
+                <span>Tap</span>
+                <select id="trace-tap" class="sd-input mono" disabled><option value="">—</option></select>
+              </label>
+              <div class="sd-toolbar-actions">
+                <button id="trace-load" class="btn">Redraw</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin-top:10px;">An outpost trace is the one capture here that is <strong>not</strong> live: it is recorded for the duration of a study and decoded afterwards (<span class="mono">embarch-outpost/decisions.md</span>, decision 10). The honest shape for the data rather than an omission &mdash; everything above this card is push-driven.</p>
+            <p id="trace-error" class="sd-error" style="display:none;"></p>
+          </div>
+
+          <div id="trace-refusal" class="card" style="display:none; margin-bottom:16px; border-color:var(--warning);"></div>
+
+          <div id="trace-body" style="display:none;">
+            <div id="trace-stats" style="display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:16px; margin-bottom:16px;"></div>
+
+            <div class="card" style="margin-bottom:16px;">
             <div class="sd-toolbar">
               <div class="card-title" style="margin:0;">Timeline</div>
               <div class="sd-toolbar-actions">
@@ -719,6 +788,10 @@
               <p class="placeholder-note" style="margin-top:10px;">A marker's <span class="mono">arg</span> is the engineer's own value, passed through as the number it is. Nothing here interprets it.</p>
             </div>
           </div>
+          </div>
+
+          <!-- 7. Data --------------------------------------------------- -->
+          <div id="ls-data"></div>
         </div>
       </section>
 

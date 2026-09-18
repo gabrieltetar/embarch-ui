@@ -10,8 +10,10 @@
 //! for the full architecture.
 
 mod config;
+mod live_study;
 mod logs;
 mod snapshot;
+mod studies_api;
 mod study_designer;
 mod trace;
 
@@ -120,6 +122,15 @@ pub(crate) struct AppState {
     /// view is the refresh**, rather than there being a staleness rule nobody
     /// can see.
     trace_cache: Arc<tokio::sync::Mutex<Option<CachedTrace>>>,
+    /// The same shape, for the Data cards' rendered CSVs — see
+    /// `studies_api::table_for`. One entry, because the tab shows one tap's
+    /// table at a time, and paging it is many requests against one file.
+    table_cache: Arc<tokio::sync::Mutex<Option<studies_api::CachedTable>>>,
+    /// Every study this process is watching live, and the one place a new
+    /// watch is started (`live_study`). **One subscription to embarch-core
+    /// per study, never one per browser** — which is what lets a tab opened
+    /// or reloaded mid-run replay the whole run so far.
+    live: Arc<live_study::LiveStudies>,
 }
 
 /// One decoded capture, keyed by the study and tap it was decoded from.
@@ -181,6 +192,8 @@ async fn async_main() -> anyhow::Result<()> {
     let (api_logs_tx, api_logs_rx) = watch::channel(Vec::new());
     tokio::spawn(logs::api_poll_loop(api_logs_tx));
 
+    let live = live_study::LiveStudies::new(core.clone());
+
     let state = AppState {
         snapshot_rx: rx,
         core,
@@ -189,6 +202,8 @@ async fn async_main() -> anyhow::Result<()> {
         logs_rx,
         api_logs_rx,
         trace_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        table_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        live,
     };
 
     let app = Router::new()
@@ -202,6 +217,31 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/enroll", post(api_enroll))
         .route("/api/signals", post(api_declare_signal))
         .route("/api/signals/{name}", axum::routing::delete(api_remove_signal))
+        // ---- Live Study -------------------------------------------------
+        .route("/api/live/events", get(live_study::api_live_events))
+        .route("/api/live/run", post(live_study::api_live_run))
+        .route("/api/studies", get(studies_api::api_studies))
+        .route("/api/studies/{study_id}", get(studies_api::api_study))
+        .route(
+            "/api/studies/{study_id}/stream/{name}/rows",
+            get(studies_api::api_stream_rows),
+        )
+        .route(
+            "/api/studies/{study_id}/stream/{name}/series",
+            get(studies_api::api_stream_series),
+        )
+        .route(
+            "/api/studies/{study_id}/stream/{name}/text",
+            get(studies_api::api_stream_text),
+        )
+        .route(
+            "/api/studies/{study_id}/stream/{name}/head",
+            get(studies_api::api_stream_head),
+        )
+        .route(
+            "/api/studies/{study_id}/stream/{name}/download",
+            get(studies_api::api_stream_download),
+        )
         .route("/api/trace/{study_id}", get(api_trace_taps))
         .route("/api/trace/{study_id}/{name}", get(api_trace_view))
         .route("/api/trace/{study_id}/{name}/bins", get(api_trace_bins))
@@ -232,7 +272,6 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/study-designer/discover", post(study_designer::api_discover))
         .route("/api/study-designer/run", post(study_designer::api_run))
         .route("/api/study-designer/preflight", post(study_designer::api_preflight))
-        .route("/api/study-designer/events", get(study_designer::api_run_events))
         .route(
             "/api/study-designer/studies",
             get(study_designer::api_studies_list).post(study_designer::api_studies_save),

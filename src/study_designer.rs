@@ -23,7 +23,6 @@
 use crate::config::StudyDesignerConfig;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json};
 use embarch_core_client::{CoreClient, StudyRunOptions};
 use embarch_study_designer::limits::{
@@ -52,10 +51,8 @@ type DecoderList = embarch_study_designer::bounded::Bounded<StructLayout, MAX_DE
 type RecordCheckList = embarch_study_designer::bounded::Bounded<RecordCheck, MAX_STREAMS_PER_STUDY>;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
 
 /// How long `POST /api/study-designer/discover` waits for a one-step
 /// `BleConnect`->`GattDiscover` study to reach a terminal state before
@@ -100,7 +97,6 @@ struct Inner {
     /// `OnceLock` that has been set cannot be un-set, so the first project's
     /// extraction would have been served for every project after it.
     static_gatt: Mutex<Option<Option<StaticGatt>>>,
-    run_tx: watch::Sender<RunState>,
 }
 
 #[derive(Clone)]
@@ -111,13 +107,11 @@ impl StudyDesigner {
     /// the tab's routes now answer for "no project open" instead of the
     /// process having no Study Designer at all (decision 14).
     pub fn new(config: Option<StudyDesignerConfig>, core: Arc<CoreClient>) -> StudyDesigner {
-        let (run_tx, _) = watch::channel(RunState::Idle);
         StudyDesigner(Arc::new(Inner {
             project: Mutex::new(config),
             core,
             live_gatt: Mutex::new(None),
             static_gatt: Mutex::new(None),
-            run_tx,
         }))
     }
 
@@ -266,44 +260,6 @@ struct StaticGatt {
     /// selective-monitor picker's group headers read
     /// (decision 17).
     service_symbols: Vec<(Uuid, String)>,
-}
-
-// `StudyResult` is `heapless`-backed with large fixed-capacity buffers
-// (`MAX_STEPS_PER_STUDY` steps' worth of `captured_data`/`gatt_services`/
-// `gatt_activity`) — over a megabyte inline, the same "oversized stack
-// frame" shape `embarch-api` decision 36 and `embarch-study-designer`
-// decision 49 already found real stack-overflow risk in. Boxed here so
-// `RunState` itself stays small regardless.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum RunState {
-    Idle,
-    Running {
-        study_id: String,
-        /// Core's field passed through verbatim, and it is **the 0-based
-        /// index of the last step that *finished*** — `None` until one has,
-        /// which is not the same as "how many steps are done"
-        /// (`embarch-core/interfaces.md`, `GET /study/{id}`; embarch-core
-        /// decision 43). Nothing on this path renumbers it. The run badge in
-        /// `assets/app.js` is the only place that turns it into a
-        /// human-facing number, and it names the step *now running*
-        /// (`embarch-ui/decisions/study-designer.md` decision 20).
-        current_step: Option<u32>,
-        total_steps: Option<u32>,
-    },
-    Completed {
-        study_id: String,
-        result: Box<StudyResult>,
-        /// The result's own provenance, flattened with the one judgement the
-        /// browser must not make itself: whether each version was *verified*
-        /// or merely `Declared` (`VersionSource::is_verified`). Redundant with
-        /// `result.provenance` on purpose — rendering `Declared` visibly
-        /// weaker is decision 11's requirement, and "the easiest place to
-        /// accidentally reintroduce" the defect `embarch-study-designer` decision 40 closes is a UI
-        /// deciding for itself which variants count.
-        provenance: ProvenanceView,
-    },
-    Failed { study_id: Option<String>, reason: String },
 }
 
 /// Said in one place, because it is both an HTTP body and (via
@@ -1698,11 +1654,11 @@ pub async fn api_run(
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     };
 
-    let _ = sd.0.run_tx.send(RunState::Running { study_id: study_id.clone(), current_step: None, total_steps: None });
-    let core = sd.0.core.clone();
-    let run_tx = sd.0.run_tx.clone();
-    let watched_id = study_id.clone();
-    tokio::spawn(async move { watch_study(core, watched_id, run_tx).await });
+    // The hand-off, and the only thing this route does with the study id
+    // besides return it: registering a live session subscribes embarch-ui
+    // once to Core's event stream for this study and starts the rings the
+    // Live Study tab reads. The tab itself needs nothing else to attach.
+    state.live.ensure(&study_id);
 
     Json(serde_json::json!({ "study_id": study_id })).into_response()
 }
@@ -1972,13 +1928,27 @@ pub async fn api_study_run(
     axum::extract::Path(slug): axum::extract::Path<String>,
     body: Option<Json<StudyRunRequest>>,
 ) -> axum::response::Response {
-    let sd = state.study_designer;
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    run_saved_study(&state, &slug, req.allow_version_mismatch).await
+}
+
+/// [`api_study_run`]'s whole body, reachable by name.
+///
+/// Two routes post a saved study now — the Study Designer's own Run button
+/// and the Live Study tab's — and **one of them had to not be a second
+/// implementation.** Everything a run decides lives here: the seals, the
+/// crate's own pre-flight, the submit, and the hand-off to the live session.
+pub async fn run_saved_study(
+    state: &crate::AppState,
+    slug: &str,
+    allow_version_mismatch: bool,
+) -> axum::response::Response {
+    let sd = state.study_designer.clone();
     let Some(project) = sd.project() else { return not_configured() };
-    let slug = match study_slug(&slug) {
+    let slug = match study_slug(slug) {
         Ok(s) => s,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let req = body.map(|Json(b)| b).unwrap_or_default();
 
     let value = match read_saved_study(&project, &slug) {
         Ok(v) => v,
@@ -2013,7 +1983,7 @@ pub async fn api_study_run(
     }
 
     let options = StudyRunOptions {
-        allow_version_mismatch: req.allow_version_mismatch,
+        allow_version_mismatch,
         // Same reason `api_run` leaves it `None`: this UI flashes nothing,
         // so it has nothing it could honestly claim to have put on the DUT.
         flashed_firmware_version: None,
@@ -2023,15 +1993,8 @@ pub async fn api_study_run(
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     };
 
-    let _ = sd.0.run_tx.send(RunState::Running {
-        study_id: study_id.clone(),
-        current_step: None,
-        total_steps: None,
-    });
-    let core = sd.0.core.clone();
-    let run_tx = sd.0.run_tx.clone();
-    let watched_id = study_id.clone();
-    tokio::spawn(async move { watch_study(core, watched_id, run_tx).await });
+    // Same hand-off as `api_run`'s — see there.
+    state.live.ensure(&study_id);
 
     Json(serde_json::json!({ "study_id": study_id })).into_response()
 }
@@ -2094,85 +2057,6 @@ fn preflight_saved(study: &Study) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-async fn watch_study(core: Arc<CoreClient>, study_id: String, tx: watch::Sender<RunState>) {
-    let start = tokio::time::Instant::now();
-    // No hard timeout here, unlike `discover` — a real study can legitimately
-    // run far longer than 30s (`embarch-study-designer` decision
-    // 9's own "unbounded BLE wait" reasoning); it ends when Core reports a
-    // terminal status, not on a clock this tab invents.
-    loop {
-        match core.get_study_status(&study_id).await {
-            Ok(status) => match status.status.as_str() {
-                "completed" => {
-                    let state = match status.result {
-                        Some(result) => RunState::Completed {
-                            provenance: provenance_view(&result.provenance),
-                            study_id,
-                            result: Box::new(result),
-                        },
-                        None => RunState::Failed {
-                            study_id: Some(study_id),
-                            reason: "embarch-core reported \"completed\" but returned no result".to_string(),
-                        },
-                    };
-                    let _ = tx.send(state);
-                    return;
-                }
-                "failed" => {
-                    let _ = tx.send(RunState::Failed {
-                        study_id: Some(study_id),
-                        reason: status.reason.unwrap_or_else(|| "study failed with no reason given".to_string()),
-                    });
-                    return;
-                }
-                _ => {
-                    let _ = tx.send(RunState::Running {
-                        study_id: study_id.clone(),
-                        current_step: status.current_step,
-                        total_steps: status.total_steps,
-                    });
-                }
-            },
-            Err(e) => {
-                let _ = tx.send(RunState::Failed { study_id: Some(study_id), reason: format!("{e:#}") });
-                return;
-            }
-        }
-        // A host-side backstop, not a protocol timeout — Core's own
-        // watchdog (`embarch-study-designer` decision 16) is
-        // what actually bounds a hung study; this just stops embarch-ui
-        // from polling forever if Core itself never resolves it.
-        if start.elapsed() > Duration::from_secs(60 * 30) {
-            let _ = tx.send(RunState::Failed {
-                study_id: Some(study_id),
-                reason: "gave up watching after 30 minutes with no terminal status from embarch-core".to_string(),
-            });
-            return;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-pub async fn api_run_events(State(state): State<crate::AppState>) -> axum::response::Response {
-    let sd = state.study_designer;
-    // A project is a precondition rather than an input here — this route
-    // reads nothing off it, but it has nothing to answer about without one.
-    if sd.project().is_none() {
-        return not_configured();
-    }
-    let rx = sd.0.run_tx.subscribe();
-    let stream = futures_util::stream::unfold((rx, true), |(mut rx, first)| async move {
-        if !first && rx.changed().await.is_err() {
-            return None;
-        }
-        let run_state = rx.borrow().clone();
-        let payload = serde_json::to_string(&run_state).unwrap_or_else(|_| "{}".to_string());
-        let event = Event::default().event("run").data(payload);
-        Some((Ok::<Event, Infallible>(event), (rx, false)))
-    });
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 // ---- saved study library (`embarch-study-designer` decision 38) ------------
