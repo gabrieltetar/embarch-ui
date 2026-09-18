@@ -1199,3 +1199,31 @@ table.data-table {
 .sd-caps-list li {
   margin: 4px 0;
 }
+
+/* The read-only preview of a run-only saved study. Deliberately plain: it is
+   a reading of a file, not a second editor. */
+.sd-stored-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 4px 16px;
+  margin: 10px 0;
+}
+.sd-stored-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+.sd-stored-label {
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
+}
+.sd-stored-steps {
+  margin: 8px 0 0;
+  padding-left: 22px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.sd-stored-steps li {
+  margin: 3px 0;
+}
+

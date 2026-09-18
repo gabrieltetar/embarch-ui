@@ -3528,6 +3528,43 @@ mod tests {
         );
     }
 
+    /// A run-only study never reaches the load route, and its Run goes
+    /// through the **existing** version-check dialog.
+    ///
+    /// Two properties worth pinning: `sdOpenStored` must not touch `sdRows`
+    /// or `sdTaps` (a read-only preview that edited the table would be the
+    /// silent overwrite the whole panel exists to avoid saying), and there
+    /// must be exactly one version-check dialog, because the question it
+    /// asks is the same question either way.
+    #[test]
+    fn a_run_only_study_previews_without_touching_the_table() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert!(
+            APP_JS.contains("if (slug && known && known.editable === false) return sdOpenStored(slug);"),
+            "a run-only file is recognised before the load route is called, not by its 409"
+        );
+        let body = {
+            let start = APP_JS.find("async function sdOpenStored(slug)").unwrap();
+            let rest = &APP_JS[start..];
+            &rest[..rest.find("\n  }\n").unwrap()]
+        };
+        assert!(!body.contains("sdRows"), "the preview must not touch the step table");
+        assert!(!body.contains("sdTaps"), "the preview must not touch the taps");
+        assert!(
+            body.contains("The step table above is a different study"),
+            "the panel says out loud that the table above is a different study"
+        );
+        assert_eq!(
+            APP_JS.matches("async function sdOpenRunCheck()").count(),
+            1,
+            "one version-check dialog, reached by both kinds of run"
+        );
+        assert!(
+            APP_JS.contains("function sdDispatchRun(allowMismatch)"),
+            "one Run button in that dialog, two destinations"
+        );
+    }
+
     /// **`app.js` holds no copy of a served fact.** The positive guard above
     /// proves the server sends the right number; this proves the browser
     /// does not carry its own. Both are needed: a browser with a fallback

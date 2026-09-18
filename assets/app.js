@@ -903,6 +903,19 @@
    * `null` means "not stated", which leaves the crate's own default in
    * place rather than this browser sending a level it invented. */
   var sdLogLevel = null;
+  /* The saved-study list keyed by slug, so picking one can tell an editable
+   * study from a run-only file **before** fetching it — which is what keeps
+   * the browser from calling a route it already knows will answer 409. */
+  var sdStudyIndex = {};
+  /* Which run the version-check dialog is standing in front of.
+   *
+   * `{kind: "authored"}` is the table; `{kind: "stored", slug}` is a file on
+   * disk. One dialog either way, because the question it asks — does the
+   * bench match what this study requires — is the same question, and a
+   * second dialog would be a second place to get that answer wrong. */
+  var sdPendingRun = { kind: "authored" };
+  /* The run-only study currently previewed, or null. */
+  var sdStoredSlug = null;
   // Characteristic display names, keyed by hyphenated characteristic UUID
   // (`embarch-study-designer` decision 56). Empty is the honest
   // starting state and every reader falls back to the UUID.
@@ -1862,9 +1875,11 @@
     var resp = await fetch("/api/study-designer/studies");
     if (!resp.ok) return;
     var studies = await resp.json();
+    sdStudyIndex = {};
     var current = select.value;
     select.innerHTML = '<option value="">Load saved study…</option>';
     studies.forEach(function (s) {
+      sdStudyIndex[s.slug] = s;
       var opt = document.createElement("option");
       opt.value = s.slug;
       opt.textContent = s.name + " (" + s.steps + " step" + (s.steps === 1 ? "" : "s") + ")" + (s.editable ? "" : " — run-only");
@@ -1903,6 +1918,76 @@
       '<span class="mono">embarch-api run-study --study-file ' + escapeHtml(saved.path) + "</span>";
     await loadSdStudies();
     sdEl("sd-load-select").value = saved.slug;
+  }
+
+  function sdCloseStored() {
+    var panel = sdEl("sd-stored-panel");
+    if (!panel) return;
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    sdStoredSlug = null;
+  }
+
+  /* Shows a run-only study read-only.
+   *
+   * **Touches neither `sdRows` nor `sdTaps`.** The table stays exactly as it
+   * was, which is why the panel says so out loud: a read-only preview under
+   * an unrelated table is otherwise the most natural thing in the world to
+   * misread as "this is what is loaded". */
+  async function sdOpenStored(slug) {
+    var panel = sdEl("sd-stored-panel");
+    if (!panel) return;
+    sdStoredSlug = slug;
+    panel.style.display = "block";
+    panel.innerHTML = '<p class="placeholder-note">reading…</p>';
+    var resp = await fetch(
+      "/api/study-designer/studies/" + encodeURIComponent(slug) + "/summary"
+    );
+    var text = await resp.text();
+    if (!resp.ok) {
+      panel.innerHTML = '<p class="sd-error">' + resp.status + " " + escapeHtml(text) + "</p>";
+      return;
+    }
+    var st = JSON.parse(text);
+    var line = function (label, value) {
+      return (
+        '<div class="sd-stored-row"><span class="sd-stored-label">' + escapeHtml(label) +
+        '</span><span class="mono">' + escapeHtml(value) + "</span></div>"
+      );
+    };
+    panel.innerHTML =
+      '<div class="card-title" style="margin:0 0 6px;">' + escapeHtml(st.name) +
+      " — run-only</div>" +
+      '<p class="placeholder-note">This file was not written from this table, so it has no ' +
+      "rows to load back. <strong>The step table above is a different study and has not " +
+      "changed.</strong> It can still be run exactly as it is on disk.</p>" +
+      '<div class="sd-stored-grid">' +
+      line("requires dev-bench", st.requires.dev_bench_version) +
+      line("requires DUT", st.requires.firmware_version) +
+      line("dev-bench log level", st.dev_bench_log_level) +
+      line("record checks", String(st.record_checks)) +
+      (st.protocols.length ? line("protocols", st.protocols.join(", ")) : "") +
+      (st.taps.length ? line("taps", st.taps.join(", ")) : "") +
+      "</div>" +
+      '<ol class="sd-stored-steps">' +
+      (st.steps.length
+        ? st.steps.map(function (n) { return "<li>" + escapeHtml(n) + "</li>"; }).join("")
+        : '<li class="placeholder-note">no steps</li>') +
+      "</ol>" +
+      '<div class="sd-row-actions" style="margin-top:12px;">' +
+      '<span style="flex:1;"></span>' +
+      '<button id="sd-stored-run" class="btn btn-primary">Run this file</button></div>';
+  }
+
+  /* Runs the stored file, through the **same** version-check dialog an
+   * authored run goes through — the discrepancy it shows is a fact about
+   * the bench and the study's `requires`, and both exist here just as much.
+   * `sdPendingRun` is the whole of the refactor that makes one dialog serve
+   * two runs. */
+  function sdRunStored() {
+    if (!sdStoredSlug) return;
+    sdPendingRun = { kind: "stored", slug: sdStoredSlug };
+    return sdOpenRunCheck();
   }
 
   async function sdLoadStudy(slug) {
@@ -3275,6 +3360,51 @@
     );
   }
 
+  /* What the pending run requires — the table's fields for an authored run,
+   * the file's own `requires` for a stored one. */
+  async function sdPendingRequires() {
+    if (sdPendingRun.kind !== "stored") return sdRequiresPayload();
+    var resp = await fetch(
+      "/api/study-designer/studies/" + encodeURIComponent(sdPendingRun.slug) + "/summary"
+    );
+    if (!resp.ok) {
+      sdShowBuildError(resp.status + " " + (await resp.text()));
+      return null;
+    }
+    var st = await resp.json();
+    return {
+      dev_bench_version: st.requires.dev_bench_version,
+      firmware_version: st.requires.firmware_version,
+    };
+  }
+
+  /* One Run button in the dialog, two destinations. */
+  function sdDispatchRun(allowMismatch) {
+    if (sdPendingRun.kind === "stored") return sdSubmitStoredRun(allowMismatch);
+    return sdSubmitRun(allowMismatch);
+  }
+
+  async function sdSubmitStoredRun(allowMismatch) {
+    closeRunCheck();
+    var slug = sdPendingRun.slug;
+    var btn = sdEl("sd-run");
+    btn.disabled = true;
+    try {
+      var resp = await fetch(
+        "/api/study-designer/studies/" + encodeURIComponent(slug) + "/run",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ allow_version_mismatch: !!allowMismatch }),
+        }
+      );
+      var text = await resp.text();
+      if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   function closeRunCheck() {
     sdEl("sd-runcheck-backdrop").style.display = "none";
     sdEl("sd-runcheck-dialog").style.display = "none";
@@ -3285,13 +3415,18 @@
   // abstract. Core's gate is still the enforcement point — this reports, it
   // does not decide.
   async function sdOpenRunCheck() {
-    var requires = sdRequiresPayload();
+    // A stored file's own `requires` rather than the table's: the whole
+    // point of this dialog is the gap between what THIS study needs and what
+    // the bench has, and the table's requirements belong to a different
+    // study.
+    var requires = await sdPendingRequires();
+    if (!requires) return;
     var params = new URLSearchParams(requires).toString();
     var resp = await fetch("/api/study-designer/version-check?" + params);
     if (!resp.ok) {
       // No pre-flight read available: run and let Core's own gate answer,
       // rather than blocking on a check this tab could not perform.
-      return sdSubmitRun(false);
+      return sdDispatchRun(false);
     }
     var check = await resp.json();
     var mismatched = check.dev_bench.satisfied === false || check.dut.satisfied === false;
@@ -3319,6 +3454,14 @@
   async function sdLoadRunCheckCaps() {
     var box = sdEl("sd-runcheck-caps");
     if (!box) return;
+    if (sdPendingRun.kind === "stored") {
+      // `/preflight` builds from the table's rows, and the table is not this
+      // study. Saying nothing beats reporting another study's capacity.
+      box.innerHTML =
+        '<p class="placeholder-note">capacity is not reported for a run-only file — ' +
+        "/preflight builds from the step table, which is a different study.</p>";
+      return;
+    }
     box.innerHTML = '<p class="placeholder-note">checking capacity…</p>';
     var rows;
     try {
@@ -3389,6 +3532,7 @@
         "not-thought-about case, which is exactly what these fields exist to rule out"
       );
     }
+    sdPendingRun = { kind: "authored" };
     return sdOpenRunCheck();
   }
 
@@ -3643,7 +3787,7 @@
     sdEl("sd-runcheck-cancel").addEventListener("click", closeRunCheck);
     sdEl("sd-runcheck-backdrop").addEventListener("click", closeRunCheck);
     sdEl("sd-runcheck-go").addEventListener("click", function () {
-      sdSubmitRun(sdEl("sd-runcheck-allow").checked);
+      sdDispatchRun(sdEl("sd-runcheck-allow").checked);
     });
     initSdTaps();
     sdEl("sd-run-streams").addEventListener("click", function (ev) {
@@ -3669,7 +3813,17 @@
     sdEl("sd-delete").addEventListener("click", sdDeleteStudy);
     sdEl("sd-discover").addEventListener("click", sdDiscover);
     sdEl("sd-load-select").addEventListener("change", function (ev) {
-      sdLoadStudy(ev.target.value);
+      var slug = ev.target.value;
+      var known = sdStudyIndex[slug];
+      // A run-only file never reaches `sdLoadStudy`: that route answers 409
+      // for exactly this case, and calling it to be told so would put an
+      // error in front of somebody who did nothing wrong.
+      if (slug && known && known.editable === false) return sdOpenStored(slug);
+      sdCloseStored();
+      sdLoadStudy(slug);
+    });
+    sdEl("sd-stored-panel").addEventListener("click", function (ev) {
+      if (ev.target.id === "sd-stored-run") sdRunStored();
     });
 
     sdEl("sd-reg-op").addEventListener("change", syncRegFieldsVisibility);

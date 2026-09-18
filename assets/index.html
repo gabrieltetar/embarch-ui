@@ -240,6 +240,10 @@
               </div>
             </div>
             <p id="sd-log-level-note" class="placeholder-note" style="margin-top:10px;"></p>
+            <!-- A run-only study, shown in the Load dropdown's own area
+                 rather than as a second list: it is the same library, and
+                 the only difference is that this one has no rows to load. -->
+            <div id="sd-stored-panel" style="display:none; margin-top:12px;"></div>
             <p id="sd-toolbar-note" class="placeholder-note" style="margin-top:10px;">Saved studies live in <span class="mono">&lt;firmware-repo&gt;/embarch/studies/</span> as plain <span class="mono">Study</span> JSON — re-runnable straight from the CLI with <span class="mono">embarch-api run-study --study-file</span>, not only from here.</p>
           </div>
 
