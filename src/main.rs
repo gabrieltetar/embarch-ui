@@ -217,6 +217,18 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/study-designer/bench-state", get(study_designer::api_bench_state))
         .route("/api/study-designer/version-check", get(study_designer::api_version_check))
         .route("/api/study-designer/registry", get(study_designer::api_registry).post(study_designer::api_register_action))
+        .route(
+            "/api/study-designer/registry/{name}",
+            axum::routing::delete(study_designer::api_registry_delete),
+        )
+        .route(
+            "/api/study-designer/structs",
+            get(study_designer::api_structs).post(study_designer::api_struct_save),
+        )
+        .route(
+            "/api/study-designer/structs/{name}",
+            axum::routing::delete(study_designer::api_struct_delete),
+        )
         .route("/api/study-designer/discover", post(study_designer::api_discover))
         .route("/api/study-designer/run", post(study_designer::api_run))
         .route("/api/study-designer/events", get(study_designer::api_run_events))
@@ -229,6 +241,20 @@ async fn async_main() -> anyhow::Result<()> {
             get(study_designer::api_studies_load).delete(study_designer::api_studies_delete),
         )
         .route("/api/study-designer/gatt/{study_id}", get(study_designer::api_gatt_data))
+        // `.eap` protocol files. `/protocols/check` comes BEFORE
+        // `/protocols/{stem}` for the same reason `new-study` is not
+        // `/studies/new`: `check` is a perfectly good file stem, so a repo
+        // with a `check.eap` would otherwise make one of these two
+        // unreachable. axum matches literals before captures, so this is
+        // unambiguous either way — the ordering states the intent.
+        .route("/api/study-designer/protocols", get(study_designer::api_protocols))
+        .route("/api/study-designer/protocols/check", post(study_designer::api_protocol_check))
+        .route(
+            "/api/study-designer/protocols/{stem}",
+            get(study_designer::api_protocol_read)
+                .put(study_designer::api_protocol_write)
+                .delete(study_designer::api_protocol_delete),
+        )
         .route("/api/logs/recent", get(api_logs_recent))
         .route("/api/logs/events", get(api_logs_events))
         .route("/api/api-logs/recent", get(api_api_logs_recent))

@@ -1201,31 +1201,37 @@ fn protocol_summaries(repo: &RepoProtocols) -> Vec<ProtocolSummary> {
             out.push(ProtocolSummary {
                 name: name.to_string(),
                 file: file.stem.clone(),
-                states: resolved
-                    .def
-                    .states
-                    .iter()
-                    .map(|state| ProtocolStateSummary {
-                        name: state.name.to_string(),
-                        terminal: matches!(
-                            state.kind,
-                            embarch_study_designer::StateKind::Terminal(_)
-                        ),
-                        outcome: match state.kind {
-                            embarch_study_designer::StateKind::Terminal(
-                                embarch_study_designer::TerminalOutcome::Pass,
-                            ) => Some("pass"),
-                            embarch_study_designer::StateKind::Terminal(
-                                embarch_study_designer::TerminalOutcome::Fail,
-                            ) => Some("fail"),
-                            _ => None,
-                        },
-                    })
-                    .collect(),
+                states: state_summaries(resolved),
             });
         }
     }
     out
+}
+
+/// One resolved protocol's states, as every picker and the editor render
+/// them. One function, so the editor's summary and the row's entry-state
+/// dropdown cannot describe the same protocol differently.
+fn state_summaries(
+    resolved: &embarch_study_designer::ResolvedProtocol,
+) -> Vec<ProtocolStateSummary> {
+    resolved
+        .def
+        .states
+        .iter()
+        .map(|state| ProtocolStateSummary {
+            name: state.name.to_string(),
+            terminal: matches!(state.kind, embarch_study_designer::StateKind::Terminal(_)),
+            outcome: match state.kind {
+                embarch_study_designer::StateKind::Terminal(
+                    embarch_study_designer::TerminalOutcome::Pass,
+                ) => Some("pass"),
+                embarch_study_designer::StateKind::Terminal(
+                    embarch_study_designer::TerminalOutcome::Fail,
+                ) => Some("fail"),
+                _ => None,
+            },
+        })
+        .collect()
 }
 
 pub async fn api_actions(State(state): State<crate::AppState>) -> axum::response::Response {
@@ -1251,12 +1257,33 @@ pub async fn api_registry(State(state): State<crate::AppState>) -> axum::respons
     }
 }
 
-/// Upserts one `RegisteredAction` by name — never a semantic "what does
-/// this do" field anywhere on this type (`embarch-study-designer`
-/// decision 35's own non-goal).
+/// A registration, a rename, or an edit — one shape, because from a form's
+/// point of view they are one operation with one optional extra field.
+///
+/// `previous_name` absent is today's upsert, unchanged. Present and
+/// different makes this a rename: the old name is reference-checked first,
+/// because a rename is a delete as far as a saved study naming it is
+/// concerned.
+#[derive(Debug, Deserialize)]
+pub struct RegisterActionRequest {
+    #[serde(default)]
+    previous_name: Option<String>,
+    #[serde(flatten)]
+    action: RegisteredAction,
+}
+
+/// Registers, edits or renames one `RegisteredAction` — never a semantic
+/// "what does this do" field anywhere on this type
+/// (`embarch-study-designer` decision 35's own non-goal).
+///
+/// **Both registries' `save` rewrite the whole TOML through
+/// `to_string_pretty`, so comments in a hand-edited file are lost.** Already
+/// true of the upsert this grew out of; an edit form makes it routine. Said
+/// here, and said in the dialog. A comment-preserving writer is a new
+/// dependency and its own decision.
 pub async fn api_register_action(
     State(state): State<crate::AppState>,
-    Json(action): Json<RegisteredAction>,
+    Json(req): Json<RegisterActionRequest>,
 ) -> axum::response::Response {
     let sd = state.study_designer;
     let Some(project) = sd.project() else { return not_configured() };
@@ -1264,8 +1291,136 @@ pub async fn api_register_action(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
+    let RegisterActionRequest { previous_name, action } = req;
+
+    if let Some(previous) = previous_name.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        if previous != action.name {
+            let scan = scan_references(&project, RefKind::Action, previous);
+            if scan.blocks() {
+                return refusal("registered action", previous, &scan);
+            }
+            registry.actions.retain(|a| a.name != previous);
+        }
+    }
+
     registry.actions.retain(|a| a.name != action.name);
     registry.actions.push(action);
+    match registry.save(&project.firmware_repo_path) {
+        Ok(()) => Json(registry).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+/// Deletes one registered action, refusing while a saved study still names
+/// it.
+pub async fn api_registry_delete(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    let mut registry = match sd.registry() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    if !registry.actions.iter().any(|a| a.name == name) {
+        return (StatusCode::NOT_FOUND, format!("no registered action named '{name}'"))
+            .into_response();
+    }
+    let scan = scan_references(&project, RefKind::Action, &name);
+    if scan.blocks() {
+        return refusal("registered action", &name, &scan);
+    }
+    registry.actions.retain(|a| a.name != name);
+    match registry.save(&project.firmware_repo_path) {
+        Ok(()) => Json(registry).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+// ---- payload layouts (`embarch-study-designer` decision 52) --------------
+//
+// `study-structs.toml` had no write route at all: a layout could only be
+// added by hand-editing the file beside the running UI. These three are the
+// action registry's routes one file over, with the same reference-check
+// posture — and every write goes through `StructRegistry::save`, so
+// validation and file layout stay the crate's rather than becoming a second
+// implementation here.
+
+pub async fn api_structs(State(state): State<crate::AppState>) -> axum::response::Response {
+    let sd = state.study_designer;
+    if sd.project().is_none() {
+        return not_configured();
+    }
+    match sd.structs() {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// A layout registration, edit or rename — `RegisterActionRequest`'s
+/// counterpart, deliberately the same shape so the two dialogs are the same
+/// dialog with a different body.
+#[derive(Debug, Deserialize)]
+pub struct StructRequest {
+    #[serde(default)]
+    previous_name: Option<String>,
+    #[serde(flatten)]
+    layout: embarch_study_designer::registry::StructDef,
+}
+
+pub async fn api_struct_save(
+    State(state): State<crate::AppState>,
+    Json(req): Json<StructRequest>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    let mut registry = match sd.structs() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let StructRequest { previous_name, layout } = req;
+
+    if let Some(previous) = previous_name.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        if previous != layout.name {
+            let scan = scan_references(&project, RefKind::Layout, previous);
+            if scan.blocks() {
+                return refusal("payload layout", previous, &scan);
+            }
+            registry.structs.retain(|d| d.name != previous);
+        }
+    }
+
+    registry.structs.retain(|d| d.name != layout.name);
+    registry.structs.push(layout);
+    // Through the crate's own `save`, which validates first — a layout whose
+    // field type is `u24le` or whose name is too long is refused there, in
+    // the one place that refusal is written.
+    match registry.save(&project.firmware_repo_path) {
+        Ok(()) => Json(registry).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+pub async fn api_struct_delete(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    let mut registry = match sd.structs() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    if !registry.structs.iter().any(|d| d.name == name) {
+        return (StatusCode::NOT_FOUND, format!("no payload layout named '{name}'"))
+            .into_response();
+    }
+    let scan = scan_references(&project, RefKind::Layout, &name);
+    if scan.blocks() {
+        return refusal("payload layout", &name, &scan);
+    }
+    registry.structs.retain(|d| d.name != name);
     match registry.save(&project.firmware_repo_path) {
         Ok(()) => Json(registry).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -1585,6 +1740,518 @@ fn study_slug(name: &str) -> Result<String, String> {
 /// switching projects moves the studies list with it (decision 14).
 fn studies_dir(project: &StudyDesignerConfig) -> std::path::PathBuf {
     project.firmware_repo_path.join("embarch").join("studies")
+}
+
+// ---- the reference scan -------------------------------------------------
+//
+// Three things in a firmware repo can be deleted or renamed out from under a
+// saved study: a registered action, a payload layout, and an `.eap` protocol.
+// A destructive edit that breaks a saved study is **refused, naming the
+// studies** rather than performed and reported — the owner's call, and the
+// only one that leaves an engineer able to decide what to do.
+//
+// This scan lives beside `studies_dir` because that is the directory it
+// reads and `_embarch_ui_rows` is the key it reads; it is deliberately not
+// in `embarch-study-designer`, which knows nothing about this tab's sidecar.
+//
+// It reads each file as a `serde_json::Value`, exactly as `api_studies_list`
+// already does, rather than deserializing a `Study`: a hand-written file, a
+// file from an older schema, and a file this tab wrote all have to be
+// scanned, and the strictest of the three would refuse the other two.
+
+/// What a scan names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefKind {
+    /// A `study-actions.toml` entry, by name.
+    Action,
+    /// A `study-structs.toml` layout, by name.
+    Layout,
+    /// An `.eap` protocol, by name.
+    Protocol,
+}
+
+/// One saved study that references the thing being deleted.
+#[derive(Debug, Clone, Serialize)]
+pub struct StudyReference {
+    slug: String,
+    name: String,
+    /// Which of its steps or taps name it, so an engineer knows where to
+    /// look rather than only that a study somewhere does.
+    steps: Vec<String>,
+}
+
+/// The whole answer to "is anything using this".
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReferenceScan {
+    referenced_by: Vec<StudyReference>,
+    /// Files in the studies directory that could not be read or parsed.
+    ///
+    /// **Never folded into "no references".** A directory this cannot fully
+    /// read is not permission to delete: a file it could not parse might be
+    /// the one study using the thing about to disappear. A non-empty list
+    /// refuses the delete exactly as a reference does.
+    unscannable: Vec<String>,
+}
+
+impl ReferenceScan {
+    /// Whether a destructive edit should be refused.
+    fn blocks(&self) -> bool {
+        !self.referenced_by.is_empty() || !self.unscannable.is_empty()
+    }
+}
+
+/// Every saved study that names `target`.
+///
+/// A missing studies directory is an empty scan: nothing can reference
+/// anything, which is the ordinary state of a repo that has saved no study.
+fn scan_references(
+    project: &StudyDesignerConfig,
+    kind: RefKind,
+    target: &str,
+) -> ReferenceScan {
+    let mut scan = ReferenceScan::default();
+    let dir = studies_dir(project);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return scan,
+        Err(e) => {
+            scan.unscannable.push(format!("{}: {e}", dir.display()));
+            return scan;
+        }
+    };
+
+    for entry in entries {
+        let Ok(entry) = entry else {
+            scan.unscannable.push(format!("{}: an entry could not be read", dir.display()));
+            continue;
+        };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            scan.unscannable.push(format!("{slug}.json could not be read"));
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            scan.unscannable.push(format!("{slug}.json is not valid JSON"));
+            continue;
+        };
+
+        let steps = references_in(&value, kind, target);
+        if !steps.is_empty() {
+            scan.referenced_by.push(StudyReference {
+                name: value.get("name").and_then(|n| n.as_str()).unwrap_or(&slug).to_string(),
+                slug,
+                steps,
+            });
+        }
+    }
+    scan.referenced_by.sort_by(|a, b| a.slug.cmp(&b.slug));
+    scan
+}
+
+/// Which parts of one saved study name `target`.
+///
+/// A layout is looked for in **both** places it can appear: `decoders[].name`
+/// — the resolved copy that actually runs — and `_embarch_ui_taps[].decoder`,
+/// the authored name. Either alone would miss a real reference: a hand-written
+/// study has no sidecar, and a study whose tap names a layout that failed to
+/// resolve has no `decoders` entry.
+///
+/// A protocol likewise: `protocols[].name` is what runs,
+/// `_embarch_ui_rows[].action.protocol` is what was authored.
+fn references_in(value: &serde_json::Value, kind: RefKind, target: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut note = |label: String| {
+        if !out.contains(&label) {
+            out.push(label);
+        }
+    };
+
+    let rows = value.get("_embarch_ui_rows").and_then(|r| r.as_array());
+    let step_name = |row: &serde_json::Value, index: usize| -> String {
+        row.get("name")
+            .and_then(|n| n.as_str())
+            .filter(|n| !n.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("step {}", index + 1))
+    };
+
+    match kind {
+        RefKind::Action => {
+            for (i, row) in rows.into_iter().flatten().enumerate() {
+                let action = row.get("action");
+                let names_it = action
+                    .and_then(|a| a.get("name"))
+                    .and_then(|n| n.as_str())
+                    .is_some_and(|n| n == target);
+                if names_it {
+                    note(step_name(row, i));
+                }
+            }
+        }
+        RefKind::Protocol => {
+            for (i, row) in rows.into_iter().flatten().enumerate() {
+                let names_it = row
+                    .get("action")
+                    .and_then(|a| a.get("protocol"))
+                    .and_then(|n| n.as_str())
+                    .is_some_and(|n| n == target);
+                if names_it {
+                    note(step_name(row, i));
+                }
+            }
+            let carried = value
+                .get("protocols")
+                .and_then(|p| p.as_array())
+                .into_iter()
+                .flatten()
+                .any(|p| p.get("name").and_then(|n| n.as_str()) == Some(target));
+            if carried {
+                note("the study carries this protocol".to_string());
+            }
+        }
+        RefKind::Layout => {
+            let carried = value
+                .get("decoders")
+                .and_then(|d| d.as_array())
+                .into_iter()
+                .flatten()
+                .any(|d| d.get("name").and_then(|n| n.as_str()) == Some(target));
+            if carried {
+                note("the study carries this layout".to_string());
+            }
+            for (i, tap) in value
+                .get("_embarch_ui_taps")
+                .and_then(|t| t.as_array())
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if tap.get("decoder").and_then(|d| d.as_str()) == Some(target) {
+                    note(
+                        tap.get("name")
+                            .and_then(|n| n.as_str())
+                            .filter(|n| !n.trim().is_empty())
+                            .map(|n| format!("tap '{n}'"))
+                            .unwrap_or_else(|| format!("tap {}", i + 1)),
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The one structured error body in this file.
+///
+/// Every other error here is plain text, and the browser renders an
+/// unparseable refusal verbatim — which is what keeps a `500` from a layer
+/// that never heard of this shape readable. This one is JSON because its
+/// payload is a *list* the dialog renders as a table, and a table
+/// reconstructed by splitting a sentence is a parser.
+fn refusal(what: &str, name: &str, scan: &ReferenceScan) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": format!(
+                "{what} '{name}' is still used by {} saved {}",
+                scan.referenced_by.len(),
+                if scan.referenced_by.len() == 1 { "study" } else { "studies" }
+            ),
+            "referenced_by": scan.referenced_by,
+            "unscannable": scan.unscannable,
+        })),
+    )
+        .into_response()
+}
+
+// ---- `.eap` protocol files (`embarch-study-designer` decisions 58-62) ----
+//
+// One directory at `<firmware-repo>/embarch/protocols/`, one `.eap` file per
+// handshake, edited as **text with live parse errors** rather than through a
+// structured form. A form would be a second copy of a server-side grammar in
+// JavaScript, which is the largest possible form of the defect `suite/017`
+// just closed; the study view shows names only.
+//
+// Every route here goes through `eap_repo`, which parses and resolves before
+// it writes, so this tab never leaves text on disk that this crate would
+// refuse to read back.
+
+/// One `.eap` file, as `GET /protocols` lists it.
+#[derive(Debug, Serialize)]
+struct ProtocolFileSummary {
+    stem: String,
+    /// Every block that resolved, with its states — the same shape the
+    /// actions response serves, so the editor and the row pickers read one
+    /// vocabulary.
+    protocols: Vec<ProtocolSummary>,
+    /// This file's errors: its one parse error, or one per block that failed
+    /// to resolve.
+    ///
+    /// **At most one parse error**, because the parser stops at the first
+    /// thing it cannot read. The editor does not promise a multi-error list
+    /// the parser cannot produce.
+    errors: Vec<EapErrorOut>,
+}
+
+/// One error, with the line the editor bands.
+#[derive(Debug, Clone, Serialize)]
+pub struct EapErrorOut {
+    /// `EapError`'s own `line {n}: …` sentence, rendered by the crate.
+    message: String,
+    /// 1-based source line, or `0` for an error with no line — a file that
+    /// could not be read at all. **A line-0 error gets no band.**
+    line: u32,
+}
+
+impl EapErrorOut {
+    fn from(error: &embarch_study_designer::eap_repo::FileError) -> EapErrorOut {
+        let line = match error {
+            embarch_study_designer::eap_repo::RepoError::Eap(e) => e.line,
+            _ => 0,
+        };
+        EapErrorOut { message: error.to_string(), line }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProtocolsResponse {
+    files: Vec<ProtocolFileSummary>,
+    /// Protocol names declared by more than one file, each with the stems
+    /// declaring it.
+    ///
+    /// Rendered repo-wide, above the files: this is the one situation
+    /// `eap_repo::defs` refuses outright, and seeing it here is how an
+    /// author finds out before a build fails rather than when one does.
+    duplicate_names: Vec<DuplicateName>,
+}
+
+#[derive(Debug, Serialize)]
+struct DuplicateName {
+    name: String,
+    files: Vec<String>,
+}
+
+fn protocols_response(repo: &RepoProtocols) -> ProtocolsResponse {
+    ProtocolsResponse {
+        files: repo
+            .files
+            .iter()
+            .map(|file| ProtocolFileSummary {
+                stem: file.stem.clone(),
+                protocols: file
+                    .resolved()
+                    .map(|(name, resolved)| ProtocolSummary {
+                        name: name.to_string(),
+                        file: file.stem.clone(),
+                        states: state_summaries(resolved),
+                    })
+                    .collect(),
+                errors: file.errors().iter().map(EapErrorOut::from).collect(),
+            })
+            .collect(),
+        duplicate_names: repo
+            .duplicate_names()
+            .into_iter()
+            .map(|(name, files)| DuplicateName { name, files })
+            .collect(),
+    }
+}
+
+pub async fn api_protocols(State(state): State<crate::AppState>) -> axum::response::Response {
+    let sd = state.study_designer;
+    if sd.project().is_none() {
+        return not_configured();
+    }
+    match sd.protocols() {
+        Ok(repo) => Json(protocols_response(&repo)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProtocolFileOut {
+    stem: String,
+    /// The file's whole text — what the editor opens.
+    text: String,
+    protocols: Vec<ProtocolSummary>,
+    errors: Vec<EapErrorOut>,
+}
+
+pub async fn api_protocol_read(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(stem): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    if sd.project().is_none() {
+        return not_configured();
+    }
+    if let Err(e) = embarch_study_designer::eap_repo::validate_stem(&stem) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
+    let repo = match sd.protocols() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let Some(file) = repo.file(&stem) else {
+        return (StatusCode::NOT_FOUND, format!("no protocol file '{stem}.eap'")).into_response();
+    };
+    Json(ProtocolFileOut {
+        stem: file.stem.clone(),
+        text: file.text.clone(),
+        protocols: file
+            .resolved()
+            .map(|(name, resolved)| ProtocolSummary {
+                name: name.to_string(),
+                file: file.stem.clone(),
+                states: state_summaries(resolved),
+            })
+            .collect(),
+        errors: file.errors().iter().map(EapErrorOut::from).collect(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProtocolTextRequest {
+    text: String,
+}
+
+/// Writes one `.eap` file, refusing text that does not parse or resolve.
+///
+/// The `400` carries `EapError`'s own `line {n}: …` sentence unchanged — the
+/// editor bands that line from it, and a reworded message would mean the
+/// editor and the error disagree about where the problem is.
+///
+/// **Nothing is written on a refusal**, so a failed save cannot cost an
+/// engineer the working version they were editing away from; `eap_repo::save`
+/// is where that ordering lives.
+pub async fn api_protocol_write(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(stem): axum::extract::Path<String>,
+    Json(req): Json<ProtocolTextRequest>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    // Validated here and again inside `eap_repo::save` — traversal is
+    // refused twice, deliberately. The check beside the `join` is the one
+    // that protects the filesystem; this one gives a better message.
+    if let Err(e) = embarch_study_designer::eap_repo::validate_stem(&stem) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
+    match embarch_study_designer::eap_repo::save(&project.firmware_repo_path, &stem, &req.text) {
+        Ok(()) => match sd.protocols() {
+            Ok(repo) => Json(protocols_response(&repo)).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        },
+        Err(embarch_study_designer::eap_repo::RepoError::Io(e)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+/// Deletes one `.eap` file, refusing while a saved study still names one of
+/// its protocols.
+pub async fn api_protocol_delete(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(stem): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    if let Err(e) = embarch_study_designer::eap_repo::validate_stem(&stem) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
+    let repo = match sd.protocols() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let Some(file) = repo.file(&stem) else {
+        return (StatusCode::NOT_FOUND, format!("no protocol file '{stem}.eap'")).into_response();
+    };
+
+    // Every protocol this file declares, checked one at a time, so the
+    // refusal names the protocol a study actually uses rather than the file.
+    //
+    // A file that did not parse declares no resolvable protocol and is
+    // therefore deletable by this check alone — which is right: nothing can
+    // be running it. `scan_references`'s own unscannable list is what keeps
+    // that from being a hole, since a study naming it by an authored name
+    // still matches.
+    let mut merged = ReferenceScan::default();
+    for (name, _) in file.resolved() {
+        let scan = scan_references(&project, RefKind::Protocol, name);
+        merged.referenced_by.extend(scan.referenced_by);
+        merged.unscannable.extend(scan.unscannable);
+    }
+    // A file that did not parse still has to be checked against its own
+    // stem, because an author who named a protocol after its file is the
+    // ordinary case and the parse failure is exactly why it stopped
+    // resolving.
+    if file.parsed.is_err() {
+        let scan = scan_references(&project, RefKind::Protocol, &stem);
+        merged.referenced_by.extend(scan.referenced_by);
+        merged.unscannable.extend(scan.unscannable);
+    }
+    merged.unscannable.sort();
+    merged.unscannable.dedup();
+    if merged.blocks() {
+        return refusal("protocol file", &stem, &merged);
+    }
+
+    match embarch_study_designer::eap_repo::delete(&project.firmware_repo_path, &stem) {
+        Ok(()) => match sd.protocols() {
+            Ok(repo) => Json(protocols_response(&repo)).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        },
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProtocolCheckResponse {
+    ok: bool,
+    protocols: Vec<ProtocolSummary>,
+    errors: Vec<EapErrorOut>,
+}
+
+/// Parses `.eap` text without writing it — the editor's Check button.
+///
+/// **`200` even when `ok` is false.** Reporting what is wrong is this
+/// route's entire purpose, so a failed parse is a successful check; the same
+/// shape `api_version_check` already uses for a mismatch it is reporting
+/// rather than suffering. A `400` here would make the browser's error path
+/// and its success path both have to render errors.
+pub async fn api_protocol_check(
+    State(state): State<crate::AppState>,
+    Json(req): Json<ProtocolTextRequest>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    if sd.project().is_none() {
+        return not_configured();
+    }
+    let (protocols, errors) = match embarch_study_designer::eap_parse::parse(&req.text) {
+        Err(e) => (Vec::new(), vec![EapErrorOut { message: e.to_string(), line: e.line }]),
+        Ok(file) => {
+            let mut protocols = Vec::new();
+            let mut errors = Vec::new();
+            for block in &file.protocols {
+                match embarch_study_designer::eap_parse::resolve(block) {
+                    Ok(resolved) => protocols.push(ProtocolSummary {
+                        name: block.name.clone(),
+                        file: String::new(),
+                        states: state_summaries(&resolved),
+                    }),
+                    Err(e) => errors.push(EapErrorOut { message: e.to_string(), line: e.line }),
+                }
+            }
+            (protocols, errors)
+        }
+    };
+    Json(ProtocolCheckResponse { ok: errors.is_empty(), protocols, errors }).into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -3289,6 +3956,234 @@ repeat = [{ name = "green", type = "i32le" }]
         // A file with no `requires` at all reads as unconstrained, which is
         // what such a study would in fact have done.
         assert_eq!(version_field(&serde_json::json!({}), "firmware_version"), REQUIREMENT_ANY);
+    }
+
+    // --- the reference scan ---------------------------------------------
+
+    fn repo_with_studies(tag: &str, files: &[(&str, serde_json::Value)]) -> (Scratch, StudyDesignerConfig) {
+        let scratch = Scratch::new(tag);
+        let dir = scratch.0.join("embarch").join("studies");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (slug, value) in files {
+            std::fs::write(
+                dir.join(format!("{slug}.json")),
+                serde_json::to_string_pretty(value).unwrap(),
+            )
+            .unwrap();
+        }
+        let config = StudyDesignerConfig {
+            firmware_repo_path: scratch.0.clone(),
+            static_extractor: None,
+        };
+        (scratch, config)
+    }
+
+    #[test]
+    fn a_registered_action_is_found_by_the_step_that_names_it() {
+        let (_scratch, project) = repo_with_studies(
+            "refs-action",
+            &[(
+                "drain",
+                serde_json::json!({
+                    "name": "Ten hour drain",
+                    "_embarch_ui_rows": [
+                        { "name": "connect", "action": { "kind": "built_in", "which": "ble_connect" } },
+                        { "name": "start-log", "action": { "kind": "registered", "name": "start_logging" } }
+                    ]
+                }),
+            )],
+        );
+        let scan = scan_references(&project, RefKind::Action, "start_logging");
+        assert!(scan.blocks());
+        assert_eq!(scan.referenced_by.len(), 1);
+        assert_eq!(scan.referenced_by[0].slug, "drain");
+        assert_eq!(scan.referenced_by[0].name, "Ten hour drain");
+        assert_eq!(scan.referenced_by[0].steps, vec!["start-log".to_string()]);
+
+        // And an action nothing names is deletable.
+        assert!(!scan_references(&project, RefKind::Action, "stop_logging").blocks());
+    }
+
+    /// **Both places a layout can appear.** A hand-written study has no
+    /// sidecar, so `decoders[].name` is the only trace of it; a study whose
+    /// tap names a layout that failed to resolve has no `decoders` entry, so
+    /// the sidecar is the only trace. Either check alone misses a real
+    /// reference.
+    #[test]
+    fn a_layout_referenced_only_through_decoders_is_still_found() {
+        let (_scratch, project) = repo_with_studies(
+            "refs-layout",
+            &[
+                (
+                    "hand-written",
+                    serde_json::json!({
+                        "name": "hand written",
+                        "decoders": [{ "name": "ppg_packet", "header": [], "repeat": [] }]
+                    }),
+                ),
+                (
+                    "sidecar-only",
+                    serde_json::json!({
+                        "name": "sidecar only",
+                        "_embarch_ui_taps": [
+                            { "kind": "gatt_notify", "name": "ppg", "decoder": "ppg_packet" }
+                        ]
+                    }),
+                ),
+            ],
+        );
+        let scan = scan_references(&project, RefKind::Layout, "ppg_packet");
+        assert_eq!(scan.referenced_by.len(), 2, "{scan:?}");
+        assert_eq!(scan.referenced_by[0].slug, "hand-written");
+        assert_eq!(
+            scan.referenced_by[0].steps,
+            vec!["the study carries this layout".to_string()]
+        );
+        assert_eq!(scan.referenced_by[1].steps, vec!["tap 'ppg'".to_string()]);
+    }
+
+    #[test]
+    fn a_protocol_is_found_through_the_row_and_through_the_carried_list() {
+        let (_scratch, project) = repo_with_studies(
+            "refs-protocol",
+            &[(
+                "bds",
+                serde_json::json!({
+                    "name": "BDS download",
+                    "protocols": [{ "name": "bds_batch_download" }],
+                    "_embarch_ui_rows": [
+                        {
+                            "name": "handshake",
+                            "action": {
+                                "kind": "built_in",
+                                "which": "run_protocol",
+                                "protocol": "bds_batch_download",
+                                "entry_state": "start"
+                            }
+                        }
+                    ]
+                }),
+            )],
+        );
+        let scan = scan_references(&project, RefKind::Protocol, "bds_batch_download");
+        assert_eq!(scan.referenced_by.len(), 1);
+        assert_eq!(
+            scan.referenced_by[0].steps,
+            vec!["handshake".to_string(), "the study carries this protocol".to_string()]
+        );
+    }
+
+    /// **A file this cannot read is reported as unscannable, never as "no
+    /// references".** A directory it cannot fully read is not permission to
+    /// delete: the file it could not parse might be the one study using the
+    /// thing about to disappear.
+    #[test]
+    fn an_unparseable_study_blocks_a_delete_rather_than_reading_as_no_references() {
+        let (scratch, project) = repo_with_studies("refs-broken", &[]);
+        std::fs::write(
+            scratch.0.join("embarch").join("studies").join("broken.json"),
+            "{ this is not json",
+        )
+        .unwrap();
+
+        let scan = scan_references(&project, RefKind::Action, "anything");
+        assert!(scan.referenced_by.is_empty());
+        assert_eq!(scan.unscannable, vec!["broken.json is not valid JSON".to_string()]);
+        assert!(scan.blocks(), "an unscannable file must refuse the delete");
+    }
+
+    #[test]
+    fn a_missing_studies_directory_is_an_empty_scan() {
+        let scratch = Scratch::new("refs-none");
+        let project = StudyDesignerConfig {
+            firmware_repo_path: scratch.0.clone(),
+            static_extractor: None,
+        };
+        let scan = scan_references(&project, RefKind::Protocol, "bds");
+        assert!(!scan.blocks());
+    }
+
+    /// The `409` body is the one structured error in this file, because its
+    /// payload is a list the dialog renders as a table.
+    #[test]
+    fn the_refusal_body_names_the_studies_as_a_list() {
+        let scan = ReferenceScan {
+            referenced_by: vec![StudyReference {
+                slug: "drain".to_string(),
+                name: "Ten hour drain".to_string(),
+                steps: vec!["start-log".to_string()],
+            }],
+            unscannable: Vec::new(),
+        };
+        let json = serde_json::to_value(serde_json::json!({
+            "error": format!(
+                "registered action 'x' is still used by {} saved study",
+                scan.referenced_by.len()
+            ),
+            "referenced_by": &scan.referenced_by,
+            "unscannable": &scan.unscannable,
+        }))
+        .unwrap();
+        assert_eq!(json["referenced_by"][0]["slug"], "drain");
+        assert_eq!(json["referenced_by"][0]["name"], "Ten hour drain");
+        assert_eq!(json["referenced_by"][0]["steps"][0], "start-log");
+    }
+
+    // --- the protocol repo ----------------------------------------------
+
+    const ONE_PROTOCOL: &str =
+        "protocol bds {\n    state start {\n        on_timeout 1000ms: goto done\n    }\n\n    state done outcome: pass\n}\n";
+
+    fn repo_with_protocols(tag: &str, files: &[(&str, &str)]) -> Scratch {
+        let scratch = Scratch::new(tag);
+        let dir = scratch.0.join("embarch").join("protocols");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (stem, text) in files {
+            std::fs::write(dir.join(format!("{stem}.eap")), text).unwrap();
+        }
+        scratch
+    }
+
+    /// A file that did not parse carries its error and does not take the
+    /// listing down with it; the file beside it still offers its protocol.
+    #[test]
+    fn the_protocols_listing_reports_a_bad_file_beside_the_good_ones() {
+        let scratch = repo_with_protocols(
+            "protocols-mixed",
+            &[("bds", ONE_PROTOCOL), ("broken", "protocol oops {\n  state go {\n")],
+        );
+        let repo = embarch_study_designer::eap_repo::scan(&scratch.0).unwrap();
+        let out = protocols_response(&repo);
+
+        assert_eq!(out.files.len(), 2);
+        let bds = out.files.iter().find(|f| f.stem == "bds").unwrap();
+        assert_eq!(bds.protocols.len(), 1);
+        assert!(bds.errors.is_empty());
+        let json = serde_json::to_value(&bds.protocols).unwrap();
+        assert_eq!(json[0]["name"], "bds");
+        assert_eq!(json[0]["file"], "bds");
+        assert_eq!(json[0]["states"][0]["name"], "start");
+        assert_eq!(json[0]["states"][0]["terminal"], false);
+        assert_eq!(json[0]["states"][1]["terminal"], true);
+        assert_eq!(json[0]["states"][1]["outcome"], "pass");
+
+        let broken = out.files.iter().find(|f| f.stem == "broken").unwrap();
+        assert!(broken.protocols.is_empty(), "the file did not parse, so it offers nothing");
+        assert_eq!(broken.errors.len(), 1, "one parse error, never a list");
+        assert!(broken.errors[0].line > 0, "the editor bands this line");
+        assert!(broken.errors[0].message.starts_with("line "), "{:?}", broken.errors[0]);
+        assert!(out.duplicate_names.is_empty());
+    }
+
+    #[test]
+    fn a_name_declared_by_two_files_is_reported_repo_wide() {
+        let scratch =
+            repo_with_protocols("protocols-dup", &[("a", ONE_PROTOCOL), ("b", ONE_PROTOCOL)]);
+        let repo = embarch_study_designer::eap_repo::scan(&scratch.0).unwrap();
+        let out = protocols_response(&repo);
+        assert_eq!(out.duplicate_names.len(), 1);
+        assert_eq!(out.duplicate_names[0].name, "bds");
+        assert_eq!(out.duplicate_names[0].files, vec!["a".to_string(), "b".to_string()]);
     }
 }
 
