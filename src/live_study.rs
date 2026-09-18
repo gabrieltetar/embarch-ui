@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use embarch_core_client::{
     CoreClient, FollowItem, FollowMode, FollowOptions, StudyEvent,
 };
+use crate::trace::{self, ClockAnchor, Projection};
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
@@ -257,6 +258,301 @@ impl Series {
     }
 }
 
+// ---- the live Time chart ----------------------------------------------------
+//
+// **The same chart the Live Study tab draws off disk, fed as the run happens.**
+// `src/time_chart.rs` builds it post-hoc from rendered files; this builds it
+// from the events Core pushes, through the same [`crate::trace::Projection`]
+// and the same row decoder, so a run watched live and the same run reloaded
+// afterwards are one picture rather than two.
+//
+// Three rules, and every one of them is about not moving something a reader has
+// already looked at:
+//
+// 1. **A mark is never placed eagerly.** A lane stores each mark's
+//    `core_rx_utc_ms` only; placement happens when a frame is serialized. This
+//    is sound because anchors append monotonically in the host clock — a new
+//    anchor can never land *between* two existing ones — so a mark already
+//    bracketed never moves, and only marks past the last anchor are affected,
+//    which the projection already refuses to place.
+// 2. **A tier is never silently promoted.** The axis exists once the trace has
+//    given two frames carrying both clocks, and not before; until then the tab
+//    says it is waiting. Where a placement genuinely must change, the epoch
+//    bumps and the browser re-snapshots.
+// 3. **A non-monotone anchor is rejected and counted, never inserted.**
+//    `current_utc_ms()` is not monotonic — an NTP correction mid-capture makes
+//    an arrival go backwards — and the post-hoc path sorts and dedups its
+//    anchors, which an append-only live push cannot do. A backwards anchor
+//    would break `project_ms`'s binary-search precondition and land a mark
+//    anywhere.
+
+/// Marks kept per lane, live. A ring like every other here, and it counts what
+/// it dropped for the same reason: a short chart and a complete one must not
+/// look alike.
+const MAX_LIVE_MARKS: usize = 20_000;
+/// Anchors kept. One per record-carrying frame — a few thousand across a long
+/// capture at the outpost's own frame rate, and the projection binary-searches
+/// them, so this is a bound on memory rather than on fidelity.
+const MAX_LIVE_ANCHORS: usize = 200_000;
+/// How often a `time_chart` frame goes out at most. A traced study pushes a
+/// frame every few milliseconds; redrawing per frame would send the browser
+/// pictures the compositor never shows.
+const TIME_CHART_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// One event on a lane, **unplaced**.
+#[derive(Debug, Clone)]
+struct LiveMark {
+    core_rx_utc_ms: u64,
+    sub: String,
+    label: String,
+}
+
+/// One lane of live marks.
+#[derive(Debug, Default)]
+struct LiveLane {
+    label: String,
+    kind: &'static str,
+    marks: VecDeque<LiveMark>,
+    /// Marks dropped off the front because the cap was hit.
+    dropped: u64,
+    /// Every mark this lane has ever held, dropped ones included.
+    total: u64,
+    /// How many of `marks` have already gone out **placed**. Everything from
+    /// here on is either placeable now or still past the last anchor.
+    ///
+    /// Counted from the front of the ring, so a drop moves it too — see
+    /// [`LiveLane::push`].
+    emitted: usize,
+}
+
+impl LiveLane {
+    fn push(&mut self, mark: LiveMark) {
+        self.total += 1;
+        self.marks.push_back(mark);
+        while self.marks.len() > MAX_LIVE_MARKS {
+            self.marks.pop_front();
+            self.dropped += 1;
+            // The cursor is an index into the ring, so dropping the front
+            // moves it. Saturating rather than wrapping: a lane whose whole
+            // emitted prefix has aged out has nothing left to re-emit.
+            self.emitted = self.emitted.saturating_sub(1);
+        }
+    }
+
+    /// The marks this lane can place now and has not sent yet.
+    ///
+    /// **Walks forward and stops at the first one that will not place.**
+    /// Anchors are monotone and marks are in arrival order, so the first
+    /// unplaceable mark is past the last anchor and so is everything after it —
+    /// there is nothing further on to find. Those are the *pending* count, and
+    /// they are drawn at the leading edge as a number, never at a guessed
+    /// position.
+    fn take_placeable(&mut self, proj: &Projection, uncertain: bool) -> (Vec<Value>, usize) {
+        let mut out = Vec::new();
+        while self.emitted < self.marks.len() {
+            let mark = &self.marks[self.emitted];
+            let Some(t) = proj.place(mark.core_rx_utc_ms) else { break };
+            out.push(json!({
+                "t": t,
+                "core_rx_utc_ms": mark.core_rx_utc_ms,
+                "kind": self.kind,
+                "sub": mark.sub,
+                "label": mark.label,
+                "uncertain": uncertain,
+            }));
+            self.emitted += 1;
+        }
+        (out, self.marks.len() - self.emitted)
+    }
+
+    /// Every mark this lane currently holds that places, for a snapshot — and
+    /// it resets the cursor, because a snapshot *is* everything sent so far.
+    fn place_all(&mut self, proj: &Projection, uncertain: bool) -> (Vec<Value>, usize) {
+        self.emitted = 0;
+        self.take_placeable(proj, uncertain)
+    }
+}
+
+/// The axis a live session is building, and the honest accounting of what it
+/// refused on the way.
+#[derive(Debug, Default)]
+struct LiveAxis {
+    /// One per record-carrying frame, appended in arrival order and **never
+    /// sorted**: an append-only feed has no later frames to sort against, so
+    /// monotonicity is enforced at the door instead.
+    anchors: Vec<ClockAnchor>,
+    /// Which axis the marks already sent were placed on. Bumped only where a
+    /// placement genuinely must change — the header frame arriving and
+    /// promoting the tier, or a stale prefix being dropped mid-run — and the
+    /// browser re-snapshots rather than patching across it.
+    epoch: u64,
+    /// Anchors refused because their arrival went backwards against the one
+    /// before them. **An NTP correction mid-capture is the realistic cause**,
+    /// and inserting one would break the projection's binary-search
+    /// precondition and land a mark anywhere. Counted so a chart that quietly
+    /// stopped gaining resolution says why.
+    non_monotone: u64,
+    /// Whether the capture's header frame has arrived. Until it has, rows carry
+    /// no `us` and contribute no anchor, so the axis does not exist yet.
+    header_seen: bool,
+    frames: u64,
+    rows: u64,
+    /// Rows the live decoder pushed that this build could not read as rows.
+    rows_unparsed: u64,
+    /// How many leading anchors were dropped as a stale pre-reset prefix.
+    stale_prefix_dropped: usize,
+    /// The tap that is drawing the axis.
+    tap: Option<String>,
+}
+
+impl LiveAxis {
+    /// Folds one pushed frame in. Returns true when the axis changed in a way
+    /// that invalidates every placement already sent.
+    fn ingest(&mut self, tap: &str, header_seen: bool, rows: &[String]) -> bool {
+        self.frames += 1;
+        self.rows += rows.len() as u64;
+        if self.tap.is_none() {
+            self.tap = Some(tap.to_string());
+        }
+        // A second traced tap cannot also draw the axis. Its frames are
+        // recorded in the counts and contribute no anchors.
+        if self.tap.as_deref() != Some(tap) {
+            return false;
+        }
+
+        let mut epoch_bump = false;
+        if header_seen && !self.header_seen {
+            self.header_seen = true;
+            // **The tier just improved.** Every row before this one carried an
+            // empty `us` and contributed no anchor, so nothing placed so far is
+            // wrong — but the axis is about to exist for the first time, and a
+            // browser holding "no axis yet" must re-snapshot rather than
+            // receive marks on an axis it has never seen.
+            epoch_bump = true;
+        }
+
+        // Decoded through `trace::parse_rows`, which is the same function the
+        // post-hoc path uses on the rendered file — the whole reason Core
+        // pushes CSV rows rather than a struct.
+        let parsed = trace::parse_rows(rows.iter().map(String::as_str), rows.len());
+        self.rows_unparsed += parsed.unparsed as u64;
+        let Some(anchor) = trace::anchor_for_frame(&parsed.rows) else {
+            return epoch_bump;
+        };
+
+        if let Some(last) = self.anchors.last() {
+            if anchor.rx_utc_ms < last.rx_utc_ms {
+                // **Rejected, not inserted.** See `LiveAxis::non_monotone`.
+                self.non_monotone += 1;
+                return epoch_bump;
+            }
+        }
+        if self.anchors.len() < MAX_LIVE_ANCHORS {
+            self.anchors.push(anchor);
+        }
+
+        // A stale pre-reset prefix can only be recognised once there is enough
+        // after it to recognise it against, so this fires mid-run or not at
+        // all — and when it does, every placement already sent was made off a
+        // dead epoch's anchors. That is exactly the case the epoch exists for.
+        let before = self.anchors.len();
+        trace::drop_stale_prefix(&mut self.anchors);
+        if self.anchors.len() < before {
+            self.stale_prefix_dropped += before - self.anchors.len();
+            epoch_bump = true;
+        }
+        if epoch_bump {
+            self.epoch += 1;
+        }
+        epoch_bump
+    }
+
+    /// Median milliseconds between consecutive anchors — how finely this
+    /// capture can place anything, which is what a projected mark's accuracy
+    /// is. `None` until there are two.
+    fn resolution_ms(&self) -> Option<f64> {
+        if self.anchors.len() < 2 {
+            return None;
+        }
+        let mut deltas: Vec<u64> = self
+            .anchors
+            .windows(2)
+            .map(|w| w[1].rx_utc_ms.saturating_sub(w[0].rx_utc_ms))
+            .collect();
+        deltas.sort_unstable();
+        let mid = deltas.len() / 2;
+        Some(if deltas.len().is_multiple_of(2) {
+            (deltas[mid - 1] + deltas[mid]) as f64 / 2.0
+        } else {
+            deltas[mid] as f64
+        })
+    }
+
+    fn projection(&self) -> Projection {
+        Projection::from_live_anchors(&self.anchors, self.resolution_ms())
+    }
+
+    fn describe(&self, proj: &Projection) -> Value {
+        if !proj.placeable() {
+            return json!({
+                "placeable": false,
+                "unit": "us",
+                "axis_clock": "dut-cycles",
+                "epoch": self.epoch,
+                "source": self.tap,
+                "note": if self.tap.is_none() {
+                    "This study declares an outpost trace and none of its frames has arrived yet, \
+                     so there is no axis to draw on. Nothing is placed against a guess in the \
+                     meantime — the chart appears when the trace's first stamped-and-dated frame \
+                     does.".to_string()
+                } else if !self.header_seen {
+                    format!(
+                        "The trace '{}' is arriving and its header frame has not, so its records \
+                         carry a raw cycle count and no rate to divide it by. The axis appears \
+                         when the header does; embarch-core repeats it, so this is a wait rather \
+                         than a refusal.",
+                        self.tap.as_deref().unwrap_or("?")
+                    )
+                } else {
+                    "Fewer than two frames of this capture carry both clocks, so there is nothing \
+                     to tie the DUT's counter to embarch-core's own. One more stamped frame is \
+                     all it takes.".to_string()
+                },
+                "frames": self.frames,
+                "rows": self.rows,
+                "non_monotone": self.non_monotone,
+            });
+        }
+        json!({
+            "placeable": true,
+            "unit": "us",
+            "axis_clock": "dut-cycles",
+            "epoch": self.epoch,
+            "source": self.tap,
+            "t_from": proj.t_from(),
+            "t_to": proj.t_to(),
+            "projected": true,
+            "accuracy_ms": proj.accuracy_ms,
+            "window_from_ms": proj.window_from_ms(),
+            "window_to_ms": proj.window_to_ms(),
+            "frames": self.frames,
+            "rows": self.rows,
+            "rows_unparsed": self.rows_unparsed,
+            "non_monotone": self.non_monotone,
+            "stale_prefix_dropped": self.stale_prefix_dropped,
+            "note": format!(
+                "The axis is the DUT's own microsecond counter, from the trace '{}' as it \
+                 arrives. Everything else in this study is stamped on embarch-core's receipt \
+                 clock and is projected onto it through the frames that carry both — good to \
+                 about {} ms so far. This axis grows as the run does: a mark past its leading \
+                 edge is counted, never drawn at a guessed position.",
+                self.tap.as_deref().unwrap_or("?"),
+                proj.accuracy_ms.map(|v| format!("{v}")).unwrap_or_else(|| "?".to_string()),
+            ),
+        })
+    }
+}
+
 /// One row of the chronological feed.
 #[derive(Debug, Clone, Serialize)]
 struct FeedRow {
@@ -302,6 +598,22 @@ struct SessionState {
     record_note: Option<String>,
     /// True once the follow task has exited.
     finished: bool,
+    /// The axis the Time chart is drawing on, built from the trace as it
+    /// arrives.
+    axis: LiveAxis,
+    /// Every step this run has finished, in the shape the projection takes.
+    ///
+    /// **This is what `StepCompleted` carrying its own stamps bought.** The
+    /// three values are Core's own, from the same `events.json` row, so a live
+    /// step band and the one a reload draws are the same band through the same
+    /// `project_steps_on` — not a live approximation of it.
+    step_stamps: Vec<trace::StepStamp>,
+    /// One lane of unplaced marks per stream, keyed the way the post-hoc
+    /// chart keys them so a live lane and a reloaded one are the same lane.
+    lanes: BTreeMap<String, LiveLane>,
+    /// When a `time_chart` frame last went out, so a traced study pushing a
+    /// frame every few milliseconds does not redraw per frame.
+    last_time_chart: Option<std::time::Instant>,
 }
 
 impl SessionState {
@@ -315,6 +627,103 @@ impl SessionState {
             self.feed_dropped += 1;
         }
         row
+    }
+
+    /// Records one mark on a lane, **unplaced** — see the module rules above.
+    fn push_mark(&mut self, key: &str, label: &str, kind: &'static str, mark: LiveMark) {
+        let lane = self.lanes.entry(key.to_string()).or_default();
+        if lane.label.is_empty() {
+            lane.label = label.to_string();
+            lane.kind = kind;
+        }
+        lane.push(mark);
+    }
+
+    /// The whole chart as it stands: every lane's placeable marks, on the axis
+    /// as it stands. What a snapshot carries, and what an epoch bump forces.
+    fn time_chart_snapshot(&mut self) -> Value {
+        let proj = self.axis.projection();
+        let axis = self.axis.describe(&proj);
+        let lanes: Vec<Value> = self
+            .lanes
+            .iter_mut()
+            .map(|(key, lane)| {
+                let (marks, pending) = lane.place_all(&proj, proj.projected());
+                json!({
+                    "key": key,
+                    "label": lane.label,
+                    "kind": lane.kind,
+                    "total": lane.total,
+                    "dropped": lane.dropped,
+                    "pending": pending,
+                    "marks": marks,
+                })
+            })
+            .collect();
+        let step_row = trace::project_steps_on(&self.step_stamps, &proj);
+        json!({
+            "axis": axis,
+            "epoch": self.axis.epoch,
+            "replace": true,
+            "lanes": lanes,
+            // The same bands the Trace card and the post-hoc chart draw,
+            // through the same projection — not a live rendering of them.
+            "bands": step_row.as_ref().map(|r| &r.bands),
+            "steps_placeable": step_row.as_ref().is_some_and(|r| r.placeable),
+            "steps_note": step_row.as_ref().map(|r| r.note.clone()),
+        })
+    }
+
+    /// The marks that became placeable since the last frame, and nothing else.
+    fn time_chart_delta(&mut self) -> Value {
+        let proj = self.axis.projection();
+        let axis = self.axis.describe(&proj);
+        let lanes: Vec<Value> = self
+            .lanes
+            .iter_mut()
+            .map(|(key, lane)| {
+                let (marks, pending) = lane.take_placeable(&proj, proj.projected());
+                json!({
+                    "key": key,
+                    "label": lane.label,
+                    "kind": lane.kind,
+                    "total": lane.total,
+                    "dropped": lane.dropped,
+                    "pending": pending,
+                    "marks": marks,
+                })
+            })
+            .collect();
+        let step_row = trace::project_steps_on(&self.step_stamps, &proj);
+        json!({
+            "axis": axis,
+            "epoch": self.axis.epoch,
+            "replace": false,
+            "lanes": lanes,
+            // The same bands the Trace card and the post-hoc chart draw,
+            // through the same projection — not a live rendering of them.
+            "bands": step_row.as_ref().map(|r| &r.bands),
+            "steps_placeable": step_row.as_ref().is_some_and(|r| r.placeable),
+            "steps_note": step_row.as_ref().map(|r| r.note.clone()),
+        })
+    }
+
+    /// A `time_chart` frame, throttled — or a full replacement when the axis
+    /// itself changed, which is never throttled because everything already
+    /// drawn is on the wrong axis until it lands.
+    fn time_chart_frame(&mut self, epoch_bumped: bool) -> Option<String> {
+        if epoch_bumped {
+            self.last_time_chart = Some(std::time::Instant::now());
+            return Some(frame("time_chart", self.time_chart_snapshot()));
+        }
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_time_chart {
+            if now.duration_since(last) < TIME_CHART_MIN_INTERVAL {
+                return None;
+            }
+        }
+        self.last_time_chart = Some(now);
+        Some(frame("time_chart", self.time_chart_delta()))
     }
 
     fn status_json(&self) -> Value {
@@ -358,7 +767,11 @@ impl LiveSession {
     /// tab mid-run work**, and it is sent to every subscriber on connect
     /// before any incremental frame.
     pub fn snapshot(&self) -> String {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        // Placed here rather than held placed: a browser connecting mid-run
+        // gets the chart as the axis stands *now*, which is the only version
+        // of it that is true.
+        let time_chart = state.time_chart_snapshot();
         frame(
             "snapshot",
             json!({
@@ -381,6 +794,7 @@ impl LiveSession {
                     .collect::<Vec<_>>(),
                 "provenance": state.provenance,
                 "streams": state.streams,
+                "time_chart": time_chart,
             }),
         )
     }
@@ -592,7 +1006,14 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             );
             Some(frame("status", json!({ "status": state.status_json(), "row": row })))
         }
-        FollowItem::Event(StudyEvent::StepCompleted { step_index, result, .. }) => {
+        FollowItem::Event(StudyEvent::StepCompleted {
+            step_index,
+            result,
+            started_utc_ms,
+            ended_utc_ms,
+            delay_before_ms,
+            ..
+        }) => {
             // The step's own record, verbatim, so `assets/app.js` renders it
             // with the same `outcomeBadge`/`stepDetail` it uses for a study
             // read back from disk (`embarch-ui` decisions 20 and 23). A
@@ -609,6 +1030,31 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             );
             if state.steps.len() < MAX_STEPS {
                 state.steps.push(row_json.clone());
+            }
+            // Both stamps or neither: a band with one end is not a band, and an
+            // older Core sends neither. `None` is the study predating them,
+            // which the chart renders as "no step row" rather than as a gap.
+            if let (Some(from), Some(to)) = (started_utc_ms, ended_utc_ms) {
+                if state.step_stamps.len() < MAX_STEPS {
+                    state.step_stamps.push(trace::StepStamp {
+                        index: step_index as usize,
+                        name: result.step_name.as_str().to_string(),
+                        outcome: match &result.outcome {
+                            embarch_study_designer::Outcome::Pass => "Pass".to_string(),
+                            embarch_study_designer::Outcome::TimedOut => "TimedOut".to_string(),
+                            embarch_study_designer::Outcome::Fail { .. } => "Fail".to_string(),
+                        },
+                        reason: match &result.outcome {
+                            embarch_study_designer::Outcome::Fail { reason } => {
+                                Some(reason.as_str().to_string())
+                            }
+                            _ => None,
+                        },
+                        delay_before_ms: delay_before_ms.unwrap_or(0),
+                        started_utc_ms: from,
+                        ended_utc_ms: to,
+                    });
+                }
             }
             // `current_step` keeps Core's own meaning — the 0-based index of
             // the last step that *finished* (`embarch-core` decision 43).
@@ -648,7 +1094,37 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
                 }),
             ))
         }
-        FollowItem::Event(StudyEvent::GattTranscript { step_index, entry, .. }) => {
+        FollowItem::Event(StudyEvent::GattTranscript {
+            step_index,
+            entry,
+            core_rx_utc_ms,
+            ..
+        }) => {
+            // The entry's own `rx_utc_ms` is dev-bench uptime, so it is not a
+            // clock this mark can be laid against anything else on. An older
+            // Core pushes no `core_rx_utc_ms` at all, and a mark with no clock
+            // is one this chart does not draw rather than one it guesses at.
+            if let Some(stamp) = core_rx_utc_ms {
+                state.push_mark(
+                    "gatt:gatt",
+                    "gatt",
+                    "gatt",
+                    LiveMark {
+                        core_rx_utc_ms: stamp,
+                        sub: format!("{} {}", entry.direction.as_str(), entry.kind.as_str()),
+                        label: format!(
+                            "{} {} · {} · {} bytes",
+                            entry.direction.as_str(),
+                            entry.kind.as_str(),
+                            entry
+                                .characteristic_uuid
+                                .map(|u| u.to_hyphenated().to_string())
+                                .unwrap_or_else(|| "(no characteristic)".to_string()),
+                            entry.payload.len()
+                        ),
+                    },
+                );
+            }
             let feed = state.push_feed(
                 "gatt",
                 format!(
@@ -668,10 +1144,25 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
                 }),
             ))
         }
+        FollowItem::Event(StudyEvent::OutpostRows {
+            stream_name,
+            header_seen,
+            rows,
+            ..
+        }) => {
+            // **The axis, built as the trace arrives** — `embarch-outpost`
+            // decision 10's live half, on this side. The rows decode through
+            // `trace::parse_rows`, which is literally the function the
+            // post-hoc path uses on the rendered file; that is the whole point
+            // of Core pushing CSV rows rather than a struct.
+            let bumped = state.axis.ingest(&stream_name, header_seen, &rows);
+            state.time_chart_frame(bumped)
+        }
         FollowItem::Event(StudyEvent::StreamText {
             stream_name,
             step_index,
             rx_utc_ms,
+            core_rx_utc_ms,
             text,
             ..
         }) => {
@@ -682,6 +1173,26 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             let dropped = console.dropped;
             let total = console.total;
             state.seq = seq;
+            // **A console line is placeable live because Core stamps the chunk
+            // that carried it**, and every line completed by one chunk shares
+            // that chunk's instant — which is exactly as precise as the
+            // recording is, and is the same rule the post-hoc path applies to
+            // the arrival sidecar. `rx_utc_ms` is not used for this: on a
+            // bench-mediated tap it is dev-bench uptime (suite decision 3).
+            let stamp = core_rx_utc_ms.unwrap_or(rx_utc_ms);
+            let key = format!("console:{stream_name}");
+            for line in &completed {
+                state.push_mark(
+                    &key,
+                    &stream_name,
+                    "console",
+                    LiveMark {
+                        core_rx_utc_ms: stamp,
+                        sub: String::new(),
+                        label: line.text.chars().take(160).collect(),
+                    },
+                );
+            }
             // No feed row per chunk: a console is chatty by nature and one
             // feed row per chunk would bury every step completion. The
             // console card is where its content belongs.
@@ -953,6 +1464,147 @@ mod tests {
         assert!(state.mode_detail.as_deref().unwrap().contains("polling instead"));
     }
 
+    // ---- the live axis ---------------------------------------------------
+
+    /// One frame's worth of pushed rows, in `outpost::csv_header()`'s shape.
+    /// `us` is what makes a row anchor the axis; an empty one is a row that
+    /// arrived before the capture's header.
+    fn trace_rows(frame: u64, rx_utc_ms: u64, us: &[&str]) -> Vec<String> {
+        us.iter()
+            .map(|u| {
+                format!("{frame},1,{rx_utc_ms},1000,{u},thread_switch_in,3,0,main")
+            })
+            .collect()
+    }
+
+    /// **A non-monotone anchor is rejected and counted, never inserted.**
+    /// `current_utc_ms()` is not monotonic — an NTP correction mid-capture
+    /// makes an arrival go backwards — and the post-hoc path sorts and dedups
+    /// its anchors, which an append-only live push cannot do. Inserting one
+    /// would break the projection's binary-search precondition and land a mark
+    /// anywhere.
+    #[test]
+    fn a_non_monotone_anchor_is_rejected_and_counted() {
+        let mut axis = LiveAxis::default();
+        axis.ingest("outpost", true, &trace_rows(0, 1_000, &["10000"]));
+        axis.ingest("outpost", true, &trace_rows(1, 1_010, &["20000"]));
+        assert_eq!(axis.anchors.len(), 2);
+
+        // The wall clock steps back 40 ms between two frames.
+        axis.ingest("outpost", true, &trace_rows(2, 970, &["30000"]));
+        assert_eq!(axis.anchors.len(), 2, "a backwards arrival must not be inserted");
+        assert_eq!(axis.non_monotone, 1, "and it must be counted, not swallowed");
+
+        // A later, forward one still lands.
+        axis.ingest("outpost", true, &trace_rows(3, 1_020, &["30000"]));
+        assert_eq!(axis.anchors.len(), 3);
+    }
+
+    /// **The axis does not exist until the trace has given it two frames
+    /// carrying both clocks**, and a study that declares a trace says it is
+    /// waiting rather than drawing a guessed one.
+    #[test]
+    fn the_axis_waits_for_the_trace_rather_than_being_invented() {
+        let mut axis = LiveAxis::default();
+        assert!(!axis.projection().placeable());
+
+        // A frame before the header: the rows carry a cycle count and no rate
+        // to divide it by, so `us` is empty and nothing anchors.
+        axis.ingest("outpost", false, &trace_rows(0, 1_000, &["", ""]));
+        assert!(!axis.projection().placeable());
+        assert!(axis.describe(&axis.projection())["note"]
+            .as_str()
+            .unwrap()
+            .contains("header frame has not"));
+
+        // One stamped frame still is not a tie between two clocks.
+        axis.ingest("outpost", true, &trace_rows(1, 1_010, &["10000"]));
+        assert!(!axis.projection().placeable());
+
+        // Two is.
+        axis.ingest("outpost", true, &trace_rows(2, 1_020, &["20000"]));
+        let proj = axis.projection();
+        assert!(proj.placeable() && proj.projected());
+        assert_eq!(proj.place(1_015), Some(15_000));
+    }
+
+    /// **The header arriving promotes the tier, and a promotion is an epoch
+    /// bump rather than a silent move.** Everything already drawn was drawn
+    /// with no axis at all; the browser re-snapshots rather than receiving
+    /// marks on an axis it has never seen.
+    #[test]
+    fn the_header_arriving_bumps_the_epoch_rather_than_promoting_silently() {
+        let mut axis = LiveAxis::default();
+        assert!(!axis.ingest("outpost", false, &trace_rows(0, 1_000, &[""])));
+        assert_eq!(axis.epoch, 0);
+        assert!(axis.ingest("outpost", true, &trace_rows(1, 1_010, &["10000"])));
+        assert_eq!(axis.epoch, 1, "the tier improved, so the epoch moved with it");
+        // And it moves once, not on every frame after it.
+        assert!(!axis.ingest("outpost", true, &trace_rows(2, 1_020, &["20000"])));
+        assert_eq!(axis.epoch, 1);
+    }
+
+    /// **A mark is never placed eagerly, and a mark past the leading edge is a
+    /// count rather than a position.** A lane hands out only what the axis can
+    /// place *now*, walks forward, and stops at the first one it cannot —
+    /// because anchors are monotone, so is everything after it.
+    #[test]
+    fn a_mark_past_the_leading_edge_is_pending_and_is_placed_when_the_axis_reaches_it() {
+        let mut axis = LiveAxis::default();
+        axis.ingest("outpost", true, &trace_rows(0, 1_000, &["10000"]));
+        axis.ingest("outpost", true, &trace_rows(1, 1_010, &["20000"]));
+
+        let mut lane = LiveLane { label: "gatt".into(), kind: "gatt", ..Default::default() };
+        for ms in [1_005u64, 1_009, 1_040] {
+            lane.push(LiveMark { core_rx_utc_ms: ms, sub: String::new(), label: String::new() });
+        }
+
+        let (placed, pending) = lane.take_placeable(&axis.projection(), true);
+        assert_eq!(placed.len(), 2, "two marks are inside the axis so far");
+        assert_eq!(pending, 1, "the third is past its leading edge and is counted, not drawn");
+        // Halfway between the two anchors in the host clock, so halfway
+        // between their DUT stamps — the projection interpolates, it does not
+        // re-origin.
+        assert_eq!(placed[0]["t"], 15_000);
+        assert!(placed[0]["uncertain"].as_bool().unwrap());
+
+        // The axis grows past it, and only then is it placed — once.
+        axis.ingest("outpost", true, &trace_rows(2, 1_050, &["60000"]));
+        let (placed, pending) = lane.take_placeable(&axis.projection(), true);
+        assert_eq!(placed.len(), 1, "exactly the one that was pending");
+        assert_eq!(pending, 0);
+        // And a mark already sent is never re-sent, which is what stops a
+        // reader watching a mark move.
+        assert_eq!(lane.take_placeable(&axis.projection(), true).0.len(), 0);
+    }
+
+    /// A live console line and a live GATT entry land on the same lane keys the
+    /// post-hoc chart uses, so a run watched live and the same run reloaded are
+    /// one chart rather than two.
+    #[test]
+    fn a_live_console_line_becomes_a_mark_on_the_lane_the_reload_will_use() {
+        let session = LiveSession::new("abc".to_string());
+        ingest(
+            &session,
+            FollowItem::Event(StudyEvent::StreamText {
+                study_id: "abc".to_string(),
+                stream_id: 1,
+                stream_name: "dev-bench".to_string(),
+                step_index: 0,
+                rx_utc_ms: 5,
+                core_rx_utc_ms: Some(1_700_000_000_005),
+                text: "booted\nready\n".to_string(),
+            }),
+        );
+        let state = session.state.lock().unwrap();
+        let lane = state.lanes.get("console:dev-bench").expect("the console lane exists");
+        assert_eq!(lane.total, 2, "one mark per completed line");
+        assert_eq!(lane.kind, "console");
+        // Unplaced, deliberately: there is no axis yet, and the mark holds the
+        // one thing that will place it later.
+        assert_eq!(lane.marks[0].core_rx_utc_ms, 1_700_000_000_005);
+    }
+
     #[test]
     fn a_text_event_produces_a_console_frame_and_no_feed_row() {
         // One feed row per console chunk would bury every step completion,
@@ -966,6 +1618,7 @@ mod tests {
                 stream_name: "dev-bench".to_string(),
                 step_index: 0,
                 rx_utc_ms: 5,
+                core_rx_utc_ms: Some(1_700_000_000_005),
                 text: "hello\n".to_string(),
             }),
         )

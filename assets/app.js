@@ -5221,6 +5221,7 @@
 
   function lsApplyFrame(frame) {
     if (frame.kind === "snapshot") return lsApplySnapshot(frame);
+    if (frame.kind === "time_chart") return tcApplyLive(frame);
     if (frame.kind === "console") return lsApplyConsole(frame);
     if (frame.kind === "samples") return lsApplySamples(frame);
     if (frame.kind === "step") {
@@ -5270,6 +5271,11 @@
     });
     if (frame.provenance) renderProvenance(lsEl("ls-provenance"), frame.provenance);
     if (frame.streams) renderRunStreams(lsEl("ls-streams"), lsStudyId, frame.streams);
+    // The chart the run has built so far, replayed whole. This is what makes
+    // opening or reloading the tab mid-run give the same picture as watching
+    // from the start — the marks are placed against the axis as it stands
+    // *now*, which is the only version of it that is true.
+    if (frame.time_chart) tcApplyLive(frame.time_chart);
   }
 
   function lsIsTerminal(status) {
@@ -7238,6 +7244,146 @@
   var TC_STEP_GAP = 8;
   var TC_BODY_PAD = 18;
 
+  /// The live session's own marks, by lane key — **the only state this file
+  /// keeps that the post-hoc chart does not.** A completed study is binned
+  /// server-side and this holds nothing; a running one is accumulating here,
+  /// bounded by `live_study.rs`'s own per-lane cap, and is binned locally.
+  ///
+  /// **Binning it here is drawing, not decoding.** The server-side binner
+  /// exists because a 13 MB capture must not cross the wire (decision 18); a
+  /// live session's marks are already in this browser, arrived one at a time,
+  /// and asking the server to re-bin them would be a round trip per frame. The
+  /// *rule* is the same one and is stated in both places: a run of bins holding
+  /// exactly one mark carries it and is clickable, and anything merged carries
+  /// a count and is not.
+  var tcLive = null;
+
+  /// Applies one `time_chart` frame from the live feed.
+  ///
+  /// `replace` is the server saying everything already drawn is on an axis that
+  /// no longer exists — a snapshot, or an epoch bump. It is never patched
+  /// across: patching would be the chart quietly moving marks somebody has
+  /// already looked at.
+  function tcApplyLive(frame) {
+    if (!frame || !frame.axis) return;
+    if (!tcLive || frame.replace || tcLive.epoch !== frame.epoch) {
+      tcLive = { epoch: frame.epoch, lanes: {}, order: [] };
+    }
+    (frame.lanes || []).forEach(function (lane) {
+      var held = tcLive.lanes[lane.key];
+      if (!held) {
+        held = { key: lane.key, label: lane.label, kind: lane.kind, marks: [] };
+        tcLive.lanes[lane.key] = held;
+        tcLive.order.push(lane.key);
+      }
+      held.total = lane.total;
+      held.dropped = lane.dropped;
+      held.pending = lane.pending;
+      // Marks arrive already placed and in axis order, and a mark is sent
+      // once — the server hands out only what it can place *now* and never
+      // re-places what it has sent.
+      Array.prototype.push.apply(held.marks, lane.marks || []);
+    });
+
+    var axis = frame.axis;
+    if (!axis.placeable) {
+      // **Waiting is a state, not a failure.** A study that declares a trace
+      // draws no axis until its first stamped-and-dated frame, and says which
+      // of the three reasons it is still waiting for.
+      trEl("tc-body").style.display = "none";
+      return tcShowError(axis.note);
+    }
+    tcShowError("");
+    tcView = {
+      study_id: lsStudyId,
+      live: true,
+      axis: {
+        unit: axis.unit,
+        axis_clock: axis.axis_clock,
+        t_from: axis.t_from,
+        t_to: axis.t_to,
+        projected: axis.projected,
+        accuracy_ms: axis.accuracy_ms,
+        placeable: true,
+        source: axis.source,
+        note: axis.note,
+      },
+      bands: frame.bands || [],
+      steps_placeable: !!frame.steps_placeable,
+      steps_note: frame.steps_note || "",
+      lanes: tcLive.order.map(function (k) {
+        var l = tcLive.lanes[k];
+        return {
+          key: l.key, label: l.label, kind: l.kind,
+          total: l.total, placed: l.marks.length,
+          before: 0, after: 0, dropped_by_cap: l.dropped,
+          note: null,
+          pending: l.pending,
+        };
+      }),
+      series: [],
+      trace: null,
+      axis_epoch: frame.epoch,
+      marks_dropped_by_cap: 0,
+      notes: (axis.non_monotone
+        ? [axis.non_monotone + " frame arrival(s) went backwards against the one before them and " +
+           "were refused — an NTP correction mid-capture is the realistic cause, and inserting " +
+           "one would land a mark anywhere"]
+        : []).concat(
+        axis.stale_prefix_dropped
+          ? [axis.stale_prefix_dropped + " leading frame(s) were dropped as a stale pre-reset " +
+             "prefix, so this axis was redrawn"]
+          : []),
+    };
+    // The window is in axis units and the axis is growing, so a reader who has
+    // not zoomed follows the leading edge and one who has stays put.
+    if (!tcWin || tcFollowing) {
+      tcWin = chartFullWin(tcView.axis);
+      tcFollowing = true;
+    }
+    tcRender();
+  }
+
+  /// True while the window is the whole run, so a growing axis keeps the
+  /// reader at its leading edge. Any zoom or pan clears it.
+  var tcFollowing = true;
+
+  /// Bins the live session's marks over one window, to the same contract the
+  /// server's `/marks` answers with.
+  function tcBinLive(win, cols) {
+    var byKey = {};
+    var span = Math.max(1, win.to - win.from);
+    (tcLive ? tcLive.order : []).forEach(function (key) {
+      var marks = tcLive.lanes[key].marks;
+      var counts = new Array(cols).fill(0);
+      var one = new Array(cols).fill(null);
+      var before = 0, after = 0, visible = 0;
+      marks.forEach(function (m) {
+        if (m.t < win.from) { before += 1; return; }
+        if (m.t > win.to) { after += 1; return; }
+        var c = Math.min(cols - 1, Math.floor(((m.t - win.from) / span) * cols));
+        counts[c] += 1;
+        one[c] = counts[c] === 1 ? m : null;
+        visible += 1;
+      });
+      var runs = [];
+      var c = 0;
+      while (c < cols) {
+        if (counts[c] === 0) { c += 1; continue; }
+        var start = c, count = 0, only = null;
+        while (c < cols && counts[c] > 0) {
+          count += counts[c];
+          if (counts[c] === 1 && !only) only = one[c];
+          c += 1;
+        }
+        runs.push({ c0: start, c1: c - 1, count: count, one: count === 1 ? only : null });
+      }
+      byKey[key] = { key: key, runs: runs, visible: visible, before: before, after: after };
+    });
+    return { key: tcBinsKey(win, cols), from: win.from, to: win.to, width: cols,
+             byKey: byKey, series: {} };
+  }
+
   function tcShowError(message) {
     var el = trEl("tc-error");
     if (!el) return;
@@ -7260,6 +7406,11 @@
   /// `/marks` answers from what it built until the next one.
   async function tcLoad() {
     var studyId = lsStudyId;
+    // A post-hoc load replaces whatever the live feed built, deliberately: the
+    // rendered files are authoritative — they carry the whole-capture header
+    // pre-pass, the stale-prefix drop over everything and the verified arrival
+    // join, none of which a live path can have.
+    tcLive = null;
     var body = trEl("tc-body");
     if (!studyId || !body) return;
     tcShowError("");
@@ -7341,6 +7492,10 @@
   /// built to show a misalignment must never be.
   function tcBinsFor(view, win, cols) {
     var key = tcBinsKey(win, cols);
+    // A live session's marks are already here — see `tcLive`. No round trip,
+    // and no held set to go stale: it is rebinned from the marks themselves
+    // every draw.
+    if (view.live) return tcBinLive(win, cols);
     if (tcBins && tcBins.key === key) return tcBins;
     if (tcBinsWanted === key) return null;
     tcBinsWanted = key;
@@ -7525,8 +7680,12 @@
           );
           drawn += 1;
         });
-        tcGutterCounts(parts, plotLeft, plotRight, mid, binned.before, binned.after,
-          lane.label, "event");
+        // A live lane's `pending` is a third count and a different fact from
+        // the two gutter ones: not "outside the window you are looking at" but
+        // "past the leading edge of the axis itself", which is what the server
+        // refuses to place rather than guess at.
+        tcGutterCounts(parts, plotLeft, plotRight, mid,
+          binned.before, binned.after + (lane.pending || 0), lane.label, "event");
         return;
       }
 
@@ -7768,6 +7927,7 @@
       from: anchor - frac * next,
       to: anchor + (1 - frac) * next,
     });
+    tcFollowing = false;
     tcScheduleDraw();
   }
 
@@ -7799,6 +7959,7 @@
       from: tcDrag.win.from - dt,
       to: tcDrag.win.to - dt,
     });
+    tcFollowing = false;
     tcScheduleDraw();
   }
 
@@ -7811,6 +7972,8 @@
   function tcFit() {
     if (!tcView) return;
     tcWin = chartFullWin(tcView.axis);
+    // Fitting a growing axis means following it again.
+    tcFollowing = true;
     tcScheduleDraw();
   }
 

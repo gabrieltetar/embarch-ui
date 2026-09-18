@@ -354,9 +354,9 @@ pub struct StepRow {
 /// stamped the frame's arrival. Either choice is inside `resolution_ms`, which
 /// is what the row reports; this one is inside it by less.
 #[derive(Debug, Clone, Copy)]
-struct ClockAnchor {
-    rx_utc_ms: u64,
-    dut_us: u64,
+pub(crate) struct ClockAnchor {
+    pub rx_utc_ms: u64,
+    pub dut_us: u64,
 }
 
 /// A backwards step between two frame anchors larger than this means the DUT's
@@ -797,7 +797,7 @@ fn clock_anchors(rows: &[Row]) -> Vec<ClockAnchor> {
 /// — a capture that opened on pre-reset bytes is pre-reset live too, and two
 /// implementations of a repair this consequential is how live and post-hoc
 /// start disagreeing about where a band goes.
-fn drop_stale_prefix(anchors: &mut Vec<ClockAnchor>) {
+pub(crate) fn drop_stale_prefix(anchors: &mut Vec<ClockAnchor>) {
     let mut worst: Option<(u64, usize)> = None;
     for i in 1..anchors.len() {
         if anchors[i].dut_us < anchors[i - 1].dut_us {
@@ -812,6 +812,31 @@ fn drop_stale_prefix(anchors: &mut Vec<ClockAnchor>) {
             anchors.drain(..at);
         }
     }
+}
+
+/// One frame's tie between the two clocks, from the rows that frame carried.
+///
+/// **The same rule [`clock_anchors`] applies per frame, and it is this function
+/// there too** — gap records excluded (a gap is stamped when the *first*
+/// dropped record was lost, measured up to 487 ms ahead of its own frame), and
+/// the **last** DUT stamp in the frame rather than the first, because a frame
+/// is sent once its last record is in.
+///
+/// `None` when this frame carries no row with both clocks on it — a header
+/// frame, a frame that arrived before the capture's header so its `us` column
+/// is empty, or a frame of nothing but gap records.
+pub(crate) fn anchor_for_frame(rows: &[Row]) -> Option<ClockAnchor> {
+    let mut rx: Option<u64> = None;
+    let mut dut: Option<u64> = None;
+    for r in rows {
+        if r.kind == Some(RecordKind::Gap) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (r.rx_utc_ms, r.dut_us) else { continue };
+        rx = Some(a);
+        dut = Some(dut.map_or(b, |cur: u64| cur.max(b)));
+    }
+    Some(ClockAnchor { rx_utc_ms: rx?, dut_us: dut? })
 }
 
 /// Projects one host-clock instant onto the DUT's counter, by linear
@@ -988,6 +1013,38 @@ impl Projection {
             window_from_ms: from_ms,
             window_to_ms: to_ms,
             ..Projection::default()
+        }
+    }
+
+    /// The live arm: a projection over anchors gathered **as frames arrive**
+    /// rather than read off a finished capture.
+    ///
+    /// **Sound for the same reason the post-hoc one is, and for one more.**
+    /// Anchors append monotonically in the host clock — the live feed refuses
+    /// any that does not — so a new anchor can never land *between* two
+    /// existing ones. A mark already bracketed by two anchors therefore never
+    /// moves, and only marks past the last anchor are affected by a new one,
+    /// which [`project_ms`] already refuses to place. That is what lets a live
+    /// chart place a mark once and never take it back.
+    ///
+    /// Fewer than two anchors is not a projection: the axis does not exist yet,
+    /// and the caller says it is waiting rather than drawing one.
+    pub fn from_live_anchors(anchors: &[ClockAnchor], accuracy_ms: Option<f64>) -> Projection {
+        if anchors.len() < 2 {
+            return Projection { refusal: Some(Refusal::NoClockTie), ..Projection::default() };
+        }
+        let window_from_ms = anchors[0].rx_utc_ms;
+        let window_to_ms = anchors[anchors.len() - 1].rx_utc_ms;
+        Projection {
+            t_from: anchors[0].dut_us,
+            t_to: anchors[anchors.len() - 1].dut_us.max(anchors[0].dut_us),
+            window_from_ms,
+            window_to_ms,
+            anchors: anchors.to_vec(),
+            projected: true,
+            placeable: true,
+            accuracy_ms,
+            refusal: None,
         }
     }
 

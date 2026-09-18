@@ -681,46 +681,36 @@ pub async fn build(state: &AppState, study_id: &str) -> Result<TimeChartView, Re
                 }
             }
             StreamEncoding::Text => {
-                // **A `Text` tap's capture carries no timestamp anywhere**, and
-                // that is a defect in the recording rather than in this chart:
-                // Core writes a console's raw bytes and nothing else, so a
-                // console read back off disk is bytes with no times. The lane
-                // is drawn as a count with this sentence beside it rather than
-                // omitted — a reader who cannot see the lane cannot tell it
-                // from a console that captured nothing.
-                let (total, note) = match state
-                    .core
-                    .get_study_stream(study_id, &entry.name, false)
-                    .await
-                {
-                    Ok(bytes) => (
-                        String::from_utf8_lossy(&bytes)
-                            .split('\n')
-                            .take(MAX_CONSOLE_LINES_COUNTED)
-                            .filter(|l| !l.is_empty())
-                            .count(),
-                        None,
-                    ),
-                    Err(e) => (0, Some(format!("{e:#}"))),
+                // **A console is placeable through its arrival sidecar, and
+                // through nothing else.** A `Text` tap's raw file *is* its
+                // rendering, so there is no rendered row with a
+                // `core_rx_utc_ms` column on it; until embarch-core started
+                // keeping a sidecar, a console read back off disk was bytes
+                // with no times anywhere — unplaceable on any shared axis,
+                // which is the one stream an engineer most wants to correlate.
+                //
+                // The sidecar keys Core's own receipt time to the **byte
+                // offset** each chunk landed at, which is the only coordinate a
+                // console line has.
+                let text = match state.core.get_study_stream(study_id, &entry.name, false).await {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Err(e) => {
+                        raw.push(empty_lane(
+                            &entry.name,
+                            "console",
+                            "text",
+                            Some(format!("tap '{}' could not be read: {e:#}", entry.name)),
+                        ));
+                        continue;
+                    }
                 };
-                raw.push(RawLane {
-                    key: format!("text:{}", entry.name),
-                    label: entry.name.clone(),
-                    kind: "console",
-                    source: "text",
-                    tap: entry.name.clone(),
-                    total,
-                    dropped_by_cap: 0,
-                    note: Some(note.unwrap_or_else(|| {
-                        "A console's capture on disk is bytes and nothing else — embarch-core \
-                         records no arrival time per chunk for a Text tap — so these lines cannot \
-                         be placed on any shared axis after the run. They are placeable live, and \
-                         a Core-side arrival sidecar is what will make them placeable here too."
-                            .to_string()
-                    })),
-                    marks: Vec::new(),
-                    native: Vec::new(),
-                });
+                let arrivals = state
+                    .core
+                    .get_study_stream_arrivals(study_id, &entry.name)
+                    .await
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+                raw.push(console_lane(&entry.name, &text, arrivals.as_deref()));
             }
             // Handled below as a strip rather than as marks — see
             // `SeriesLane` for why 1.47 M points is a smear and not a chart.
@@ -1011,6 +1001,106 @@ fn empty_lane(
         dropped_by_cap: 0,
         note,
         marks: Vec::new(),
+        native: Vec::new(),
+    }
+}
+
+/// One console turned into raw marks, through its arrival sidecar.
+///
+/// **A line is placed by the chunk that carried its first byte.** That is
+/// exactly as precise as the recording is — a chunk is one read off the wire,
+/// and several lines completing in one read genuinely did arrive together. It
+/// is never finer than that and never pretends to be: no interpolation across
+/// a chunk, the same refusal the trace view makes about spreading a frame's
+/// records across an interval.
+fn console_lane(tap: &str, text: &str, arrivals: Option<&str>) -> RawLane {
+    let total = text.split('\n').take(MAX_CONSOLE_LINES_COUNTED).filter(|l| !l.is_empty()).count();
+
+    // `(byte_offset, core_rx_utc_ms)`, in file order.
+    let chunks: Vec<(u64, u64)> = match arrivals {
+        None => Vec::new(),
+        Some(csv) => {
+            let mut lines = csv.split('\n');
+            let header = lines.next().unwrap_or_default().trim_end_matches('\r');
+            if header != "byte_offset,core_rx_utc_ms,bytes" {
+                // A sidecar this build does not recognise is refused rather
+                // than read positionally — the same posture `trace::parse`
+                // takes toward a column list it did not write.
+                return RawLane {
+                    note: Some(format!(
+                        "tap '{tap}' has an arrival sidecar whose columns are {header:?}, and this \
+                         build reads \"byte_offset,core_rx_utc_ms,bytes\" — refusing to guess which \
+                         column moved, so its lines are not placed"
+                    )),
+                    total,
+                    ..empty_lane(tap, "console", "text", None)
+                };
+            }
+            lines
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.trim_end_matches('\r').split(',').collect();
+                    match (f.first()?.parse::<u64>(), f.get(1)?.parse::<u64>()) {
+                        (Ok(off), Ok(ms)) => Some((off, ms)),
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+    };
+
+    if chunks.is_empty() {
+        return RawLane {
+            note: Some(format!(
+                "tap '{tap}' has no arrival sidecar, so its lines carry no clock at all and are \
+                 drawn nowhere. embarch-core keeps one for every Text tap captured from \
+                 2026-09-18; a study recorded before that has a console and no times for it, and \
+                 no later read can invent them."
+            )),
+            total,
+            ..empty_lane(tap, "console", "text", None)
+        };
+    }
+
+    // Line `i` starts at this byte offset in the file.
+    let mut marks = Vec::new();
+    let mut dropped_by_cap = 0usize;
+    let mut offset = 0u64;
+    let mut chunk = 0usize;
+    for (i, line) in text.split('\n').enumerate() {
+        let len = line.len() as u64 + 1;
+        if line.is_empty() {
+            offset += len;
+            continue;
+        }
+        // The chunks are in file order and so are the lines, so this walks
+        // forward once across both rather than searching per line.
+        while chunk + 1 < chunks.len() && chunks[chunk + 1].0 <= offset {
+            chunk += 1;
+        }
+        offset += len;
+        if marks.len() >= MAX_MARKS_PER_LANE {
+            dropped_by_cap += 1;
+            continue;
+        }
+        let trimmed = line.strip_suffix('\r').unwrap_or(line);
+        marks.push(RawMark {
+            core_rx_utc_ms: chunks[chunk].1,
+            row_index: i,
+            sub: String::new(),
+            label: trimmed.chars().take(160).collect(),
+        });
+    }
+
+    RawLane {
+        key: format!("console:{tap}"),
+        label: tap.to_string(),
+        kind: "console",
+        source: "text",
+        tap: tap.to_string(),
+        total,
+        dropped_by_cap,
+        note: None,
+        marks,
         native: Vec::new(),
     }
 }
