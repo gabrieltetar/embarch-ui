@@ -916,6 +916,11 @@
   var sdPendingRun = { kind: "authored" };
   /* The run-only study currently previewed, or null. */
   var sdStoredSlug = null;
+  /* The name a registration dialog is editing, or null for a new one. Sent
+   * as `previous_name`, which is what makes edit and rename one form. */
+  var sdRegPrevious = null;
+  /* The same, for the layout dialog. */
+  var sdLayoutPrevious = null;
   // Characteristic display names, keyed by hyphenated characteristic UUID
   // (`embarch-study-designer` decision 56). Empty is the honest
   // starting state and every reader falls back to the UUID.
@@ -1865,6 +1870,8 @@
     sdRegistry = sdRegisteredActions();
     sdAdoptDiscovery(data);
     renderSdUnregistered();
+    renderSdRegistered();
+    renderSdLayouts();
     renderSdRows();
     return data;
   }
@@ -2442,7 +2449,63 @@
     renderSdRows();
   }
 
+  /* The one renderer behind both "register this characteristic" and "edit
+   * this action": the form is identical, and `sdRegPrevious` is the whole
+   * of the difference — absent it is today's upsert, present it makes the
+   * request a rename the server reference-checks first. */
+  function syncRegisterMode() {
+    var editing = sdRegPrevious != null;
+    sdEl("sd-reg-save").textContent = editing ? "Save changes" : "Register";
+    sdEl("sd-reg-delete").style.display = editing ? "inline-flex" : "none";
+    sdEl("sd-reg-refusal").style.display = "none";
+    sdEl("sd-reg-refusal").innerHTML = "";
+  }
+
+  /* Opens the same dialog on an action that already exists.
+   *
+   * The entry point this never had: `ActionRegistry::save` has always
+   * validated-then-written, and the UI has only ever had an upsert POST with
+   * nowhere to launch an edit from. */
+  function openRegisterEdit(name) {
+    var action = (sdRegistry || []).filter(function (a) { return a.name === name; })[0];
+    if (!action) return;
+    sdRegPrevious = name;
+    sdEl("sd-reg-name").value = action.name;
+    sdEl("sd-reg-service").value = uuidStr(action.service_uuid);
+    sdEl("sd-reg-char").value = uuidStr(action.uuid);
+    sdEl("sd-reg-op").value = action.operation;
+    sdEl("sd-reg-fields").innerHTML = "";
+    sdEl("sd-reg-result").style.display = "none";
+    syncRegFieldsVisibility();
+    (action.fields || []).forEach(function (field) {
+      addRegField();
+      var nodes = sdEl("sd-reg-fields").querySelectorAll(".sd-reg-field");
+      var node = nodes[nodes.length - 1];
+      node.querySelector('[data-reg="fname"]').value = field.name;
+      node.querySelector('[data-reg="foff"]').value = field.byte_offset;
+      node.querySelector('[data-reg="flen"]').value = field.byte_len;
+      var values = node.querySelector('[data-reg="values"]');
+      values.innerHTML = "";
+      (field.values || []).forEach(function (value) {
+        values.insertAdjacentHTML("beforeend", regValueHtml());
+        var vn = values.lastElementChild;
+        vn.querySelector('[data-reg="vlabel"]').value = value.label;
+        // Hex, not the text it may have been typed as — the saved form is
+        // bytes, and re-rendering them as text would be a guess about an
+        // encoding the bytes no longer carry.
+        vn.querySelector('[data-reg="vmode"]').value = "hex";
+        vn.querySelector('[data-reg="vbytes"]').value = (value.bytes || [])
+          .map(function (b) { return "0x" + ("0" + b.toString(16)).slice(-2); })
+          .join(" ");
+      });
+    });
+    syncRegisterMode();
+    sdEl("sd-register-dialog").style.display = "block";
+    sdEl("sd-register-backdrop").style.display = "block";
+  }
+
   function openRegisterDialog(serviceUuid, charUuid, properties) {
+    sdRegPrevious = null;
     sdEl("sd-reg-name").value = "";
     sdEl("sd-reg-service").value = serviceUuid;
     sdEl("sd-reg-char").value = charUuid;
@@ -2459,8 +2522,58 @@
     sdEl("sd-reg-result").style.display = "none";
     syncRegFieldsVisibility();
     if (op === "write") addRegField();
+    syncRegisterMode();
     sdEl("sd-register-dialog").style.display = "block";
     sdEl("sd-register-backdrop").style.display = "block";
+  }
+
+  /* Renders a 409's table of the studies still using something, and
+   * **leaves the form exactly as it is**.
+   *
+   * One renderer for all three refusals (action, layout, protocol file):
+   * they carry one body shape, and a refusal a reader has to decode
+   * differently per dialog is three chances to render it wrong.
+   *
+   * A body that does not parse as that shape is rendered verbatim — every
+   * other error in this suite is plain text, and a refusal from a layer that
+   * never heard of this shape must still be readable. */
+  function renderRefusal(boxId, status, text) {
+    var box = sdEl(boxId);
+    if (!box) return;
+    var body = null;
+    try {
+      body = JSON.parse(text);
+    } catch (e) {
+      body = null;
+    }
+    box.style.display = "block";
+    if (!body || !body.referenced_by) {
+      box.innerHTML = '<p class="sd-error">' + status + " " + escapeHtml(text) + "</p>";
+      return;
+    }
+    var rows = (body.referenced_by || [])
+      .map(function (r) {
+        return (
+          '<tr><td class="mono">' + escapeHtml(r.slug) + "</td><td>" + escapeHtml(r.name) +
+          '</td><td class="mono">' + escapeHtml((r.steps || []).join(", ")) + "</td></tr>"
+        );
+      })
+      .join("");
+    var unscannable = body.unscannable || [];
+    box.innerHTML =
+      '<p class="sd-error" style="margin-bottom:8px;">' + escapeHtml(body.error || "refused") +
+      "</p>" +
+      (rows
+        ? '<table class="data-table"><thead><tr><th>File</th><th>Study</th><th>Where</th>' +
+          "</tr></thead><tbody>" + rows + "</tbody></table>"
+        : "") +
+      (unscannable.length
+        ? '<p class="sd-error" style="margin-top:8px;">Also, these files could not be read, ' +
+          "so this cannot say whether they use it: " +
+          escapeHtml(unscannable.join("; ")) + "</p>"
+        : "") +
+      '<p class="placeholder-note" style="margin-top:8px;">Nothing was changed, and the form ' +
+      "above still holds what you entered.</p>";
   }
 
   function closeRegisterDialog() {
@@ -2549,10 +2662,12 @@
     var charBytes = uuidToBytes(sdEl("sd-reg-char").value);
     if (!serviceBytes || !charBytes) return regResult("both UUIDs must be full 128-bit UUIDs", false);
 
+    sdEl("sd-reg-refusal").style.display = "none";
     var resp = await fetch("/api/study-designer/registry", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        previous_name: sdRegPrevious,
         name: name,
         service_uuid: serviceBytes,
         uuid: charBytes,
@@ -2561,10 +2676,219 @@
       }),
     });
     var text = await resp.text();
+    if (resp.status === 409) return renderRefusal("sd-reg-refusal", resp.status, text);
     if (!resp.ok) return regResult(resp.status + " " + text, false);
-    regResult("registered — it's now pickable as a step action", true);
+    regResult(
+      sdRegPrevious ? "saved" : "registered — it's now pickable as a step action",
+      true
+    );
     await loadSdActions();
     setTimeout(closeRegisterDialog, 800);
+  }
+
+  async function deleteRegistration() {
+    if (sdRegPrevious == null) return;
+    sdEl("sd-reg-refusal").style.display = "none";
+    var resp = await fetch(
+      "/api/study-designer/registry/" + encodeURIComponent(sdRegPrevious),
+      { method: "DELETE" }
+    );
+    var text = await resp.text();
+    if (resp.status === 409) return renderRefusal("sd-reg-refusal", resp.status, text);
+    if (!resp.ok) return regResult(resp.status + " " + text, false);
+    await loadSdActions();
+    closeRegisterDialog();
+  }
+
+  // --- payload layouts ---------------------------------------------------
+
+  /* One field row, reusing `.sd-reg-value`'s layout so this dialog brings no
+   * CSS of its own (decision 17).
+   *
+   * The type dropdown renders **only served `scalar_types`**. An empty list
+   * is an empty picker and a refusal — a guessed eighteen would offer
+   * spellings the server might not accept, which is worse than offering
+   * none. */
+  function layoutFieldHtml(field) {
+    var options = sdScalarTypes
+      .map(function (t) {
+        return (
+          '<option value="' + escapeHtml(t) + '"' +
+          (field && t === field.type ? " selected" : "") + ">" + escapeHtml(t) + "</option>"
+        );
+      })
+      .join("");
+    return (
+      '<div class="sd-reg-value">' +
+      '<input class="sd-input mono" data-layout="name" placeholder="field name" ' +
+      'spellcheck="false" value="' + escapeHtml((field && field.name) || "") + '" />' +
+      '<select class="sd-input mono" data-layout="type">' +
+      (options || '<option value="">no scalar type served</option>') +
+      "</select>" +
+      '<button class="sd-icon-btn" data-layout="remove" title="remove this field">✕</button>' +
+      "</div>"
+    );
+  }
+
+  function renderLayoutGroup(id, fields) {
+    var box = sdEl(id);
+    if (!box) return;
+    box.innerHTML = (fields || []).map(layoutFieldHtml).join("");
+  }
+
+  function readLayoutGroup(id) {
+    var out = [];
+    sdEl(id).querySelectorAll(".sd-reg-value").forEach(function (node) {
+      var name = node.querySelector('[data-layout="name"]').value.trim();
+      var type = node.querySelector('[data-layout="type"]').value;
+      if (!name && !type) return;
+      out.push({ name: name, type: type });
+    });
+    return out;
+  }
+
+  function openLayoutDialog(name) {
+    var layout = name
+      ? sdStructLayouts.filter(function (l) { return l.name === name; })[0]
+      : null;
+    sdLayoutPrevious = layout ? layout.name : null;
+    sdEl("sd-layout-title").textContent = layout ? "Edit layout" : "New payload layout";
+    sdEl("sd-layout-name").value = layout ? layout.name : "";
+    renderLayoutGroup("sd-layout-header", layout ? layout.header : []);
+    renderLayoutGroup("sd-layout-repeat", layout ? layout.repeat : []);
+    sdEl("sd-layout-result").style.display = "none";
+    sdEl("sd-layout-refusal").style.display = "none";
+    sdEl("sd-layout-refusal").innerHTML = "";
+    sdEl("sd-layout-delete").style.display = layout ? "inline-flex" : "none";
+    sdEl("sd-layout-dialog").style.display = "block";
+    sdEl("sd-layout-backdrop").style.display = "block";
+  }
+
+  function closeLayoutDialog() {
+    sdEl("sd-layout-dialog").style.display = "none";
+    sdEl("sd-layout-backdrop").style.display = "none";
+  }
+
+  function layoutResult(message, ok) {
+    var el = sdEl("sd-layout-result");
+    el.style.display = "block";
+    el.className = ok ? "placeholder-note" : "sd-error";
+    el.textContent = message;
+  }
+
+  async function submitLayout() {
+    var name = sdEl("sd-layout-name").value.trim();
+    if (!name) return layoutResult("the layout needs a name", false);
+    var header = readLayoutGroup("sd-layout-header");
+    var repeat = readLayoutGroup("sd-layout-repeat");
+    if (!header.length && !repeat.length) {
+      return layoutResult("a layout with no field decodes nothing", false);
+    }
+    var blank = header.concat(repeat).filter(function (f) { return !f.name || !f.type; });
+    if (blank.length) return layoutResult("every field needs a name and a type", false);
+    if (sdMaxStructFields != null) {
+      var over = header.length > sdMaxStructFields || repeat.length > sdMaxStructFields;
+      if (over) {
+        return layoutResult(
+          "each group takes at most " + sdMaxStructFields + " fields",
+          false
+        );
+      }
+    }
+    sdEl("sd-layout-refusal").style.display = "none";
+    var resp = await fetch("/api/study-designer/structs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        previous_name: sdLayoutPrevious,
+        name: name,
+        header: header,
+        repeat: repeat,
+      }),
+    });
+    var text = await resp.text();
+    if (resp.status === 409) return renderRefusal("sd-layout-refusal", resp.status, text);
+    if (!resp.ok) return layoutResult(resp.status + " " + text, false);
+    layoutResult("saved", true);
+    // Through the actions response, so the tap's Decoding dropdown and this
+    // dialog read the same list — proving the widened shape reached both.
+    await loadSdActions();
+    renderSdTaps();
+    setTimeout(closeLayoutDialog, 600);
+  }
+
+  async function deleteLayout() {
+    if (sdLayoutPrevious == null) return;
+    sdEl("sd-layout-refusal").style.display = "none";
+    var resp = await fetch(
+      "/api/study-designer/structs/" + encodeURIComponent(sdLayoutPrevious),
+      { method: "DELETE" }
+    );
+    var text = await resp.text();
+    if (resp.status === 409) return renderRefusal("sd-layout-refusal", resp.status, text);
+    if (!resp.ok) return layoutResult(resp.status + " " + text, false);
+    await loadSdActions();
+    renderSdTaps();
+    closeLayoutDialog();
+  }
+
+  /* The two chip pools that give edit and delete somewhere to be launched
+   * from — near-clones of `renderSdUnregistered`, which is the pool that
+   * already turns a click into a dialog. */
+  function renderSdRegistered() {
+    var pool = sdEl("sd-registered");
+    if (!pool) return;
+    var actions = sdRegistry || [];
+    if (!actions.length) {
+      pool.innerHTML =
+        '<span class="placeholder-note">no registered action in this repo yet — click a ' +
+        "detected characteristic above to register one</span>";
+      return;
+    }
+    pool.innerHTML = "";
+    actions.forEach(function (action) {
+      var chip = document.createElement("div");
+      chip.className = "probe-card";
+      chip.style.cursor = "pointer";
+      var uuid = uuidStr(action.uuid);
+      chip.innerHTML =
+        '<div class="mono" style="font-size:12px;">' + escapeHtml(action.name) + "</div>" +
+        '<div style="font-size:11px; color:var(--text-tertiary);">' +
+        escapeHtml(action.operation) + " · " + escapeHtml(charLabel(uuid)) +
+        ((action.fields || []).length ? " · " + action.fields.length + " field(s)" : "") +
+        "</div>";
+      chip.title = charTitle(uuid, uuidStr(action.service_uuid));
+      chip.addEventListener("click", function () {
+        openRegisterEdit(action.name);
+      });
+      pool.appendChild(chip);
+    });
+  }
+
+  function renderSdLayouts() {
+    var pool = sdEl("sd-layouts");
+    if (!pool) return;
+    if (!sdStructLayouts.length) {
+      pool.innerHTML =
+        '<span class="placeholder-note">no payload layout in this repo yet</span>';
+      return;
+    }
+    pool.innerHTML = "";
+    sdStructLayouts.forEach(function (layout) {
+      var chip = document.createElement("div");
+      chip.className = "probe-card";
+      chip.style.cursor = "pointer";
+      var header = (layout.header || []).length;
+      var repeat = (layout.repeat || []).length;
+      chip.innerHTML =
+        '<div class="mono" style="font-size:12px;">' + escapeHtml(layout.name) + "</div>" +
+        '<div style="font-size:11px; color:var(--text-tertiary);">' +
+        header + " header · " + repeat + " repeat</div>";
+      chip.addEventListener("click", function () {
+        openLayoutDialog(layout.name);
+      });
+      pool.appendChild(chip);
+    });
   }
 
   // The registry's own `Uuid` is 16 raw bytes over the wire, so the
@@ -3834,6 +4158,26 @@
     sdEl("sd-register-dialog").addEventListener("click", onRegisterDialogClick);
     sdEl("sd-reg-cancel").addEventListener("click", closeRegisterDialog);
     sdEl("sd-reg-save").addEventListener("click", submitRegistration);
+    sdEl("sd-reg-delete").addEventListener("click", deleteRegistration);
+    sdEl("sd-add-layout").addEventListener("click", function () {
+      openLayoutDialog(null);
+    });
+    sdEl("sd-layout-cancel").addEventListener("click", closeLayoutDialog);
+    sdEl("sd-layout-backdrop").addEventListener("click", closeLayoutDialog);
+    sdEl("sd-layout-save").addEventListener("click", submitLayout);
+    sdEl("sd-layout-delete").addEventListener("click", deleteLayout);
+    sdEl("sd-layout-add-header").addEventListener("click", function () {
+      sdEl("sd-layout-header").insertAdjacentHTML("beforeend", layoutFieldHtml(null));
+    });
+    sdEl("sd-layout-add-repeat").addEventListener("click", function () {
+      sdEl("sd-layout-repeat").insertAdjacentHTML("beforeend", layoutFieldHtml(null));
+    });
+    sdEl("sd-layout-dialog").addEventListener("click", function (ev) {
+      var btn = ev.target.closest('[data-layout="remove"]');
+      if (!btn) return;
+      ev.preventDefault();
+      btn.closest(".sd-reg-value").remove();
+    });
     sdEl("sd-register-backdrop").addEventListener("click", closeRegisterDialog);
 
     // Run progress arrives by push, never by client-side polling —

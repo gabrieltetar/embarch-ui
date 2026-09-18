@@ -3565,6 +3565,35 @@ mod tests {
         );
     }
 
+    /// The layout editor offers **only** served scalar types, and a refusal
+    /// leaves the form filled.
+    #[test]
+    fn the_layout_editor_guesses_no_scalar_type_and_a_refusal_keeps_the_form() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert!(
+            APP_JS.contains("var options = sdScalarTypes"),
+            "the type picker is built from the served list"
+        );
+        assert!(
+            APP_JS.contains("'<option value=\"\">no scalar type served</option>'"),
+            "an empty served list is an empty picker and a refusal, never a guessed eighteen"
+        );
+        assert!(
+            APP_JS.contains("function renderRefusal(boxId, status, text)"),
+            "one refusal renderer for all three 409s — three would be three chances to get it wrong"
+        );
+        assert!(
+            APP_JS.contains("still holds what you entered"),
+            "a refusal that discarded the form would make the retry a retype"
+        );
+        // The refusal renderer must survive a body that is not the
+        // structured shape: every other error in this file is plain text.
+        assert!(
+            APP_JS.contains("if (!body || !body.referenced_by) {"),
+            "an unparseable refusal is rendered verbatim"
+        );
+    }
+
     /// **`app.js` holds no copy of a served fact.** The positive guard above
     /// proves the server sends the right number; this proves the browser
     /// does not carry its own. Both are needed: a browser with a fallback
