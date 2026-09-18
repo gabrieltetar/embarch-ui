@@ -683,6 +683,46 @@
           <!-- 5. Consoles ----------------------------------------------- -->
           <div id="ls-consoles"></div>
 
+          <!-- 6. Time chart ---------------------------------------------- -->
+          <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Time &mdash; one axis for everything this study did</div>
+              <div class="sd-toolbar-actions">
+                <button id="tc-fit" class="btn" title="back to the whole run (double-clicking the plot does the same)">Fit</button>
+                <button id="tc-reload" class="btn">Redraw</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin-top:10px;">Step bands, GATT traffic, decoded struct rows, sample strips and the trace&rsquo;s own markers, on <strong>one</strong> X axis. Every position here comes from <span class="mono">core_rx_utc_ms</span> &mdash; embarch-core&rsquo;s own receipt clock &mdash; and never from a capture&rsquo;s <span class="mono">rx_utc_ms</span>, which in a study CSV is dev-bench uptime and is comparable with nothing outside its own tap.</p>
+            <p id="tc-error" class="sd-error" style="display:none;"></p>
+          </div>
+
+          <div id="tc-body" style="display:none;">
+            <div class="card" style="margin-bottom:16px;">
+              <p id="tc-axis-note" class="placeholder-note" style="margin-top:0;"></p>
+              <p id="tc-notes" class="placeholder-note" style="display:none; color:var(--warning);"></p>
+              <div class="trace-legend">
+                <span class="trace-key"><i class="sw-run"></i>one event &mdash; click it to open the row it is</span>
+                <span class="trace-key"><i class="sw-gapcross"></i>a cluster: more than one event in this column, so no single one is drawn</span>
+                <span class="trace-key"><i class="sw-open"></i>placed across two clocks &mdash; good to the axis&rsquo;s stated accuracy, not to a span&rsquo;s microsecond</span>
+                <span class="trace-key"><i class="sw-marker"></i>marker, stamped by the DUT itself</span>
+              </div>
+              <div class="trace-nav">
+                <span id="tc-window" class="placeholder-note mono" style="margin:0;"></span>
+                <span class="placeholder-note" style="margin:0;">wheel over the plot zooms at the pointer, drag pans, double-click fits</span>
+              </div>
+              <p id="tc-steps-note" class="placeholder-note" style="margin-top:10px;"></p>
+              <div id="tc-plot" class="trace-plot">
+                <svg id="tc-head" style="display:block;"></svg>
+                <div class="trace-scroll">
+                  <svg id="tc-chart" width="100%" style="display:block;"></svg>
+                </div>
+              </div>
+              <p class="placeholder-note" style="margin-top:10px;">A number at a lane&rsquo;s left or right edge counts events that are real and <strong>outside this window</strong> &mdash; a tap&rsquo;s scope is routinely narrower than the study, and a point mark is never clamped to an edge the way a step band is, because a clamped point would be drawn at a time it was not at. A lane with a note beside it is one this chart cannot place at all, and the note says why.</p>
+            </div>
+
+            <div id="tc-detail" class="card" style="display:none; margin-bottom:16px;"></div>
+          </div>
+
           <!-- 6. Trace --------------------------------------------------- -->
           <input id="trace-study" type="hidden" />
           <div class="card" style="margin-bottom:16px;">

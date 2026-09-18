@@ -246,6 +246,7 @@ pub async fn api_stream_rows(
             // card offers exactly those and the table offers all of them.
             "numeric_columns": table.numeric_columns(),
             "time_column": table.time_column(),
+            "axis_clock": table.axis_clock(),
         })),
     )
         .into_response()
@@ -338,6 +339,7 @@ pub async fn api_stream_series(
             Json(json!({
                 "column": column,
                 "time_column": time_column,
+                "axis_clock": table.axis_clock(),
                 "bins": Vec::<Value>::new(),
                 "points": 0,
                 "unparsed": unparsed,
@@ -393,6 +395,11 @@ pub async fn api_stream_series(
         Json(json!({
             "column": column,
             "time_column": time_column,
+            // Which clock the x axis is, not merely which column. `rx_utc_ms`
+            // is dev-bench uptime and `core_rx_utc_ms` is Core's real UTC; a
+            // plot that did not say which it drew is a plot two people will
+            // read as the same axis.
+            "axis_clock": table.axis_clock(),
             "from": from,
             "to": to,
             "data_from": data_from,
@@ -658,8 +665,44 @@ impl Table {
 
     /// The column to plot against, or `None` for a tap with no stamp of its
     /// own — in which case a caller plots against the row index and says so.
+    ///
+    /// **`core_rx_utc_ms` first, and that ordering was a real defect.** This
+    /// used to take the *first* column matching [`is_time_column`], and in
+    /// every rendering this suite writes `rx_utc_ms` is column 0 while Core
+    /// appends `core_rx_utc_ms` last — so every Data-card plot ever drawn was
+    /// drawn against **dev-bench uptime**, milliseconds since that board
+    /// booted (suite decision 3). Within one tap that is not wrong, which is
+    /// exactly why nothing ever looked broken: the intervals hold, and only
+    /// the origin is a different clock's. It is one step from the trap, and
+    /// the step is laying two taps side by side.
+    ///
+    /// The bench's own stamp is still offered where there is nothing else — a
+    /// tap that predates `core_rx_utc_ms` has a real, usable axis of its own,
+    /// and the answer for it is to plot it and name the clock
+    /// ([`Self::axis_clock`]), not to refuse. What must never happen is
+    /// *silently* choosing it over Core's.
     pub fn time_column(&self) -> Option<String> {
-        self.columns.iter().find(|c| is_time_column(c)).cloned()
+        self.columns
+            .iter()
+            .find(|c| *c == "core_rx_utc_ms")
+            .or_else(|| self.columns.iter().find(|c| is_time_column(c)))
+            .cloned()
+    }
+
+    /// Which clock [`Self::time_column`] picked, named rather than implied.
+    ///
+    /// `"core-clock"` is embarch-core's own receipt time, real UTC, comparable
+    /// with every other stream in the study. `"bench-uptime"` is dev-bench's,
+    /// comparable with nothing outside this tap. `"row-index"` is not a clock
+    /// at all. A caller labelling an axis needs to say which of the three it
+    /// got — "ms" alone does not say whose milliseconds these are, and two of
+    /// these three look identical on a plot.
+    pub fn axis_clock(&self) -> &'static str {
+        match self.time_column().as_deref() {
+            Some("core_rx_utc_ms") => "core-clock",
+            Some(_) => "bench-uptime",
+            None => "row-index",
+        }
     }
 }
 
@@ -752,6 +795,41 @@ mod tests {
         );
         assert_eq!(table.numeric_columns(), ["rep_index"]);
         assert_eq!(table.time_column().as_deref(), Some("core_rx_utc_ms"));
+    }
+
+    /// **Core's own stamp wins over the bench's, whatever order they sit in.**
+    /// In every rendering this suite writes, `rx_utc_ms` is column 0 and
+    /// `core_rx_utc_ms` is appended last — and the two are different clocks
+    /// under one name (suite decision 3). Taking the first match plotted every
+    /// Data card against dev-bench uptime, which within one tap looks exactly
+    /// right because only the origin is wrong.
+    #[test]
+    fn cores_own_stamp_wins_over_the_benchs_whatever_order_they_sit_in() {
+        let table = Table::parse(
+            "rx_utc_ms,step_name,value,unit,channel_id,core_rx_utc_ms\n\
+             120,connect,1.5,Milliamps,0,1700000000120\n",
+        );
+        assert_eq!(table.time_column().as_deref(), Some("core_rx_utc_ms"));
+        assert_eq!(table.axis_clock(), "core-clock");
+    }
+
+    /// A tap that predates `core_rx_utc_ms` still has a usable axis of its
+    /// own. The answer is to plot it and **name the clock**, not to refuse —
+    /// what must never happen is choosing it silently over Core's.
+    #[test]
+    fn a_tap_with_only_the_benchs_stamp_is_plotted_and_says_whose_clock_it_is() {
+        let table = Table::parse("rx_utc_ms,step_name,value,unit,channel_id\n120,c,1.5,mA,0\n");
+        assert_eq!(table.time_column().as_deref(), Some("rx_utc_ms"));
+        assert_eq!(table.axis_clock(), "bench-uptime");
+    }
+
+    /// And a tap with no stamp at all is plotted against its row index, which
+    /// is not a clock and says so.
+    #[test]
+    fn a_tap_with_no_stamp_plots_against_its_row_index_and_says_so() {
+        let table = Table::parse("a,b\n1,2\n");
+        assert_eq!(table.time_column(), None);
+        assert_eq!(table.axis_clock(), "row-index");
     }
 
     #[test]

@@ -274,7 +274,7 @@ pub struct Gap {
 ///
 /// One study step as **embarch-core** recorded it: two wall-clock stamps and
 /// the delay the study declared before it. Nothing here is on the trace's axis
-/// yet — [`project_steps`] is what puts it there, and refuses to when it
+/// yet — [`project_steps_on`] is what puts it there, and refuses to when it
 /// cannot.
 #[derive(Debug, Clone)]
 pub struct StepStamp {
@@ -323,7 +323,7 @@ pub struct StepBand {
 /// the one piece of context that turns a timeline into a diagnosis.
 ///
 /// **Three axis cases, each named rather than guessed** — see
-/// [`project_steps`].
+/// [`project_steps_on`].
 #[derive(Debug, Clone, Serialize)]
 pub struct StepRow {
     /// False when this axis has no time base to project onto. The row is then
@@ -540,6 +540,16 @@ pub struct TraceView {
     /// is the realistic cause); on the DUT clock it means the unwrap lost a
     /// wrap. Either way it says so instead of drawing confidently.
     pub out_of_order_rows: usize,
+    /// The one crossing between embarch-core's receipt clock and this axis,
+    /// built once here and handed to everything that wants to lay another of
+    /// the study's streams beside this capture.
+    ///
+    /// **Never serialized.** It holds the whole anchor list, which is one
+    /// entry per frame — and it is a server-side instrument, not a payload:
+    /// the browser never places anything itself, for the same reason it parses
+    /// no CSV (decision 18, suite decision 4). `time_chart` is its caller.
+    #[serde(skip_serializing)]
+    pub projection: Projection,
     /// Which study step was running when, projected onto this axis. `None`
     /// when embarch-core had no per-step stamps to offer — a study that ran
     /// before Core recorded them, or one whose `events.json` is gone.
@@ -842,7 +852,7 @@ fn project_ms(anchors: &[ClockAnchor], ms: u64) -> Option<u64> {
 /// The one crossing between embarch-core's receipt clock and whatever clock a
 /// view's axis is on.
 ///
-/// **Extracted from [`project_steps`], which was both arms of it inline.**
+/// **Extracted from [`project_steps_on`], which was both arms of it inline.**
 /// Every stream a study produces except the outpost trace is stamped by the
 /// same `current_utc_ms()` in the same Core process — step edges, a sample's
 /// `core_rx_utc_ms`, a GATT row's, a console line's arrival. Only the trace
@@ -963,6 +973,39 @@ impl Projection {
         }
     }
 
+    /// The no-trace arm: embarch-core's own receipt clock **is** the axis, so
+    /// every placement is the identity and exact.
+    ///
+    /// Structurally identical to [`Self::from_trace`]'s `"ms"` branch with an
+    /// empty `rows` slice, and deliberately so: a study with no outpost trace
+    /// is the same code path as one whose capture fell back to the host clock,
+    /// not a second one to keep in step.
+    pub fn core_clock(from_ms: u64, to_ms: u64) -> Projection {
+        Projection {
+            placeable: true,
+            t_from: from_ms,
+            t_to: to_ms,
+            window_from_ms: from_ms,
+            window_to_ms: to_ms,
+            ..Projection::default()
+        }
+    }
+
+    /// Whether this axis can take an instant at all. A default [`Projection`]
+    /// is the one that cannot: nothing in the study carries a clock.
+    pub fn placeable(&self) -> bool {
+        self.placeable
+    }
+
+    /// The axis's own extent, in the axis's own units.
+    pub fn t_from(&self) -> u64 {
+        self.t_from
+    }
+
+    pub fn t_to(&self) -> u64 {
+        self.t_to
+    }
+
     /// Whether a placement is an interpolation rather than the identity — the
     /// difference between "good to `accuracy_ms`" and "exact".
     pub fn projected(&self) -> bool {
@@ -973,6 +1016,10 @@ impl Projection {
     /// unplaceable instant against to say which end it fell off.
     pub fn window_from_ms(&self) -> u64 {
         self.window_from_ms
+    }
+
+    pub fn window_to_ms(&self) -> u64 {
+        self.window_to_ms
     }
 
     /// One instant on embarch-core's clock, placed on this axis — or `None`
@@ -1032,7 +1079,7 @@ impl Projection {
 ///   absolute UTC milliseconds these stamps are in. No projection, no caveat.
 /// - refused — there is no time base at all, so a step **cannot be placed**.
 ///   Said, with no bands drawn.
-fn project_steps(steps: &[StepStamp], proj: &Projection) -> Option<StepRow> {
+pub fn project_steps_on(steps: &[StepStamp], proj: &Projection) -> Option<StepRow> {
     if steps.is_empty() {
         return None;
     }
@@ -1890,7 +1937,8 @@ fn parse_with_cap(
         resolution_ms,
         records_lost,
         out_of_order_rows,
-        steps: project_steps(steps, &projection),
+        steps: project_steps_on(steps, &projection),
+        projection,
         gaps,
         lanes,
         markers,
@@ -3102,6 +3150,61 @@ mod tests {
         let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[], placeholder_summary())
             .expect("parses");
         assert!(view.steps.is_none());
+    }
+
+    /// **The one thing the Time chart rests on: a mark and a step edge at the
+    /// same instant land at the same position.** The step row and every other
+    /// stream go through one [`Projection`], so this is true by construction —
+    /// and it is asserted anyway, because "by construction" is exactly what
+    /// stopped being true the last time this suite grew a second copy of one
+    /// piece of clock arithmetic.
+    #[test]
+    fn a_mark_and_a_step_edge_at_the_same_instant_place_to_the_same_position() {
+        let steps = [step(0, "connect", "Pass", 0, STAMPED_EPOCH_MS + 100, STAMPED_EPOCH_MS + 300)];
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &steps, placeholder_summary())
+            .expect("parses");
+        let band = &view.steps.as_ref().expect("placed").bands[0];
+        // A GATT row received at the very instant the step started.
+        assert_eq!(view.projection.place(STAMPED_EPOCH_MS + 100), Some(band.from));
+        assert_eq!(view.projection.place(STAMPED_EPOCH_MS + 300), Some(band.to));
+        // And one received inside it lands inside it.
+        let inside = view.projection.place(STAMPED_EPOCH_MS + 200).expect("inside the capture");
+        assert!(band.from < inside && inside < band.to);
+    }
+
+    /// **A point outside the anchors' range is unplaceable, and is never
+    /// clamped.** A band clamped to the capture's edge is still a truthful
+    /// drawing of a step that ran past it; a point clamped the same way would
+    /// be drawn at a time it was not at. The two answers come from the same
+    /// projection and differ only in which method the caller reaches for.
+    #[test]
+    fn a_point_outside_the_capture_is_refused_where_a_band_edge_is_clamped() {
+        let view = parse("s", "outpost", STAMPED_TRACE, true, true, Some(true), None, &[], placeholder_summary())
+            .expect("parses");
+        let before = STAMPED_EPOCH_MS - 5_000;
+        let after = STAMPED_EPOCH_MS + 900_000;
+        assert_eq!(view.projection.place(before), None);
+        assert_eq!(view.projection.place(after), None);
+        assert_eq!(view.projection.place_edge(before), (view.t_from, true));
+        assert_eq!(view.projection.place_edge(after), (view.t_to, true));
+    }
+
+    /// **A study with no trace is not a second code path.** It is the same
+    /// projection with embarch-core's own clock as the axis: exact, nothing
+    /// projected, no accuracy to state.
+    #[test]
+    fn with_no_trace_cores_clock_is_the_axis_and_every_placement_is_exact() {
+        let proj = Projection::core_clock(1_000, 2_000);
+        assert!(proj.placeable());
+        assert!(!proj.projected());
+        assert_eq!(proj.accuracy_ms, None);
+        assert_eq!(proj.place(1_234), Some(1_234));
+        // And it takes the step row unchanged, with no caveat on it.
+        let steps = [step(0, "connect", "Pass", 0, 1_100, 1_900)];
+        let row = project_steps_on(&steps, &proj).expect("placed");
+        assert!(row.placeable && !row.projected);
+        assert_eq!(row.accuracy_ms, None);
+        assert_eq!((row.bands[0].from, row.bands[0].to), (1_100, 1_900));
     }
 
     /// **The projection is built from a stale-prefix-free anchor list.** A

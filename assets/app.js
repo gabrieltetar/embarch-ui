@@ -5077,6 +5077,7 @@
     lsEl("ls-data").innerHTML = "";
     lsEl("ls-status-lagged").style.display = "none";
     lsEl("ls-record-note").style.display = "none";
+    tcHideDetail();
     lsDetach();
 
     await lsLoadRecord(studyId, true);
@@ -5153,6 +5154,12 @@
     if (lsRecord.taps_note) lsNote("ls-record-note", lsRecord.taps_note);
 
     lsRenderTraceTaps();
+    // The Time chart reads the whole study rather than one tap, so it is
+    // loaded here rather than off the tap picker. Awaited **after** the
+    // trace picker is populated and before the per-tap cards, so a slow
+    // multi-megabyte capture does not hold up the cards that are already
+    // drawable.
+    await tcLoad();
     if (rebuild) {
       await lsRenderConsoles();
       await lsRenderData();
@@ -6287,6 +6294,79 @@
     drawTraceChart(view);
   }
 
+  // ---- shared chart geometry ------------------------------------------------
+  //
+  // **Two charts, one pixel map.** The Time chart and the Trace chart draw the
+  // same axis over the same capture, stacked one above the other, and a reader
+  // reads across them. Two independently-derived pixel maps agree in the
+  // middle and disagree at the edges by a fraction of a column — which is a
+  // mark drawn one pixel away from the span it happened inside, and the one
+  // error this pair of charts exists to make impossible. So there is one
+  // clamp, one set of zoom floors and one pixel map, and both charts go
+  // through them.
+  //
+  // Everything here takes an **axis** — anything carrying `t_from`, `t_to` and
+  // `unit` — rather than a view, so a `TraceView` and a `TimeChartView.axis`
+  // are both valid arguments without either learning about the other.
+
+  /// The right-hand inset of a plot, shared so both charts end at the same x.
+  var CHART_PAD_RIGHT = 14;
+
+  function chartFullWin(axis) {
+    return { from: axis.t_from, to: Math.max(axis.t_from + 1, axis.t_to) };
+  }
+
+  /// The finest window a reader may zoom to. A floor is needed because the
+  /// axis is integers: a window narrower than a few units would put several
+  /// pixel columns inside one unit, and the binning would draw a span's
+  /// *rounding* rather than its extent. The floors differ per clock because
+  /// the units do — 40 µs of the DUT's counter, 4 ms of the host's, 4 frames
+  /// when there is no time base at all.
+  function chartMinWin(unit) {
+    if (unit === "us") return 40;
+    return 4;
+  }
+
+  /// Clamps a proposed window into the capture. Zoom never goes wider than the
+  /// whole capture and pan never leaves it, so there is no way to end up
+  /// looking at empty axis and wondering whether the trace stopped.
+  function chartClampWin(axis, win) {
+    var full = chartFullWin(axis);
+    var extent = full.to - full.from;
+    var w = Math.min(extent, Math.max(chartMinWin(axis.unit), win.to - win.from));
+    var from = Math.min(Math.max(win.from, full.from), full.to - w);
+    // **Rounded to whole units, and that is load-bearing rather than tidy.**
+    // The axis is integers (`chartMinWin` says why), but zooming at the
+    // pointer computes an anchor from a pixel fraction, so every wheel notch
+    // produced a fractional window. That was invisible while aggregation
+    // happened in the browser and float bounds only shifted a rect by a
+    // sub-pixel; now the window is a request the server answers, and
+    // `?from=1234.56` is not a narrower window, it is a malformed query.
+    // Rounding the width first and the origin second keeps the zoom floor
+    // exact.
+    w = Math.round(w);
+    return { from: Math.round(from), to: Math.round(from) + w };
+  }
+
+  /// Axis units per CSS pixel of plot, for a drag.
+  function chartUnitsPerPx(widthPx, gutter, win) {
+    var plotW = Math.max(1, widthPx - CHART_PAD_RIGHT - gutter);
+    return (win.to - win.from) / plotW;
+  }
+
+  /// The axis value under a pointer event. `null` when the pointer is left of
+  /// the plot (over the lane-name gutter), where a zoom anchor would be
+  /// meaningless.
+  function chartAxisAt(svg, gutter, win, ev) {
+    if (!svg) return null;
+    var rect = svg.getBoundingClientRect();
+    var px = ev.clientX - rect.left;
+    if (px < gutter) return null;
+    var plotW = Math.max(1, rect.width - CHART_PAD_RIGHT - gutter);
+    var f = Math.max(0, Math.min(1, (px - gutter) / plotW));
+    return win.from + f * (win.to - win.from);
+  }
+
   /// The lane-name gutter's floor. The gutter itself is measured per draw
   /// against the *visible* lanes' longest label (`traceGutter`), because a
   /// name that runs off the left edge makes a lane unidentifiable — and a
@@ -6298,7 +6378,7 @@
   var TRACE_AXIS_H = 30;
   var TRACE_ROW_H = 24;
   var TRACE_BAR_H = 13;
-  var TRACE_PAD_RIGHT = 14;
+  var TRACE_PAD_RIGHT = CHART_PAD_RIGHT;
   var TRACE_BODY_PAD = 18;
   /// The study-action row's own band height, and the gap under it before the
   /// lanes begin. It lives in the pinned header rather than in the scrolling
@@ -6325,40 +6405,20 @@
   var traceHidden = null;
   var traceDrawQueued = false;
 
+  // The three below now delegate to the shared geometry above. They stay as
+  // named functions because every call site in this section reads `view`, and
+  // a `view` is an axis for these purposes — `t_from`, `t_to` and `unit` are
+  // exactly what the shared functions take.
   function traceFullWin(view) {
-    return { from: view.t_from, to: Math.max(view.t_from + 1, view.t_to) };
+    return chartFullWin(view);
   }
 
-  /// The finest window a reader may zoom to. A floor is needed because the
-  /// axis is integers: a window narrower than a few units would put several
-  /// pixel columns inside one unit, and the aggregation below would draw a
-  /// span's *rounding* rather than its extent. The floors differ per clock
-  /// because the units do — 40 µs of the DUT's counter, 4 ms of the host's,
-  /// 4 frames when there is no time base at all.
   function traceMinWin(view) {
-    if (view.unit === "us") return 40;
-    if (view.unit === "ms") return 4;
-    return 4;
+    return chartMinWin(view.unit);
   }
 
-  /// Clamps a proposed window into the capture. Zoom never goes wider than the
-  /// whole capture and pan never leaves it, so there is no way to end up
-  /// looking at empty axis and wondering whether the trace stopped.
   function traceClampWin(view, win) {
-    var full = traceFullWin(view);
-    var extent = full.to - full.from;
-    var w = Math.min(extent, Math.max(traceMinWin(view), win.to - win.from));
-    var from = Math.min(Math.max(win.from, full.from), full.to - w);
-    // **Rounded to whole units, and that is load-bearing rather than tidy.**
-    // The axis is integers (`traceMinWin` says why), but zooming at the
-    // pointer computes an anchor from a pixel fraction, so every wheel notch
-    // produced a fractional window. That was invisible while aggregation
-    // happened here and float bounds only shifted a rect by a sub-pixel; now
-    // the window is a request the server answers, and `?from=1234.56` is not a
-    // narrower window, it is a malformed query. Rounding the width first and
-    // the origin second keeps the zoom floor exact.
-    w = Math.round(w);
-    return { from: Math.round(from), to: Math.round(from) + w };
+    return chartClampWin(view, win);
   }
 
   function traceResetWindow(view) {
@@ -6963,23 +7023,14 @@
 
   function traceUnitsPerPx(view, win) {
     var svg = trEl("trace-chart");
-    var width = Math.max(640, (svg && svg.clientWidth) || 900);
-    var plotW = Math.max(1, width - TRACE_PAD_RIGHT - traceGutter);
-    return (win.to - win.from) / plotW;
+    return chartUnitsPerPx(Math.max(640, (svg && svg.clientWidth) || 900), traceGutter, win);
   }
 
   /// The axis value under a pointer event, in view units. Returns `null` when
   /// the pointer is left of the plot (over the lane-name gutter), where a
   /// zoom anchor would be meaningless.
   function traceAxisAt(view, win, ev) {
-    var svg = trEl("trace-chart");
-    if (!svg) return null;
-    var rect = svg.getBoundingClientRect();
-    var px = ev.clientX - rect.left;
-    if (px < traceGutter) return null;
-    var plotW = Math.max(1, rect.width - TRACE_PAD_RIGHT - traceGutter);
-    var f = Math.max(0, Math.min(1, (px - traceGutter) / plotW));
-    return win.from + f * (win.to - win.from);
+    return chartAxisAt(trEl("trace-chart"), traceGutter, win, ev);
   }
 
   function traceOnWheel(ev) {
@@ -7156,6 +7207,638 @@
     traceScheduleDraw();
   }
 
+  // ---- the Time chart --------------------------------------------------------
+  //
+  // **One axis, everything on it.** The cards above and below this one each
+  // show one stream well and none of them together; this shows the run. Its
+  // geometry is the shared one (`chartClampWin` and friends), so a position
+  // here and the same position on the Trace chart below are the same pixel.
+  //
+  // **This file places nothing.** Every `t` arrives already on the axis, from
+  // `src/time_chart.rs`, which is the one place embarch-core's receipt clock is
+  // crossed onto a capture's own counter. A browser that did its own arithmetic
+  // here would be a second implementation of the projection, which is the whole
+  // thing decision 18 and suite decision 4 exist to prevent — and the
+  // arithmetic in question is the one this suite has already got wrong once, by
+  // 46×.
+
+  var tcView = null;
+  var tcWin = null;
+  var tcBins = null;
+  var tcBinsWanted = null;
+  var tcBinsSeq = 0;
+  var tcDrag = null;
+  var tcDrawQueued = false;
+  var TC_GUTTER = 210;
+  var TC_AXIS_H = 30;
+  var TC_ROW_H = 26;
+  var TC_MARK_H = 14;
+  var TC_SERIES_H = 40;
+  var TC_STEP_H = 26;
+  var TC_STEP_GAP = 8;
+  var TC_BODY_PAD = 18;
+
+  function tcShowError(message) {
+    var el = trEl("tc-error");
+    if (!el) return;
+    if (!message) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = message;
+  }
+
+  function tcForgetBins() {
+    tcBins = null;
+    tcBinsWanted = null;
+    tcBinsSeq += 1;
+  }
+
+  /// Loads one study's whole chart. Loading **is** the refresh, the same
+  /// contract the Trace card holds: the server rebuilds on every call and
+  /// `/marks` answers from what it built until the next one.
+  async function tcLoad() {
+    var studyId = lsStudyId;
+    var body = trEl("tc-body");
+    if (!studyId || !body) return;
+    tcShowError("");
+    var resp;
+    try {
+      resp = await fetch("/api/time-chart/" + encodeURIComponent(studyId));
+    } catch (e) {
+      body.style.display = "none";
+      return tcShowError("could not reach embarch-ui: " + e.message);
+    }
+    var text = await resp.text();
+    if (!resp.ok) {
+      body.style.display = "none";
+      return tcShowError(resp.status + " " + text);
+    }
+    tcView = JSON.parse(text);
+    tcWin = null;
+    tcForgetBins();
+    tcHideDetail();
+    tcRender();
+  }
+
+  function tcRender() {
+    var view = tcView;
+    var body = trEl("tc-body");
+    if (!view || !body) return;
+
+    // **No axis is a state, not a failure.** A study whose steps carry no
+    // stamps and whose taps carry no `core_rx_utc_ms` has nothing to draw on,
+    // and positions invented from row order would look exactly like times.
+    if (!view.axis.placeable) {
+      body.style.display = "none";
+      return tcShowError(view.axis.note);
+    }
+    body.style.display = "block";
+
+    trEl("tc-axis-note").textContent = view.axis.note;
+    trEl("tc-steps-note").textContent = view.steps_placeable
+      ? ""
+      : view.steps_note;
+    trEl("tc-steps-note").style.display = view.steps_placeable ? "none" : "block";
+
+    var notes = (view.notes || []).slice();
+    if (view.marks_dropped_by_cap) {
+      notes.push(
+        view.marks_dropped_by_cap +
+          " event(s) past a lane's cap are not drawn — the whole capture is still on embarch-core's disk"
+      );
+    }
+    var notesEl = trEl("tc-notes");
+    if (notes.length) {
+      notesEl.style.display = "block";
+      notesEl.textContent = notes.join(" · ");
+    } else {
+      notesEl.style.display = "none";
+    }
+
+    tcScheduleDraw();
+  }
+
+  function tcScheduleDraw() {
+    if (tcDrawQueued) return;
+    tcDrawQueued = true;
+    requestAnimationFrame(function () {
+      tcDrawQueued = false;
+      if (tcView) tcDraw(tcView);
+    });
+  }
+
+  function tcBinsKey(win, cols) {
+    return win.from + ":" + win.to + ":" + cols;
+  }
+
+  /// The bins for exactly this window, or `null` after asking for them.
+  ///
+  /// The same rule the Trace chart holds: **nothing is drawn from a different
+  /// window's bins.** A held set could be rescaled into position and would be
+  /// approximately right, and "approximately right" is precisely what a chart
+  /// built to show a misalignment must never be.
+  function tcBinsFor(view, win, cols) {
+    var key = tcBinsKey(win, cols);
+    if (tcBins && tcBins.key === key) return tcBins;
+    if (tcBinsWanted === key) return null;
+    tcBinsWanted = key;
+    var seq = (tcBinsSeq += 1);
+    fetch(
+      "/api/time-chart/" + encodeURIComponent(view.study_id) + "/marks?from=" +
+        win.from + "&to=" + win.to + "&width=" + cols
+    )
+      .then(function (resp) {
+        if (resp.ok) return resp.json();
+        return resp.text().then(function (t) { throw new Error(resp.status + " " + t); });
+      })
+      .then(function (data) {
+        if (seq !== tcBinsSeq || tcView !== view) return;
+        // **An answer from a different axis is refused, never drawn.** The
+        // epoch changes only when the axis genuinely improved — a live session
+        // dropping a stale prefix, or its header frame arriving and promoting
+        // the tier — and drawing a reply from across that change would move
+        // marks a reader has already looked at.
+        if (data.axis_epoch !== view.axis_epoch) {
+          return tcShowError(
+            "this chart's axis changed while a window was in flight (epoch " +
+              view.axis_epoch + " → " + data.axis_epoch + "); nothing was drawn — press Redraw"
+          );
+        }
+        if (data.from !== win.from || data.to !== win.to || data.width !== cols) {
+          return tcShowError(
+            "the server binned " + data.from + "–" + data.to + " at " + data.width +
+            " bins, not the " + win.from + "–" + win.to + " at " + cols +
+            " this window asked for, so nothing was redrawn"
+          );
+        }
+        var byKey = {};
+        (data.lanes || []).forEach(function (l) { byKey[l.key] = l; });
+        var series = {};
+        (data.series || []).forEach(function (l) { series[l.key] = l; });
+        tcBins = { key: key, from: data.from, to: data.to, width: data.width, byKey: byKey, series: series };
+        tcScheduleDraw();
+      })
+      .catch(function (e) {
+        if (seq !== tcBinsSeq) return;
+        tcBinsWanted = null;
+        tcShowError("could not bin this window: " + e.message);
+      });
+    return null;
+  }
+
+  /// A lane's colour, by what it carries. Deliberately four distinguishable
+  /// hues rather than one: a reader scanning for "the notification that came
+  /// in during that step" is scanning by kind first.
+  function tcLaneColor(kind) {
+    if (kind === "gatt") return "var(--accent)";
+    if (kind === "struct") return "var(--info)";
+    if (kind === "marker") return "var(--warning)";
+    return "var(--text-tertiary)";
+  }
+
+  function tcDraw(view) {
+    var svg = trEl("tc-chart");
+    var head = trEl("tc-head");
+    if (!svg || !view.axis.placeable) return;
+    if (!tcWin) tcWin = chartFullWin(view.axis);
+    var win = chartClampWin(view.axis, tcWin);
+    tcWin = win;
+
+    var width = Math.max(640, svg.clientWidth || svg.parentElement.clientWidth || 900);
+    var plotLeft = TC_GUTTER;
+    var plotRight = width - CHART_PAD_RIGHT;
+    var plotW = Math.max(1, plotRight - plotLeft);
+    var cols = Math.max(1, Math.round(plotW));
+    var span = Math.max(1, win.to - win.from);
+    function x(t) {
+      return plotLeft + ((t - win.from) / span) * plotW;
+    }
+    var tier = Math.max(Math.abs(win.to - view.axis.t_from), Math.abs(win.from - view.axis.t_from));
+    function at(t) {
+      return fmtAxisT(view.axis, t - view.axis.t_from, span, tier);
+    }
+
+    var bins = tcBinsFor(view, win, cols);
+    if (!bins) return;
+
+    var lanes = view.lanes || [];
+    var series = view.series || [];
+    var stepped = view.steps_placeable && view.bands && view.bands.length;
+    var headH = TC_AXIS_H + (stepped ? TC_STEP_H + TC_STEP_GAP * 2 : 0);
+
+    // ---- body -----------------------------------------------------------
+    var parts = [];
+    var y = 0;
+    var rows = [];
+    lanes.forEach(function (l) { rows.push({ lane: l, top: y, h: TC_ROW_H }); y += TC_ROW_H; });
+    series.forEach(function (sr) { rows.push({ series: sr, top: y, h: TC_SERIES_H }); y += TC_SERIES_H; });
+    var bodyH = Math.max(TC_ROW_H, y) + TC_BODY_PAD;
+
+    parts.push(
+      '<defs>' +
+      '<pattern id="tc-cluster" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
+      '<rect width="6" height="6" fill="var(--accent-soft-bg)"/>' +
+      '<line x1="0" y1="0" x2="0" y2="6" stroke="var(--accent)" stroke-width="2"/></pattern>' +
+      "</defs>"
+    );
+
+    var ticks = 6;
+    var t;
+    for (t = 0; t <= ticks; t += 1) {
+      var gx = x(win.from + (span * t) / ticks);
+      parts.push(
+        '<line x1="' + gx + '" y1="0" x2="' + gx + '" y2="' + (bodyH - 4) +
+        '" stroke="var(--border)" stroke-width="1" opacity="0.7"/>'
+      );
+    }
+
+    var drawn = 0;
+    rows.forEach(function (row) {
+      var mid = row.top + row.h / 2;
+      var lane = row.lane;
+      var sr = row.series;
+      var label = lane ? lane.label : sr.label;
+      var unplaceable = lane ? !!lane.note : !!sr.note;
+
+      parts.push(
+        '<text x="' + (TC_GUTTER - 12) + '" y="' + (mid + 4) + '" text-anchor="end" ' +
+        'fill="' + (unplaceable ? "var(--text-tertiary)" : "var(--text-primary)") + '" ' +
+        'font-size="11.5" font-family="IBM Plex Mono, monospace"' +
+        (unplaceable ? ' font-style="italic"' : "") + ">" +
+        "<title>" + escapeHtml(
+          label + " — " + (lane ? lane.kind : "samples · " + sr.column) + ", " +
+          (lane ? lane.total : sr.total) + " event(s) in the whole run, " +
+          (lane ? lane.placed : sr.placed) + " of them placeable on this axis" +
+          (unplaceable ? " — " + (lane ? lane.note : sr.note) : "")
+        ) + "</title>" + escapeHtml(label) + "</text>"
+      );
+      parts.push(
+        '<line x1="' + plotLeft + '" y1="' + mid + '" x2="' + plotRight + '" y2="' + mid +
+        '" stroke="var(--border)" stroke-width="1" stroke-dasharray="2 4"/>'
+      );
+
+      if (unplaceable) {
+        parts.push(
+          '<text x="' + (plotLeft + 10) + '" y="' + (mid + 4) + '" fill="var(--text-tertiary)" ' +
+          'font-size="11" font-style="italic">' +
+          escapeHtml(
+            (lane ? lane.total : sr.total) +
+            " event(s) this chart cannot place — hover the lane name for why"
+          ) + "</text>"
+        );
+        return;
+      }
+
+      if (lane) {
+        var binned = bins.byKey[lane.key] || { runs: [], before: 0, after: 0 };
+        var color = tcLaneColor(lane.kind);
+        var barTop = mid - TC_MARK_H / 2;
+        (binned.runs || []).forEach(function (run) {
+          var rx = plotLeft + run.c0;
+          var rw = Math.max(3, run.c1 - run.c0 + 1);
+          var one = run.one;
+          var title;
+          if (one) {
+            title =
+              at(one.t) + " · " + (one.sub ? one.sub + " · " : "") + one.label +
+              (one.uncertain
+                ? " · placed from embarch-core's receipt clock onto this capture's counter, to about " +
+                  view.axis.accuracy_ms + " ms"
+                : " · exactly where embarch-core received it") +
+              " — click to open the row";
+          } else {
+            var blockFrom = win.from + (run.c0 / cols) * span;
+            var blockTo = win.from + ((run.c1 + 1) / cols) * span;
+            title =
+              run.count + " event(s) of this lane merged into " + (run.c1 - run.c0 + 1) +
+              " pixel column(s), " + at(Math.round(blockFrom)) + " → " + at(Math.round(blockTo)) +
+              " — zoom in to separate them; no single one of them is drawn here";
+          }
+          parts.push(
+            '<rect x="' + rx + '" y="' + barTop + '" width="' + rw + '" height="' + TC_MARK_H +
+            '" rx="2" fill="' + (one ? color : "url(#tc-cluster)") + '"' +
+            (one && one.uncertain ? ' opacity="0.72"' : "") +
+            (one ? ' class="tc-mark" data-mark-id="' + one.id + '"' : "") +
+            "><title>" + escapeHtml(title) + "</title></rect>"
+          );
+          drawn += 1;
+        });
+        tcGutterCounts(parts, plotLeft, plotRight, mid, binned.before, binned.after,
+          lane.label, "event");
+        return;
+      }
+
+      // A sample tap: a min/max strip, scaled to what is on screen.
+      var sb = bins.series[sr.key] || { bins: [], min: 0, max: 0, before: 0, after: 0 };
+      var lo = sb.min;
+      var hi = sb.max;
+      var range = hi - lo;
+      if (!(range > 0)) {
+        lo = lo - 0.5;
+        range = 1;
+      }
+      var top = row.top + 4;
+      var h = row.h - 10;
+      (sb.bins || []).forEach(function (b) {
+        var y0 = top + h * (1 - (b.max - lo) / range);
+        var y1 = top + h * (1 - (b.min - lo) / range);
+        parts.push(
+          '<rect x="' + (plotLeft + b.c) + '" y="' + y0 + '" width="1.2" height="' +
+          Math.max(1, y1 - y0) + '" fill="var(--success)"/>'
+        );
+        drawn += 1;
+      });
+      parts.push(
+        '<text x="' + (plotRight - 4) + '" y="' + (top + 10) + '" text-anchor="end" ' +
+        'fill="var(--text-tertiary)" font-size="10" font-family="IBM Plex Mono, monospace">' +
+        escapeHtml(
+          hi.toPrecision(4) + (sr.unit ? " " + sr.unit : "") + " max · " +
+          lo.toPrecision(4) + " min in this window"
+        ) + "</text>"
+      );
+      tcGutterCounts(parts, plotLeft, plotRight, mid, sb.before, sb.after, sr.label, "sample");
+    });
+
+    if (!rows.length) {
+      parts.push(
+        '<text x="' + (plotLeft + 12) + '" y="' + (TC_ROW_H / 2 + 4) + '" ' +
+        'fill="var(--text-tertiary)" font-size="12">' +
+        escapeHtml("This study produced no stream this chart can draw.") + "</text>"
+      );
+    }
+
+    svg.setAttribute("viewBox", "0 0 " + width + " " + bodyH);
+    svg.setAttribute("height", String(bodyH));
+    svg.innerHTML = parts.join("");
+
+    // ---- header: the axis and the step row -------------------------------
+    if (head) {
+      var hp = [];
+      var stepTop = TC_AXIS_H + TC_STEP_GAP;
+      for (t = 0; t <= ticks; t += 1) {
+        var tickAt = win.from + (span * t) / ticks;
+        var tx = x(tickAt);
+        hp.push(
+          '<line x1="' + tx + '" y1="' + (TC_AXIS_H - 6) + '" x2="' + tx + '" y2="' + headH +
+          '" stroke="var(--border)" stroke-width="1" opacity="0.7"/>' +
+          '<text x="' + tx + '" y="' + (TC_AXIS_H - 10) + '" text-anchor="' +
+          (t === 0 ? "start" : t === ticks ? "end" : "middle") + '" ' +
+          'fill="var(--text-tertiary)" font-size="10.5" font-family="IBM Plex Mono, monospace">' +
+          escapeHtml(at(Math.round(tickAt))) + "</text>"
+        );
+      }
+
+      if (stepped) {
+        hp.push(
+          '<text x="' + (TC_GUTTER - 12) + '" y="' + (stepTop + TC_STEP_H / 2 + 4) +
+          '" text-anchor="end" fill="var(--text-secondary)" font-size="11.5" ' +
+          'font-family="IBM Plex Mono, monospace">' +
+          escapeHtml(view.axis.projected
+            ? "study step (±" + view.axis.accuracy_ms + " ms)"
+            : "study step") + "</text>"
+        );
+        view.bands.forEach(function (b) {
+          if (b.to < win.from || b.from > win.to) return;
+          var bx0 = Math.max(plotLeft, Math.min(plotRight, x(b.from)));
+          var bx1 = Math.max(plotLeft, Math.min(plotRight, x(b.to)));
+          var bxd = Math.max(plotLeft, Math.min(plotRight, x(b.exec_from)));
+          var decoded = decodeOutcome(b.outcome, b.reason);
+          var color = traceOutcomeColor(decoded);
+          var detail =
+            "step " + b.index + " · " + b.name + " → " + b.outcome +
+            (decoded.reason ? " (" + decoded.reason + ")" : "") +
+            (b.delay_before_ms > 0 ? " · " + b.delay_before_ms + " ms declared delay first" : "") +
+            (b.clipped_start ? " · began before this axis starts" : "") +
+            (b.clipped_end ? " · ended after this axis ends" : "");
+          if (bxd > bx0 + 0.5) {
+            hp.push(
+              '<rect x="' + bx0 + '" y="' + stepTop + '" width="' + (bxd - bx0) + '" height="' +
+              TC_STEP_H + '" fill="var(--bg-surface-inset)" stroke="var(--border)" ' +
+              'stroke-width="1"><title>' + escapeHtml(detail) + "</title></rect>"
+            );
+          }
+          hp.push(
+            '<rect x="' + bxd + '" y="' + stepTop + '" width="' + Math.max(1.5, bx1 - bxd) +
+            '" height="' + TC_STEP_H + '" rx="2" fill="' + color +
+            '" opacity="0.42" stroke="' + color + '" stroke-width="1"><title>' +
+            escapeHtml(detail) + "</title></rect>"
+          );
+          var labelW = bx1 - bx0;
+          if (labelW > 44) {
+            hp.push(
+              '<text x="' + (bx0 + labelW / 2) + '" y="' + (stepTop + TC_STEP_H / 2 + 4) +
+              '" text-anchor="middle" fill="var(--text-primary)" font-size="10.5" ' +
+              'font-family="IBM Plex Mono, monospace" pointer-events="none">' +
+              escapeHtml(traceFitLabel(b.name, labelW)) + "</text>"
+            );
+          }
+        });
+      }
+
+      head.setAttribute("viewBox", "0 0 " + width + " " + headH);
+      head.setAttribute("height", String(headH));
+      head.style.width = width + "px";
+      head.innerHTML = hp.join("");
+    }
+
+    tcUpdateReadout(view, win, drawn);
+  }
+
+  /// The counts at each end of a lane: events that are real, placed, and
+  /// outside the window a reader is looking at.
+  ///
+  /// **Two numbers, not one.** "214 before this trace opened" says to widen the
+  /// tap's scope earlier; the same total as one number says nothing.
+  function tcGutterCounts(parts, plotLeft, plotRight, mid, before, after, label, noun) {
+    if (before) {
+      parts.push(
+        '<text x="' + (plotLeft + 3) + '" y="' + (mid - 9) + '" fill="var(--text-tertiary)" ' +
+        'font-size="10" font-family="IBM Plex Mono, monospace">&#9666;' + before +
+        "<title>" + escapeHtml(before + " " + noun + "(s) of " + label +
+          " fall before this window — they are drawn nowhere here rather than stacked at the edge") +
+        "</title></text>"
+      );
+    }
+    if (after) {
+      parts.push(
+        '<text x="' + (plotRight - 3) + '" y="' + (mid - 9) + '" text-anchor="end" ' +
+        'fill="var(--text-tertiary)" font-size="10" font-family="IBM Plex Mono, monospace">' +
+        after + "&#9656;<title>" + escapeHtml(after + " " + noun + "(s) of " + label +
+          " fall after this window") + "</title></text>"
+      );
+    }
+  }
+
+  function tcUpdateReadout(view, win, drawn) {
+    var el = trEl("tc-window");
+    if (!el) return;
+    var full = chartFullWin(view.axis);
+    var extent = full.to - full.from;
+    var w = win.to - win.from;
+    var span = Math.max(1, w);
+    el.textContent =
+      (w < extent
+        ? "showing " + fmtSpanLen(view.axis, w) + " of " + fmtSpanLen(view.axis, extent) + " — " +
+          fmtAxisT(view.axis, win.from - view.axis.t_from, span, win.to - view.axis.t_from) +
+          " to " + fmtAxisT(view.axis, win.to - view.axis.t_from, span, win.to - view.axis.t_from)
+        : "showing the whole run, " + fmtSpanLen(view.axis, extent)) +
+      " · " + (view.lanes.length + view.series.length) + " lanes · " + drawn + " marks drawn · " +
+      view.axis.axis_clock;
+  }
+
+  // ---- opening one mark ------------------------------------------------------
+
+  function tcHideDetail() {
+    var el = trEl("tc-detail");
+    if (el) el.style.display = "none";
+  }
+
+  /// Opens one mark: the row it **is**, fetched rather than carried.
+  ///
+  /// The id encodes the lane and the row index, so this is the same row the
+  /// Data card shows for that record — not a second rendering that could
+  /// disagree with it.
+  async function tcOpenMark(id) {
+    var el = trEl("tc-detail");
+    if (!el || !tcView) return;
+    el.style.display = "block";
+    el.innerHTML = '<div class="card-title">Opening&hellip;</div>';
+    var resp = await fetch(
+      "/api/time-chart/" + encodeURIComponent(tcView.study_id) + "/mark/" + encodeURIComponent(id)
+    );
+    var text = await resp.text();
+    if (!resp.ok) {
+      el.innerHTML =
+        '<div class="card-title">This mark has no row to open</div>' +
+        '<p class="sd-error">' + escapeHtml(resp.status + " " + text) + "</p>";
+      return;
+    }
+    var d = JSON.parse(text);
+    var head =
+      '<div class="sd-toolbar"><div class="card-title" style="margin:0;">' +
+      escapeHtml((d.tap || d.lane) + (d.row_index === undefined ? "" : " · row " + d.row_index)) +
+      '</div><div class="sd-toolbar-actions"><button id="tc-detail-close" class="btn">Close</button></div></div>';
+    var where = d.mark
+      ? '<p class="placeholder-note" style="margin:8px 0;">' +
+        escapeHtml(
+          "at " + fmtAxisT(tcView.axis, d.mark.t - tcView.axis.t_from,
+            Math.max(1, tcView.axis.t_to - tcView.axis.t_from),
+            tcView.axis.t_to - tcView.axis.t_from) +
+          (d.mark.core_rx_utc_ms
+            ? " · embarch-core received it at " + new Date(d.mark.core_rx_utc_ms).toISOString()
+            : "") +
+          (d.mark.uncertain
+            ? " · placed across two clocks, to about " + tcView.axis.accuracy_ms + " ms"
+            : "")
+        ) + "</p>"
+      : "";
+    var bodyHtml;
+    if (d.columns) {
+      bodyHtml =
+        '<div class="table-scroll"><table class="data-table"><tbody>' +
+        d.columns.map(function (c, i) {
+          return "<tr><th style=\"width:180px;\">" + escapeHtml(c) + "</th><td class=\"mono\">" +
+            escapeHtml(d.row[i] === undefined ? "" : d.row[i]) + "</td></tr>";
+        }).join("") +
+        "</tbody></table></div>";
+    } else {
+      bodyHtml = '<p class="placeholder-note">' + escapeHtml(d.note || "") + "</p>";
+    }
+    el.innerHTML = head + where + bodyHtml;
+    var close = trEl("tc-detail-close");
+    if (close) close.addEventListener("click", tcHideDetail);
+  }
+
+  // ---- navigation ------------------------------------------------------------
+
+  function tcOnWheel(ev) {
+    if (!tcView || !tcWin) return;
+    if (ev.shiftKey) return;
+    var anchor = chartAxisAt(trEl("tc-chart"), TC_GUTTER, tcWin, ev);
+    if (anchor === null) return;
+    ev.preventDefault();
+    var delta = ev.deltaY * (ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? 700 : 1);
+    var factor = Math.exp(delta * 0.0028);
+    var w = tcWin.to - tcWin.from;
+    var next = w * factor;
+    var frac = (anchor - tcWin.from) / w;
+    tcWin = chartClampWin(tcView.axis, {
+      from: anchor - frac * next,
+      to: anchor + (1 - frac) * next,
+    });
+    tcScheduleDraw();
+  }
+
+  function tcOnPointerDown(ev) {
+    if (!tcView || !tcWin) return;
+    if (ev.button !== 0) return;
+    // A click on a mark opens it rather than starting a drag — a mark is 3 px
+    // wide and a drag that began on one would swallow every click.
+    var mark = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-mark-id");
+    if (mark) {
+      tcOpenMark(mark);
+      return;
+    }
+    if (chartAxisAt(trEl("tc-chart"), TC_GUTTER, tcWin, ev) === null) return;
+    tcDrag = { x: ev.clientX, win: { from: tcWin.from, to: tcWin.to } };
+    var plot = trEl("tc-plot");
+    if (plot) plot.classList.add("is-panning");
+    ev.preventDefault();
+  }
+
+  function tcOnPointerMove(ev) {
+    if (!tcDrag || !tcView) return;
+    var svg = trEl("tc-chart");
+    var perPx = chartUnitsPerPx(
+      Math.max(640, (svg && svg.clientWidth) || 900), TC_GUTTER, tcDrag.win
+    );
+    var dt = (ev.clientX - tcDrag.x) * perPx;
+    tcWin = chartClampWin(tcView.axis, {
+      from: tcDrag.win.from - dt,
+      to: tcDrag.win.to - dt,
+    });
+    tcScheduleDraw();
+  }
+
+  function tcOnPointerUp() {
+    tcDrag = null;
+    var plot = trEl("tc-plot");
+    if (plot) plot.classList.remove("is-panning");
+  }
+
+  function tcFit() {
+    if (!tcView) return;
+    tcWin = chartFullWin(tcView.axis);
+    tcScheduleDraw();
+  }
+
+  function initTimeChart() {
+    var fit = trEl("tc-fit");
+    if (fit) fit.addEventListener("click", tcFit);
+    var reload = trEl("tc-reload");
+    if (reload) reload.addEventListener("click", tcLoad);
+    var plot = trEl("tc-plot");
+    if (plot) {
+      plot.addEventListener("wheel", tcOnWheel, { passive: false });
+      plot.addEventListener("pointerdown", tcOnPointerDown);
+      plot.addEventListener("pointermove", tcOnPointerMove);
+      plot.addEventListener("pointerup", tcOnPointerUp);
+      plot.addEventListener("pointercancel", tcOnPointerUp);
+      plot.addEventListener("dblclick", function (ev) {
+        ev.preventDefault();
+        tcFit();
+      });
+    }
+    var pending = null;
+    window.addEventListener("resize", function () {
+      if (!tcView) return;
+      clearTimeout(pending);
+      pending = setTimeout(function () { tcScheduleDraw(); }, 120);
+    });
+  }
+
   function initTraceTab() {
     if (!trEl("trace-chart")) return;
     // Redraws the tap already selected. The study is the Live Study tab's —
@@ -7218,6 +7901,7 @@
     initSignals();
     initStudyDesignerTab();
     initLiveStudyTab();
+    initTimeChart();
     initTraceTab();
     initDebugTab();
     initEvents();

@@ -15,6 +15,7 @@ mod logs;
 mod snapshot;
 mod studies_api;
 mod study_designer;
+mod time_chart;
 mod trace;
 
 use axum::extract::State;
@@ -122,6 +123,11 @@ pub(crate) struct AppState {
     /// view is the refresh**, rather than there being a staleness rule nobody
     /// can see.
     trace_cache: Arc<tokio::sync::Mutex<Option<CachedTrace>>>,
+    /// The Time chart's own one-entry cache — **a new one rather than a wider
+    /// `trace_cache` or `table_cache`**. Each of those holds one entry because
+    /// each serves one card asking many questions about one file; widening
+    /// either to fit this chart would change behaviour for those cards.
+    time_chart_cache: Arc<tokio::sync::Mutex<Option<time_chart::CachedTimeChart>>>,
     /// The same shape, for the Data cards' rendered CSVs — see
     /// `studies_api::table_for`. One entry, because the tab shows one tap's
     /// table at a time, and paging it is many requests against one file.
@@ -203,6 +209,7 @@ async fn async_main() -> anyhow::Result<()> {
         api_logs_rx,
         trace_cache: Arc::new(tokio::sync::Mutex::new(None)),
         table_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        time_chart_cache: Arc::new(tokio::sync::Mutex::new(None)),
         live,
     };
 
@@ -242,6 +249,15 @@ async fn async_main() -> anyhow::Result<()> {
             "/api/studies/{study_id}/stream/{name}/download",
             get(studies_api::api_stream_download),
         )
+        // ---- the Time chart ---------------------------------------------
+        //
+        // One study, every stream it produced, one axis. `/marks` is the
+        // windowed route the chart actually draws from; `/mark/{id}` opens one
+        // of them. `mark` comes before nothing ambiguous — a study id cannot
+        // contain a slash — so ordering here is plain.
+        .route("/api/time-chart/{study_id}", get(time_chart::api_time_chart))
+        .route("/api/time-chart/{study_id}/marks", get(time_chart::api_time_chart_marks))
+        .route("/api/time-chart/{study_id}/mark/{id}", get(time_chart::api_time_chart_mark))
         .route("/api/trace/{study_id}", get(api_trace_taps))
         .route("/api/trace/{study_id}/{name}", get(api_trace_view))
         .route("/api/trace/{study_id}/{name}/bins", get(api_trace_bins))
@@ -636,7 +652,7 @@ struct TraceBinsQuery {
 
 /// Fetches one tap's rendered CSV from Core and decodes it into a
 /// [`trace::TraceView`]. The error arm is the HTTP response to send.
-async fn decode_trace(
+pub(crate) async fn decode_trace(
     state: &AppState,
     study_id: &str,
     name: &str,
@@ -699,7 +715,40 @@ async fn decode_trace(
     // recorded per-step stamps, or one whose `events.json` has been swept,
     // still has a perfectly good timeline to draw — the row is what goes
     // missing, and the view says so itself rather than failing the request.
-    let steps: Vec<trace::StepStamp> = match state.core.study_steps(study_id).await {
+    let steps = step_stamps(&state.core, study_id).await;
+
+    match trace::parse(
+        study_id,
+        name,
+        &csv,
+        entry.is_named(),
+        entry.is_timed(),
+        entry.self_excluded,
+        entry.note.clone(),
+        &steps,
+        summary,
+    ) {
+        Ok(view) => Ok(Arc::new(view)),
+        Err(e) => Err((StatusCode::UNPROCESSABLE_ENTITY, e).into_response()),
+    }
+}
+
+/// embarch-core's own per-step arrival stamps, reduced to what placing a step
+/// on a timeline needs.
+///
+/// Its absence is not an error: a study that ran before Core recorded per-step
+/// stamps, or one whose `events.json` has been swept, still has a perfectly
+/// good timeline to draw — the step row is what goes missing, and the view says
+/// so itself rather than failing the request.
+///
+/// **One implementation, two callers.** The Trace card's step row and the Time
+/// chart's step bands are the same bands through the same projection; a second
+/// copy of this reduction is a second place `timed: false` could be read wrong.
+pub(crate) async fn step_stamps(
+    core: &CoreClient,
+    study_id: &str,
+) -> Vec<trace::StepStamp> {
+    match core.study_steps(study_id).await {
         Ok(Some(steps)) if steps.timed => steps
             .steps
             .into_iter()
@@ -716,29 +765,14 @@ async fn decode_trace(
             })
             .collect(),
         // `timed: false` is Core saying this study predates the stamps. Not
-        // partially filled in and not guessed at — an untimed study hands
-        // back no steps at all, and the tab renders its "no per-step arrival
+        // partially filled in and not guessed at — an untimed study hands back
+        // no steps at all, and the caller renders its "no per-step arrival
         // stamps" sentence.
         Ok(_) => Vec::new(),
         Err(e) => {
-            tracing::warn!("could not read study '{study_id}' steps for the trace's step row: {e:#}");
+            tracing::warn!("could not read study '{study_id}' steps for its step row: {e:#}");
             Vec::new()
         }
-    };
-
-    match trace::parse(
-        study_id,
-        name,
-        &csv,
-        entry.is_named(),
-        entry.is_timed(),
-        entry.self_excluded,
-        entry.note.clone(),
-        &steps,
-        summary,
-    ) {
-        Ok(view) => Ok(Arc::new(view)),
-        Err(e) => Err((StatusCode::UNPROCESSABLE_ENTITY, e).into_response()),
     }
 }
 

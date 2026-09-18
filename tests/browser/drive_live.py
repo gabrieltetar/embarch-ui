@@ -53,13 +53,53 @@ def main():
         time.sleep(8)
 
         steps = script("return document.querySelectorAll('#ls-steps-rows tr').length")
-        check("its steps render off disk", steps == 11, steps)
+        # Against embarch-core's own count for *this* study rather than a
+        # hardcoded one: the README says to pass any completed study with an
+        # outpost tap, and an expectation pinned to one study makes every other
+        # one fail for a reason that is not a defect.
+        want = len(json.load(urllib.request.urlopen(
+            UI + "/api/studies/" + STUDY, timeout=60))["steps"]["steps"])
+        check("its steps render off disk", steps == want, str(steps) + " of " + str(want))
         consoles = script("return document.querySelectorAll('#ls-consoles .ls-console').length")
         check("both Text taps get a console: dev-bench and the DUT shell", consoles == 2, consoles)
         check("the DUT shell console is named as its own tap",
               script("return document.getElementById('ls-consoles').innerText.indexOf('nus-shell')>=0"))
         check("the bench console has its captured lines in it",
               script("var e=document.getElementById('ls-console-dev-bench'); return e ? e.children.length : 0") > 0)
+        # ---- the Time chart -------------------------------------------
+        #
+        # The one surface that answers "what was the DUT doing when that
+        # notification arrived". Its checks are the alignment ones: every lane
+        # draws, a cluster says it is a cluster rather than presenting itself
+        # as one event, and clicking a mark opens the same row the Data card
+        # below shows for that record.
+        check("the Time chart draws on one axis",
+              script("return document.getElementById('tc-body').style.display") == "block")
+        check("its axis names the clock it is on",
+              script("var t=document.getElementById('tc-axis-note').textContent;"
+                     "return t.indexOf('embarch-core')>=0 && t.length>80"))
+        check("a lane draws per stream, plus the step row above them",
+              script("return document.querySelectorAll('#tc-chart rect').length") > 3)
+        check("the step row is drawn in the pinned header, not in the body",
+              script("return document.querySelectorAll('#tc-head rect').length") > 0)
+        check("a console lane says it cannot be placed rather than going missing",
+              script("return document.getElementById('tc-chart').textContent"
+                     ".indexOf('this chart cannot place')>=0"))
+        clusters = script("return document.querySelectorAll('#tc-chart rect[fill^=\"url(#tc-cluster\"]').length")
+        singles = script("return document.querySelectorAll('#tc-chart rect.tc-mark').length")
+        check("at full zoom most marks merge, and a cluster is drawn as a cluster",
+              clusters > 0 and singles > 0, str(singles) + " single, " + str(clusters) + " merged")
+        # Open one mark and confirm it is the row it claims to be.
+        script("var m=document.querySelector('#tc-chart rect.tc-mark');"
+               "if(m) m.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0}));")
+        time.sleep(3)
+        detail = script("return document.getElementById('tc-detail').innerText") or ""
+        check("clicking a mark opens the row it is, not a second rendering of it",
+              script("return document.getElementById('tc-detail').style.display") == "block"
+              and "step_name" in detail.lower(), detail[:80])
+        check("an opened mark says which clock placed it and how closely",
+              "embarch-core received it at" in detail)
+
         check("the trace tap selector offers this study's outpost tap",
               script("var s=document.getElementById('trace-tap'); return !s.disabled && s.options.length>=1"))
         time.sleep(12)
