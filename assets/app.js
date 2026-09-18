@@ -5002,7 +5002,10 @@
         return;
       }
       var data = await resp.json();
-      var studies = data.studies || [];
+      // A bare array, not an object with a `studies` key — that route
+      // predates this tab and its shape is its own. Both are accepted so a
+      // reader here does not have to remember which it is.
+      var studies = Array.isArray(data) ? data : data.studies || [];
       select.innerHTML = studies.length
         ? studies
             .map(function (st) {

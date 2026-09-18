@@ -19,6 +19,17 @@ EMBARCH_UI_CONFIG=/tmp/ui.toml EMBARCH_UI_PORT=4899 ./target/release/embarch-ui 
 python3 tests/browser/drive.py
 ```
 
+`drive_live.py <study_id>` is the other half: it points at a **real** embarch-core
+and opens one completed study, checking every card against data embarch-core
+actually holds — the steps, both consoles, the trace chart and its load
+repartition, the GATT table, a `Raw` tap's hex head, the captured-streams table
+and the provenance grid. It found `embarch-core` decision 71 (a study the job
+registry had forgotten had no reachable provenance or per-tap byte counts).
+
+```sh
+python3 tests/browser/drive_live.py <a completed study_id with an outpost tap>
+```
+
 **Not wired into `cargo test`**, deliberately: it needs geckodriver, a release
 build and three processes, and a test that cannot run on a checkout is worse
 than a script somebody runs on purpose. Run it after any change to
