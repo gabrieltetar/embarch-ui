@@ -671,21 +671,37 @@ fn auto_transcript_tap(streams: &mut StreamList, steps: &[Step]) -> Result<(), S
 /// where to look still looks in the right place.
 const AUTO_TRANSCRIPT_TAP_NAME: &str = "gatt";
 
-/// Every submitter recomputes both of a study's seals immediately before
-/// sending (`embarch-study-designer` decision 26) — the same
-/// two lines `embarch-api`'s own `study.rs::reseal_study` uses, inlined here
+/// Every submitter recomputes **all three** of a study's seals immediately
+/// before sending (`embarch-study-designer` decision 26) — the same three
+/// lines `embarch-api`'s own `study.rs::reseal_study` uses, inlined here
 /// rather than depending on that crate for them.
 ///
-/// `streams_crc` is `embarch-study-designer` decision 39's 2026-08-25
-/// amendment's sibling seal over
-/// `Study.streams`. This tab authors no taps today, so it always reseals to
-/// the empty-list value — which is genuinely 0, not a placeholder — but it
-/// is computed rather than assumed, so the day this tab does author one
-/// there is nothing to remember to change.
+/// The three, and why each is here rather than assumed:
+///
+/// - `steps_crc` over `Study.steps`, the original seal.
+/// - `streams_crc` over `Study.streams`, `embarch-study-designer` decision
+///   39's 2026-08-25 amendment's sibling seal. This tab authors taps, so it
+///   is routinely non-zero.
+/// - `protocols_crc` over `Study.protocols`, decision 58's third seal. A
+///   study built from this tab's rows carries protocols only once a
+///   `RunProtocol` row names one; before that it reseals to the empty-list
+///   value — which is genuinely 0, not a placeholder — but it is computed
+///   rather than assumed.
+///
+/// **The third line was missing until 2026-09-17**, which is the same
+/// hardcoded-arity trap `embarch-api`'s `reseal_study` hit on 2026-08-27
+/// ([embarch-decision-reversals.md] row 76): a seal added as a deliberate
+/// *sibling* has to be added everywhere the set is enumerated, and "both" in
+/// a doc comment is the kind of arity that silently becomes false. Nothing
+/// was observable while `Study.protocols` was always empty — the first
+/// protocol-carrying study would have been `400`ed by Core's third seal
+/// check.
 fn seal_crc(study: &mut Study) -> Result<(), String> {
     study.steps_crc = embarch_study_designer::steps_crc(&study.steps).map_err(|e| format!("{e:?}"))?;
     study.streams_crc =
         embarch_study_designer::streams_crc(&study.streams).map_err(|e| format!("{e:?}"))?;
+    study.protocols_crc =
+        embarch_study_designer::protocols_crc(&study.protocols).map_err(|e| format!("{e:?}"))?;
     Ok(())
 }
 
@@ -1847,6 +1863,67 @@ mod tests {
         assert_eq!(
             json["max_monitor_targets"],
             embarch_study_designer::limits::MAX_MONITOR_TARGETS
+        );
+    }
+
+    /// `seal_crc` seals **all three** of a study's seals, not the two it was
+    /// first written against.
+    ///
+    /// The regression this pins is invisible while `Study.protocols` is
+    /// empty — `protocols_crc(&[])` is 0, which is also what an unsealed
+    /// field holds — so the test hand-builds a study carrying one
+    /// `ProtocolDef` and asserts the sealed value is the crate's own
+    /// `protocols_crc` of it *and* that it is not 0. Asserting only the
+    /// former would pass against a `seal_crc` that never touched the field.
+    /// Same failure `embarch-api`'s `reseal_study` had (row 76).
+    #[test]
+    fn seal_crc_seals_all_three_including_protocols() {
+        use embarch_study_designer::{
+            ActiveState, ProtocolDef, StateDef, StateKind, TerminalOutcome,
+        };
+
+        let mut states = embarch_study_designer::bounded::Bounded::new();
+        states
+            .push(StateDef {
+                name: heapless::String::try_from("go").unwrap(),
+                kind: StateKind::Active(ActiveState {
+                    on_enter: None,
+                    on_event: heapless::Vec::new(),
+                    on_timeout: None,
+                }),
+            })
+            .unwrap();
+        states
+            .push(StateDef {
+                name: heapless::String::try_from("done").unwrap(),
+                kind: StateKind::Terminal(TerminalOutcome::Pass),
+            })
+            .unwrap();
+        let def = ProtocolDef {
+            name: heapless::String::try_from("bds").unwrap(),
+            sources: heapless::Vec::new(),
+            frames: heapless::Vec::new(),
+            session: heapless::Vec::new(),
+            states,
+        };
+
+        let mut study = build_study(
+            "seal-test",
+            RequirementsInput::any().build().unwrap(),
+            &[],
+            &ActionRegistry::default(),
+        )
+        .unwrap();
+        study.protocols.push(def).unwrap();
+        study.protocols_crc = 0;
+
+        seal_crc(&mut study).unwrap();
+
+        let expected = embarch_study_designer::protocols_crc(&study.protocols).unwrap();
+        assert_eq!(study.protocols_crc, expected);
+        assert_ne!(
+            study.protocols_crc, 0,
+            "a study carrying a protocol must not seal to the empty-list value"
         );
     }
 
