@@ -30,6 +30,8 @@ use embarch_study_designer::limits::{
     MAX_DECODERS_PER_STUDY, MAX_FIRMWARE_VERSION_LEN, MAX_SIGNAL_NAME_LEN, MAX_STREAMS_PER_STUDY,
     MAX_STREAM_NAME_LEN,
 };
+use embarch_study_designer::eap_repo::RepoProtocols;
+use embarch_study_designer::ProtocolDef;
 use embarch_study_designer::{
     build_study, merge_actions, requirement_satisfied, validate_taps, Action, ActionRegistry,
     BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattName, GattNameBook,
@@ -159,6 +161,35 @@ impl StudyDesigner {
             return Err(NO_PROJECT.to_string());
         };
         StructRegistry::load(&repo).map_err(|e| e.to_string())
+    }
+
+    /// The firmware repo's own `embarch/protocols/*.eap` — the protocol
+    /// manifests a `RunProtocol` step can hand the link to
+    /// (`embarch-study-designer` decisions 58-62).
+    ///
+    /// Read fresh on every call rather than cached, for exactly the reason
+    /// [`Self::registry`] and [`Self::structs`] are: these files are edited
+    /// beside the running UI — by this tab's own editor dialog, and by hand
+    /// — and a cached copy would mean a fix needs a restart to take effect.
+    ///
+    /// A scan never fails on a bad file (`eap_repo::scan`'s own contract), so
+    /// the `Err` here is only "no project" or a directory that could not be
+    /// read at all.
+    fn protocols(&self) -> Result<RepoProtocols, String> {
+        let Some(repo) = self.repo_path() else {
+            return Err(NO_PROJECT.to_string());
+        };
+        embarch_study_designer::eap_repo::scan(&repo).map_err(|e| e.to_string())
+    }
+
+    /// Every protocol this repo declares, ready to be resolved against by
+    /// `build_study`.
+    ///
+    /// **A duplicate protocol name is refused here**, not silently resolved
+    /// — that refusal is what lets a row name a protocol by name alone, so
+    /// it has to reach the caller as an error rather than as a shorter list.
+    fn protocol_defs(&self) -> Result<Vec<ProtocolDef>, String> {
+        self.protocols()?.defs().map_err(|e| e.to_string())
     }
 
     /// Runs the configured `static_extractor` at most once per project.
@@ -311,6 +342,8 @@ fn discover_study(target_name: Option<&str>) -> Result<Study, String> {
                 role: RoleChoice::Central,
                 target_name: target_name.map(|n| n.to_string()),
                 security_level: None,
+                protocol: None,
+                entry_state: None,
             },
             timeout_ms: 15_000,
             continue_on_fail: false,
@@ -318,7 +351,15 @@ fn discover_study(target_name: Option<&str>) -> Result<Study, String> {
         },
         TableRow {
             name: "discover".to_string(),
-            action: RowAction::BuiltIn { targets: Vec::new(), which: BuiltInActionKind::GattDiscover, role: RoleChoice::Central , target_name: None, security_level: None },
+            action: RowAction::BuiltIn {
+                targets: Vec::new(),
+                which: BuiltInActionKind::GattDiscover,
+                role: RoleChoice::Central,
+                target_name: None,
+                security_level: None,
+                protocol: None,
+                entry_state: None,
+            },
             timeout_ms: 15_000,
             continue_on_fail: false,
             delay_before_ms: 0,
@@ -334,6 +375,10 @@ fn discover_study(target_name: Option<&str>) -> Result<Study, String> {
         RequirementsInput::any().build()?,
         &rows,
         &ActionRegistry::default(),
+        // No protocol catalogue: a discovery study is two fixed built-in
+        // rows, neither of which is a `RunProtocol`, so there is nothing for
+        // one to resolve against.
+        &[],
     )
     .map_err(|e| e.to_string())
 }
@@ -1062,6 +1107,7 @@ pub struct RunRequest {
 /// Builds, taps, and seals one authored study — everything `run` and `save`
 /// do identically, so a saved file and a submitted study can never disagree
 /// about what the rows meant.
+#[allow(clippy::too_many_arguments)]
 fn build_authored(
     req_name: &str,
     rows: &[TableRow],
@@ -1069,9 +1115,10 @@ fn build_authored(
     taps: &[TapInput],
     registry: &ActionRegistry,
     structs: &StructRegistry,
+    protocols: &[ProtocolDef],
 ) -> Result<Study, (StatusCode, String)> {
     let requires = requires.build().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let mut study = build_study(req_name, requires, rows, registry)
+    let mut study = build_study(req_name, requires, rows, registry, protocols)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     // Taps are built against the *resolved* steps rather than the raw rows:
     // whether a characteristic is subscribed at all is a property of the
@@ -1104,8 +1151,23 @@ pub async fn api_run(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let study =
-        match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry, &structs) {
+    // A repo whose `.eap` files declare one protocol name twice is refused
+    // here rather than resolved by directory order — see `sd.protocol_defs`.
+    // `400` and not `500`: the repo's own files are what is wrong, and the
+    // person who can fix them is the one looking at this tab.
+    let protocols = match sd.protocol_defs() {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let study = match build_authored(
+        &req.name,
+        &req.rows,
+        &req.requires,
+        &req.taps,
+        &registry,
+        &structs,
+        &protocols,
+    ) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
@@ -1364,8 +1426,23 @@ pub async fn api_studies_save(
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let study =
-        match build_authored(&req.name, &req.rows, &req.requires, &req.taps, &registry, &structs) {
+    // A repo whose `.eap` files declare one protocol name twice is refused
+    // here rather than resolved by directory order — see `sd.protocol_defs`.
+    // `400` and not `500`: the repo's own files are what is wrong, and the
+    // person who can fix them is the one looking at this tab.
+    let protocols = match sd.protocol_defs() {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let study = match build_authored(
+        &req.name,
+        &req.rows,
+        &req.requires,
+        &req.taps,
+        &registry,
+        &structs,
+        &protocols,
+    ) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
@@ -1912,6 +1989,7 @@ mod tests {
             RequirementsInput::any().build().unwrap(),
             &[],
             &ActionRegistry::default(),
+            &[],
         )
         .unwrap();
         study.protocols.push(def).unwrap();
@@ -3006,6 +3084,11 @@ pub async fn api_new_study(
         &[],
         &registry,
         &StructRegistry::default(),
+        // A brand-new study has no rows, so no row names a protocol and
+        // there is nothing to resolve against. Reading the repo's `.eap`
+        // files here would make creating an empty study fail on a repo whose
+        // protocols are mid-edit.
+        &[],
     ) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),

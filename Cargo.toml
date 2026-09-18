@@ -14,7 +14,12 @@ axum = "0.8"
 # list, Study-building (decision 5). No hardware
 # feature: this crate's `study-ui`/`gatt-extract` features never touch
 # probe-rs/serialport, only files inside the firmware repo being edited.
-embarch-study-designer = { path = "../embarch-study-designer", features = ["study-ui", "gatt-extract"] }
+# `eap-parse` joins them for the .eap protocol manifests the Study Designer
+# authors (`embarch-study-designer` decisions 58-62): the parser, the
+# resolver, and `eap_repo`'s on-disk layer over a firmware repo's
+# `embarch/protocols/`. Like the other two it is std-only file work inside
+# the repo being edited, and it pulls in no new third-party dependency.
+embarch-study-designer = { path = "../embarch-study-designer", features = ["study-ui", "gatt-extract", "eap-parse"] }
 # The one implementation of "reach embarch-core over HTTP+Bearer," shared
 # with embarch-api rather than duplicated (decision 5). ALL hardware-adjacent
 # data — reads (probe/board enumeration, alert history, dev-bench port) as
