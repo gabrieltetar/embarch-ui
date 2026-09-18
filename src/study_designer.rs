@@ -975,6 +975,43 @@ pub struct LogLevelOption {
     /// carries and what this route accepts back.
     value: String,
     label: &'static str,
+    /// What choosing this level costs, as prose the picker shows under it.
+    /// Empty for a level with nothing to warn about.
+    ///
+    /// **Served rather than written in `app.js`** for the reason every other
+    /// vocabulary here is: prose keyed on a level name is a browser-side
+    /// copy of the level set, and it goes stale the same way a label does.
+    note: &'static str,
+    /// True for the level an unstated study runs at.
+    ///
+    /// Served because *which* level is the default is a fact of
+    /// `DevBenchLogLevel`, not of this browser. A browser that pre-selected
+    /// `Warn` by name would be asserting that default from a second place —
+    /// and a picker that pre-selected nothing would show `Off` first, which
+    /// is the one level a study must never reach by not choosing.
+    default: bool,
+}
+
+/// The prose under each level in the picker.
+///
+/// Distinct from [`DevBenchLogLevel::label`], which is the one-line option
+/// text and belongs to the crate. This is UI prose about what the choice
+/// costs an author, so it lives beside the route that serves it.
+fn log_level_note(level: DevBenchLogLevel) -> &'static str {
+    match level {
+        DevBenchLogLevel::Off => {
+            "Nothing comes back — not even the fatal-error dump, so a crash mid-study goes \
+             unreported. The level for a study that needs a clear link and is willing to be \
+             blind."
+        }
+        DevBenchLogLevel::Info | DevBenchLogLevel::Debug => {
+            "The bench clamps this to whatever its firmware was actually built with, and \
+             reports the clamp on its own dev-bench log stream — read it there after the run \
+             rather than assuming this is what it used. Expect real link bandwidth during \
+             BLE-heavy steps."
+        }
+        DevBenchLogLevel::Error | DevBenchLogLevel::Warn => "",
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1152,6 +1189,8 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
                     .and_then(|v| v.as_str().map(str::to_string))
                     .unwrap_or_default(),
                 label: l.label(),
+                note: log_level_note(*l),
+                default: *l == DevBenchLogLevel::default(),
             })
             .collect(),
         dev_bench_limits: DevBenchLimits {
@@ -2689,6 +2728,14 @@ struct LoadedStudy {
     /// this key existed, or written by hand, still loads its taps rather than
     /// silently dropping them on the next save.
     taps: Vec<LoadedTap>,
+    /// Read out of the saved `Study` itself, like `requires` and for the same
+    /// reason: the level is a real field of the thing that runs.
+    ///
+    /// `None` for a file authored before the field existed. Loading that as
+    /// `None` rather than as the default's spelling is what keeps "not
+    /// stated" distinguishable after a round trip — a study reloaded and
+    /// re-saved must not gain an explicit level it never had.
+    dev_bench_log_level: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2891,6 +2938,10 @@ pub async fn api_studies_load(
         rows,
         requires,
         taps,
+        dev_bench_log_level: value
+            .get("dev_bench_log_level")
+            .and_then(|l| l.as_str())
+            .map(str::to_string),
     })
     .into_response()
 }
@@ -3324,6 +3375,8 @@ mod tests {
                 .map(|l| LogLevelOption {
                     value: serde_json::to_value(l).unwrap().as_str().unwrap().to_string(),
                     label: l.label(),
+                    note: log_level_note(*l),
+                    default: *l == DevBenchLogLevel::default(),
                 })
                 .collect(),
             dev_bench_limits: DevBenchLimits {
@@ -3342,8 +3395,29 @@ mod tests {
         assert_eq!(json["scalar_types"].as_array().unwrap().len(), 18);
         assert_eq!(json["scalar_types"][0], "u8");
         assert_eq!(json["dev_bench_log_levels"].as_array().unwrap().len(), 5);
-        // The JSON spelling a saved study carries, served as-is.
+        // The JSON spelling a saved study carries, served as-is — and the
+        // default flagged here rather than left for a browser to assert.
         assert_eq!(json["dev_bench_log_levels"][2]["value"], "Warn");
+        assert_eq!(json["dev_bench_log_levels"][2]["default"], true);
+        assert_eq!(
+            json["dev_bench_log_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|l| l["default"] == true)
+                .count(),
+            1,
+            "exactly one level is the default"
+        );
+        // `Off` warns about the dump it loses; the two loud ones warn about
+        // the clamp. The two quiet middle levels have nothing to say.
+        assert!(json["dev_bench_log_levels"][0]["note"]
+            .as_str()
+            .unwrap()
+            .contains("fatal-error dump"));
+        assert_eq!(json["dev_bench_log_levels"][1]["note"], "");
+        assert_eq!(json["dev_bench_log_levels"][2]["note"], "");
+        assert!(json["dev_bench_log_levels"][4]["note"].as_str().unwrap().contains("clamps"));
         assert_eq!(
             json["dev_bench_limits"]["max_steps_per_study"],
             limits::DEV_BENCH_MAX_STEPS_PER_STUDY

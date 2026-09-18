@@ -223,6 +223,14 @@
                 <span>Study name</span>
                 <input id="sd-name" type="text" class="sd-input" value="untitled-study" spellcheck="false" />
               </label>
+              <!-- Beside the study name because the log level belongs to the
+                   saved study, not to the run and not to the log tap —
+                   embarch-study-designer decision 51 rejected making it a
+                   property of the tap, so it must not sit in Streams. -->
+              <label class="sd-field" style="flex:0 1 240px;">
+                <span>dev-bench log level</span>
+                <select id="sd-log-level" class="sd-input"></select>
+              </label>
               <div class="sd-toolbar-actions">
                 <button id="sd-new-study" class="btn" title="Start a new, empty, immediately-saveable study in this project">New study</button>
                 <button id="sd-save" class="btn">Save</button>
@@ -231,6 +239,7 @@
                 <button id="sd-discover" class="btn">Discover GATT</button>
               </div>
             </div>
+            <p id="sd-log-level-note" class="placeholder-note" style="margin-top:10px;"></p>
             <p id="sd-toolbar-note" class="placeholder-note" style="margin-top:10px;">Saved studies live in <span class="mono">&lt;firmware-repo&gt;/embarch/studies/</span> as plain <span class="mono">Study</span> JSON — re-runnable straight from the CLI with <span class="mono">embarch-api run-study --study-file</span>, not only from here.</p>
           </div>
 
@@ -284,6 +293,9 @@
               <span style="flex:1;"></span>
               <button id="sd-run" class="btn btn-primary">Run study</button>
             </div>
+            <!-- Advisory, never a gate: this note never disables Run. See
+                 embarch-study-designer's `limits` advisory band. -->
+            <p id="sd-caps-note" class="placeholder-note" style="margin-top:10px;"></p>
             <p id="sd-build-error" class="sd-error" style="display:none;"></p>
           </div>
 
@@ -346,6 +358,7 @@
           <div class="card-title">Before this run</div>
           <p class="placeholder-note">What this study requires, against what the bench actually has. Shown before the run so the choice is made against the real discrepancy rather than in the abstract.</p>
           <div id="sd-runcheck-body"></div>
+          <div id="sd-runcheck-caps" style="margin-top:14px;"></div>
           <label id="sd-runcheck-allow-wrap" class="req-any" style="margin-top:14px; display:none;">
             <input id="sd-runcheck-allow" type="checkbox" />
             <span>Run anyway. embarch-core records the override in the result, with both strings — it is never silently honoured.</span>

@@ -880,6 +880,29 @@
    * decoder dropdown still reads only `.name`. One served shape read by
    * both, rather than a second route over the same file. */
   var sdStructLayouts = [];
+  /* Everything else the server serves that the browser must not restate.
+   *
+   * **Every one of these follows `sdMaxStreamNameLen`'s posture, not
+   * `sdMaxTargets`'s: no numeric fallback, `null`/`[]` meaning "not yet
+   * known".** A guessed cap is the restated-limit defect these fields exist
+   * to remove, and a guessed vocabulary is worse — it renders a picker whose
+   * entries the server would refuse. An empty list is an empty picker, which
+   * is a refusal an author can see. */
+  var sdProtocols = [];
+  var sdMaxProtocols = null;
+  var sdMaxRecordMagicLen = null;
+  var sdMaxStructFields = null;
+  var sdScalarTypes = [];
+  var sdLogLevels = [];
+  /* `{max_steps_per_study, max_event_arms_per_state, max_protocols_wire_len}`
+   * — the advisory dev-bench caps. `null` renders as **unknown**, never as
+   * "within caps": a bench this tab could not read is not a bench that
+   * agrees. Nothing here disables Run. */
+  var sdDevBenchLimits = null;
+  /* The study's own dev-bench log level (`embarch-dev-bench` decision 39).
+   * `null` means "not stated", which leaves the crate's own default in
+   * place rather than this browser sending a level it invented. */
+  var sdLogLevel = null;
   // Characteristic display names, keyed by hyphenated characteristic UUID
   // (`embarch-study-designer` decision 56). Empty is the honest
   // starting state and every reader falls back to the UUID.
@@ -1076,6 +1099,116 @@
     if (data && typeof data.max_stream_name_len === "number") {
       sdMaxStreamNameLen = data.max_stream_name_len;
     }
+    sdProtocols = (data && data.protocols) || [];
+    sdScalarTypes = (data && data.scalar_types) || [];
+    sdLogLevels = (data && data.dev_bench_log_levels) || [];
+    if (data && typeof data.max_protocols_per_study === "number") {
+      sdMaxProtocols = data.max_protocols_per_study;
+    }
+    if (data && typeof data.max_record_magic_len === "number") {
+      sdMaxRecordMagicLen = data.max_record_magic_len;
+    }
+    if (data && typeof data.max_struct_fields === "number") {
+      sdMaxStructFields = data.max_struct_fields;
+    }
+    sdDevBenchLimits = (data && data.dev_bench_limits) || null;
+    renderSdLogLevels();
+    renderSdCapsNote();
+  }
+
+  /* The dev-bench log level picker, built from the served vocabulary.
+   *
+   * An empty list leaves the select empty and says so — the browser holds
+   * no copy of the levels, so a response that did not carry them is a
+   * picker with nothing in it rather than a picker of guesses. */
+  function renderSdLogLevels() {
+    var select = sdEl("sd-log-level");
+    if (!select) return;
+    if (!sdLogLevels.length) {
+      select.innerHTML = '<option value="">not served</option>';
+      select.disabled = true;
+      sdEl("sd-log-level-note").textContent =
+        "the log levels come from the server and this response carried none";
+      return;
+    }
+    select.disabled = false;
+    select.innerHTML = sdLogLevels
+      .map(function (level) {
+        return (
+          '<option value="' + escapeHtml(level.value) + '"' +
+          (level.value === sdLogLevel ? " selected" : "") + ">" +
+          escapeHtml(level.label) + "</option>"
+        );
+      })
+      .join("");
+    if (sdLogLevel == null) {
+      /* Nothing stated: show the level the server flagged as the default,
+       * without *claiming* it — `sdLogLevelPayload` keeps sending null until
+       * an author picks one, so the study still gets the crate's default
+       * rather than one this browser asserted.
+       *
+       * The flag is served rather than matched by name here: which level is
+       * the default is a fact of `DevBenchLogLevel`, and selecting nothing
+       * would show the first option, which is the one level a study must
+       * never reach by not choosing. */
+      var fallback = sdLogLevels.filter(function (l) { return l.default; })[0];
+      select.value = (fallback || sdLogLevels[0]).value;
+    }
+    renderSdLogLevelNote();
+  }
+
+  /* What choosing the selected level costs, in the server's own words.
+   *
+   * The prose is served beside the label for the same reason the label is:
+   * prose keyed on a level name would be a browser-side copy of the level
+   * set. **No invented clamp reading** — the note points at the bench's own
+   * log stream because that is where the firmware reports its clamp, and
+   * nothing here has read it. */
+  function renderSdLogLevelNote() {
+    var note = sdEl("sd-log-level-note");
+    if (!note) return;
+    var value = sdEl("sd-log-level").value;
+    var level = sdLogLevels.filter(function (l) { return l.value === value; })[0];
+    note.textContent = (level && level.note) || "";
+  }
+
+  /* What this study is sending, against what this suite's dev-bench takes.
+   *
+   * `null` limits render as **unknown**, never as "within caps" — a bench
+   * this tab could not read is not a bench that agrees. Within caps renders
+   * as nothing, because a quiet note is what "nothing to say" looks like.
+   *
+   * Only the step cap is computed here. The other two cannot be: a wire
+   * length is a postcard encoding and an event-arm count is a property of a
+   * resolved ProtocolDef, so both come off `/preflight`. */
+  function renderSdCapsNote() {
+    var note = sdEl("sd-caps-note");
+    if (!note) return;
+    if (!sdDevBenchLimits) {
+      note.innerHTML =
+        "dev-bench capacity <strong>unknown</strong> — nothing here has read it, so nothing " +
+        "here can say whether this study is within it.";
+      return;
+    }
+    var max = sdDevBenchLimits.max_steps_per_study;
+    if (typeof max !== "number" || sdRows.length <= max) {
+      note.textContent = "";
+      return;
+    }
+    note.innerHTML =
+      "<strong>" + sdRows.length + " steps</strong> — this suite's dev-bench refuses a study " +
+      "over " + max + " at decode. Advisory only: the bench in front of you may be a " +
+      "different build, so Run is not blocked.";
+  }
+
+  /* The level to send, or `null` for "not stated".
+   *
+   * Null rather than the default level spelled here: `build_authored`
+   * leaves the crate's own argued
+   * default in place for an absent level, and a browser that sent Warn
+   * explicitly would be a second copy of that decision. */
+  function sdLogLevelPayload() {
+    return sdLogLevel;
   }
 
   function sdRegisteredActions() {
@@ -1430,6 +1563,7 @@
     if (!tbody) return;
     if (!sdRows.length) {
       tbody.innerHTML = '<tr><td colspan="8"><span class="placeholder-note">no steps yet — add one, or start from the capture-window template</span></td></tr>';
+      renderSdCapsNote();
       return;
     }
     tbody.innerHTML = "";
@@ -1462,6 +1596,9 @@
         "</div></td>";
       tbody.appendChild(tr);
     });
+    // Live: the step count is the one advisory cap a browser can check for
+    // itself, so it answers as the table is edited rather than only at Run.
+    renderSdCapsNote();
   }
 
   /* Rewrites just the cumulative "+Nms in" hints, without touching any
@@ -1750,7 +1887,13 @@
     var resp = await fetch("/api/study-designer/studies", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name, rows: rows, requires: sdRequiresPayload(), taps: sdTaps }),
+      body: JSON.stringify({
+        name: name,
+        rows: rows,
+        requires: sdRequiresPayload(),
+        taps: sdTaps,
+        dev_bench_log_level: sdLogLevelPayload(),
+      }),
     });
     var text = await resp.text();
     if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
@@ -1771,6 +1914,11 @@
     var loaded = JSON.parse(text);
     sdEl("sd-name").value = loaded.name;
     if (loaded.requires) sdApplyRequires(loaded.requires);
+    // Restored, or left unstated when the file predates the field — never
+    // silently reset to Warn, which is the same drop decision 17 records for
+    // monitor targets.
+    sdLogLevel = loaded.dev_bench_log_level || null;
+    renderSdLogLevels();
     sdTaps = loaded.taps || [];
     renderSdTaps();
     sdRows = loaded.rows.map(function (r) {
@@ -2916,6 +3064,73 @@
     sdEl("sd-runcheck-allow").checked = false;
     sdEl("sd-runcheck-backdrop").style.display = "block";
     sdEl("sd-runcheck-dialog").style.display = "block";
+    // Fired after the dialog is up, not awaited before it: a pre-flight the
+    // server cannot answer must not keep the version check off the screen.
+    sdLoadRunCheckCaps();
+  }
+
+  /* The full advisory set for the study about to run, from `/preflight`.
+   *
+   * Server-built, because two of the three cannot be computed here at all —
+   * a postcard wire length and the event arms of a resolved ProtocolDef.
+   * A pre-flight that fails renders as **unknown**, never as "within caps",
+   * and never blocks the Run button beside it. */
+  async function sdLoadRunCheckCaps() {
+    var box = sdEl("sd-runcheck-caps");
+    if (!box) return;
+    box.innerHTML = '<p class="placeholder-note">checking capacity…</p>';
+    var rows;
+    try {
+      rows = sdCollectRows();
+    } catch (e) {
+      box.innerHTML =
+        '<p class="placeholder-note">capacity <strong>unknown</strong> — ' +
+        escapeHtml(e.message) + "</p>";
+      return;
+    }
+    var resp;
+    try {
+      resp = await fetch("/api/study-designer/preflight", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: sdEl("sd-name").value.trim() || "untitled-study",
+          rows: rows,
+          requires: sdRequiresPayload(),
+          taps: sdTaps,
+          dev_bench_log_level: sdLogLevelPayload(),
+        }),
+      });
+    } catch (e) {
+      box.innerHTML =
+        '<p class="placeholder-note">capacity <strong>unknown</strong> — the pre-flight ' +
+        "request did not complete. Run is not blocked.</p>";
+      return;
+    }
+    if (!resp.ok) {
+      box.innerHTML =
+        '<p class="placeholder-note">capacity <strong>unknown</strong> — ' +
+        escapeHtml(await resp.text()) + ". Run is not blocked.</p>";
+      return;
+    }
+    var pre = await resp.json();
+    var facts =
+      pre.steps + " step" + (pre.steps === 1 ? "" : "s") + " · " +
+      pre.taps + " tap" + (pre.taps === 1 ? "" : "s") + " · " +
+      pre.record_checks + " record check" + (pre.record_checks === 1 ? "" : "s") + " · " +
+      (pre.protocols.length
+        ? pre.protocols.map(escapeHtml).join(", ") + " (" + pre.protocols_wire_len + " bytes)"
+        : "no protocols") +
+      " · log level " + escapeHtml(pre.dev_bench_log_level);
+    var advisories = pre.advisories || [];
+    box.innerHTML =
+      '<p class="placeholder-note">' + facts + "</p>" +
+      (advisories.length
+        ? '<ul class="sd-caps-list">' +
+          advisories.map(function (a) { return "<li>" + escapeHtml(a) + "</li>"; }).join("") +
+          "</ul><p class=\"placeholder-note\">Advisory only — the bench in front of you may " +
+          "be a different build, so none of this blocks the run.</p>"
+        : "");
   }
 
   async function sdRunStudy() {
@@ -2955,6 +3170,9 @@
           rows: rows,
           requires: sdRequiresPayload(),
           taps: sdTaps,
+          // Saved with the study, unlike the waiver below — decision 51
+          // rejected making the level a property of anything but the study.
+          dev_bench_log_level: sdLogLevelPayload(),
           // A run parameter, never a study field: a saved study must not carry
           // a waiver into every later re-read of its own results.
           allow_version_mismatch: !!allowMismatch,
@@ -3201,6 +3419,12 @@
     });
     sdEl("sd-new-study").addEventListener("click", sdNewStudy);
     sdEl("sd-save").addEventListener("click", sdSaveStudy);
+    sdEl("sd-log-level").addEventListener("change", function (e) {
+      // Set only once an author picks: an untouched select must not turn
+      // "not stated" into an explicit level the study then carries.
+      sdLogLevel = e.target.value || null;
+      renderSdLogLevelNote();
+    });
     sdEl("sd-delete").addEventListener("click", sdDeleteStudy);
     sdEl("sd-discover").addEventListener("click", sdDiscover);
     sdEl("sd-load-select").addEventListener("change", function (ev) {
