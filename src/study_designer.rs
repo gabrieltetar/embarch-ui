@@ -3732,6 +3732,42 @@ mod tests {
         );
     }
 
+    /// **One adopt-and-render, three callers.**
+    ///
+    /// The sequence that repaints everything reading an `/actions` response
+    /// existed three times and had already drifted — `sdEnterProject`
+    /// repainted four of the six, so two pools stayed at their `index.html`
+    /// placeholders until some unrelated call happened to run one of the
+    /// other two. Found by clicking the real page. A renderer added to the
+    /// one function is added everywhere.
+    #[test]
+    fn one_function_adopts_an_actions_response() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert_eq!(APP_JS.matches("function sdAdoptActions(data)").count(), 1);
+        // Three callers, and no second copy of the assignment that starts it.
+        assert_eq!(APP_JS.matches("sdAdoptActions(data);").count(), 3);
+        assert_eq!(
+            APP_JS.matches("sdRegistry = sdRegisteredActions();").count(),
+            1,
+            "a second copy of this line is a second copy of the sequence"
+        );
+        let body = {
+            let start = APP_JS.find("function sdAdoptActions(data)").unwrap();
+            let rest = &APP_JS[start..];
+            &rest[..rest.find("\n  }\n").unwrap()]
+        };
+        for renderer in [
+            "renderSdUnregistered()",
+            "renderSdRegistered()",
+            "renderSdLayouts()",
+            "renderSdProtocolsCard()",
+            "renderSdRows()",
+            "renderSdTaps()",
+        ] {
+            assert!(body.contains(renderer), "{renderer} must repaint on an actions response");
+        }
+    }
+
     /// **`app.js` holds no copy of a served fact.** The positive guard above
     /// proves the server sends the right number; this proves the browser
     /// does not carry its own. Both are needed: a browser with a fallback

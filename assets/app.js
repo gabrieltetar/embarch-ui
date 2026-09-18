@@ -2027,10 +2027,18 @@
     });
   }
 
-  async function loadSdActions() {
-    var resp = await fetch("/api/study-designer/actions");
-    if (!resp.ok) throw new Error(await resp.text());
-    var data = await resp.json();
+  /* Takes one `/actions` response and repaints everything that reads it.
+   *
+   * **One function, three callers.** This sequence existed three times — in
+   * `loadSdActions`, in the discover handler, and in `sdEnterProject` — and
+   * the three had already drifted: `sdEnterProject` repainted four of the
+   * six things that read this response, which is why the registered-action
+   * and layout pools stayed at their index.html placeholders until some
+   * unrelated call happened to run one of the other two. Found by clicking
+   * the real page; invisible to every test here.
+   *
+   * A renderer added below is now added once. */
+  function sdAdoptActions(data) {
     sdActions = data.actions || [];
     sdRegistry = sdRegisteredActions();
     sdAdoptDiscovery(data);
@@ -2039,6 +2047,19 @@
     renderSdLayouts();
     renderSdProtocolsCard();
     renderSdRows();
+    // The tap table picks its characteristics and its decoder layouts out
+    // of this same response, so it goes stale on exactly this call and no
+    // other. Without this a GATT tap row kept reading "no notify-capable
+    // characteristic known — run Discover GATT" *after* a discovery that had
+    // just found several, which reads as the discovery having failed.
+    renderSdTaps();
+  }
+
+  async function loadSdActions() {
+    var resp = await fetch("/api/study-designer/actions");
+    if (!resp.ok) throw new Error(await resp.text());
+    var data = await resp.json();
+    sdAdoptActions(data);
     return data;
   }
 
@@ -2281,17 +2302,7 @@
         return;
       }
       var data = await resp.json();
-      sdActions = data.actions || [];
-      sdRegistry = sdRegisteredActions();
-      sdAdoptDiscovery(data);
-      renderSdUnregistered();
-      renderSdRows();
-      // The tap table picks its characteristics and its decoder layouts out
-      // of the same response, so it goes stale on exactly this call and no
-      // other. Without this a GATT tap row kept reading "no notify-capable
-      // characteristic known — run Discover GATT" *after* a discovery that
-      // had just found several, which reads as the discovery having failed.
-      renderSdTaps();
+      sdAdoptActions(data);
     } catch (e) {
       sdShowBuildError("discover failed: " + String(e));
     } finally {
@@ -4524,18 +4535,16 @@
     }
     body.style.display = "block";
     var data = await resp.json();
-    sdActions = data.actions || [];
-    sdRegistry = sdRegisteredActions();
-    sdAdoptDiscovery(data);
+    // Wired before the first paint: `sdAdoptActions` renders rows whose
+    // listeners live on the table, and the template below is the first
+    // thing a fresh project shows.
     if (!sdWired) {
       sdWireStudyDesigner();
       sdWired = true;
     }
     if (!sdRows.length) sdRows = sdCaptureTemplate();
-    renderSdRows();
-    renderSdUnregistered();
+    sdAdoptActions(data);
     loadSdStudies();
-    renderSdTaps();
     // Prefilled from live bench state on first paint, which is what makes a
     // mandatory field a help rather than a tax.
     sdLoadBenchState(true);
