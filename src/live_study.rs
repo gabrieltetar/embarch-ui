@@ -403,9 +403,36 @@ struct LiveAxis {
     stale_prefix_dropped: usize,
     /// The tap that is drawing the axis.
     tap: Option<String>,
+    /// Whether this study **declared** an outpost trace, read once off its
+    /// stream index before the first event.
+    ///
+    /// **This is the difference between waiting and drawing.** A study that
+    /// declared a trace draws no axis until that trace's first
+    /// stamped-and-dated frame, because the alternative is opening on Core's
+    /// clock and flipping to the DUT's counter a second later — a new unit
+    /// *and* a new origin under a reader who has already looked. A study that
+    /// declared none has no second clock coming, so embarch-core's own receipt
+    /// clock **is** the axis from the first mark and stays exact.
+    declares_trace: bool,
+    /// The extent of everything stamped on Core's clock so far, for the
+    /// no-trace axis. It only ever grows, and growing an axis moves nothing on
+    /// it: a placement there is the identity.
+    core_from_ms: u64,
+    core_to_ms: u64,
 }
 
 impl LiveAxis {
+    /// Widens the no-trace axis to take one instant on embarch-core's clock.
+    /// A no-op once a trace is drawing the axis.
+    fn note_core_instant(&mut self, ms: u64) {
+        if self.core_from_ms == 0 || ms < self.core_from_ms {
+            self.core_from_ms = ms;
+        }
+        if ms > self.core_to_ms {
+            self.core_to_ms = ms;
+        }
+    }
+
     /// Folds one pushed frame in. Returns true when the axis changed in a way
     /// that invalidates every placement already sent.
     fn ingest(&mut self, tap: &str, header_seen: bool, rows: &[String]) -> bool {
@@ -489,11 +516,32 @@ impl LiveAxis {
     }
 
     fn projection(&self) -> Projection {
+        if !self.declares_trace {
+            // No second clock is coming, so there is nothing to project and
+            // nothing to wait for. One mark is not yet an axis.
+            if self.core_to_ms > self.core_from_ms {
+                return Projection::core_clock(self.core_from_ms, self.core_to_ms);
+            }
+            return Projection::default();
+        }
         Projection::from_live_anchors(&self.anchors, self.resolution_ms())
     }
 
     fn describe(&self, proj: &Projection) -> Value {
         if !proj.placeable() {
+            if !self.declares_trace {
+                return json!({
+                    "placeable": false,
+                    "unit": "ms",
+                    "axis_clock": "core-clock",
+                    "epoch": self.epoch,
+                    "source": "embarch-core",
+                    "note": "Nothing stamped on embarch-core's clock has arrived yet, so there is \
+                             no extent to draw an axis over. This study declared no outpost trace, \
+                             so the axis is Core's own receipt clock and appears with the first \
+                             two things it receives.",
+                });
+            }
             return json!({
                 "placeable": false,
                 "unit": "us",
@@ -521,6 +569,30 @@ impl LiveAxis {
                 "frames": self.frames,
                 "rows": self.rows,
                 "non_monotone": self.non_monotone,
+            });
+        }
+        if !proj.projected() {
+            // embarch-core's own receipt clock, directly. Every mark is exactly
+            // where Core received it, to the millisecond, and nothing is
+            // projected — the same axis the post-hoc chart draws for a study
+            // with no trace, and the same code path.
+            return json!({
+                "placeable": true,
+                "unit": "ms",
+                "axis_clock": "core-clock",
+                "epoch": self.epoch,
+                "source": "embarch-core",
+                "t_from": proj.t_from(),
+                "t_to": proj.t_to(),
+                "projected": false,
+                "accuracy_ms": Value::Null,
+                "window_from_ms": proj.window_from_ms(),
+                "window_to_ms": proj.window_to_ms(),
+                "note": "The axis is embarch-core's own receipt clock, directly — this study \
+                         declared no outpost trace, so there is no second clock and nothing to \
+                         project. Every mark is exactly where Core received it, to the \
+                         millisecond. The axis grows as the run does, which moves nothing already \
+                         on it.",
             });
         }
         json!({
@@ -631,6 +703,7 @@ impl SessionState {
 
     /// Records one mark on a lane, **unplaced** — see the module rules above.
     fn push_mark(&mut self, key: &str, label: &str, kind: &'static str, mark: LiveMark) {
+        self.axis.note_core_instant(mark.core_rx_utc_ms);
         let lane = self.lanes.entry(key.to_string()).or_default();
         if lane.label.is_empty() {
             lane.label = label.to_string();
@@ -708,22 +781,32 @@ impl SessionState {
         })
     }
 
-    /// A `time_chart` frame, throttled — or a full replacement when the axis
-    /// itself changed, which is never throttled because everything already
-    /// drawn is on the wrong axis until it lands.
-    fn time_chart_frame(&mut self, epoch_bumped: bool) -> Option<String> {
-        if epoch_bumped {
-            self.last_time_chart = Some(std::time::Instant::now());
-            return Some(frame("time_chart", self.time_chart_snapshot()));
-        }
+    /// A `time_chart` frame.
+    ///
+    /// **Two independent things, and collapsing them into one was a real
+    /// defect** — found on the bench, on the first live run. `axis_changed`
+    /// means everything already drawn is on an axis that no longer exists, so
+    /// the whole chart is re-sent; `force` means only "do not wait out the
+    /// throttle", which is what a step completion wants so its band appears the
+    /// instant the step lands. Passing `true` for both made every one of a
+    /// twelve-step study's completions re-send all ~100 marks — harmless to
+    /// draw, since the browser resets on a replace, and a direct contradiction
+    /// of the property this design rests on: **a mark is placed once and never
+    /// re-sent.**
+    fn time_chart_frame(&mut self, axis_changed: bool, force: bool) -> Option<String> {
         let now = std::time::Instant::now();
-        if let Some(last) = self.last_time_chart {
-            if now.duration_since(last) < TIME_CHART_MIN_INTERVAL {
-                return None;
+        if !axis_changed && !force {
+            if let Some(last) = self.last_time_chart {
+                if now.duration_since(last) < TIME_CHART_MIN_INTERVAL {
+                    return None;
+                }
             }
         }
         self.last_time_chart = Some(now);
-        Some(frame("time_chart", self.time_chart_delta()))
+        Some(frame(
+            "time_chart",
+            if axis_changed { self.time_chart_snapshot() } else { self.time_chart_delta() },
+        ))
     }
 
     fn status_json(&self) -> Value {
@@ -875,6 +958,26 @@ impl LiveStudies {
 /// two copies of the one piece of logic that has to be right about missing
 /// data.
 async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>) {
+    // **Whether this study declared an outpost trace, read once before the
+    // first event**, because it decides which of two axes the Time chart is
+    // waiting for — and getting that wrong means either drawing on Core's
+    // clock and flipping to the DUT's counter a second later, or waiting
+    // forever for a trace that is not coming. embarch-core writes
+    // `streams/index.json` before any byte arrives, so this is answerable now.
+    //
+    // A read that fails reads as "no trace": the chart then draws on Core's
+    // clock, which is exact and is never wrong about the marks it places — it
+    // would simply be replaced by a better axis at the first trace frame, and
+    // that replacement is an epoch bump the browser already handles.
+    let declares_trace = matches!(
+        core.study_streams(&session.study_id).await,
+        Ok(Some(index)) if index.streams.iter().any(|e| matches!(
+            e.encoding,
+            embarch_study_designer::StreamEncoding::OutpostTrace
+        ))
+    );
+    session.state.lock().unwrap().axis.declares_trace = declares_trace;
+
     let options = FollowOptions {
         // No deadline: a study runs as long as it runs, and Core's own
         // watchdog is what bounds a hung one. The 30-minute backstop the
@@ -1035,6 +1138,10 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             // older Core sends neither. `None` is the study predating them,
             // which the chart renders as "no step row" rather than as a gap.
             if let (Some(from), Some(to)) = (started_utc_ms, ended_utc_ms) {
+                // A step's own window widens the no-trace axis too, so a study
+                // whose first step produced no marks still has an axis.
+                state.axis.note_core_instant(from);
+                state.axis.note_core_instant(to);
                 if state.step_stamps.len() < MAX_STEPS {
                     state.step_stamps.push(trace::StepStamp {
                         index: step_index as usize,
@@ -1061,6 +1168,14 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             // Nothing here renumbers it.
             state.current_step = Some(step_index);
             let feed = state.push_feed("step", label);
+            // The band belongs on the chart the instant the step lands, not
+            // whenever the next mark happens to arrive — so the throttle is
+            // skipped. **Not an axis change**: the marks already sent are
+            // exactly where they were.
+            let chart = state.time_chart_frame(false, true);
+            if let Some(chart) = chart {
+                session.send(chart);
+            }
             Some(frame(
                 "step",
                 json!({ "step": row_json, "status": state.status_json(), "row": feed }),
@@ -1125,6 +1240,9 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
                     },
                 );
             }
+            if let Some(chart) = state.time_chart_frame(false, false) {
+                session.send(chart);
+            }
             let feed = state.push_feed(
                 "gatt",
                 format!(
@@ -1156,7 +1274,7 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             // post-hoc path uses on the rendered file; that is the whole point
             // of Core pushing CSV rows rather than a struct.
             let bumped = state.axis.ingest(&stream_name, header_seen, &rows);
-            state.time_chart_frame(bumped)
+            state.time_chart_frame(bumped, false)
         }
         FollowItem::Event(StudyEvent::StreamText {
             stream_name,
@@ -1196,6 +1314,13 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             // No feed row per chunk: a console is chatty by nature and one
             // feed row per chunk would bury every step completion. The
             // console card is where its content belongs.
+            //
+            // The chart frame is throttled and rides alongside — on a study
+            // with no trace this is what makes the axis appear at all, since
+            // nothing else here is on embarch-core's clock as often.
+            if let Some(chart) = state.time_chart_frame(false, false) {
+                session.send(chart);
+            }
             Some(frame(
                 "console",
                 json!({
@@ -1485,7 +1610,7 @@ mod tests {
     /// anywhere.
     #[test]
     fn a_non_monotone_anchor_is_rejected_and_counted() {
-        let mut axis = LiveAxis::default();
+        let mut axis = LiveAxis { declares_trace: true, ..Default::default() };
         axis.ingest("outpost", true, &trace_rows(0, 1_000, &["10000"]));
         axis.ingest("outpost", true, &trace_rows(1, 1_010, &["20000"]));
         assert_eq!(axis.anchors.len(), 2);
@@ -1505,7 +1630,7 @@ mod tests {
     /// waiting rather than drawing a guessed one.
     #[test]
     fn the_axis_waits_for_the_trace_rather_than_being_invented() {
-        let mut axis = LiveAxis::default();
+        let mut axis = LiveAxis { declares_trace: true, ..Default::default() };
         assert!(!axis.projection().placeable());
 
         // A frame before the header: the rows carry a cycle count and no rate
@@ -1534,7 +1659,7 @@ mod tests {
     /// marks on an axis it has never seen.
     #[test]
     fn the_header_arriving_bumps_the_epoch_rather_than_promoting_silently() {
-        let mut axis = LiveAxis::default();
+        let mut axis = LiveAxis { declares_trace: true, ..Default::default() };
         assert!(!axis.ingest("outpost", false, &trace_rows(0, 1_000, &[""])));
         assert_eq!(axis.epoch, 0);
         assert!(axis.ingest("outpost", true, &trace_rows(1, 1_010, &["10000"])));
@@ -1550,7 +1675,7 @@ mod tests {
     /// because anchors are monotone, so is everything after it.
     #[test]
     fn a_mark_past_the_leading_edge_is_pending_and_is_placed_when_the_axis_reaches_it() {
-        let mut axis = LiveAxis::default();
+        let mut axis = LiveAxis { declares_trace: true, ..Default::default() };
         axis.ingest("outpost", true, &trace_rows(0, 1_000, &["10000"]));
         axis.ingest("outpost", true, &trace_rows(1, 1_010, &["20000"]));
 
@@ -1576,6 +1701,32 @@ mod tests {
         // And a mark already sent is never re-sent, which is what stops a
         // reader watching a mark move.
         assert_eq!(lane.take_placeable(&axis.projection(), true).0.len(), 0);
+    }
+
+    /// **A study that declared no trace does not wait for one.** There is no
+    /// second clock coming, so embarch-core's own receipt clock *is* the axis
+    /// from the first two things it receives, and every mark on it is exact.
+    /// That is the same `Projection::core_clock` the post-hoc chart uses for
+    /// such a study — one code path, not a live approximation of it.
+    #[test]
+    fn with_no_trace_declared_the_live_axis_is_cores_clock_and_waits_for_nothing() {
+        let mut axis = LiveAxis::default();
+        assert!(!axis.projection().placeable(), "one instant is not yet an extent");
+        axis.note_core_instant(1_700_000_000_000);
+        axis.note_core_instant(1_700_000_005_000);
+        let proj = axis.projection();
+        assert!(proj.placeable());
+        assert!(!proj.projected(), "there is nothing to project onto");
+        assert_eq!(proj.accuracy_ms, None, "an exact placement states no accuracy");
+        assert_eq!(proj.place(1_700_000_002_500), Some(1_700_000_002_500));
+        let described = axis.describe(&proj);
+        assert_eq!(described["axis_clock"], "core-clock");
+        assert_eq!(described["unit"], "ms");
+
+        // And growing it moves nothing already on it: a placement here is the
+        // identity, so the same instant places to the same position after.
+        axis.note_core_instant(1_700_000_009_000);
+        assert_eq!(axis.projection().place(1_700_000_002_500), Some(1_700_000_002_500));
     }
 
     /// A live console line and a live GATT entry land on the same lane keys the

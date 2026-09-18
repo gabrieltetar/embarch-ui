@@ -82,9 +82,16 @@ def main():
               script("return document.querySelectorAll('#tc-chart rect').length") > 3)
         check("the step row is drawn in the pinned header, not in the body",
               script("return document.querySelectorAll('#tc-head rect').length") > 0)
-        check("a console lane says it cannot be placed rather than going missing",
-              script("return document.getElementById('tc-chart').textContent"
-                     ".indexOf('this chart cannot place')>=0"))
+        # A console lane is drawn either way and **never silently missing**:
+        # placed, on a study captured since embarch-core kept a Text tap's
+        # arrival sidecar (`embarch-core` decision 73), and otherwise a count
+        # with the reason beside it. Both are correct; going missing is not.
+        console_lane = script(
+            "var t=document.getElementById('tc-chart').textContent;"
+            "return [t.indexOf('this chart cannot place')>=0, t.indexOf('console')>=0"
+            " || t.indexOf('dev-bench')>=0];")
+        check("a console lane is drawn — placed, or saying why it cannot be",
+              console_lane[0] or console_lane[1], console_lane)
         clusters = script("return document.querySelectorAll('#tc-chart rect[fill^=\"url(#tc-cluster\"]').length")
         singles = script("return document.querySelectorAll('#tc-chart rect.tc-mark').length")
         check("at full zoom most marks merge, and a cluster is drawn as a cluster",
@@ -100,13 +107,25 @@ def main():
         check("an opened mark says which clock placed it and how closely",
               "embarch-core received it at" in detail)
 
-        check("the trace tap selector offers this study's outpost tap",
-              script("var s=document.getElementById('trace-tap'); return !s.disabled && s.options.length>=1"))
-        time.sleep(12)
-        check("the trace chart draws",
-              script("return document.querySelectorAll('#trace-chart rect, #trace-chart path').length") > 10)
-        check("the load repartition renders rows",
-              script("return document.querySelectorAll('#trace-load-rows tr').length") > 0)
+        # The trace checks apply only to a study that declared one. Read off
+        # embarch-core's own stream index rather than assumed: the README says
+        # to pass any completed study, and three checks that fail on a study
+        # with no trace are three checks nobody can read.
+        taps = json.load(urllib.request.urlopen(
+            UI + "/api/studies/" + STUDY, timeout=60))["taps"] or []
+        traced = [t for t in taps if t.get("is_outpost_trace") and t.get("rendered")]
+        if traced:
+            check("the trace tap selector offers this study's outpost tap",
+                  script("var s=document.getElementById('trace-tap'); return !s.disabled && s.options.length>=1"))
+            time.sleep(12)
+            check("the trace chart draws",
+                  script("return document.querySelectorAll('#trace-chart rect, #trace-chart path').length") > 10)
+            check("the load repartition renders rows",
+                  script("return document.querySelectorAll('#trace-load-rows tr').length") > 0)
+        else:
+            check("a study with no outpost tap says so instead of an empty chart",
+                  script("var s=document.getElementById('trace-tap');"
+                         "return s.disabled && s.textContent.indexOf('declared no outpost trace')>=0"))
         cards = script("return document.querySelectorAll('#ls-data > .card').length")
         check("one data card per remaining tap (2 Raw + 1 GattTranscript)", cards == 3, cards)
         check("the GATT transcript renders as a table the browser never parsed",

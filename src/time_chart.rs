@@ -1389,15 +1389,41 @@ pub async fn api_time_chart_mark(
             )
                 .into_response()
         }
-        "text" => (
-            StatusCode::CONFLICT,
-            format!(
-                "tap '{}' is a console, and a console's capture on disk carries no arrival time \
-                 per line — so this chart placed none of its lines and has no mark to open.",
-                lane.tap
-            ),
-        )
-            .into_response(),
+        "text" => {
+            // The mark's row index is the line's own index in the console's
+            // file, so this opens the line it **is** — the same line the
+            // console card above shows, not a second rendering of it.
+            let bytes = match state.core.get_study_stream(&study_id, &lane.tap, false).await {
+                Ok(b) => b,
+                Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            let Some(line) = text.split('\n').nth(row_index) else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("tap '{}' has no line {row_index}", lane.tap),
+                )
+                    .into_response();
+            };
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "lane": lane.key,
+                    "kind": lane.kind,
+                    "source": lane.source,
+                    "tap": lane.tap,
+                    "row_index": row_index,
+                    "columns": ["line", "text"],
+                    "row": [row_index.to_string(), line.strip_suffix('\r').unwrap_or(line)],
+                    "mark": mark,
+                    "note": "A console line is placed by the chunk that carried its first byte — \
+                             one read off the wire, so every line completed by one read shares its \
+                             instant. Nothing interpolates inside a chunk, and no reading of this \
+                             file can be finer than that.",
+                })),
+            )
+                .into_response()
+        }
         _ => {
             let table = match fetch_table(&state, &study_id, &lane.tap).await {
                 Ok(t) => t,
