@@ -27,11 +27,11 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json};
 use embarch_core_client::{CoreClient, StudyRunOptions};
 use embarch_study_designer::limits::{
-    MAX_DECODERS_PER_STUDY, MAX_FIRMWARE_VERSION_LEN, MAX_SIGNAL_NAME_LEN, MAX_STREAMS_PER_STUDY,
-    MAX_STREAM_NAME_LEN,
+    MAX_DECODERS_PER_STUDY, MAX_FIRMWARE_VERSION_LEN, MAX_RECORD_MAGIC_LEN, MAX_SIGNAL_NAME_LEN,
+    MAX_STREAMS_PER_STUDY, MAX_STREAM_NAME_LEN,
 };
 use embarch_study_designer::eap_repo::RepoProtocols;
-use embarch_study_designer::ProtocolDef;
+use embarch_study_designer::{DevBenchLogLevel, ProtocolDef, RecordCheck, RecordFraming};
 use embarch_study_designer::{
     build_study, merge_actions, requirement_satisfied, validate_taps, Action, ActionRegistry,
     BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattName, GattNameBook,
@@ -47,6 +47,9 @@ type StreamList = HVec<StreamTap, MAX_STREAMS_PER_STUDY>;
 /// `Study.decoders`' own type (`embarch-study-designer` decision 52),
 /// named once rather than spelled out at each use.
 type DecoderList = embarch_study_designer::bounded::Bounded<StructLayout, MAX_DECODERS_PER_STUDY>;
+/// `Study.record_checks`' own type (`embarch-study-designer` decision 70).
+/// Bounded by the tap count, not by a cap of its own: a check rides on a tap.
+type RecordCheckList = embarch_study_designer::bounded::Bounded<RecordCheck, MAX_STREAMS_PER_STUDY>;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -511,6 +514,27 @@ pub enum TapInput {
         /// A `study-structs.toml` entry's name, or blank for raw bytes.
         #[serde(default)]
         decoder: String,
+        /// The record magic this capture's frames begin with
+        /// (`embarch-study-designer` decision 70). Empty means **no check**,
+        /// which is the honest state for a payload whose framing nobody has
+        /// declared.
+        ///
+        /// **The check rides on its tap rather than sitting in a parallel
+        /// list**, because it is a fact about *this* capture and because
+        /// `build_taps` is already the one place a tap's `id` is assigned —
+        /// so the `RecordCheck.stream_id` it mints cannot disagree with the
+        /// `StreamTap.id` it is about. A separate authored list would need
+        /// its own way to name a tap, which is a second identity for one
+        /// thing.
+        ///
+        /// Bytes, not a string. The magic is a byte run — `GWF1` is ASCII
+        /// and `BSS\x03` is not — and the browser parses whichever the
+        /// author typed with the same `parseBytes` the registration form
+        /// uses. It is **never truncated**: a shortened magic finds
+        /// different record boundaries, which is a check that measures the
+        /// wrong thing and passes.
+        #[serde(default)]
+        record_magic: Vec<u8>,
     },
 }
 
@@ -533,9 +557,10 @@ fn build_taps(
     taps: &[TapInput],
     steps: &[Step],
     structs: &StructRegistry,
-) -> Result<(StreamList, DecoderList), String> {
+) -> Result<(StreamList, DecoderList, RecordCheckList), String> {
     let mut out: StreamList = StreamList::new();
     let mut decoders: DecoderList = DecoderList::new();
+    let mut record_checks: RecordCheckList = RecordCheckList::new();
 
     for (index, tap) in taps.iter().enumerate() {
         let name = tap.name().trim();
@@ -566,7 +591,13 @@ fn build_taps(
                     scope: StreamScope::WholeStudy,
                 }
             }
-            TapInput::GattNotify { service_uuid, characteristic_uuid, decoder, .. } => {
+            TapInput::GattNotify {
+                service_uuid,
+                characteristic_uuid,
+                decoder,
+                record_magic,
+                ..
+            } => {
                 let service_uuid = Uuid::parse(service_uuid.trim()).ok_or_else(|| {
                     format!("stream tap {}: '{service_uuid}' is not a UUID", index + 1)
                 })?;
@@ -621,6 +652,31 @@ fn build_taps(
                     }
                 };
 
+                // Minted here, with the `id` this loop already assigned, so a
+                // check and the tap it is about cannot disagree about which
+                // stream they mean.
+                if !record_magic.is_empty() {
+                    if record_magic.len() > MAX_RECORD_MAGIC_LEN {
+                        return Err(format!(
+                            "stream tap '{name}': a record magic is {} bytes and the wire \
+                             allows {MAX_RECORD_MAGIC_LEN} — a shortened magic would find \
+                             different record boundaries, so it is refused rather than cut",
+                            record_magic.len()
+                        ));
+                    }
+                    let magic = HVec::from_slice(record_magic).map_err(|_| {
+                        format!("stream tap '{name}': record magic does not fit the wire")
+                    })?;
+                    record_checks
+                        .push(RecordCheck {
+                            stream_id: id,
+                            framing: RecordFraming::MagicPrefixedCrc32Le { magic },
+                        })
+                        .map_err(|_| {
+                            format!("more than {MAX_STREAMS_PER_STUDY} record checks in one study")
+                        })?;
+                }
+
                 StreamTap {
                     id,
                     name: tap_name,
@@ -644,7 +700,7 @@ fn build_taps(
     // The same pre-flight Core runs on submit, run here so an authoring
     // mistake is a message in this tab rather than a `400` from a round trip.
     validate_taps(&out, steps.len() as u32, decoders.len()).map_err(|e| format!("{e:?}"))?;
-    Ok((out, decoders))
+    Ok((out, decoders, record_checks))
 }
 
 /// Whether any step in `steps` subscribes to this characteristic — an
@@ -1102,6 +1158,17 @@ pub struct RunRequest {
     /// renders that.
     #[serde(default)]
     allow_version_mismatch: bool,
+    /// How loud dev-bench's firmware should be for this run
+    /// (`embarch-dev-bench` decision 39). Absent leaves the crate's own
+    /// default (`Warn`) in place — see `build_authored`, which is the one
+    /// place that decision is read.
+    ///
+    /// A property of the **saved study**, not of the run: decision 51
+    /// rejected making it a property of the log tap, so it is saved and
+    /// loaded with the study exactly as `requires` is, and it is not a run
+    /// dialog field the way `reflash` and `allow_version_mismatch` are.
+    #[serde(default)]
+    dev_bench_log_level: Option<DevBenchLogLevel>,
 }
 
 /// Builds, taps, and seals one authored study — everything `run` and `save`
@@ -1116,6 +1183,7 @@ fn build_authored(
     registry: &ActionRegistry,
     structs: &StructRegistry,
     protocols: &[ProtocolDef],
+    log_level: Option<DevBenchLogLevel>,
 ) -> Result<Study, (StatusCode, String)> {
     let requires = requires.build().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let mut study = build_study(req_name, requires, rows, registry, protocols)
@@ -1123,12 +1191,22 @@ fn build_authored(
     // Taps are built against the *resolved* steps rather than the raw rows:
     // whether a characteristic is subscribed at all is a property of the
     // `Action` a row became, not of the row's own text.
-    let (mut streams, decoders) = build_taps(taps, &study.steps, structs)
+    let (mut streams, decoders, record_checks) = build_taps(taps, &study.steps, structs)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     auto_transcript_tap(&mut streams, &study.steps)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     study.streams = streams;
     study.decoders = decoders;
+    study.record_checks = record_checks;
+    // **Only when the request said so.** `None` leaves the crate's own
+    // argued default (`Warn`) in place rather than this layer restating it:
+    // `build_study` gives a whole paragraph to why an unstated level has a
+    // correct answer where an unstated `requires` has only a permissive one,
+    // and writing `Warn` here would be a second copy of that decision that
+    // stops tracking the first.
+    if let Some(level) = log_level {
+        study.dev_bench_log_level = level;
+    }
     seal_crc(&mut study).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(study)
 }
@@ -1167,6 +1245,7 @@ pub async fn api_run(
         &registry,
         &structs,
         &protocols,
+        req.dev_bench_log_level,
     ) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
@@ -1330,6 +1409,17 @@ pub struct SaveStudyRequest {
     requires: RequirementsInput,
     #[serde(default)]
     taps: Vec<TapInput>,
+    /// How loud dev-bench's firmware should be for this run
+    /// (`embarch-dev-bench` decision 39). Absent leaves the crate's own
+    /// default (`Warn`) in place — see `build_authored`, which is the one
+    /// place that decision is read.
+    ///
+    /// A property of the **saved study**, not of the run: decision 51
+    /// rejected making it a property of the log tap, so it is saved and
+    /// loaded with the study exactly as `requires` is, and it is not a run
+    /// dialog field the way `reflash` and `allow_version_mismatch` are.
+    #[serde(default)]
+    dev_bench_log_level: Option<DevBenchLogLevel>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1442,6 +1532,7 @@ pub async fn api_studies_save(
         &registry,
         &structs,
         &protocols,
+        req.dev_bench_log_level,
     ) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
@@ -1582,7 +1673,8 @@ fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
     };
     streams
         .iter()
-        .filter_map(|tap| {
+        .enumerate()
+        .filter_map(|(index, tap)| {
             let name = tap.get("name")?.as_str()?.to_string();
             let source = tap.get("source")?;
             if let Some(signal) = source.get("Signal").and_then(|s| s.get("name"))
@@ -1605,11 +1697,35 @@ fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
                     d.get(index as usize)?.get("name")?.as_str().map(str::to_string)
                 })
                 .unwrap_or_default();
+            // The record magic comes back the same way, off
+            // `Study.record_checks` keyed by `stream_id` — which is the tap's
+            // own index, assigned by `build_taps` and enforced by
+            // `validate_taps`, so this is a lookup and not a guess either. A
+            // tap with no check gets an empty magic: no check, which is what
+            // such a tap had.
+            let record_magic = value
+                .get("record_checks")
+                .and_then(|c| c.as_array())
+                .and_then(|checks| {
+                    let check = checks.iter().find(|c| {
+                        c.get("stream_id").and_then(|id| id.as_u64()) == Some(index as u64)
+                    })?;
+                    let magic = check.get("framing")?.get("MagicPrefixedCrc32Le")?.get("magic")?;
+                    Some(
+                        magic
+                            .as_array()?
+                            .iter()
+                            .filter_map(|b| u8::try_from(b.as_u64()?).ok())
+                            .collect::<Vec<u8>>(),
+                    )
+                })
+                .unwrap_or_default();
             Some(TapInput::GattNotify {
                 name,
                 service_uuid: uuid_field(gatt, "service_uuid")?,
                 characteristic_uuid: uuid_field(gatt, "characteristic_uuid")?,
                 decoder,
+                record_magic,
             })
         })
         .collect()
@@ -2392,6 +2508,7 @@ mod tests {
             service_uuid: NUS_SERVICE.to_string(),
             characteristic_uuid: characteristic.to_string(),
             decoder: decoder.to_string(),
+            record_magic: Vec::new(),
         }
     }
 
@@ -2436,7 +2553,7 @@ repeat = [{ name = "green", type = "i32le" }]
     /// it here rather than accepting it is what makes that unfailable.
     #[test]
     fn authored_taps_get_their_index_as_their_wire_handle() {
-        let (taps, decoders) = build_taps(
+        let (taps, decoders, _) = build_taps(
             &[tap("outpost", "outpost-uart"), tap("second", "other")],
             &plain_steps(3),
             &StructRegistry::default(),
@@ -2484,7 +2601,7 @@ repeat = [{ name = "green", type = "i32le" }]
         // The submitted `Study` carries the layout, not the name: Core cannot
         // read the firmware repo, so a study that named a layout without
         // carrying it would render nothing on any machine but this one.
-        let (taps, decoders) = build_taps(
+        let (taps, decoders, _) = build_taps(
             &[gatt_tap("ppg", NUS_TX, "ppg_packet")],
             &monitoring_steps(),
             &structs_toml(),
@@ -2501,9 +2618,153 @@ repeat = [{ name = "green", type = "i32le" }]
         }
     }
 
+    fn gatt_tap_with_magic(name: &str, magic: &[u8]) -> TapInput {
+        TapInput::GattNotify {
+            name: name.to_string(),
+            service_uuid: NUS_SERVICE.to_string(),
+            characteristic_uuid: NUS_TX.to_string(),
+            decoder: String::new(),
+            record_magic: magic.to_vec(),
+        }
+    }
+
+    /// The check's `stream_id` is the `id` `build_taps` assigned to the tap
+    /// it rides on. Minting it in that loop rather than accepting it is what
+    /// makes the two unable to disagree.
+    #[test]
+    fn a_record_check_carries_the_id_of_the_tap_it_rides_on() {
+        let (taps, _, checks) = build_taps(
+            &[gatt_tap("plain", NUS_TX, ""), gatt_tap_with_magic("framed", b"GWF1")],
+            &monitoring_steps(),
+            &structs_toml(),
+        )
+        .unwrap();
+        assert_eq!(checks.len(), 1, "only the tap with a magic gets a check");
+        assert_eq!(checks[0].stream_id, taps[1].id);
+        assert_eq!(checks[0].stream_id, 1);
+        let RecordFraming::MagicPrefixedCrc32Le { magic } = &checks[0].framing;
+        assert_eq!(magic.as_slice(), b"GWF1");
+    }
+
+    /// An empty magic is **no check**, not a check that matches everything —
+    /// the honest state for a payload whose framing nobody has declared.
+    #[test]
+    fn a_tap_with_no_magic_gets_no_check() {
+        let (_, _, checks) =
+            build_taps(&[gatt_tap("plain", NUS_TX, "")], &monitoring_steps(), &structs_toml())
+                .unwrap();
+        assert!(checks.is_empty());
+    }
+
+    /// Refused naming the tap, never truncated: a shortened magic finds
+    /// different record boundaries, which is a check that measures the wrong
+    /// thing and passes.
+    #[test]
+    fn an_over_long_magic_is_refused_naming_the_tap() {
+        let too_long = vec![0xAA; MAX_RECORD_MAGIC_LEN + 1];
+        let err = build_taps(
+            &[gatt_tap_with_magic("framed", &too_long)],
+            &monitoring_steps(),
+            &structs_toml(),
+        )
+        .unwrap_err();
+        assert!(err.contains("'framed'"), "{err}");
+        assert!(err.contains(&MAX_RECORD_MAGIC_LEN.to_string()), "{err}");
+        assert!(err.contains(&too_long.len().to_string()), "{err}");
+    }
+
+    /// A study written by hand, or saved before the sidecar existed, still
+    /// loads its record magic back — off `record_checks` keyed by
+    /// `stream_id`, which is the tap's own index. Same lookup-not-a-guess
+    /// property the decoder round trip has.
+    #[test]
+    fn a_record_magic_comes_back_off_record_checks_with_no_sidecar() {
+        let study = serde_json::json!({
+            "streams": [{
+                "id": 0,
+                "name": "ppg",
+                "source": { "GattNotify": {
+                    "service_uuid": Uuid::parse(NUS_SERVICE).unwrap().0.to_vec(),
+                    "characteristic_uuid": Uuid::parse(NUS_TX).unwrap().0.to_vec()
+                }},
+                "encoding": "Raw",
+                "scope": "WholeStudy"
+            }],
+            "record_checks": [{
+                "stream_id": 0,
+                "framing": { "MagicPrefixedCrc32Le": { "magic": [0x47, 0x57, 0x46, 0x31] } }
+            }]
+        });
+        match &taps_from_streams(&study)[0] {
+            TapInput::GattNotify { record_magic, .. } => assert_eq!(record_magic, b"GWF1"),
+            other => panic!("expected a GattNotify tap, got {other:?}"),
+        }
+    }
+
+    /// What a saved study's JSON actually carries. `build_authored` is the
+    /// one path both `run` and `save` take, so a key missing here is a key
+    /// missing from the file *and* from the submitted study.
+    #[test]
+    fn an_authored_study_carries_its_log_level_and_record_checks() {
+        let rows = vec![TableRow {
+            name: "monitor".to_string(),
+            action: RowAction::BuiltIn {
+                targets: Vec::new(),
+                which: BuiltInActionKind::GattMonitorStart,
+                role: RoleChoice::Central,
+                target_name: None,
+                security_level: None,
+                protocol: None,
+                entry_state: None,
+            },
+            timeout_ms: 1_000,
+            continue_on_fail: false,
+            delay_before_ms: 0,
+        }];
+        let study = build_authored(
+            "framed",
+            &rows,
+            &RequirementsInput::any(),
+            &[gatt_tap_with_magic("ppg", b"GWF1")],
+            &ActionRegistry::default(),
+            &StructRegistry::default(),
+            &[],
+            Some(DevBenchLogLevel::Debug),
+        )
+        .unwrap();
+
+        let json = serde_json::to_value(&study).unwrap();
+        assert_eq!(json["dev_bench_log_level"], "Debug");
+        assert_eq!(json["record_checks"][0]["stream_id"], 0);
+        assert_eq!(
+            json["record_checks"][0]["framing"]["MagicPrefixedCrc32Le"]["magic"],
+            serde_json::json!([0x47, 0x57, 0x46, 0x31])
+        );
+    }
+
+    /// An absent level leaves the crate's own argued default in place rather
+    /// than this layer restating `Warn` — a second copy of that decision
+    /// would stop tracking the first.
+    #[test]
+    fn an_absent_log_level_leaves_the_crates_default() {
+        let study = build_authored(
+            "quiet",
+            &[],
+            &RequirementsInput::any(),
+            &[],
+            &ActionRegistry::default(),
+            &StructRegistry::default(),
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(study.dev_bench_log_level, DevBenchLogLevel::default());
+        assert_eq!(serde_json::to_value(&study).unwrap()["dev_bench_log_level"], "Warn");
+    }
+
     #[test]
     fn a_gatt_tap_with_no_layout_is_raw_rather_than_guessed_at() {
-        let (taps, decoders) =
+        let (taps, decoders, _) =
             build_taps(&[gatt_tap("ppg", NUS_TX, "")], &monitoring_steps(), &structs_toml())
                 .unwrap();
         assert!(decoders.is_empty());
@@ -2512,7 +2773,7 @@ repeat = [{ name = "green", type = "i32le" }]
 
     #[test]
     fn two_taps_sharing_a_layout_share_one_decoder_slot() {
-        let (taps, decoders) = build_taps(
+        let (taps, decoders, _) = build_taps(
             &[gatt_tap("a", NUS_TX, "ppg_packet"), gatt_tap("b", NUS_SERVICE, "ppg_packet")],
             &monitoring_steps(),
             &structs_toml(),
@@ -2596,7 +2857,7 @@ repeat = [{ name = "green", type = "i32le" }]
 
     #[test]
     fn the_auto_tap_lands_after_the_authored_ones_and_keeps_index_as_id() {
-        let (mut streams, _) = build_taps(
+        let (mut streams, _, _) = build_taps(
             &[gatt_tap("ppg", NUS_TX, "ppg_packet")],
             &monitoring_steps(),
             &structs_toml(),
@@ -2719,7 +2980,7 @@ repeat = [{ name = "green", type = "i32le" }]
             }]
         });
         match &taps_from_streams(&study)[0] {
-            TapInput::GattNotify { name, service_uuid, characteristic_uuid, decoder } => {
+            TapInput::GattNotify { name, service_uuid, characteristic_uuid, decoder, .. } => {
                 assert_eq!(name, "ppg");
                 assert_eq!(service_uuid, NUS_SERVICE);
                 assert_eq!(characteristic_uuid, NUS_TX);
@@ -3089,6 +3350,8 @@ pub async fn api_new_study(
         // files here would make creating an empty study fail on a repo whose
         // protocols are mid-edit.
         &[],
+        // And it states no log level, so the crate's default stands.
+        None,
     ) {
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
