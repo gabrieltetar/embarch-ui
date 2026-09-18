@@ -1793,7 +1793,7 @@ pub async fn api_study_summary(
     };
     let value = match read_saved_study(&project, &slug) {
         Ok(v) => v,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let list = |key: &str, field: &str| -> Vec<String> {
@@ -1842,23 +1842,34 @@ pub async fn api_study_summary(
 }
 
 /// Reads and parses one saved study file, or the response that says why not.
+///
+/// The `Err` is boxed: an `axum::Response` is a 128-byte value, and
+/// `clippy::result_large_err` is right that a `Result` shaped that way costs
+/// every caller a move it does not need. Boxing is one line where an
+/// `#[allow]` would be one line of silence.
 fn read_saved_study(
     project: &StudyDesignerConfig,
     slug: &str,
-) -> Result<serde_json::Value, axum::response::Response> {
+) -> Result<serde_json::Value, Box<axum::response::Response>> {
     let path = studies_dir(project).join(format!("{slug}.json"));
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(
-                (StatusCode::NOT_FOUND, format!("no saved study '{slug}'")).into_response()
-            )
+            return Err(Box::new(
+                (StatusCode::NOT_FOUND, format!("no saved study '{slug}'")).into_response(),
+            ))
         }
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+        Err(e) => {
+            return Err(Box::new(
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            ))
+        }
     };
     serde_json::from_str(&text).map_err(|e| {
-        (StatusCode::BAD_REQUEST, format!("{} isn't valid JSON: {e}", path.display()))
-            .into_response()
+        Box::new(
+            (StatusCode::BAD_REQUEST, format!("{} isn't valid JSON: {e}", path.display()))
+                .into_response(),
+        )
     })
 }
 
@@ -1891,7 +1902,7 @@ pub async fn api_study_run(
 
     let value = match read_saved_study(&project, &slug) {
         Ok(v) => v,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     // **A deserialize failure is a fact about that file**, stated as one —
     // not a `502` about a round trip that never happened, and not a bare
