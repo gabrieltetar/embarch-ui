@@ -1627,6 +1627,384 @@ pub async fn api_run(
     Json(serde_json::json!({ "study_id": study_id })).into_response()
 }
 
+/// What a pre-flight found. **Never gates**: every field is a reading, and
+/// the route answers `200` for a study that is over every advisory cap.
+#[derive(Debug, Serialize)]
+struct PreflightResponse {
+    steps: usize,
+    taps: usize,
+    decoders: usize,
+    record_checks: usize,
+    /// The protocols this study's rows actually named, in the order the
+    /// study carries them — derived by `build_study`, not authored.
+    protocols: Vec<String>,
+    /// The postcard-encoded size of `Study.protocols`, length prefix
+    /// included — the one advisory dev-bench cap that mirrors no count and
+    /// so cannot be checked by counting anything.
+    protocols_wire_len: usize,
+    dev_bench_log_level: String,
+    /// One sentence per advisory cap this study is over.
+    ///
+    /// **Built here, not in the browser.** Two of the three cannot be
+    /// computed there at all: the wire length is a postcard encoding, and
+    /// the event-arm count is a property of a resolved `ProtocolDef` the
+    /// browser only ever sees a summary of. Building the third here too
+    /// keeps them one list with one voice.
+    advisories: Vec<String>,
+}
+
+/// Builds the study a `run` would submit and reports what it is, without
+/// submitting it.
+///
+/// Same `build_authored` the run and the save take, so a pre-flight cannot
+/// describe a different study from the one that would run. A build error is
+/// a `400` with the same message the run would have given.
+pub async fn api_preflight(
+    State(state): State<crate::AppState>,
+    Json(req): Json<RunRequest>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    if sd.project().is_none() {
+        return not_configured();
+    }
+    let registry = match sd.registry() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let structs = match sd.structs() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let protocols = match sd.protocol_defs() {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let study = match build_authored(
+        &req.name,
+        &req.rows,
+        &req.requires,
+        &req.taps,
+        &registry,
+        &structs,
+        &protocols,
+        req.dev_bench_log_level,
+    ) {
+        Ok(s) => s,
+        Err((code, e)) => return (code, e).into_response(),
+    };
+
+    let wire_len = match embarch_study_designer::protocols_wire_len(&study.protocols) {
+        Ok(len) => len,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")).into_response(),
+    };
+    Json(PreflightResponse {
+        steps: study.steps.len(),
+        taps: study.streams.len(),
+        decoders: study.decoders.len(),
+        record_checks: study.record_checks.len(),
+        protocols: study.protocols.iter().map(|p| p.name.to_string()).collect(),
+        protocols_wire_len: wire_len,
+        dev_bench_log_level: serde_json::to_value(study.dev_bench_log_level)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default(),
+        advisories: advisories_for(&study, wire_len),
+    })
+    .into_response()
+}
+
+/// One sentence per advisory dev-bench cap this study is over.
+///
+/// **Advisory, never a gate.** Each sentence says what this study is and
+/// what this suite's bench takes, and says nothing about whether to run it:
+/// the bench on somebody's desk may be a different build, and a host that
+/// refused to run a study its own bench would accept would be enforcing a
+/// number it cannot see.
+fn advisories_for(study: &Study, protocols_wire_len: usize) -> Vec<String> {
+    use embarch_study_designer::limits;
+    let mut out = Vec::new();
+
+    if study.steps.len() > limits::DEV_BENCH_MAX_STEPS_PER_STUDY {
+        out.push(format!(
+            "{} steps — this suite's dev-bench refuses a study over {} at decode",
+            study.steps.len(),
+            limits::DEV_BENCH_MAX_STEPS_PER_STUDY
+        ));
+    }
+    if protocols_wire_len > limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN {
+        out.push(format!(
+            "the protocols this study carries encode to {protocols_wire_len} bytes — this \
+             suite's dev-bench accepts up to {}",
+            limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN
+        ));
+    }
+    // Per state, not per protocol: the cap is on one state's arms, and a
+    // protocol with one fat state and five thin ones is over it. Named by
+    // protocol and state so the sentence points at the `.eap` to edit.
+    for protocol in study.protocols.iter() {
+        for state in protocol.states.iter() {
+            let embarch_study_designer::StateKind::Active(active) = &state.kind else { continue };
+            if active.on_event.len() > limits::DEV_BENCH_MAX_EVENT_ARMS_PER_STATE {
+                out.push(format!(
+                    "protocol '{}' state '{}' has {} event arms — this suite's dev-bench \
+                     accepts {} per state",
+                    protocol.name,
+                    state.name,
+                    active.on_event.len(),
+                    limits::DEV_BENCH_MAX_EVENT_ARMS_PER_STATE
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// What a saved study *is*, without loading it into the table.
+///
+/// Answers for a run-only file — one written by hand or by an agent, which
+/// `api_studies_load` refuses with a `409` because it has no
+/// `_embarch_ui_rows` to load back. That `409` is unchanged and correct;
+/// this is the read-only view the browser shows instead, and it is also
+/// what the existing version-check dialog reads, so that dialog needs no
+/// route of its own.
+#[derive(Debug, Serialize)]
+struct StudySummary {
+    slug: String,
+    name: String,
+    editable: bool,
+    requires: RequirementsOut,
+    dev_bench_log_level: String,
+    /// One label per step, in order — enough to read what the study does.
+    steps: Vec<String>,
+    taps: Vec<String>,
+    protocols: Vec<String>,
+    record_checks: usize,
+}
+
+pub async fn api_study_summary(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    let slug = match study_slug(&slug) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let value = match read_saved_study(&project, &slug) {
+        Ok(v) => v,
+        Err(response) => return response,
+    };
+
+    let list = |key: &str, field: &str| -> Vec<String> {
+        value
+            .get(key)
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, item)| {
+                item.get(field)
+                    .and_then(|n| n.as_str())
+                    .filter(|n| !n.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{key} {}", i + 1))
+            })
+            .collect()
+    };
+
+    Json(StudySummary {
+        name: value.get("name").and_then(|n| n.as_str()).unwrap_or(&slug).to_string(),
+        editable: value.get("_embarch_ui_rows").is_some(),
+        requires: RequirementsOut {
+            dev_bench_version: version_field(&value, "dev_bench_version"),
+            firmware_version: version_field(&value, "firmware_version"),
+        },
+        // Absent means the field predates `dev_bench_log_level`, and such a
+        // study ran at the crate's default — which is what is reported,
+        // rather than an empty cell that reads as "nothing".
+        dev_bench_log_level: value
+            .get("dev_bench_log_level")
+            .and_then(|l| l.as_str())
+            .unwrap_or("Warn")
+            .to_string(),
+        steps: list("steps", "name"),
+        taps: list("streams", "name"),
+        protocols: list("protocols", "name"),
+        record_checks: value
+            .get("record_checks")
+            .and_then(|c| c.as_array())
+            .map(|c| c.len())
+            .unwrap_or(0),
+        slug,
+    })
+    .into_response()
+}
+
+/// Reads and parses one saved study file, or the response that says why not.
+fn read_saved_study(
+    project: &StudyDesignerConfig,
+    slug: &str,
+) -> Result<serde_json::Value, axum::response::Response> {
+    let path = studies_dir(project).join(format!("{slug}.json"));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(
+                (StatusCode::NOT_FOUND, format!("no saved study '{slug}'")).into_response()
+            )
+        }
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    };
+    serde_json::from_str(&text).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("{} isn't valid JSON: {e}", path.display()))
+            .into_response()
+    })
+}
+
+/// Runs a saved study **as it is on disk**, with no round trip through the
+/// table.
+///
+/// This is the only path a run-only file has: `api_studies_load` answers
+/// `409` for a study with no `_embarch_ui_rows`, and that refusal is right —
+/// there are no rows to load. What was missing was a way to run one anyway,
+/// which is the whole reason such files exist.
+///
+/// **Every seal is recomputed before submitting** (decision 26), all three,
+/// because a hand-written file's seals are whatever its author typed. Then
+/// the crate's own pre-flight runs locally — `validate_taps`,
+/// `validate_protocol` per carried protocol, and the two `RunProtocol` index
+/// checks — so an authoring mistake in that file is a sentence here rather
+/// than a `400` from a round trip.
+pub async fn api_study_run(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    body: Option<Json<StudyRunRequest>>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+    let slug = match study_slug(&slug) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    let value = match read_saved_study(&project, &slug) {
+        Ok(v) => v,
+        Err(response) => return response,
+    };
+    // **A deserialize failure is a fact about that file**, stated as one —
+    // not a `502` about a round trip that never happened, and not a bare
+    // serde message with no path. Capacity diagnosis (which `embarch-api`'s
+    // `capacity::explain` does properly) is private to that binary, so this
+    // reports serde's own line and column and points at the CLI that can say
+    // more.
+    let mut study: Study = match serde_json::from_value(value) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "'{slug}.json' is not a Study this build can run: {e}. \
+                     `embarch-api run-study --study-file` reports capacity limits in more \
+                     detail."
+                ),
+            )
+                .into_response()
+        }
+    };
+
+    if let Err(e) = seal_crc(&mut study) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+    if let Err(e) = preflight_saved(&study) {
+        return (StatusCode::BAD_REQUEST, format!("'{slug}.json': {e}")).into_response();
+    }
+
+    let options = StudyRunOptions {
+        allow_version_mismatch: req.allow_version_mismatch,
+        // Same reason `api_run` leaves it `None`: this UI flashes nothing,
+        // so it has nothing it could honestly claim to have put on the DUT.
+        flashed_firmware_version: None,
+    };
+    let study_id = match sd.0.core.post_study(&study, &options).await {
+        Ok(resp) => resp.study_id,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    };
+
+    let _ = sd.0.run_tx.send(RunState::Running {
+        study_id: study_id.clone(),
+        current_step: None,
+        total_steps: None,
+    });
+    let core = sd.0.core.clone();
+    let run_tx = sd.0.run_tx.clone();
+    let watched_id = study_id.clone();
+    tokio::spawn(async move { watch_study(core, watched_id, run_tx).await });
+
+    Json(serde_json::json!({ "study_id": study_id })).into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct StudyRunRequest {
+    #[serde(default)]
+    allow_version_mismatch: bool,
+}
+
+/// The crate's own pre-flight over a study nobody here built.
+///
+/// An authored study got these checks on the way through `build_study` and
+/// `build_taps`; a file read off disk got none of them. Run here so a
+/// mistake in a hand-written file is a sentence in this tab.
+fn preflight_saved(study: &Study) -> Result<(), String> {
+    embarch_study_designer::validate_taps(
+        &study.streams,
+        study.steps.len() as u32,
+        study.decoders.len(),
+    )
+    .map_err(|e| format!("{e:?}"))?;
+
+    for protocol in study.protocols.iter() {
+        embarch_study_designer::validate_protocol(protocol)
+            .map_err(|e| format!("protocol '{}': {e}", protocol.name))?;
+    }
+
+    // The two index checks `validate_protocol` cannot make, because it never
+    // sees an `Action` — see `Action::RunProtocol`'s own comment. Both would
+    // otherwise reach a hand-written C array subscript on the bench.
+    for (i, step) in study.steps.iter().enumerate() {
+        let Action::RunProtocol { protocol, entry_state } = step.action else { continue };
+        let Some(def) = study.protocols.get(protocol as usize) else {
+            return Err(format!(
+                "step {} ('{}') runs protocol {protocol}, but this study carries {}",
+                i + 1,
+                step.name,
+                study.protocols.len()
+            ));
+        };
+        let Some(state) = def.states.get(entry_state as usize) else {
+            return Err(format!(
+                "step {} ('{}') enters protocol '{}' at state {entry_state}, which declares {}",
+                i + 1,
+                step.name,
+                def.name,
+                def.states.len()
+            ));
+        };
+        if matches!(state.kind, embarch_study_designer::StateKind::Terminal(_)) {
+            return Err(format!(
+                "step {} ('{}') enters protocol '{}' at '{}', a terminal state — the run \
+                 would reach its outcome immediately and capture nothing",
+                i + 1,
+                step.name,
+                def.name,
+                state.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn watch_study(core: Arc<CoreClient>, study_id: String, tx: watch::Sender<RunState>) {
     let start = tokio::time::Instant::now();
     // No hard timeout here, unlike `discover` — a real study can legitimately
@@ -3956,6 +4334,188 @@ repeat = [{ name = "green", type = "i32le" }]
         // A file with no `requires` at all reads as unconstrained, which is
         // what such a study would in fact have done.
         assert_eq!(version_field(&serde_json::json!({}), "firmware_version"), REQUIREMENT_ANY);
+    }
+
+    // --- pre-flight -------------------------------------------------------
+
+    /// A study under every cap produces no advisory. The comparison exists
+    /// to be meaningful, not permanently true.
+    #[test]
+    fn a_small_study_is_over_no_advisory_cap() {
+        let study = build_authored(
+            "small",
+            &[],
+            &RequirementsInput::any(),
+            &[],
+            &ActionRegistry::default(),
+            &StructRegistry::default(),
+            &[],
+            None,
+        )
+        .unwrap();
+        let wire = embarch_study_designer::protocols_wire_len(&study.protocols).unwrap();
+        assert!(advisories_for(&study, wire).is_empty());
+    }
+
+    /// Over the step cap: one sentence, naming this study's count and the
+    /// bench's. Nothing in it says whether to run.
+    #[test]
+    fn a_study_over_the_step_cap_gets_one_sentence_and_no_verdict() {
+        use embarch_study_designer::limits::DEV_BENCH_MAX_STEPS_PER_STUDY;
+        let rows: Vec<TableRow> = (0..DEV_BENCH_MAX_STEPS_PER_STUDY + 1)
+            .map(|i| TableRow {
+                name: format!("s{i}"),
+                action: RowAction::BuiltIn {
+                    targets: Vec::new(),
+                    which: BuiltInActionKind::GattDiscover,
+                    role: RoleChoice::Central,
+                    target_name: None,
+                    security_level: None,
+                    protocol: None,
+                    entry_state: None,
+                },
+                timeout_ms: 1_000,
+                continue_on_fail: false,
+                delay_before_ms: 0,
+            })
+            .collect();
+        let study = build_authored(
+            "big",
+            &rows,
+            &RequirementsInput::any(),
+            &[],
+            &ActionRegistry::default(),
+            &StructRegistry::default(),
+            &[],
+            None,
+        )
+        .unwrap();
+        let wire = embarch_study_designer::protocols_wire_len(&study.protocols).unwrap();
+        let advisories = advisories_for(&study, wire);
+        assert_eq!(advisories.len(), 1, "{advisories:?}");
+        assert!(advisories[0].contains(&(DEV_BENCH_MAX_STEPS_PER_STUDY + 1).to_string()));
+        assert!(advisories[0].contains(&DEV_BENCH_MAX_STEPS_PER_STUDY.to_string()));
+        for verdict in ["cannot", "refuse this", "will not run", "too many"] {
+            assert!(!advisories[0].contains(verdict), "advisory reads as a gate: {advisories:?}");
+        }
+    }
+
+    /// The wire-length advisory fires on the encoding, not on a count —
+    /// which is the whole reason `protocols_wire_len` exists.
+    #[test]
+    fn the_wire_length_advisory_reads_the_encoded_size() {
+        let study = build_authored(
+            "small",
+            &[],
+            &RequirementsInput::any(),
+            &[],
+            &ActionRegistry::default(),
+            &StructRegistry::default(),
+            &[],
+            None,
+        )
+        .unwrap();
+        let over = embarch_study_designer::limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN + 1;
+        let advisories = advisories_for(&study, over);
+        assert_eq!(advisories.len(), 1, "{advisories:?}");
+        assert!(advisories[0].contains(&over.to_string()));
+        assert!(advisories[0].contains(
+            &embarch_study_designer::limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN.to_string()
+        ));
+    }
+
+    // --- running a saved study as it is ------------------------------------
+
+    fn saved_study_with_protocol(entry_state: u8, states: &[(&str, bool)]) -> Study {
+        let mut study = build_authored(
+            "as-is",
+            &[],
+            &RequirementsInput::any(),
+            &[],
+            &ActionRegistry::default(),
+            &StructRegistry::default(),
+            &[],
+            None,
+        )
+        .unwrap();
+        let mut defs = embarch_study_designer::bounded::Bounded::new();
+        for (name, terminal) in states {
+            defs.push(embarch_study_designer::StateDef {
+                name: HString::try_from(*name).unwrap(),
+                kind: if *terminal {
+                    embarch_study_designer::StateKind::Terminal(
+                        embarch_study_designer::TerminalOutcome::Pass,
+                    )
+                } else {
+                    embarch_study_designer::StateKind::Active(
+                        embarch_study_designer::ActiveState {
+                            on_enter: None,
+                            on_event: HVec::new(),
+                            on_timeout: None,
+                        },
+                    )
+                },
+            })
+            .unwrap();
+        }
+        study
+            .protocols
+            .push(embarch_study_designer::ProtocolDef {
+                name: HString::try_from("bds").unwrap(),
+                sources: HVec::new(),
+                frames: HVec::new(),
+                session: HVec::new(),
+                states: defs,
+            })
+            .unwrap();
+        study
+            .steps
+            .push(Step {
+                name: HString::try_from("handshake").unwrap(),
+                action: Action::RunProtocol { protocol: 0, entry_state },
+                timeout_ms: 30_000,
+                continue_on_fail: false,
+                delay_before_ms: 0,
+            })
+            .unwrap();
+        study
+    }
+
+    /// The two index checks `validate_protocol` cannot make, because it
+    /// never sees an `Action`. Both would otherwise reach a hand-written C
+    /// array subscript on the bench.
+    #[test]
+    fn a_hand_written_study_gets_the_run_protocol_index_checks() {
+        // In range and not terminal: accepted.
+        assert!(preflight_saved(&saved_study_with_protocol(0, &[("go", false), ("done", true)]))
+            .is_ok());
+
+        // Entry state past the end.
+        let err = preflight_saved(&saved_study_with_protocol(9, &[("go", false), ("done", true)]))
+            .unwrap_err();
+        assert!(err.contains("state 9"), "{err}");
+        assert!(err.contains("handshake"), "{err}");
+
+        // Entry state terminal.
+        let err = preflight_saved(&saved_study_with_protocol(1, &[("go", false), ("done", true)]))
+            .unwrap_err();
+        assert!(err.contains("terminal"), "{err}");
+        assert!(err.contains("'done'"), "{err}");
+
+        // Protocol index past the end.
+        let mut study = saved_study_with_protocol(0, &[("go", false), ("done", true)]);
+        study.steps[0].action = Action::RunProtocol { protocol: 3, entry_state: 0 };
+        let err = preflight_saved(&study).unwrap_err();
+        assert!(err.contains("protocol 3"), "{err}");
+    }
+
+    /// `validate_protocol`'s own refusals reach the caller naming the
+    /// protocol — a manifest with no terminal state can never finish.
+    #[test]
+    fn a_protocol_that_can_never_finish_is_refused_naming_it() {
+        let err = preflight_saved(&saved_study_with_protocol(0, &[("go", false)])).unwrap_err();
+        assert!(err.contains("'bds'"), "{err}");
+        assert!(err.contains("terminal"), "{err}");
     }
 
     // --- the reference scan ---------------------------------------------

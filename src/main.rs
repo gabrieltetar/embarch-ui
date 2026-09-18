@@ -231,6 +231,7 @@ async fn async_main() -> anyhow::Result<()> {
         )
         .route("/api/study-designer/discover", post(study_designer::api_discover))
         .route("/api/study-designer/run", post(study_designer::api_run))
+        .route("/api/study-designer/preflight", post(study_designer::api_preflight))
         .route("/api/study-designer/events", get(study_designer::api_run_events))
         .route(
             "/api/study-designer/studies",
@@ -240,6 +241,14 @@ async fn async_main() -> anyhow::Result<()> {
             "/api/study-designer/studies/{slug}",
             get(study_designer::api_studies_load).delete(study_designer::api_studies_delete),
         )
+        // Both sit under `{slug}`, so a study named "summary" or "run" is
+        // unambiguous: the literal segment follows the capture rather than
+        // competing with it.
+        .route(
+            "/api/study-designer/studies/{slug}/summary",
+            get(study_designer::api_study_summary),
+        )
+        .route("/api/study-designer/studies/{slug}/run", post(study_designer::api_study_run))
         .route("/api/study-designer/gatt/{study_id}", get(study_designer::api_gatt_data))
         // `.eap` protocol files. `/protocols/check` comes BEFORE
         // `/protocols/{stem}` for the same reason `new-study` is not
