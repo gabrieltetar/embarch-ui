@@ -858,11 +858,11 @@ struct ActionsResponse {
     /// all. Whether a characteristic can notify is an observation, and this
     /// list carries only observations.
     subscribable: Vec<SubscribableCharacteristic>,
-    /// The names in the firmware repo's `embarch/study-structs.toml` — what a
+    /// The firmware repo's `embarch/study-structs.toml` entries — what a
     /// `GattNotify` tap's decoder dropdown offers (`embarch-study-designer`
-    /// decision 52). Empty when
-    /// the repo declares none, which is the ordinary starting state.
-    struct_layouts: Vec<String>,
+    /// decision 52) and what the layout editor edits. Empty when the repo
+    /// declares none, which is the ordinary starting state.
+    struct_layouts: Vec<StructLayoutSummary>,
     /// What every picker that names a characteristic labels its options with
     /// (`embarch-study-designer` decision 56), keyed by
     /// hyphenated characteristic UUID.
@@ -904,6 +904,104 @@ struct ActionsResponse {
     /// slices the characteristic label to this length rather than to a
     /// literal `32`.
     max_stream_name_len: usize,
+    /// Every protocol this repo's `embarch/protocols/*.eap` files declare
+    /// that **resolved** — what a `RunProtocol` row's protocol picker offers
+    /// and what its entry-state picker reads its states from
+    /// (`embarch-study-designer` decisions 58-62).
+    ///
+    /// A file that did not parse contributes no entry here; it is reported
+    /// by the editor's own `GET /protocols`, which is where a file's errors
+    /// belong. This list answers "what can a study reach".
+    protocols: Vec<ProtocolSummary>,
+    /// `limits::MAX_PROTOCOLS_PER_STUDY` — how many distinct protocols one
+    /// study's rows may name between them. Served for the reason every other
+    /// cap here is: `build_study` enforces it, and a browser-side copy
+    /// drifts silently the day it moves.
+    max_protocols_per_study: usize,
+    /// `limits::MAX_RECORD_MAGIC_LEN` — the longest record magic a tap may
+    /// declare (`embarch-study-designer` decision 70).
+    max_record_magic_len: usize,
+    /// `limits::MAX_STRUCT_FIELDS` — scalars per group in one payload
+    /// layout, which is what the layout editor stops at.
+    max_struct_fields: usize,
+    /// `decoder::ScalarType::ALL`'s spellings, in picker order — the layout
+    /// editor's type dropdown.
+    ///
+    /// **An empty list is an empty picker and a refusal**, never a guessed
+    /// eighteen: the browser has no fallback for a served vocabulary, the
+    /// same posture it takes for `max_stream_name_len`.
+    scalar_types: Vec<&'static str>,
+    /// `DevBenchLogLevel::ALL`, each as the JSON spelling a saved study
+    /// carries plus the label naming what choosing it costs.
+    dev_bench_log_levels: Vec<LogLevelOption>,
+    /// The three advisory dev-bench caps
+    /// (`embarch-study-designer::limits`'s advisory band).
+    ///
+    /// **Advisory, never a gate.** They are what the caps note reads; Run is
+    /// never disabled by one. Absent — which is what a browser sees when
+    /// this response could not be built — renders as *unknown*, never as
+    /// "within caps".
+    dev_bench_limits: DevBenchLimits,
+}
+
+/// One resolved `.eap` protocol, as the row pickers render it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProtocolSummary {
+    /// The `protocol <name> { … }` identifier — what a row carries.
+    name: String,
+    /// The file stem it is declared in, so the editor can be opened at the
+    /// right file. A row never carries this: the name alone resolves,
+    /// because `eap_repo::defs` refuses a repo declaring one name twice.
+    file: String,
+    states: Vec<ProtocolStateSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProtocolStateSummary {
+    name: String,
+    /// True for a state a run ends in. The entry-state picker refuses one
+    /// **before submit** from this flag — a terminal entry state would pass
+    /// instantly and capture nothing.
+    terminal: bool,
+    /// `"pass"` or `"fail"` for a terminal state, absent otherwise. Rendered
+    /// verbatim; nothing in the browser reasons about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogLevelOption {
+    /// The JSON spelling — bare PascalCase, which is what a saved study
+    /// carries and what this route accepts back.
+    value: String,
+    label: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DevBenchLimits {
+    max_steps_per_study: usize,
+    max_event_arms_per_state: usize,
+    max_protocols_wire_len: usize,
+}
+
+/// One payload layout, with its fields — not just its name.
+///
+/// **Widened from the bare `Vec<String>` this shipped with** because the
+/// layout editor has to render what an existing layout *is* before it can
+/// edit it, and the tap's decoder dropdown still only needs `name`. One
+/// shape read by both, rather than a second route serving the same file.
+#[derive(Debug, Clone, Serialize)]
+pub struct StructLayoutSummary {
+    name: String,
+    header: Vec<StructFieldSummary>,
+    repeat: Vec<StructFieldSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StructFieldSummary {
+    name: String,
+    #[serde(rename = "type")]
+    ty: String,
 }
 
 /// One characteristic a study can subscribe to, as the pickers render it.
@@ -1006,9 +1104,26 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
     // the tap pickers are still usable without it, and a tab that renders
     // nothing at all is a worse answer to "one layout has a typo".
     let struct_layouts = match sd.structs() {
-        Ok(r) => r.structs.into_iter().map(|d| d.name).collect(),
+        Ok(r) => r.structs.into_iter().map(struct_layout_summary).collect(),
         Err(e) => {
             tracing::warn!("study-structs.toml could not be read: {e}");
+            Vec::new()
+        }
+    };
+    // Same posture, one directory over: a repo whose `.eap` files are
+    // mid-edit still gets a usable action list. `scan` never fails on a bad
+    // file, so what lands here is "no project" or an unreadable directory —
+    // and either way this list answers "what can a study reach", with the
+    // per-file errors belonging to `GET /protocols`.
+    //
+    // A duplicate protocol name across files is deliberately NOT refused
+    // here: this is a picker, and refusing to render one would leave an
+    // author with no way to see which two files collide. The refusal happens
+    // where it matters, when a study is built.
+    let protocols = match sd.protocols() {
+        Ok(repo) => protocol_summaries(&repo),
+        Err(e) => {
+            tracing::warn!("embarch/protocols could not be read: {e}");
             Vec::new()
         }
     };
@@ -1022,12 +1137,95 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
         service_names: service_names(&sd.names(), live.as_deref(), static_gatt.as_deref()),
         max_monitor_targets: embarch_study_designer::limits::MAX_MONITOR_TARGETS,
         max_stream_name_len: MAX_STREAM_NAME_LEN,
+        max_protocols_per_study: embarch_study_designer::limits::MAX_PROTOCOLS_PER_STUDY,
+        max_record_magic_len: MAX_RECORD_MAGIC_LEN,
+        max_struct_fields: embarch_study_designer::limits::MAX_STRUCT_FIELDS,
+        scalar_types: embarch_study_designer::ScalarType::ALL.iter().map(|t| t.as_str()).collect(),
+        dev_bench_log_levels: DevBenchLogLevel::ALL
+            .iter()
+            .map(|l| LogLevelOption {
+                // Through serde rather than a hand-written string: this is
+                // the spelling a saved study carries, and the one place it
+                // is defined is that impl.
+                value: serde_json::to_value(l)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default(),
+                label: l.label(),
+            })
+            .collect(),
+        dev_bench_limits: DevBenchLimits {
+            max_steps_per_study: embarch_study_designer::limits::DEV_BENCH_MAX_STEPS_PER_STUDY,
+            max_event_arms_per_state:
+                embarch_study_designer::limits::DEV_BENCH_MAX_EVENT_ARMS_PER_STATE,
+            max_protocols_wire_len:
+                embarch_study_designer::limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN,
+        },
+        protocols,
         actions,
         live_gatt_available: live.is_some(),
         static_gatt_available: static_gatt.is_some(),
         struct_layouts,
     })
     .into_response()
+}
+
+/// One `study-structs.toml` entry as the response carries it — the TOML's own
+/// `StructDef`, renamed rather than re-derived, so a field spelling this
+/// serves is the spelling that file holds.
+fn struct_layout_summary(
+    def: embarch_study_designer::registry::StructDef,
+) -> StructLayoutSummary {
+    let field = |f: embarch_study_designer::registry::StructFieldDef| StructFieldSummary {
+        name: f.name,
+        ty: f.ty,
+    };
+    StructLayoutSummary {
+        name: def.name,
+        header: def.header.into_iter().map(field).collect(),
+        repeat: def.repeat.into_iter().map(field).collect(),
+    }
+}
+
+/// Every resolved protocol in a scanned repo, with its states.
+///
+/// Only resolved blocks: a file that did not parse contributes nothing here
+/// and is reported by `GET /protocols` instead, where a file's own errors
+/// belong. Duplicated names across files appear twice on purpose — this is a
+/// picker, and hiding one would leave an author unable to see the collision
+/// that `build_study` will refuse.
+fn protocol_summaries(repo: &RepoProtocols) -> Vec<ProtocolSummary> {
+    let mut out = Vec::new();
+    for file in &repo.files {
+        for (name, resolved) in file.resolved() {
+            out.push(ProtocolSummary {
+                name: name.to_string(),
+                file: file.stem.clone(),
+                states: resolved
+                    .def
+                    .states
+                    .iter()
+                    .map(|state| ProtocolStateSummary {
+                        name: state.name.to_string(),
+                        terminal: matches!(
+                            state.kind,
+                            embarch_study_designer::StateKind::Terminal(_)
+                        ),
+                        outcome: match state.kind {
+                            embarch_study_designer::StateKind::Terminal(
+                                embarch_study_designer::TerminalOutcome::Pass,
+                            ) => Some("pass"),
+                            embarch_study_designer::StateKind::Terminal(
+                                embarch_study_designer::TerminalOutcome::Fail,
+                            ) => Some("fail"),
+                            _ => None,
+                        },
+                    })
+                    .collect(),
+            });
+        }
+    }
+    out
 }
 
 pub async fn api_actions(State(state): State<crate::AppState>) -> axum::response::Response {
@@ -2035,11 +2233,18 @@ mod tests {
         );
     }
 
-    /// The served cap is the enforced cap. `app.js`'s `sd-add-gatt-tap`
-    /// handler slices a default tap name to `data.max_stream_name_len` rather
-    /// than to a literal `32` — see `assets/app.js`.
+    /// The served cap is the enforced cap, for every cap and vocabulary on
+    /// this response.
+    ///
+    /// **The struct literal is the guard.** A field added to
+    /// `ActionsResponse` without a line here does not compile, which is what
+    /// makes this catch a *new* served fact that quietly gets a wrong value,
+    /// not only a changed one. `app.js` has no fallback for any of these —
+    /// see the negative text guards below, which pin that it holds no copy.
     #[test]
-    fn served_stream_name_limit_matches_the_constant() {
+    fn every_served_limit_and_vocabulary_matches_its_constant() {
+        use embarch_study_designer::limits;
+
         let response = ActionsResponse {
             actions: Vec::new(),
             live_gatt_available: false,
@@ -2048,15 +2253,79 @@ mod tests {
             struct_layouts: Vec::new(),
             characteristic_names: BTreeMap::new(),
             service_names: BTreeMap::new(),
-            max_monitor_targets: embarch_study_designer::limits::MAX_MONITOR_TARGETS,
+            protocols: Vec::new(),
+            max_monitor_targets: limits::MAX_MONITOR_TARGETS,
             max_stream_name_len: MAX_STREAM_NAME_LEN,
+            max_protocols_per_study: limits::MAX_PROTOCOLS_PER_STUDY,
+            max_record_magic_len: MAX_RECORD_MAGIC_LEN,
+            max_struct_fields: limits::MAX_STRUCT_FIELDS,
+            scalar_types: embarch_study_designer::ScalarType::ALL
+                .iter()
+                .map(|t| t.as_str())
+                .collect(),
+            dev_bench_log_levels: DevBenchLogLevel::ALL
+                .iter()
+                .map(|l| LogLevelOption {
+                    value: serde_json::to_value(l).unwrap().as_str().unwrap().to_string(),
+                    label: l.label(),
+                })
+                .collect(),
+            dev_bench_limits: DevBenchLimits {
+                max_steps_per_study: limits::DEV_BENCH_MAX_STEPS_PER_STUDY,
+                max_event_arms_per_state: limits::DEV_BENCH_MAX_EVENT_ARMS_PER_STATE,
+                max_protocols_wire_len: limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN,
+            },
         };
         let json = serde_json::to_value(&response).unwrap();
+
         assert_eq!(json["max_stream_name_len"], MAX_STREAM_NAME_LEN);
+        assert_eq!(json["max_monitor_targets"], limits::MAX_MONITOR_TARGETS);
+        assert_eq!(json["max_protocols_per_study"], limits::MAX_PROTOCOLS_PER_STUDY);
+        assert_eq!(json["max_record_magic_len"], MAX_RECORD_MAGIC_LEN);
+        assert_eq!(json["max_struct_fields"], limits::MAX_STRUCT_FIELDS);
+        assert_eq!(json["scalar_types"].as_array().unwrap().len(), 18);
+        assert_eq!(json["scalar_types"][0], "u8");
+        assert_eq!(json["dev_bench_log_levels"].as_array().unwrap().len(), 5);
+        // The JSON spelling a saved study carries, served as-is.
+        assert_eq!(json["dev_bench_log_levels"][2]["value"], "Warn");
         assert_eq!(
-            json["max_monitor_targets"],
-            embarch_study_designer::limits::MAX_MONITOR_TARGETS
+            json["dev_bench_limits"]["max_steps_per_study"],
+            limits::DEV_BENCH_MAX_STEPS_PER_STUDY
         );
+        assert_eq!(
+            json["dev_bench_limits"]["max_event_arms_per_state"],
+            limits::DEV_BENCH_MAX_EVENT_ARMS_PER_STATE
+        );
+        assert_eq!(
+            json["dev_bench_limits"]["max_protocols_wire_len"],
+            limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN
+        );
+    }
+
+    /// **`app.js` holds no copy of a served fact.** The positive guard above
+    /// proves the server sends the right number; this proves the browser
+    /// does not carry its own. Both are needed: a browser with a fallback
+    /// renders a plausible wrong value on exactly the request that failed.
+    #[test]
+    fn app_js_holds_no_copy_of_a_served_limit_or_vocabulary() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        for literal in [
+            // DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN
+            "3072",
+            // DEV_BENCH_MAX_STEPS_PER_STUDY, as a bare comparison
+            "> 16",
+            // A log level spelled in the browser rather than served.
+            "\"Warn\"",
+            "\"Debug\"",
+            // A scalar type spelled in the browser rather than served.
+            "\"u16le\"",
+            "\"f32le\"",
+        ] {
+            assert!(
+                !APP_JS.contains(literal),
+                "app.js holds {literal}, which is a served fact — read it off the response"
+            );
+        }
     }
 
     /// `seal_crc` seals **all three** of a study's seals, not the two it was

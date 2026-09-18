@@ -872,7 +872,13 @@
    * Cancel discards it; Done commits it to the row. Held outside the row so
    * a half-made selection never reaches `sdCollectRows`. */
   var sdTargetDraft = null;
-  // Names from the firmware repo's own study-structs.toml (`embarch-study-designer` decision 52).
+  /* The firmware repo's own study-structs.toml entries (`embarch-study-designer`
+   * decision 52), each `{name, header:[{name,type}], repeat:[...]}`.
+   *
+   * Objects rather than the bare names this used to hold: the layout editor
+   * has to render what a layout IS before it can edit it, and the tap's
+   * decoder dropdown still reads only `.name`. One served shape read by
+   * both, rather than a second route over the same file. */
   var sdStructLayouts = [];
   // Characteristic display names, keyed by hyphenated characteristic UUID
   // (`embarch-study-designer` decision 56). Empty is the honest
@@ -2739,7 +2745,8 @@
     var decoders =
       '<option value="">raw bytes — no layout declared</option>' +
       sdStructLayouts
-        .map(function (name) {
+        .map(function (layout) {
+          var name = layout.name;
           return (
             '<option value="' + escapeHtml(name) + '"' +
             (name === tap.decoder ? " selected" : "") + ">" + escapeHtml(name) + "</option>"
