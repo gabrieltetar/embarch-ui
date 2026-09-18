@@ -1919,7 +1919,14 @@
     // monitor targets.
     sdLogLevel = loaded.dev_bench_log_level || null;
     renderSdLogLevels();
-    sdTaps = loaded.taps || [];
+    sdTaps = (loaded.taps || []).map(function (tap) {
+      if (tap.kind !== "gatt_notify") return tap;
+      tap.record_magic = tap.record_magic || [];
+      tap.magicMode = "hex";
+      tap.magicText = magicTextFromBytes(tap.record_magic);
+      tap.magicError = "";
+      return tap;
+    });
     renderSdTaps();
     sdRows = loaded.rows.map(function (r) {
       var base = sdNewRow({
@@ -3002,6 +3009,71 @@
     );
   }
 
+  /* The record-framing cell.
+   *
+   * **Only a `gatt_notify` tap gets controls.** An outpost trace is a raw
+   * UART capture with no record structure this mechanism can find, and
+   * `TapInput::Outpost` carries no `record_magic` at all — so the cell says
+   * why it is empty rather than offering a control that would do nothing.
+   * Decision 11's rule: a menu whose entries are all wrong is worse than no
+   * menu.
+   *
+   * The magic goes through `parseBytes(text, mode)` unchanged — the same
+   * parser the registration form uses. A magic is ASCII or literal bytes,
+   * which is exactly that function's two modes; a third spelling here would
+   * be a second byte grammar in one file. */
+  function sdRecordFramingCell(tap, i) {
+    if (tap.kind !== "gatt_notify") {
+      return (
+        '<td><span class="placeholder-note">not applicable — an outpost trace is a raw ' +
+        "UART capture with no record structure to find</span></td>"
+      );
+    }
+    var bytes = tap.record_magic || [];
+    var over = sdMaxRecordMagicLen != null && bytes.length > sdMaxRecordMagicLen;
+    var status;
+    if (tap.magicError) {
+      status = '<span class="sd-error">' + escapeHtml(tap.magicError) + "</span>";
+    } else if (!bytes.length) {
+      status = '<span class="placeholder-note">blank — this capture is not checked</span>';
+    } else if (over) {
+      // Named, never trimmed: a shortened magic finds different record
+      // boundaries, which is a check that measures the wrong thing and
+      // passes. The server refuses it too.
+      status =
+        '<span class="sd-error">' + bytes.length + " bytes — the wire allows " +
+        sdMaxRecordMagicLen + ", and a magic is never shortened to fit</span>";
+    } else {
+      status =
+        '<span class="placeholder-note">' + bytes.length + " of " +
+        (sdMaxRecordMagicLen == null ? "?" : sdMaxRecordMagicLen) + " bytes</span>";
+    }
+    return (
+      '<td><div style="display:flex; gap:4px;">' +
+      '<select class="sd-input" style="flex:0 0 74px;" data-tap-magic-mode="' + i + '">' +
+      '<option value="text"' + (tap.magicMode === "text" ? " selected" : "") + ">text</option>" +
+      '<option value="hex"' + (tap.magicMode !== "text" ? " selected" : "") + ">bytes</option>" +
+      "</select>" +
+      '<input class="sd-input mono" style="flex:1 1 auto; min-width:0;" data-tap-magic="' + i +
+      '" spellcheck="false" placeholder="' +
+      (tap.magicMode === "text" ? "GWF1" : "0x47 0x57 0x46 0x31") + '" value="' +
+      escapeHtml(tap.magicText || "") + '" /></div>' +
+      '<div style="margin-top:4px;">' + status + "</div></td>"
+    );
+  }
+
+  /* Bytes back to the hex spelling, for a tap loaded off disk.
+   *
+   * Hex rather than the text it may have been typed as — the same choice the
+   * raw-payload load path makes, and for the same reason: the saved form is
+   * bytes, and re-rendering them as text would be a guess about an encoding
+   * the bytes no longer carry. */
+  function magicTextFromBytes(bytes) {
+    return (bytes || [])
+      .map(function (b) { return "0x" + ("0" + b.toString(16)).slice(-2); })
+      .join(" ");
+  }
+
   function renderSdTaps() {
     var tbody = sdEl("sd-taps");
     if (!tbody) return;
@@ -3013,12 +3085,70 @@
           '<td><input class="sd-input mono" data-tap-name="' + i + '" value="' +
           escapeHtml(tap.name) + '" spellcheck="false" /></td>' +
           (isGatt ? sdGattTapCells(tap, i) : sdOutpostTapCells(tap, i)) +
+          // Emitted here rather than inside each kind's own cell builder, so
+          // a column can never be added to one kind and forgotten on the
+          // other — which is a row with the wrong number of cells, and a
+          // table that silently shears.
+          sdRecordFramingCell(tap, i) +
           '<td style="text-align:right;"><button class="sd-icon-btn" data-tap-remove="' + i +
           '" title="Remove this tap">✕</button></td></tr>'
         );
       })
       .join("");
     sdEl("sd-taps-empty").style.display = sdTaps.length ? "none" : "block";
+  }
+
+  /* Parses one tap's magic out of what was typed, in the mode chosen.
+   *
+   * On a parse failure `record_magic` is emptied rather than left holding
+   * the last good value: a tap whose text says one thing and whose bytes say
+   * another is exactly the silent disagreement this whole mechanism exists
+   * to catch. The error is shown in the cell and the study still submits —
+   * as a tap with no check, which the cell says. */
+  function sdApplyMagic(tap, text) {
+    tap.magicText = text;
+    if (!text.trim()) {
+      tap.record_magic = [];
+      tap.magicError = "";
+      return sdRefreshMagicCell(tap);
+    }
+    try {
+      tap.record_magic = parseBytes(text, tap.magicMode === "text" ? "text" : "hex");
+      tap.magicError = "";
+    } catch (e) {
+      tap.record_magic = [];
+      tap.magicError = e.message;
+    }
+    sdRefreshMagicCell(tap);
+  }
+
+  /* Rewrites just this tap's status line, without re-rendering the row —
+   * re-rendering while someone is typing in it moves the caret to the end,
+   * which is the focus bug decision 17 records for the target dialog. */
+  function sdRefreshMagicCell(tap) {
+    var index = sdTaps.indexOf(tap);
+    if (index < 0) return;
+    var input = sdEl("sd-taps").querySelector('[data-tap-magic="' + index + '"]');
+    if (!input) return;
+    var cell = input.closest("td");
+    if (!cell) return;
+    var status = cell.lastElementChild;
+    if (!status) return;
+    var bytes = tap.record_magic || [];
+    if (tap.magicError) {
+      status.innerHTML = '<span class="sd-error">' + escapeHtml(tap.magicError) + "</span>";
+    } else if (!bytes.length) {
+      status.innerHTML =
+        '<span class="placeholder-note">blank — this capture is not checked</span>';
+    } else if (sdMaxRecordMagicLen != null && bytes.length > sdMaxRecordMagicLen) {
+      status.innerHTML =
+        '<span class="sd-error">' + bytes.length + " bytes — the wire allows " +
+        sdMaxRecordMagicLen + ", and a magic is never shortened to fit</span>";
+    } else {
+      status.innerHTML =
+        '<span class="placeholder-note">' + bytes.length + " of " +
+        (sdMaxRecordMagicLen == null ? "?" : sdMaxRecordMagicLen) + " bytes</span>";
+    }
   }
 
   function initSdTaps() {
@@ -3058,12 +3188,23 @@
         service_uuid: first ? first.service_uuid : "",
         characteristic_uuid: first ? first.characteristic_uuid : "",
         decoder: "",
+        // Blank is no check, which is the honest state for a payload whose
+        // framing nobody has declared — never a default magic.
+        record_magic: [],
+        magicMode: "hex",
+        magicText: "",
+        magicError: "",
       });
       renderSdTaps();
     });
     tbody.addEventListener("input", function (ev) {
       var i = ev.target.getAttribute("data-tap-name");
-      if (i !== null) sdTaps[Number(i)].name = ev.target.value;
+      if (i !== null) {
+        sdTaps[Number(i)].name = ev.target.value;
+        return;
+      }
+      var m = ev.target.getAttribute("data-tap-magic");
+      if (m !== null) sdApplyMagic(sdTaps[Number(m)], ev.target.value);
     });
     tbody.addEventListener("change", function (ev) {
       var i = ev.target.getAttribute("data-tap-signal");
@@ -3088,6 +3229,17 @@
       var d = ev.target.getAttribute("data-tap-decoder");
       if (d !== null) {
         sdTaps[Number(d)].decoder = ev.target.value;
+        renderSdTaps();
+        return;
+      }
+      var mm = ev.target.getAttribute("data-tap-magic-mode");
+      if (mm !== null) {
+        var t = sdTaps[Number(mm)];
+        t.magicMode = ev.target.value;
+        // Re-read the same text under the new mode rather than converting
+        // the bytes: "GWF1" means four bytes as text and nothing at all as
+        // hex, and silently rewriting what was typed would hide that.
+        sdApplyMagic(t, t.magicText || "");
         renderSdTaps();
       }
     });

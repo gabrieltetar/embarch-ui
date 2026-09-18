@@ -316,12 +316,14 @@
                     <th style="width:200px;">Output name</th>
                     <th style="width:230px;">Signal / characteristic</th>
                     <th>Decoding</th>
+                    <th style="width:220px;" title="a record magic makes this capture checkable end to end: Core scans for it and verifies each record's trailing CRC-32">Record framing</th>
                     <th style="width:60px;"></th>
                   </tr>
                 </thead>
                 <tbody id="sd-taps"></tbody>
               </table>
             </div>
+            <p class="placeholder-note" style="margin-top:10px;"><strong>Record framing</strong> is what turns "the file has bytes in it" into "these are the bytes the DUT computed a checksum over". Give a GATT tap the magic its records begin with — <span class="mono">GWF1</span> as text, or <span class="mono">0x42 0x53 0x53 0x03</span> as bytes — and embarch-core finds the record boundaries and checks each record's trailing CRC-32 after the run. Leave it blank and the capture is simply not checked, which is an honest answer and not a passing one.</p>
             <p id="sd-taps-empty" class="placeholder-note" style="margin-top:10px;">No taps — this study records its steps and nothing else.</p>
           </div>
 

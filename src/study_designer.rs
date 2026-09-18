@@ -3498,6 +3498,36 @@ mod tests {
         }
     }
 
+    /// The record-framing column is emitted **once**, from `renderSdTaps`,
+    /// so both tap kinds go through one insertion.
+    ///
+    /// A column added inside each kind's own cell builder is a column that
+    /// gets added to one and forgotten on the other, which is a row with the
+    /// wrong number of cells and a table that silently shears.
+    #[test]
+    fn the_record_framing_column_is_emitted_once_for_both_tap_kinds() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        // Two occurrences: the declaration and exactly one call site.
+        assert_eq!(
+            APP_JS.matches("sdRecordFramingCell(tap, i)").count(),
+            2,
+            "one insertion, in renderSdTaps, not one per tap kind"
+        );
+        assert_eq!(APP_JS.matches("function sdRecordFramingCell").count(), 1);
+        assert!(
+            APP_JS.contains("not applicable — an outpost trace is a raw"),
+            "an outpost row says why it has no control rather than offering one that does nothing"
+        );
+        assert!(
+            APP_JS.contains("parseBytes(text, tap.magicMode === \"text\" ? \"text\" : \"hex\")"),
+            "the magic goes through the same parseBytes the registration form uses, unchanged"
+        );
+        assert!(
+            APP_JS.contains("and a magic is never shortened to fit"),
+            "an over-long magic is named, never trimmed"
+        );
+    }
+
     /// **`app.js` holds no copy of a served fact.** The positive guard above
     /// proves the server sends the right number; this proves the browser
     /// does not carry its own. Both are needed: a browser with a fallback
