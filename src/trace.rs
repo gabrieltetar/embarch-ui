@@ -574,25 +574,25 @@ fn kind_of(name: &str) -> Option<RecordKind> {
     })
 }
 
-struct Row {
-    frame_index: u64,
-    rx_utc_ms: Option<u64>,
+pub(crate) struct Row {
+    pub frame_index: u64,
+    pub rx_utc_ms: Option<u64>,
     /// The DUT's own stamp, in whole microseconds. `None` when the `us` column
     /// is empty, which means no header frame anywhere in the capture said what
     /// rate to divide `cycles` by — Core refuses to invent one.
-    dut_us: Option<u64>,
+    pub dut_us: Option<u64>,
     /// The same instant in raw DUT cycles. Carried only so a gap record can
     /// convert its own `b` — a **cycle** span — into the axis's microseconds,
     /// using the ratio between its own two columns. Nothing else needs it:
     /// `dut_us` is the same instant in the unit everything is drawn in.
-    dut_cycles: Option<u64>,
-    kind: Option<RecordKind>,
-    a: u32,
-    b: u32,
-    name: String,
+    pub dut_cycles: Option<u64>,
+    pub kind: Option<RecordKind>,
+    pub a: u32,
+    pub b: u32,
+    pub name: String,
     /// Filled in once the axis unit is known: `dut_us`, `rx_utc_ms` or
     /// `frame_index`.
-    t: u64,
+    pub t: u64,
 }
 
 /// Everything the axis decision needs to know about the DUT's clock over a set
@@ -768,10 +768,26 @@ fn clock_anchors(rows: &[Row]) -> Vec<ClockAnchor> {
         .filter_map(|f| by_frame.get(f).map(|&(rx_utc_ms, dut_us)| ClockAnchor { rx_utc_ms, dut_us }))
         .collect();
 
-    // The stale prefix ends at the single largest backward step in DUT time.
-    // Sign is the signal here and magnitude is the filter: see
-    // `STALE_PREFIX_MIN_US` for why the two kinds of backward step are not
-    // the same thing.
+    drop_stale_prefix(&mut anchors);
+
+    anchors.sort_by_key(|a| a.rx_utc_ms);
+    anchors.dedup_by_key(|a| a.rx_utc_ms);
+    anchors
+}
+
+/// Drops everything before a DUT-counter restart, in place.
+///
+/// The stale prefix ends at the single largest backward step in DUT time.
+/// Sign is the signal here and magnitude is the filter: see
+/// [`STALE_PREFIX_MIN_US`] for why the two kinds of backward step are not the
+/// same thing.
+///
+/// **Extracted so the live path cannot grow a second copy of it.** A live
+/// anchor feed appends one frame at a time and has to apply exactly this rule
+/// — a capture that opened on pre-reset bytes is pre-reset live too, and two
+/// implementations of a repair this consequential is how live and post-hoc
+/// start disagreeing about where a band goes.
+fn drop_stale_prefix(anchors: &mut Vec<ClockAnchor>) {
     let mut worst: Option<(u64, usize)> = None;
     for i in 1..anchors.len() {
         if anchors[i].dut_us < anchors[i - 1].dut_us {
@@ -786,10 +802,6 @@ fn clock_anchors(rows: &[Row]) -> Vec<ClockAnchor> {
             anchors.drain(..at);
         }
     }
-
-    anchors.sort_by_key(|a| a.rx_utc_ms);
-    anchors.dedup_by_key(|a| a.rx_utc_ms);
-    anchors
 }
 
 /// Projects one host-clock instant onto the DUT's counter, by linear
@@ -827,30 +839,200 @@ fn project_ms(anchors: &[ClockAnchor], ms: u64) -> Option<u64> {
     Some(at.max(0) as u64)
 }
 
-/// The study-action row, from Core's per-step stamps and this view's own axis.
+/// The one crossing between embarch-core's receipt clock and whatever clock a
+/// view's axis is on.
 ///
-/// **Three cases, each named rather than guessed:**
+/// **Extracted from [`project_steps`], which was both arms of it inline.**
+/// Every stream a study produces except the outpost trace is stamped by the
+/// same `current_utc_ms()` in the same Core process — step edges, a sample's
+/// `core_rx_utc_ms`, a GATT row's, a console line's arrival. Only the trace
+/// crosses a clock boundary, so this is the one place a crossing happens, and
+/// a caller that wants to lay anything beside anything else goes through it.
 ///
-/// - `"us"` — the axis is the DUT's own counter and the stamps are the host's,
-///   so every band is *projected* through [`clock_anchors`] and carries the
-///   capture's `resolution_ms` as its accuracy. It is good to about 12 ms on a
-///   real capture, which against seconds-long steps is invisible — but it is
-///   said out loud, because the spans beneath these bands are microsecond-exact
-///   and a row that looked aligned to them would be claiming a precision it
-///   does not have.
-/// - `"ms"` — the axis already *is* embarch-core's receipt clock, in the same
-///   absolute UTC milliseconds these stamps are in. No projection, no caveat,
-///   exact alignment.
-/// - `"frame"` — there is no time base at all, so a step **cannot be placed**.
-///   Said, with no bands drawn.
-fn project_steps(
-    steps: &[StepStamp],
-    rows: &[Row],
-    unit: &str,
+/// Two constructors, because there are exactly two axes:
+///
+/// - [`Self::from_trace`] — a capture drew the axis. On `"us"` the axis is the
+///   DUT's own counter and every placement is an interpolation between the two
+///   [`ClockAnchor`]s bracketing it, carrying `accuracy_ms`. On `"ms"` the axis
+///   already *is* Core's receipt clock, so a placement is the identity and
+///   exact. On `"frame"` nothing is placeable at all and [`Self::refusal`]
+///   says why.
+/// - [`Self::core_clock`] — there is no trace, so Core's clock is the axis
+///   directly. Structurally the `"ms"` arm with no rows behind it, which is
+///   why a study without a trace is not a second code path.
+///
+/// **It never extrapolates.** Outside the window it answers `None`, and a
+/// caller decides whether that is a clamped band edge ([`Self::place_edge`])
+/// or a mark that cannot be drawn at all. Clamping a point mark would put it
+/// at a time it was not at, which is the one thing a shared axis must not do.
+#[derive(Debug, Clone, Default)]
+pub struct Projection {
+    /// Empty whenever the axis already is Core's clock — there is nothing to
+    /// tie together.
+    anchors: Vec<ClockAnchor>,
+    /// True when a placement is an interpolation rather than the identity.
+    projected: bool,
+    /// False when this axis is not a clock at all (a frame index). Nothing is
+    /// placed, and [`Self::refusal`] is `Some`.
+    placeable: bool,
+    /// The axis's own extent, in the axis's own units — what a clamped edge
+    /// clamps to.
     t_from: u64,
     t_to: u64,
-    resolution_ms: Option<f64>,
-) -> Option<StepRow> {
+    /// The same window **in host milliseconds**, which is the unit every
+    /// instant handed to this type is in. On the DUT clock that is the
+    /// anchors' own range, which is exactly where [`project_ms`] stops
+    /// answering; on Core's clock the axis already is those milliseconds.
+    ///
+    /// Carried explicitly because "unplaceable" is two different facts —
+    /// before the window, or after it — and every caller's decision turns on
+    /// which one it was.
+    window_from_ms: u64,
+    window_to_ms: u64,
+    /// How closely a projected instant can be placed, in milliseconds — the
+    /// capture's own `resolution_ms`, because that is how finely the two
+    /// clocks are tied together. `None` when nothing is projected, where a
+    /// placement is exact.
+    pub accuracy_ms: Option<f64>,
+    /// Why nothing can be placed. `Some` exactly when `placeable` is false.
+    ///
+    /// **A kind, not a sentence.** The *fact* is this axis's — it has no clock,
+    /// or nothing ties its clock to Core's — and the *wording* belongs to
+    /// whichever row is refusing to draw, because "which step was running"
+    /// and "where this console line landed" are refused for one reason and
+    /// read as two different sentences.
+    pub refusal: Option<Refusal>,
+}
+
+/// Why an axis can take nothing stamped on embarch-core's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The axis is a frame index — a complete and real coordinate, and an
+    /// order rather than a clock. Nothing on any wall clock has a position in
+    /// it.
+    NoTimeBase,
+    /// The axis is the DUT's own counter, and no frame in the capture carries
+    /// both clocks, so there is nothing to tie the two together with.
+    NoClockTie,
+}
+
+impl Projection {
+    /// The trace arm: a capture's axis, and the tie to Core's clock where the
+    /// axis is not already it.
+    ///
+    /// `rows` are the rows the view **kept** — after the stale-prefix drop —
+    /// for the same reason [`clock_anchors`] reads them rather than the raw
+    /// file.
+    fn from_trace(
+        rows: &[Row],
+        unit: &str,
+        t_from: u64,
+        t_to: u64,
+        resolution_ms: Option<f64>,
+    ) -> Projection {
+        let base = Projection {
+            t_from,
+            t_to,
+            window_from_ms: t_from,
+            window_to_ms: t_to,
+            ..Projection::default()
+        };
+        match unit {
+            // The axis already is embarch-core's receipt clock, in the same
+            // absolute UTC milliseconds every other stream is stamped in. No
+            // projection, no caveat, exact alignment.
+            "ms" => Projection { placeable: true, ..base },
+            "us" => {
+                let anchors = clock_anchors(rows);
+                if anchors.len() < 2 {
+                    return Projection { refusal: Some(Refusal::NoClockTie), ..base };
+                }
+                let window_from_ms = anchors[0].rx_utc_ms;
+                let window_to_ms = anchors[anchors.len() - 1].rx_utc_ms;
+                Projection {
+                    anchors,
+                    projected: true,
+                    placeable: true,
+                    accuracy_ms: resolution_ms,
+                    window_from_ms,
+                    window_to_ms,
+                    ..base
+                }
+            }
+            _ => Projection { refusal: Some(Refusal::NoTimeBase), ..base },
+        }
+    }
+
+    /// Whether a placement is an interpolation rather than the identity — the
+    /// difference between "good to `accuracy_ms`" and "exact".
+    pub fn projected(&self) -> bool {
+        self.projected
+    }
+
+    /// The same window in host milliseconds — what a caller compares an
+    /// unplaceable instant against to say which end it fell off.
+    pub fn window_from_ms(&self) -> u64 {
+        self.window_from_ms
+    }
+
+    /// One instant on embarch-core's clock, placed on this axis — or `None`
+    /// where this axis has no position for it.
+    pub fn place(&self, ms: u64) -> Option<u64> {
+        if !self.placeable {
+            return None;
+        }
+        if self.projected {
+            project_ms(&self.anchors, ms)
+        } else {
+            (ms >= self.window_from_ms && ms <= self.window_to_ms).then_some(ms)
+        }
+    }
+
+    /// A band's edge: placed where it can be, and otherwise clamped to the
+    /// axis's own edge on the side it fell off, with `true` saying it was
+    /// clamped.
+    ///
+    /// **Only an edge.** A band clamped to the capture's edge is still a
+    /// truthful drawing of a step that ran past it; a *point* mark clamped the
+    /// same way would be drawn at a time it was not at, so a mark uses
+    /// [`Self::place`] and is left undrawn instead.
+    pub fn place_edge(&self, ms: u64) -> (u64, bool) {
+        match self.place(ms) {
+            Some(v) => (v, false),
+            None if ms < self.window_from_ms => (self.t_from, true),
+            None => (self.t_to, true),
+        }
+    }
+
+    /// Whether `[from_ms, to_ms]` overlaps this axis's window at all.
+    ///
+    /// **Overlap, not "either edge places", and the difference was a real
+    /// defect.** A step *enclosing* the capture — one long step with the tap
+    /// opened and closed inside it — has neither edge inside the window, so
+    /// both placements return `None`; deciding by placement dropped the one
+    /// step that ran for the whole trace.
+    pub fn overlaps(&self, from_ms: u64, to_ms: u64) -> bool {
+        self.placeable && to_ms >= self.window_from_ms && from_ms <= self.window_to_ms
+    }
+}
+
+/// The study-action row, from Core's per-step stamps and a [`Projection`].
+///
+/// **Three cases, each named rather than guessed** — and all three are now the
+/// projection's own, because they are the same three every other stream on the
+/// axis faces:
+///
+/// - projected — the axis is the DUT's own counter and the stamps are the
+///   host's, so every band carries the capture's `resolution_ms` as its
+///   accuracy. It is good to about 12 ms on a real capture, which against
+///   seconds-long steps is invisible — but it is said out loud, because the
+///   spans beneath these bands are microsecond-exact and a row that looked
+///   aligned to them would be claiming a precision it does not have.
+/// - exact — the axis already *is* embarch-core's receipt clock, in the same
+///   absolute UTC milliseconds these stamps are in. No projection, no caveat.
+/// - refused — there is no time base at all, so a step **cannot be placed**.
+///   Said, with no bands drawn.
+fn project_steps(steps: &[StepStamp], proj: &Projection) -> Option<StepRow> {
     if steps.is_empty() {
         return None;
     }
@@ -862,87 +1044,42 @@ fn project_steps(
         bands: Vec::new(),
     };
 
-    let anchors;
-    let (projected, accuracy_ms) = match unit {
-        "ms" => (false, None),
-        "us" => {
-            (true, resolution_ms)
-        }
-        _ => {
+    match proj.refusal {
+        Some(Refusal::NoTimeBase) => {
             return Some(untimed(
-                "This capture has no time base — its axis is a frame index, which is an order and \
-                 not a clock — so which study step was running at a given instant cannot be placed \
-                 on it. The steps and their outcomes are in the study's own result; nothing is \
-                 drawn here rather than bands at invented positions."
+                "This capture has no time base — its axis is a frame index, which is an order \
+                 and not a clock — so which study step was running at a given instant cannot be \
+                 placed on it. The steps and their outcomes are in the study's own result; \
+                 nothing is drawn here rather than bands at invented positions."
                     .to_string(),
             ))
         }
-    };
-
-    if projected {
-        anchors = clock_anchors(rows);
-        if anchors.len() < 2 {
+        Some(Refusal::NoClockTie) => {
             return Some(untimed(
-                "This capture is drawn on the DUT's own counter and carries no host arrival stamps \
-                 to tie that counter to embarch-core's clock, which is the clock the study's steps \
-                 are stamped on. The two cannot be related, so no step band is drawn."
+                "This capture is drawn on the DUT's own counter and carries no host arrival \
+                 stamps to tie that counter to embarch-core's clock, which is the clock the \
+                 study's steps are stamped on. The two cannot be related, so no step band is \
+                 drawn."
                     .to_string(),
-            ));
+            ))
         }
-    } else {
-        anchors = Vec::new();
+        None => {}
     }
-
-    let place = |ms: u64| -> Option<u64> {
-        if projected {
-            project_ms(&anchors, ms)
-        } else {
-            (ms >= t_from && ms <= t_to).then_some(ms)
-        }
-    };
-
-    // The capture's own window **in host milliseconds** — the unit the step
-    // stamps are in, whichever clock draws the axis. On the DUT clock that is
-    // the anchors' own range, which is exactly where `project_ms` stops
-    // answering; on the host clock the axis already is those milliseconds.
-    //
-    // Carried explicitly because "`place` returned `None`" is two different
-    // facts — before the capture, or after it — and every decision below turns
-    // on which one it was.
-    let (window_from_ms, window_to_ms) = if projected {
-        (anchors[0].rx_utc_ms, anchors[anchors.len() - 1].rx_utc_ms)
-    } else {
-        (t_from, t_to)
-    };
 
     let mut bands = Vec::new();
     for s in steps {
         // A step is drawn if any part of its window overlaps the capture. Its
         // edges clamp to the capture's, and each clamped edge says so — the
         // trace covers the study's declared tap scope, which is routinely
-        // narrower than the study itself.
-        //
-        // **Decided by overlap rather than by whether an edge could be
-        // placed, and the difference was a real defect.** A step *enclosing*
-        // the capture — one long step, with the tap opened and closed inside
-        // it, which is the ordinary shape of a `drain-bds` that runs for
-        // minutes — has neither edge inside the window, so both placements
-        // return `None` and the old code dropped the band outright. The one
-        // step actually running for the whole trace was the one step the row
-        // never showed.
-        if s.ended_utc_ms < window_from_ms || s.started_utc_ms > window_to_ms {
+        // narrower than the study itself. See `Projection::overlaps` for why
+        // this is an overlap test rather than a placement test.
+        if !proj.overlaps(s.started_utc_ms, s.ended_utc_ms) {
             continue;
         }
         // Past the overlap test, an unplaceable edge can only be outside on
         // its own side: the start before the window, the end after it.
-        let (from, clipped_start) = match place(s.started_utc_ms) {
-            Some(v) => (v, false),
-            None => (t_from, true),
-        };
-        let (to, clipped_end) = match place(s.ended_utc_ms) {
-            Some(v) => (v, false),
-            None => (t_to, true),
-        };
+        let (from, clipped_start) = proj.place_edge(s.started_utc_ms);
+        let (to, clipped_end) = proj.place_edge(s.ended_utc_ms);
         // The projection can still invert by a few microseconds across a
         // benign hook-stamp inversion, which would make a sub-millisecond
         // step's two edges cross. Collapsed to a zero-width band rather than
@@ -964,9 +1101,9 @@ fn project_steps(
         let exec_from = if s.delay_before_ms == 0 {
             from
         } else {
-            match place(delay_end_ms) {
+            match proj.place(delay_end_ms) {
                 Some(v) => v.clamp(from, to),
-                None if delay_end_ms < window_from_ms => from,
+                None if delay_end_ms < proj.window_from_ms() => from,
                 None => to,
             }
         };
@@ -995,14 +1132,14 @@ fn project_steps(
         ));
     }
 
-    let note = if projected {
+    let note = if proj.projected() {
         format!(
             "The step row is on embarch-core's clock, not the DUT's. Each band is Core's own \
              arrival stamp for that step, projected onto this capture's DUT counter through the \
              frames that carry both clocks — good to about {} ms, which is this capture's own \
              resolution. The lanes below it are microsecond-exact; the row above them is not, and \
              a band's edge should not be read as aligned to a span's.",
-            accuracy_ms.map(|v| format!("{v}")).unwrap_or_else(|| "?".to_string())
+            proj.accuracy_ms.map(|v| format!("{v}")).unwrap_or_else(|| "?".to_string())
         )
     } else {
         "The step row is on embarch-core's own receipt clock — which is also this capture's axis, \
@@ -1011,7 +1148,95 @@ fn project_steps(
             .to_string()
     };
 
-    Some(StepRow { placeable: true, projected, accuracy_ms, note, bands })
+    Some(StepRow {
+        placeable: true,
+        projected: proj.projected(),
+        accuracy_ms: proj.accuracy_ms,
+        note,
+        bands,
+    })
+}
+
+/// What [`parse_rows`] read, and what it could not.
+pub(crate) struct ParsedRows {
+    pub rows: Vec<Row>,
+    /// Rows past the cap, never silently discarded.
+    pub dropped_by_cap: usize,
+    /// Lines this parser **refused** — fewer than nine fields, or a
+    /// `frame_index` that is not a number.
+    pub unparsed: usize,
+}
+
+/// Decodes the body of a rendered `*.trace.csv` — every line **after** the
+/// header — into rows.
+///
+/// **Extracted so the live path decodes through literally this function.**
+/// embarch-core pushes live trace rows in `outpost::csv_header()`'s own shape
+/// (plan decision 6) precisely so that live and post-hoc share one decoder: a
+/// second implementation of these nine positional fields is a second place the
+/// column order lives, and the column order is `embarch-study-designer`'s.
+///
+/// The caller checks the header. Positional access below is safe only because
+/// that check already refused anything whose columns are not exactly
+/// [`outpost::csv_header`] — it is what stands in for parsing the header into
+/// a name map. The indices moved by two when record layout 3 restored the
+/// DUT's `cycles`/`us` columns ahead of `kind`; they are:
+///   0 frame_index, 1 frame_seq, 2 rx_utc_ms, 3 cycles, 4 us,
+///   5 kind, 6 a, 7 b, 8 name
+pub(crate) fn parse_rows<'a>(lines: impl Iterator<Item = &'a str>, cap: usize) -> ParsedRows {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut dropped_by_cap = 0usize;
+    let mut unparsed = 0usize;
+    for line in lines {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if rows.len() >= cap {
+            dropped_by_cap += 1;
+            continue;
+        }
+        let f = split_row(line);
+        if f.len() < 9 {
+            // A short line is a truncated write, not a row shape to interpret.
+            // Counted, not merely skipped: a capture cut off mid-write is the
+            // realistic case, and it is the one where staying quiet would let
+            // the tab claim it held every row of the file.
+            unparsed += 1;
+            continue;
+        }
+        // The only field with no defensible fallback: every `t` is a frame
+        // index or is anchored against one, so a row without it has no place
+        // on the axis. Refused and counted, for the same reason as above.
+        let Ok(frame_index) = f[0].parse::<u64>() else {
+            unparsed += 1;
+            continue;
+        };
+        rows.push(Row {
+            frame_index,
+            rx_utc_ms: if f[2].is_empty() { None } else { f[2].parse::<u64>().ok() },
+            // `us` is rendered by Core with three decimal places, from an
+            // integer cycle count divided by an integer rate. Truncating to
+            // whole microseconds is deliberate: this target's counter ticks at
+            // 1 MHz, so the fraction is always zero and a sub-microsecond axis
+            // would be claiming precision the counter does not have. On a
+            // faster counter the fraction is real and the floor costs at most
+            // one microsecond per span end, which is below the jitter of the
+            // hook that emitted it.
+            dut_us: if f[4].is_empty() {
+                None
+            } else {
+                f[4].parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0).map(|v| v as u64)
+            },
+            dut_cycles: f[3].parse::<u64>().ok(),
+            kind: kind_of(&f[5]),
+            a: f[6].parse::<u32>().unwrap_or(0),
+            b: f[7].parse::<u32>().unwrap_or(0),
+            name: f[8].clone(),
+            t: 0,
+        });
+    }
+    ParsedRows { rows, dropped_by_cap, unparsed }
 }
 
 /// Splits one CSV line, honouring the double-quoting `name` may carry: a
@@ -1084,8 +1309,8 @@ fn parse_with_cap(
     summary: embarch_core_client::LoadSummary,
     cap: usize,
 ) -> Result<TraceView, String> {
-    let mut lines = csv.split('\n');
-    let header = lines.next().unwrap_or_default().trim_end_matches('\r');
+    let mut split = csv.split('\n');
+    let header = split.next().unwrap_or_default().trim_end_matches('\r');
     if header != outpost::csv_header() {
         return Err(format!(
             "this capture's columns are {header:?}, and this build reads {:?} — refusing to guess \
@@ -1094,65 +1319,8 @@ fn parse_with_cap(
         ));
     }
 
-    let mut rows: Vec<Row> = Vec::new();
-    let mut rows_dropped_by_cap = 0usize;
-    let mut rows_unparsed = 0usize;
-    for line in lines {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() {
-            continue;
-        }
-        if rows.len() >= cap {
-            rows_dropped_by_cap += 1;
-            continue;
-        }
-        let f = split_row(line);
-        if f.len() < 9 {
-            // A short line is a truncated write, not a row shape to interpret.
-            // Counted, not merely skipped: a capture cut off mid-write is the
-            // realistic case, and it is the one where staying quiet would let
-            // the tab claim it held every row of the file.
-            rows_unparsed += 1;
-            continue;
-        }
-        // Positional access is safe only because the header check above already
-        // refused anything whose columns are not exactly `outpost::csv_header()`
-        // — that check is what stands in for parsing the header into a name
-        // map. The indices moved by two when record layout 3 restored the DUT's
-        // `cycles`/`us` columns ahead of `kind`; they are:
-        //   0 frame_index, 1 frame_seq, 2 rx_utc_ms, 3 cycles, 4 us,
-        //   5 kind, 6 a, 7 b, 8 name
-        // The only field with no defensible fallback: every `t` below is a
-        // frame index or is anchored against one, so a row without it has no
-        // place on the axis. Refused and counted, for the same reason as above.
-        let Ok(frame_index) = f[0].parse::<u64>() else {
-            rows_unparsed += 1;
-            continue;
-        };
-        rows.push(Row {
-            frame_index,
-            rx_utc_ms: if f[2].is_empty() { None } else { f[2].parse::<u64>().ok() },
-            // `us` is rendered by Core with three decimal places, from an
-            // integer cycle count divided by an integer rate. Truncating to
-            // whole microseconds is deliberate: this target's counter ticks at
-            // 1 MHz, so the fraction is always zero and a sub-microsecond axis
-            // would be claiming precision the counter does not have. On a
-            // faster counter the fraction is real and the floor costs at most
-            // one microsecond per span end, which is below the jitter of the
-            // hook that emitted it.
-            dut_us: if f[4].is_empty() {
-                None
-            } else {
-                f[4].parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0).map(|v| v as u64)
-            },
-            dut_cycles: f[3].parse::<u64>().ok(),
-            kind: kind_of(&f[5]),
-            a: f[6].parse::<u32>().unwrap_or(0),
-            b: f[7].parse::<u32>().unwrap_or(0),
-            name: f[8].clone(),
-            t: 0,
-        });
-    }
+    let ParsedRows { mut rows, dropped_by_cap: rows_dropped_by_cap, unparsed: rows_unparsed } =
+        parse_rows(split, cap);
 
     // ---- a stale leading prefix, dropped before any clock is read ---------
     //
@@ -1687,6 +1855,11 @@ fn parse_with_cap(
         }
     }
 
+    // The one crossing between embarch-core's clock and this axis, built
+    // once. Everything laid on this axis from any other stream goes through
+    // it — the step row below is simply its first caller.
+    let projection = Projection::from_trace(&rows, unit, t_from, t_to, resolution_ms);
+
     Ok(TraceView {
         study_id: study_id.to_string(),
         tap: tap.to_string(),
@@ -1717,7 +1890,7 @@ fn parse_with_cap(
         resolution_ms,
         records_lost,
         out_of_order_rows,
-        steps: project_steps(steps, &rows, unit, t_from, t_to, resolution_ms),
+        steps: project_steps(steps, &projection),
         gaps,
         lanes,
         markers,
