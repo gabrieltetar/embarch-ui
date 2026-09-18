@@ -3432,6 +3432,72 @@ mod tests {
         );
     }
 
+    /// The three record-cell invariants, as text guards — the only thing
+    /// that can cover them in `cargo test`, since `app.js` is served as
+    /// bytes and never evaluated here.
+    ///
+    /// Each has a wrong version that looks right, which is why they are
+    /// pinned rather than left to reading: a `records: null` rendered as
+    /// clean, an empty capture rendered as verified, and a literal `32`
+    /// standing in for `MAX_BAD_RECORDS_REPORTED`.
+    #[test]
+    fn the_records_cell_never_reads_clean_when_it_cannot_know() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert!(APP_JS.contains("function recordsCell(report)"), "one named helper");
+        assert!(
+            APP_JS.contains("not checked — this tap declared no record framing"),
+            "`records: null` reads as not checked, never as clean"
+        );
+        assert!(
+            APP_JS.contains("nothing to check — no record found in this capture"),
+            "an empty capture reads as nothing to check, never as verified"
+        );
+        assert!(
+            !APP_JS.contains("report.all_verified"),
+            "RecordReport::all_verified() returns true for an empty capture, so the browser \
+             deliberately does not call it — the comment naming it is the reason why"
+        );
+        assert!(
+            APP_JS.contains("var capped = offsets.length < bad;"),
+            "the 32-offset cap is inferred by comparing offsets with failures, never written"
+        );
+        // Scoped to the helper's own body: `32` appears elsewhere in this
+        // file as a UUID hex length, and a whole-file substring check would
+        // be a guard that fails for an unrelated reason.
+        let body = {
+            let start = APP_JS.find("function recordsCell(report)").unwrap();
+            let rest = &APP_JS[start..];
+            &rest[..rest.find("\n  }\n").unwrap()]
+        };
+        assert!(
+            !body.contains(&embarch_study_designer::limits::MAX_BAD_RECORDS_REPORTED.to_string()),
+            "a literal MAX_BAD_RECORDS_REPORTED in recordsCell is a copy that goes stale"
+        );
+    }
+
+    /// A protocol outcome goes through the same `outcomeBadge` every other
+    /// outcome does — one decoder, so a protocol that failed cannot read as
+    /// one that did not — and `final_state` is rendered with no claim about
+    /// whether it was terminal, which is a lookup this file cannot make.
+    #[test]
+    fn a_protocol_outcome_reuses_the_one_outcome_decoder() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert!(
+            APP_JS.contains("var badge = outcomeBadge(step.protocol.outcome, null);"),
+            "through the existing badge, not a second decoder"
+        );
+        assert!(
+            APP_JS.contains("escapeHtml(step.protocol.final_state || \"—\")"),
+            "final_state is rendered verbatim"
+        );
+        for claim in ["finished", "reached its outcome", "terminal state"] {
+            assert!(
+                !APP_JS.contains(&format!("ended in {claim}")),
+                "the browser must claim nothing about whether final_state was terminal"
+            );
+        }
+    }
+
     /// **`app.js` holds no copy of a served fact.** The positive guard above
     /// proves the server sends the right number; this proves the browser
     /// does not carry its own. Both are needed: a browser with a fallback

@@ -2548,7 +2548,26 @@
     if (step.security_level) {
       parts.push(String(step.security_level).toUpperCase());
     }
-    return parts.length ? escapeHtml(parts.join(" · ")) : '<span class="placeholder-note">—</span>';
+    var text = parts.length ? escapeHtml(parts.join(" · ")) : "";
+
+    /* What a `RunProtocol` step's machine ended as (`embarch-study-designer`
+     * decision 62), through the same `outcomeBadge` every other outcome goes
+     * through — one decoder, so a protocol that failed cannot read as one
+     * that did not.
+     *
+     * `final_state` is rendered **verbatim and with no claim about it**.
+     * Whether that state was terminal is a lookup in the ProtocolDef the
+     * study carries, which this file does not have; asserting "finished" or
+     * "stopped here" from the name alone would be the kind of plausible,
+     * wrong reading this tab keeps refusing to produce. */
+    if (step.protocol) {
+      var badge = outcomeBadge(step.protocol.outcome, null);
+      var state =
+        '<span class="mono" style="font-size:11.5px;">ended in ' +
+        escapeHtml(step.protocol.final_state || "—") + "</span>";
+      text = (text ? text + " · " : "") + badge + " " + state;
+    }
+    return text || '<span class="placeholder-note">—</span>';
   }
 
   // Decision 11: a result renders **how** each version was established, not
@@ -2610,7 +2629,8 @@
     el.style.display = "block";
     el.innerHTML =
       '<div class="card-title" style="margin-bottom:8px;">Captured streams</div>' +
-      '<table class="data-table"><thead><tr><th>Tap</th><th>Bytes</th><th>Complete</th><th></th>' +
+      '<table class="data-table"><thead><tr><th>Tap</th><th>Bytes</th><th>Complete</th>' +
+      "<th>Records</th><th></th>" +
       "</tr></thead><tbody>" +
       streams
         .map(function (ref) {
@@ -2622,6 +2642,7 @@
               ? '<span class="badge badge-warning">short of what the source produced</span>'
               : '<span class="badge badge-success">complete</span>') +
             "</td>" +
+            "<td>" + recordsCell(ref.records) + "</td>" +
             '<td style="text-align:right;"><button class="btn" data-open-trace="' +
             escapeHtml(ref.name) + '" data-open-study="' + escapeHtml(studyId || "") +
             '">Open in Trace</button></td></tr>'
@@ -2629,6 +2650,74 @@
         })
         .join("") +
       "</tbody></table>";
+  }
+
+  /* What checking one capture's records found — a **reading**, not a badge
+   * (decision 12): the interesting answers here are differences, and a
+   * green/red pill collapses "4 of 5 verified, one at offset 2048" into a
+   * colour.
+   *
+   * Three invariants, each of which has a wrong version that looks right:
+   *
+   *   1. `records: null` is NEVER rendered as clean. The study declared no
+   *      framing for this tap, which is a different fact from "every record
+   *      verified" — conflating them is how a short capture read as complete
+   *      in the first place. It reads "not checked".
+   *
+   *   2. `total === 0` is NEVER rendered as verified. `RecordReport`'s own
+   *      `all_verified()` returns true for an empty capture, which is why
+   *      this deliberately does not use it: a tap that captured nothing has
+   *      nothing to verify, and saying so is the honest answer.
+   *
+   *   3. The 32-offset report cap is NEVER written here. It is inferred, by
+   *      comparing how many offsets arrived with how many records failed —
+   *      a literal 32 in this file is a second copy of
+   *      `MAX_BAD_RECORDS_REPORTED` that goes stale the day it moves. */
+  function recordsCell(report) {
+    if (report == null) {
+      return '<span class="placeholder-note">not checked — this tap declared no record framing</span>';
+    }
+    var total = report.total || 0;
+    var verified = report.verified || 0;
+    var bad = total - verified;
+    var offsets = report.bad_offsets || [];
+    var leading = report.leading_bytes || 0;
+
+    if (total === 0) {
+      return (
+        '<span class="placeholder-note">nothing to check — no record found in this capture' +
+        (leading ? " (" + leading + " leading bytes)" : "") +
+        "</span>"
+      );
+    }
+
+    var head =
+      '<span class="mono">' + verified + " of " + total + " verified</span>";
+    var detail = [];
+    if (leading) {
+      detail.push(
+        leading +
+          " byte" + (leading === 1 ? "" : "s") +
+          " before the first record — the capture began mid-record"
+      );
+    }
+    if (bad > 0) {
+      /* Inferred, never read off a constant: fewer offsets than failures
+       * means the report hit its own cap. */
+      var capped = offsets.length < bad;
+      detail.push(
+        bad + " did not verify at " +
+        (capped ? "the first " + offsets.length + " of " + bad + " offsets " : "offsets ") +
+        offsets.join(", ")
+      );
+    }
+    return (
+      head +
+      (detail.length
+        ? '<div class="placeholder-note" style="margin-top:4px;">' +
+          escapeHtml(detail.join(" · ")) + "</div>"
+        : "")
+    );
   }
 
   // The run badge's counter names **the step now running**, not the count of
