@@ -51,7 +51,7 @@ fi
 # Linux embarch-ui binary, so it has to run on the remote (WSL) side, not on
 # the Windows UI side.
 vsix="$(python3 - <<'PY'
-import json, zipfile
+import glob, json, zipfile
 from xml.sax.saxutils import quoteattr, escape
 
 pkg = json.load(open("package.json"))
@@ -98,7 +98,12 @@ with zipfile.ZipFile(vsix, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("extension.vsixmanifest", manifest)
     z.writestr("[Content_Types].xml", content_types)
     z.writestr("extension/package.json", open("package.json", "rb").read())
-    z.writestr("extension/out/extension.js", open("out/extension.js", "rb").read())
+    # Every compiled module, not just the entry point: the extension is more
+    # than one file since focus.ts, and a missing module is a require() that
+    # throws at activation — the same silent "the commands aren't there"
+    # symptom this script exists to fix. `.map` files stay out (.vscodeignore).
+    for js in sorted(glob.glob("out/*.js")):
+        z.writestr(f"extension/{js}", open(js, "rb").read())
     z.writestr("extension/readme.md", open("README.md", "rb").read())
     z.writestr("extension/LICENSE.txt", open("LICENSE", "rb").read())
     z.writestr("extension/icon.png", open("icon.png", "rb").read())
