@@ -889,6 +889,11 @@
    * entries the server would refuse. An empty list is an empty picker, which
    * is a refusal an author can see. */
   var sdProtocols = [];
+  /* Stems of `.eap` files that did not parse. A row naming a protocol that
+   * is in none of the served summaries reads differently when this is
+   * non-empty: "not in this repo" is a claim, and with an unreadable file in
+   * the directory it is one this browser cannot make. */
+  var sdUnparsedEap = [];
   var sdMaxProtocols = null;
   var sdMaxRecordMagicLen = null;
   var sdMaxStructFields = null;
@@ -921,6 +926,12 @@
   var sdRegPrevious = null;
   /* The same, for the layout dialog. */
   var sdLayoutPrevious = null;
+  /* The `.eap` editor's whole model: the scanned files, which one is open,
+   * whether it has unsaved edits, and the errors currently rendered. */
+  var sdEapFiles = [];
+  var sdEapStem = null;
+  var sdEapDirty = false;
+  var sdEapErrors = [];
   // Characteristic display names, keyed by hyphenated characteristic UUID
   // (`embarch-study-designer` decision 56). Empty is the honest
   // starting state and every reader falls back to the UUID.
@@ -1118,6 +1129,7 @@
       sdMaxStreamNameLen = data.max_stream_name_len;
     }
     sdProtocols = (data && data.protocols) || [];
+    sdUnparsedEap = (data && data.unparsed_files) || [];
     sdScalarTypes = (data && data.scalar_types) || [];
     sdLogLevels = (data && data.dev_bench_log_levels) || [];
     if (data && typeof data.max_protocols_per_study === "number") {
@@ -1269,6 +1281,110 @@
     return ops;
   }
 
+  /* The `RunProtocol` row's two selects, both from the served protocol list.
+   *
+   * Three cases are **wrong but visible** — each keeps what was authored,
+   * says what is wrong with it, and lets the server refuse it. Snapping a
+   * row to a different protocol, or silently blanking a state, is how a
+   * study quietly becomes a different study:
+   *
+   *   1. A protocol the repo no longer declares: kept, marked "not in this
+   *      repo".
+   *   2. A protocol whose file did not parse: its option is `disabled` and
+   *      the state picker reads "unknown until the file parses" — NOT "no
+   *      states", which would be a claim about the manifest rather than
+   *      about our ability to read it.
+   *   3. A terminal entry state: refused before submit, from the served
+   *      `terminal` flag. A run entering one would pass instantly and
+   *      capture nothing. */
+  function sdRunProtocolParamsHtml(row) {
+    if (!sdProtocols.length) {
+      return (
+        '<span class="placeholder-note">no <span class="mono">.eap</span> protocol in this ' +
+        "repo — author one with <span class=\"mono\">Author .eap files…</span> below</span>"
+      );
+    }
+    var known = sdProtocols.filter(function (p) { return p.name === row.protocol; })[0];
+    var options = sdProtocols
+      .map(function (p) {
+        return (
+          '<option value="' + escapeHtml(p.name) + '"' +
+          (p.name === row.protocol ? " selected" : "") +
+          // A block that parsed but did not resolve cannot be *chosen*: the
+          // server would refuse it, and offering it would be offering a
+          // choice that only fails later.
+          (p.resolved ? "" : " disabled") + ">" + escapeHtml(p.name) +
+          (p.resolved ? " (" + p.states.length + " states)" : " — " + escapeHtml(p.file) +
+            ".eap has an error") + "</option>"
+        );
+      })
+      .join("");
+    if (!row.protocol) {
+      options = '<option value="" selected>pick a protocol…</option>' + options;
+    } else if (!known) {
+      options =
+        '<option value="' + escapeHtml(row.protocol) + '" selected>' +
+        escapeHtml(row.protocol) + " — not in this repo</option>" + options;
+    }
+
+    var stateOptions;
+    var note = "";
+    if (known && !known.resolved) {
+      /* The protocol is there, in a file, with something wrong inside it.
+       * "no states" would be a claim about the manifest where this is a
+       * statement about our ability to read it. */
+      stateOptions =
+        '<option value="' + escapeHtml(row.entryState || "") + '" selected>' +
+        escapeHtml(row.entryState || "(first state)") +
+        " — unknown until the file parses</option>";
+      note =
+        known.file + ".eap has an error, so this protocol's states are unknown — open " +
+        "Author .eap files… to see what is wrong with it";
+    } else if (!known) {
+      stateOptions =
+        '<option value="' + escapeHtml(row.entryState || "") + '" selected>' +
+        escapeHtml(row.entryState || "(first state)") + "</option>";
+      note = row.protocol
+        ? (sdUnparsedEap.length
+            ? "not declared by any .eap file this repo could read — and " +
+              sdUnparsedEap.length + " file(s) did not parse, so it may be in one of those"
+            : "this protocol is not declared by any .eap file in this repo")
+        : "";
+    } else {
+      stateOptions =
+        '<option value=""' + (row.entryState ? "" : " selected") + ">(first state)</option>" +
+        known.states
+          .map(function (st) {
+            return (
+              '<option value="' + escapeHtml(st.name) + '"' +
+              (st.name === row.entryState ? " selected" : "") + ">" + escapeHtml(st.name) +
+              (st.terminal ? " — terminal" : "") + "</option>"
+            );
+          })
+          .join("");
+      if (row.entryState && !known.states.some(function (st) { return st.name === row.entryState; })) {
+        stateOptions =
+          '<option value="' + escapeHtml(row.entryState) + '" selected>' +
+          escapeHtml(row.entryState) + " — not a state of " + escapeHtml(known.name) +
+          "</option>" + stateOptions;
+      }
+      var entry = known.states.filter(function (st) { return st.name === row.entryState; })[0];
+      if (entry && entry.terminal) {
+        note =
+          "a terminal state — the run would reach its outcome immediately and capture nothing";
+      }
+    }
+    return (
+      '<div class="sd-params">' +
+      '<label class="sd-param" style="flex:1 1 200px;"><span>Protocol</span>' +
+      '<select data-field="protocol">' + options + "</select></label>" +
+      '<label class="sd-param" style="flex:1 1 200px;"><span>Entry state</span>' +
+      '<select data-field="entryState">' + stateOptions + "</select></label>" +
+      (note ? '<div class="sd-error" style="flex:1 1 100%;">' + escapeHtml(note) + "</div>" : "") +
+      "</div>"
+    );
+  }
+
   function sdNewRow(overrides) {
     var row = {
       id: sdNextRowId++,
@@ -1288,6 +1404,14 @@
       // decision 44 makes it the honest way to say "this DUT needs none"
       // rather than leaving the step out and hoping.
       securityLevel: "l4",
+      // Only meaningful for a `run_protocol` row (`embarch-study-designer`
+      // decision 60). **Names, never indices**: a saved study that carried
+      // the index would silently mean a different protocol the day an
+      // unrelated row was deleted. Blank protocol is refused by the server,
+      // because there is no defensible default; blank entry state is the
+      // protocol's first declared state.
+      protocol: "",
+      entryState: "",
       rawService: "",
       rawChar: "",
       // Vendor-defined selection (`embarch-study-designer` decision 41): ids, never UUIDs — the
@@ -1453,6 +1577,9 @@
         }
         return sdTargetsSummaryHtml(row);
       }
+      if (row.which === "run_protocol") {
+        return sdRunProtocolParamsHtml(row);
+      }
       if (row.which !== "ble_connect") {
         return '<span class="placeholder-note">no parameters</span>';
       }
@@ -1582,6 +1709,7 @@
     if (!sdRows.length) {
       tbody.innerHTML = '<tr><td colspan="8"><span class="placeholder-note">no steps yet — add one, or start from the capture-window template</span></td></tr>';
       renderSdCapsNote();
+      renderSdProtocolsCard();
       return;
     }
     tbody.innerHTML = "";
@@ -1617,6 +1745,8 @@
     // Live: the step count is the one advisory cap a browser can check for
     // itself, so it answers as the table is edited rather than only at Run.
     renderSdCapsNote();
+    // Derived from the rows, so it follows them.
+    renderSdProtocolsCard();
   }
 
   /* Rewrites just the cumulative "+Nms in" hints, without touching any
@@ -1672,6 +1802,21 @@
       return;
     }
 
+    if (field === "protocol") {
+      row.protocol = ev.target.value;
+      // The entry state belongs to a protocol, so changing the protocol
+      // clears it rather than carrying a state name onto a machine that may
+      // not have one by that name. "" means the first declared state, which
+      // is the one entry point every protocol has.
+      row.entryState = "";
+      renderSdRows();
+      return;
+    }
+    if (field === "entryState") {
+      row.entryState = ev.target.value;
+      renderSdRows();
+      return;
+    }
     if (field === "choice") {
       row.fieldChoices[ev.target.dataset.choiceField] = ev.target.value;
       return;
@@ -1759,6 +1904,26 @@
             })
             .filter(Boolean),
         };
+        if (row.which === "run_protocol") {
+          action.protocol = row.protocol || null;
+          action.entry_state = row.entryState || null;
+          if (!row.protocol) {
+            throw new Error(label + ": pick one of this repo's .eap protocols");
+          }
+          // Refused here, from the served flag, rather than discovered as a
+          // 400 after a round trip — the choice was made in this row and the
+          // refusal belongs beside it.
+          var picked = sdProtocols.filter(function (p) { return p.name === row.protocol; })[0];
+          var st = picked
+            ? picked.states.filter(function (x) { return x.name === row.entryState; })[0]
+            : null;
+          if (st && st.terminal) {
+            throw new Error(
+              label + ": '" + row.entryState + "' is a terminal state of " + row.protocol +
+              ", so the run would reach its outcome immediately and capture nothing"
+            );
+          }
+        }
         if (sdIsSelectiveMonitor(row.which) && !action.targets.length) {
           throw new Error(
             label + ": pick at least one characteristic, or use GattMonitorAll to subscribe to everything"
@@ -1872,6 +2037,7 @@
     renderSdUnregistered();
     renderSdRegistered();
     renderSdLayouts();
+    renderSdProtocolsCard();
     renderSdRows();
     return data;
   }
@@ -2039,6 +2205,11 @@
         // reopening such a study came back with an empty selection and the
         // security level reset, both without a word.
         base.securityLevel = a.security_level || base.securityLevel;
+        // Both, not one: dropping `entry_state` while restoring `protocol`
+        // is exactly the shape of the silent loss decision 17 records for
+        // monitor targets.
+        base.protocol = a.protocol || "";
+        base.entryState = a.entry_state || "";
         base.targets = (a.targets || []).map(function (t) {
           return t.characteristic_uuid;
         });
@@ -2830,6 +3001,295 @@
     await loadSdActions();
     renderSdTaps();
     closeLayoutDialog();
+  }
+
+  // --- .eap protocol manifests -------------------------------------------
+
+  /* The read-only Protocols card: which protocols this study's rows name.
+   *
+   * Derived from the rows, exactly as `build_study` derives what the study
+   * carries — a separately-authored list here would be a browser-side copy
+   * of something already implied, which is the staleness pattern this whole
+   * design keeps refusing. */
+  function renderSdProtocolsCard() {
+    var box = sdEl("sd-protocols-carried");
+    if (!box) return;
+    var named = [];
+    sdRows.forEach(function (row) {
+      if (row.kind !== "built_in" || row.which !== "run_protocol") return;
+      if (row.protocol && named.indexOf(row.protocol) < 0) named.push(row.protocol);
+    });
+    if (!named.length) {
+      box.innerHTML =
+        '<span class="placeholder-note">no step runs a protocol, so this study carries none' +
+        (sdProtocols.length
+          ? " — " + sdProtocols.length + " available in this repo"
+          : "") + "</span>";
+      return;
+    }
+    box.innerHTML =
+      '<div class="chip-pool">' +
+      named
+        .map(function (name) {
+          var known = sdProtocols.filter(function (p) { return p.name === name; })[0];
+          return (
+            '<div class="probe-card"><div class="mono" style="font-size:12px;">' +
+            escapeHtml(name) + "</div>" +
+            '<div style="font-size:11px; color:var(--text-tertiary);">' +
+            (known
+              ? known.states.length + " states · " + escapeHtml(known.file) + ".eap"
+              : "not declared by any .eap file in this repo") +
+            "</div></div>"
+          );
+        })
+        .join("") +
+      "</div>" +
+      (sdMaxProtocols != null && named.length > sdMaxProtocols
+        ? '<p class="sd-error" style="margin-top:8px;">' + named.length +
+          " distinct protocols — one study carries at most " + sdMaxProtocols + "</p>"
+        : "");
+  }
+
+  /* Loads the file list. `sdEapFiles` is the whole editor's model. */
+  async function sdEapLoad(selectStem) {
+    var resp = await fetch("/api/study-designer/protocols");
+    if (!resp.ok) {
+      sdEapStatus(resp.status + " " + (await resp.text()), true);
+      return;
+    }
+    var data = await resp.json();
+    sdEapFiles = data.files || [];
+    var dup = sdEl("sd-eap-duplicates");
+    var dups = data.duplicate_names || [];
+    dup.style.display = dups.length ? "block" : "none";
+    dup.innerHTML = dups
+      .map(function (d) {
+        return (
+          "Two files declare <span class=\"mono\">" + escapeHtml(d.name) +
+          "</span>: " + escapeHtml(d.files.join(".eap, ")) +
+          ".eap — a study naming it cannot be built until one is renamed."
+        );
+      })
+      .join("<br>");
+    renderEapFileList();
+    var want = selectStem != null ? selectStem : sdEapStem;
+    var found = sdEapFiles.filter(function (f) { return f.stem === want; })[0];
+    sdEapSelect(found ? found.stem : (sdEapFiles[0] ? sdEapFiles[0].stem : null), true);
+  }
+
+  /* **Rendered once, then patched.** Re-rendering this list on every select
+   * is the focus bug decision 17 records for the target dialog — it destroys
+   * the node the click landed on. `syncEapFileList` moves the selection;
+   * `renderEapFileList` is only for a list whose membership changed. */
+  function renderEapFileList() {
+    var list = sdEl("sd-eap-list");
+    if (!list) return;
+    if (!sdEapFiles.length) {
+      list.innerHTML =
+        '<p class="placeholder-note" style="padding:10px;">no .eap file in this repo yet</p>';
+      return;
+    }
+    list.innerHTML = sdEapFiles
+      .map(function (f) {
+        return (
+          '<button class="eap-file" data-eap-file="' + escapeHtml(f.stem) + '">' +
+          escapeHtml(f.stem) + ".eap" +
+          (f.errors.length ? " ⚠" : "") +
+          '<div style="font-size:10.5px; color:var(--text-tertiary);">' +
+          (f.errors.length
+            ? "did not parse"
+            : f.protocols.map(function (p) { return p.name; }).join(", ") || "no protocol") +
+          "</div></button>"
+        );
+      })
+      .join("");
+    syncEapFileList();
+  }
+
+  function syncEapFileList() {
+    var list = sdEl("sd-eap-list");
+    if (!list) return;
+    list.querySelectorAll("[data-eap-file]").forEach(function (node) {
+      node.setAttribute(
+        "aria-selected",
+        node.getAttribute("data-eap-file") === sdEapStem ? "true" : "false"
+      );
+    });
+  }
+
+  /* Switching files is guarded: this dialog holds a file in the engineer's
+   * repo, not a retypeable form, and nothing auto-saves. */
+  function sdEapSelect(stem, force) {
+    if (!force && sdEapDirty && stem !== sdEapStem) {
+      if (!window.confirm("Discard unsaved changes to " + sdEapStem + ".eap?")) return;
+    }
+    sdEapStem = stem;
+    sdEapDirty = false;
+    var file = sdEapFiles.filter(function (f) { return f.stem === stem; })[0];
+    var text = file ? file.text : "";
+    sdEl("sd-eap-text").value = text;
+    sdEapRenderErrors(file ? file.errors : [], false);
+    sdEapSyncGutter();
+    sdEapStatus(
+      file
+        ? (file.errors.length
+            ? file.errors.length + " problem" + (file.errors.length === 1 ? "" : "s") +
+              " in this file"
+            : "parses · " + file.protocols.map(function (p) { return p.name; }).join(", "))
+        : "no file selected",
+      false
+    );
+    syncEapFileList();
+  }
+
+  function sdEapStatus(message, isError) {
+    var el = sdEl("sd-eap-status");
+    if (!el) return;
+    el.className = isError ? "sd-error" : "placeholder-note";
+    el.textContent = message;
+  }
+
+  /* The gutter is rebuilt from the text's own line count, so it and the
+   * textarea cannot disagree about how many lines there are. Both scroll
+   * together, driven by the textarea. */
+  function sdEapSyncGutter() {
+    var text = sdEl("sd-eap-text");
+    var gutter = sdEl("sd-eap-gutter");
+    if (!text || !gutter) return;
+    var lines = text.value.split("\n").length;
+    var out = [];
+    for (var i = 1; i <= lines; i++) out.push(i);
+    gutter.textContent = out.join("\n");
+    gutter.scrollTop = text.scrollTop;
+    sdEapPlaceBands();
+  }
+
+  /* Bands sit behind the text at `(line - 1) * --eap-line`, read from the
+   * one place that variable is defined — so a change to the line height
+   * moves the gutter, the text and the bands together. */
+  function sdEapPlaceBands() {
+    var text = sdEl("sd-eap-text");
+    var bands = sdEl("sd-eap-bands");
+    if (!text || !bands) return;
+    var editor = text.closest(".eap-editor");
+    var lineHeight = parseFloat(
+      getComputedStyle(editor).getPropertyValue("--eap-line")
+    ) || 18;
+    var padding = parseFloat(getComputedStyle(text).paddingTop) || 0;
+    bands.innerHTML = sdEapErrors
+      // A line-0 error has no line to band — an unreadable file, or an error
+      // about the file as a whole. It still lists below the editor.
+      .filter(function (e) { return e.line > 0; })
+      .map(function (e) {
+        var top = padding + (e.line - 1) * lineHeight - text.scrollTop;
+        return '<div class="eap-band" style="top:' + top + 'px;"></div>';
+      })
+      .join("");
+  }
+
+  /* `stale` is rendered, not hidden: a Check describes the text it was run
+   * against, and one keystroke later it may describe a different file. */
+  function sdEapRenderErrors(errors, stale) {
+    sdEapErrors = errors || [];
+    sdEl("sd-eap-bands").className = "eap-bands" + (stale ? " eap-stale" : "");
+    sdEl("sd-eap-errors").innerHTML = sdEapErrors
+      .map(function (e, i) {
+        return (
+          '<button class="eap-error" data-eap-error="' + i + '">' +
+          escapeHtml(e.message) + "</button>"
+        );
+      })
+      .join("");
+    sdEapPlaceBands();
+  }
+
+  /* Clicking an error row puts the caret on its line. `setSelectionRange`
+   * on the real textarea, which is the whole reason this is a textarea and
+   * not a contenteditable renderer: native caret, undo, IME and clipboard
+   * behaviour come free. */
+  function sdEapGoToLine(line) {
+    var text = sdEl("sd-eap-text");
+    if (!text || line < 1) return;
+    var lines = text.value.split("\n");
+    var offset = 0;
+    for (var i = 0; i < line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+    text.focus();
+    text.setSelectionRange(offset, offset + (lines[line - 1] || "").length);
+  }
+
+  async function sdEapCheck() {
+    var resp = await fetch("/api/study-designer/protocols/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: sdEl("sd-eap-text").value }),
+    });
+    if (!resp.ok) return sdEapStatus(resp.status + " " + (await resp.text()), true);
+    var out = await resp.json();
+    sdEapRenderErrors(out.errors || [], false);
+    sdEapStatus(
+      out.ok
+        ? "parses · " + (out.protocols.map(function (p) { return p.name; }).join(", ") ||
+            "no protocol declared")
+        : out.errors.length + " problem" + (out.errors.length === 1 ? "" : "s") +
+          " — nothing is written until this is clean",
+      !out.ok
+    );
+  }
+
+  async function sdEapSave() {
+    if (!sdEapStem) return sdEapStatus("no file selected", true);
+    var resp = await fetch(
+      "/api/study-designer/protocols/" + encodeURIComponent(sdEapStem),
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: sdEl("sd-eap-text").value }),
+      }
+    );
+    var body = await resp.text();
+    if (!resp.ok) {
+      // The refusal carries the parser's own `line {n}: …`, so the band and
+      // the message cannot disagree about where the problem is.
+      var line = /line (\d+):/.exec(body);
+      sdEapRenderErrors([{ message: body, line: line ? Number(line[1]) : 0 }], false);
+      return sdEapStatus("not written — " + body, true);
+    }
+    sdEapDirty = false;
+    await sdEapLoad(sdEapStem);
+    // The row pickers read the same list, so a protocol saved here is
+    // offerable immediately rather than after a reload.
+    await loadSdActions();
+    renderSdRows();
+    sdEapStatus("saved", false);
+  }
+
+  async function sdEapDelete() {
+    if (!sdEapStem) return;
+    if (!window.confirm("Delete " + sdEapStem + ".eap?")) return;
+    var resp = await fetch(
+      "/api/study-designer/protocols/" + encodeURIComponent(sdEapStem),
+      { method: "DELETE" }
+    );
+    var body = await resp.text();
+    if (resp.status === 409) {
+      return renderRefusal("sd-eap-refusal", resp.status, body);
+    }
+    if (!resp.ok) return sdEapStatus(resp.status + " " + body, true);
+    sdEapDirty = false;
+    sdEapStem = null;
+    sdEl("sd-eap-refusal").style.display = "none";
+    await sdEapLoad(null);
+    await loadSdActions();
+    renderSdRows();
+  }
+
+  function sdEapClose(force) {
+    if (!force && sdEapDirty) {
+      if (!window.confirm("Discard unsaved changes to " + sdEapStem + ".eap?")) return;
+    }
+    sdEapDirty = false;
+    sdEl("sd-eap-dialog").style.display = "none";
+    sdEl("sd-eap-backdrop").style.display = "none";
   }
 
   /* The two chip pools that give edit and delete somewhere to be launched
@@ -4177,6 +4637,63 @@
       if (!btn) return;
       ev.preventDefault();
       btn.closest(".sd-reg-value").remove();
+    });
+
+    // --- the .eap editor
+    sdEl("sd-eap-open").addEventListener("click", async function () {
+      sdEl("sd-eap-dialog").style.display = "block";
+      sdEl("sd-eap-backdrop").style.display = "block";
+      sdEl("sd-eap-refusal").style.display = "none";
+      await sdEapLoad(sdEapStem);
+    });
+    // The backdrop is guarded exactly as the Close button is: this dialog
+    // holds a file in a repo, and a stray click outside it must not be the
+    // thing that loses an edit.
+    sdEl("sd-eap-backdrop").addEventListener("click", function () { sdEapClose(false); });
+    sdEl("sd-eap-close").addEventListener("click", function () { sdEapClose(false); });
+    sdEl("sd-eap-check").addEventListener("click", sdEapCheck);
+    sdEl("sd-eap-save").addEventListener("click", sdEapSave);
+    sdEl("sd-eap-delete").addEventListener("click", sdEapDelete);
+    sdEl("sd-eap-new").addEventListener("click", function () {
+      var stem = (window.prompt("New .eap file name (no extension)") || "").trim();
+      if (!stem) return;
+      // Added to the model rather than written: nothing here auto-saves, so
+      // a new file exists on disk only once Save writes text that parses.
+      if (!sdEapFiles.some(function (f) { return f.stem === stem; })) {
+        sdEapFiles.push({ stem: stem, text: "", protocols: [], errors: [] });
+        renderEapFileList();
+      }
+      sdEapSelect(stem, false);
+      sdEapDirty = true;
+    });
+    sdEl("sd-eap-list").addEventListener("click", function (ev) {
+      var btn = ev.target.closest("[data-eap-file]");
+      if (!btn) return;
+      sdEapSelect(btn.getAttribute("data-eap-file"), false);
+    });
+    sdEl("sd-eap-errors").addEventListener("click", function (ev) {
+      var btn = ev.target.closest("[data-eap-error]");
+      if (!btn) return;
+      var err = sdEapErrors[Number(btn.getAttribute("data-eap-error"))];
+      if (err) sdEapGoToLine(err.line);
+    });
+    sdEl("sd-eap-text").addEventListener("input", function () {
+      sdEapDirty = true;
+      // One keystroke and the bands describe text that no longer exists.
+      // Greyed rather than cleared: an error that was there a moment ago is
+      // still information, and silently dropping it reads as "fixed".
+      sdEl("sd-eap-bands").className = "eap-bands eap-stale";
+      sdEapStatus("edited — the marks below describe the text you had at the last Check", false);
+      sdEapSyncGutter();
+    });
+    sdEl("sd-eap-text").addEventListener("scroll", function () {
+      sdEl("sd-eap-gutter").scrollTop = sdEl("sd-eap-text").scrollTop;
+      sdEapPlaceBands();
+    });
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Escape") return;
+      if (sdEl("sd-eap-dialog").style.display !== "block") return;
+      sdEapClose(false);
     });
     sdEl("sd-register-backdrop").addEventListener("click", closeRegisterDialog);
 

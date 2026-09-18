@@ -1227,3 +1227,152 @@ table.data-table {
   margin: 3px 0;
 }
 
+/* --- the .eap editor dialog --------------------------------------------
+ *
+ * The one dialog decision 17's "a new dialog needs no new CSS" does not
+ * cover. A file list beside an editor at the standard min(720px, 92vw) is a
+ * 40-column editor, and a 40-column editor is not an editor: an `.eap`
+ * `source` line is ~100 characters before anything is wrong with it.
+ *
+ * `--eap-line` is defined once and shared by the gutter, the textarea and
+ * the error bands. Two copies of a line height is how a band lands one line
+ * off the error it describes, which is worse than no band at all. */
+.dialog-wide {
+  width: min(1180px, 96vw);
+}
+
+.eap-layout {
+  display: flex;
+  gap: 14px;
+  margin-top: 12px;
+  align-items: stretch;
+}
+
+.eap-files {
+  flex: 0 0 200px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow-y: auto;
+  max-height: 58vh;
+}
+
+.eap-file {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.eap-file[aria-selected="true"] {
+  background: var(--accent-soft-bg);
+  color: var(--text-primary);
+}
+
+.eap-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* `--eap-line` is the single definition. Everything below reads it. */
+.eap-editor {
+  --eap-line: 18px;
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  /* NOT --bg-surface-inset: that token stays dark in the light theme, which
+   * would put light text on a light-theme page inside a dark box. */
+  background: var(--bg-surface-2);
+  overflow: hidden;
+}
+
+.eap-gutter {
+  flex: 0 0 auto;
+  padding: 10px 8px;
+  text-align: right;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: var(--eap-line);
+  user-select: none;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.eap-textwrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Behind the text, never over it: a band is context, and text that has to be
+   read through a highlight is text that is harder to read than it was. */
+.eap-bands {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.eap-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--eap-line);
+  background: var(--danger-soft-bg);
+}
+
+/* A Check describes the text it was run against. Edit after one and the
+   bands grey out rather than silently going on pointing at lines that may
+   have moved. */
+.eap-bands.eap-stale .eap-band {
+  background: var(--bg-surface);
+  outline: 1px dashed var(--border-strong);
+  outline-offset: -1px;
+}
+
+.eap-text {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-height: 58vh;
+  padding: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: var(--eap-line);
+  resize: vertical;
+  /* Load-bearing: a wrapped line makes one source line occupy two rendered
+     rows, and every gutter number and every band below it is then wrong. */
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+.eap-text:focus {
+  outline: none;
+}
+
+.eap-error {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+

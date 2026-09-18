@@ -934,6 +934,13 @@ struct ActionsResponse {
     /// `DevBenchLogLevel::ALL`, each as the JSON spelling a saved study
     /// carries plus the label naming what choosing it costs.
     dev_bench_log_levels: Vec<LogLevelOption>,
+    /// Stems of `.eap` files that did not parse at all.
+    ///
+    /// A file that did not parse declares nothing this can name, so a row
+    /// pointing into one cannot be told apart from a row pointing at a
+    /// deleted protocol — except by saying that some file in this repo is
+    /// unreadable, which is what this list is for.
+    unparsed_files: Vec<String>,
     /// The three advisory dev-bench caps
     /// (`embarch-study-designer::limits`'s advisory band).
     ///
@@ -953,6 +960,20 @@ pub struct ProtocolSummary {
     /// right file. A row never carries this: the name alone resolves,
     /// because `eap_repo::defs` refuses a repo declaring one name twice.
     file: String,
+    /// False for a block that **parsed but did not resolve** — its name is
+    /// known and its states are not.
+    ///
+    /// Listed rather than omitted, because the two are different facts and a
+    /// row naming it should be able to say which. A row pointing at an
+    /// unresolved block is not a row pointing at nothing: the protocol is
+    /// there, in a file, with something wrong inside it — and "no states"
+    /// would be a claim about the manifest where "unknown until it resolves"
+    /// is a statement about our ability to read it.
+    ///
+    /// A study naming one is still refused by `build_study`, which resolves
+    /// against `defs()` and sees only resolved blocks.
+    resolved: bool,
+    /// Empty whenever `resolved` is false.
     states: Vec<ProtocolStateSummary>,
 }
 
@@ -1157,11 +1178,11 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
     // here: this is a picker, and refusing to render one would leave an
     // author with no way to see which two files collide. The refusal happens
     // where it matters, when a study is built.
-    let protocols = match sd.protocols() {
-        Ok(repo) => protocol_summaries(&repo),
+    let (protocols, unparsed) = match sd.protocols() {
+        Ok(repo) => (protocol_summaries(&repo), unparsed_files(&repo)),
         Err(e) => {
             tracing::warn!("embarch/protocols could not be read: {e}");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
     Json(ActionsResponse {
@@ -1201,6 +1222,7 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
                 embarch_study_designer::limits::DEV_BENCH_MAX_PROTOCOLS_WIRE_LEN,
         },
         protocols,
+        unparsed_files: unparsed,
         actions,
         live_gatt_available: live.is_some(),
         static_gatt_available: static_gatt.is_some(),
@@ -1236,15 +1258,34 @@ fn struct_layout_summary(
 fn protocol_summaries(repo: &RepoProtocols) -> Vec<ProtocolSummary> {
     let mut out = Vec::new();
     for file in &repo.files {
-        for (name, resolved) in file.resolved() {
-            out.push(ProtocolSummary {
-                name: name.to_string(),
-                file: file.stem.clone(),
-                states: state_summaries(resolved),
-            });
+        for block in &file.blocks {
+            match &block.resolved {
+                Ok(resolved) => out.push(ProtocolSummary {
+                    name: block.name.clone(),
+                    file: file.stem.clone(),
+                    resolved: true,
+                    states: state_summaries(resolved),
+                }),
+                Err(_) => out.push(ProtocolSummary {
+                    name: block.name.clone(),
+                    file: file.stem.clone(),
+                    resolved: false,
+                    states: Vec::new(),
+                }),
+            }
         }
     }
     out
+}
+
+/// Stems of files that did not parse at all. See
+/// [`ActionsResponse::unparsed_files`].
+fn unparsed_files(repo: &RepoProtocols) -> Vec<String> {
+    repo.files
+        .iter()
+        .filter(|f| f.parsed.is_err())
+        .map(|f| f.stem.clone())
+        .collect()
 }
 
 /// One resolved protocol's states, as every picker and the editor render
@@ -2475,6 +2516,7 @@ fn protocols_response(repo: &RepoProtocols) -> ProtocolsResponse {
                     .map(|(name, resolved)| ProtocolSummary {
                         name: name.to_string(),
                         file: file.stem.clone(),
+                        resolved: true,
                         states: state_summaries(resolved),
                     })
                     .collect(),
@@ -2535,6 +2577,7 @@ pub async fn api_protocol_read(
             .map(|(name, resolved)| ProtocolSummary {
                 name: name.to_string(),
                 file: file.stem.clone(),
+                resolved: true,
                 states: state_summaries(resolved),
             })
             .collect(),
@@ -2671,6 +2714,7 @@ pub async fn api_protocol_check(
                     Ok(resolved) => protocols.push(ProtocolSummary {
                         name: block.name.clone(),
                         file: String::new(),
+                        resolved: true,
                         states: state_summaries(&resolved),
                     }),
                     Err(e) => errors.push(EapErrorOut { message: e.to_string(), line: e.line }),
@@ -3361,6 +3405,7 @@ mod tests {
             characteristic_names: BTreeMap::new(),
             service_names: BTreeMap::new(),
             protocols: Vec::new(),
+            unparsed_files: Vec::new(),
             max_monitor_targets: limits::MAX_MONITOR_TARGETS,
             max_stream_name_len: MAX_STREAM_NAME_LEN,
             max_protocols_per_study: limits::MAX_PROTOCOLS_PER_STUDY,
@@ -3591,6 +3636,89 @@ mod tests {
         assert!(
             APP_JS.contains("if (!body || !body.referenced_by) {"),
             "an unparseable refusal is rendered verbatim"
+        );
+    }
+
+    /// The `.eap` editor's load-bearing details, as text guards.
+    ///
+    /// Each of these has a wrong version that renders and looks fine until
+    /// somebody has a real file open: a wrapped line makes every gutter
+    /// number and every band below it wrong; a second copy of the line
+    /// height lands a band one line off; a per-line element id turns one
+    /// file into hundreds of declared ids the guard cannot check.
+    #[test]
+    fn the_eap_editor_keeps_its_gutter_bands_and_text_in_step() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        const INDEX: &str = include_str!("../assets/index.html");
+        const CSS: &str = include_str!("../assets/style.css");
+
+        assert!(
+            INDEX.contains("wrap=\"off\""),
+            "wrap=off is load-bearing: a wrapped line makes one source line two rendered rows"
+        );
+        assert!(
+            INDEX.contains("<textarea id=\"sd-eap-text\""),
+            "a real textarea, so native caret, undo, IME and clipboard behaviour come free"
+        );
+        assert_eq!(
+            CSS.matches("--eap-line:").count(),
+            1,
+            "one definition of the line height — two copies is how a band lands one line off"
+        );
+        assert!(
+            !CSS.contains("background: var(--bg-surface-inset);\n  overflow: hidden;\n}\n\n.eap-gutter"),
+            "the editor background must not be --bg-surface-inset, which stays dark in light theme"
+        );
+        assert!(
+            APP_JS.contains(".filter(function (e) { return e.line > 0; })"),
+            "a line-0 error gets no band, but still lists below the editor"
+        );
+        assert!(
+            APP_JS.contains("eap-bands eap-stale"),
+            "editing after a Check greys the bands rather than silently dropping them"
+        );
+        assert!(
+            APP_JS.contains("text.setSelectionRange(offset,"),
+            "an error row clicks through to its line on the real textarea"
+        );
+        // No id built by concatenation: per-file and per-error elements key
+        // off `data-*`, which is what keeps `tests/element_ids.rs` able to
+        // see every id this file declares.
+        assert!(
+            APP_JS.contains("data-eap-file=") && APP_JS.contains("data-eap-error="),
+            "per-file and per-error elements key off data-*, never a built id"
+        );
+        assert!(
+            !APP_JS.contains("\"sd-eap-line-\"") && !APP_JS.contains("sd-eap-error-\" +"),
+            "no element id is built by concatenation"
+        );
+        // One wrapper, not a new one: the id guard hardcodes four names, so
+        // an `eapEl()` would hide every lookup inside it.
+        assert!(!APP_JS.contains("function eapEl("), "no new lookup wrapper");
+    }
+
+    /// The `RunProtocol` row re-hydrates **both** of its fields on load.
+    ///
+    /// This is the hole `embarch-ui` decision 17 records as having silently
+    /// dropped monitor targets — one feature later, with two fields instead
+    /// of one.
+    #[test]
+    fn a_run_protocol_row_reloads_both_of_its_fields() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert!(APP_JS.contains("base.protocol = a.protocol || \"\";"));
+        assert!(APP_JS.contains("base.entryState = a.entry_state || \"\";"));
+        assert!(
+            APP_JS.contains("unknown until the file parses")
+                || APP_JS.contains("did not parse"),
+            "a file that did not parse reads as unreadable, never as a protocol with no states"
+        );
+        assert!(
+            APP_JS.contains("not a state of "),
+            "a renamed state keeps what was authored and says it is not there"
+        );
+        assert!(
+            APP_JS.contains("is a terminal state of "),
+            "a terminal entry state is refused before submit, from the served flag"
         );
     }
 
@@ -4980,6 +5108,42 @@ repeat = [{ name = "green", type = "i32le" }]
         assert!(broken.errors[0].line > 0, "the editor bands this line");
         assert!(broken.errors[0].message.starts_with("line "), "{:?}", broken.errors[0]);
         assert!(out.duplicate_names.is_empty());
+    }
+
+    /// A block that **parsed but did not resolve** is listed with its name
+    /// and no states, and a file that did not parse at all is listed by
+    /// stem. They are different facts and a row naming one should be able to
+    /// say which.
+    #[test]
+    fn an_unresolved_block_is_listed_and_an_unparsed_file_is_named() {
+        // A block with a `goto` nothing declares: it parses, it does not
+        // resolve.
+        let unresolved =
+            "protocol broken {\n    state go {\n        on_timeout 1000ms: goto nowhere\n    }\n\n    state done outcome: pass\n}\n";
+        let scratch = repo_with_protocols(
+            "protocols-unresolved",
+            &[("ok", ONE_PROTOCOL), ("broken", unresolved), ("garbage", "protocol x {\n")],
+        );
+        let repo = embarch_study_designer::eap_repo::scan(&scratch.0).unwrap();
+
+        let summaries = protocol_summaries(&repo);
+        let json = serde_json::to_value(&summaries).unwrap();
+        let broken = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "broken")
+            .expect("an unresolved block is listed, not omitted");
+        assert_eq!(broken["resolved"], false);
+        assert_eq!(broken["states"].as_array().unwrap().len(), 0);
+        assert_eq!(broken["file"], "broken");
+
+        let ok = json.as_array().unwrap().iter().find(|p| p["name"] == "bds").unwrap();
+        assert_eq!(ok["resolved"], true);
+
+        // A file that did not parse declares nothing nameable, so it is
+        // reported by stem instead.
+        assert_eq!(unparsed_files(&repo), vec!["garbage".to_string()]);
     }
 
     #[test]

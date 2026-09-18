@@ -339,6 +339,17 @@
 
           <div class="card" style="margin-bottom:16px;">
             <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Protocols — the <span class="mono">.eap</span> manifests this study's steps hand the link to</div>
+              <div class="sd-toolbar-actions">
+                <button id="sd-eap-open" class="btn">Author .eap files…</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin:8px 0 10px;">A <span class="mono">RunProtocol</span> step hands the BLE link to a declared state machine for the length of that step — a request/chunk/consume handshake that would otherwise be a dozen brittle write steps. Manifests live in <span class="mono">&lt;firmware-repo&gt;/embarch/protocols/</span>; the study carries a resolved copy, so it replays identically on a machine that is not yours. This card is read-only: what a study carries is derived from the steps that name it, never authored separately.</p>
+            <div id="sd-protocols-carried"></div>
+          </div>
+
+          <div class="card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
               <div class="card-title" style="margin:0;">Registered actions and payload layouts — this repo's own</div>
               <div class="sd-toolbar-actions">
                 <button id="sd-add-layout" class="btn">+ Payload layout</button>
@@ -471,6 +482,41 @@
             <span style="flex:1;"></span>
             <button id="sd-layout-cancel" class="btn">Cancel</button>
             <button id="sd-layout-save" class="btn btn-primary">Save layout</button>
+          </div>
+        </div>
+        <!-- The `.eap` editor. The one dialog decision 17's "a new dialog
+             needs no new CSS" does not cover: a file list plus an editor at
+             min(720px, 92vw) is a 40-column editor, which is not an editor.
+             `.dialog-wide` plus the `.eap-*` block in style.css. -->
+        <div id="sd-eap-backdrop" class="dialog-backdrop" style="display:none;"></div>
+        <div id="sd-eap-dialog" class="dialog dialog-wide" style="display:none;">
+          <div class="card-title">Protocol manifests — <span class="mono">&lt;firmware-repo&gt;/embarch/protocols/</span></div>
+          <p class="placeholder-note">Plain text, checked by the same parser that resolves a manifest into a study. Nothing here auto-saves, and nothing is written until it parses and resolves — a refused save leaves the file byte-identical.</p>
+          <div id="sd-eap-duplicates" class="sd-error" style="display:none;"></div>
+          <div class="eap-layout">
+            <div class="eap-files">
+              <div id="sd-eap-list"></div>
+              <button id="sd-eap-new" class="btn" style="margin:8px;">+ New file</button>
+            </div>
+            <div class="eap-main">
+              <div class="eap-editor">
+                <div id="sd-eap-gutter" class="eap-gutter"></div>
+                <div class="eap-textwrap">
+                  <div id="sd-eap-bands" class="eap-bands"></div>
+                  <textarea id="sd-eap-text" class="eap-text" wrap="off" spellcheck="false"></textarea>
+                </div>
+              </div>
+              <p id="sd-eap-status" class="placeholder-note" style="margin:8px 0 0;"></p>
+              <div id="sd-eap-errors"></div>
+              <div id="sd-eap-refusal" style="display:none;"></div>
+            </div>
+          </div>
+          <div class="sd-row-actions" style="margin-top:14px;">
+            <button id="sd-eap-delete" class="btn">Delete file</button>
+            <span style="flex:1;"></span>
+            <button id="sd-eap-check" class="btn">Check</button>
+            <button id="sd-eap-close" class="btn">Close</button>
+            <button id="sd-eap-save" class="btn btn-primary">Save</button>
           </div>
         </div>
       </section>
