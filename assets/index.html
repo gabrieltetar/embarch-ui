@@ -95,10 +95,6 @@
 
     <div class="content">
       <section class="tab-panel" data-tab="dashboard">
-        <div class="page-head">
-          <h1>Dashboard</h1>
-          <p>Suite overview — everything embarch-ui can see through embarch-core right now</p>
-        </div>
         <div id="dashboard-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
         <div style="display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:16px; margin-bottom:16px;">
           <div class="card">
@@ -133,10 +129,6 @@
       </section>
 
       <section class="tab-panel" data-tab="topology">
-        <div class="page-head">
-          <h1>Topology</h1>
-          <p>Hardware and software topology — what's wired to what, right now</p>
-        </div>
         <div class="card" style="margin-bottom:16px; padding:26px 30px;">
           <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
         </div>
@@ -182,10 +174,6 @@
       </section>
 
       <section class="tab-panel" data-tab="study-designer">
-        <div class="page-head">
-          <h1>Study Designer</h1>
-          <p>Build and run a <span class="mono">Study</span> against a connected DUT</p>
-        </div>
 
         <!-- decision 14. This card replaces the old
              "Not configured" dead end: the config field is still the
@@ -623,10 +611,6 @@
       </section>
 
       <section class="tab-panel" data-tab="enroll">
-        <div class="page-head">
-          <h1>Enroll</h1>
-          <p>Declare which physical board plays which role — hardware topology only; software topology is fully automatic</p>
-        </div>
         <div id="enroll-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
         <div class="card" style="margin-bottom:16px;">
           <div class="card-title">Attached probes — drag onto a role below, or click a card then a zone</div>
@@ -709,10 +693,6 @@
       </div>
 
       <section class="tab-panel" data-tab="live-study">
-        <div class="page-head">
-          <h1>Live Study</h1>
-          <p>Run a study and watch everything land as it arrives &mdash; or open a past one and read it back off disk</p>
-        </div>
 
         <!-- 1. Run / open ------------------------------------------------ -->
         <div style="display:grid; grid-template-columns: minmax(280px, 380px) 1fr; gap:16px; margin-bottom:16px;">
@@ -971,11 +951,12 @@
       </section>
 
       <section class="tab-panel" data-tab="debug">
-        <div class="page-head" style="display:flex; align-items:flex-end; justify-content:space-between; flex-wrap:wrap; gap:12px;">
-          <div>
-            <h1>Debug</h1>
-            <p id="debug-subtitle">Live-tailed embarch-core log</p>
-          </div>
+        <!-- No <h1> here, or on any other tab: the topbar already names the
+             tab, taking the text from the nav item itself, so a heading in
+             the body could only ever repeat it. The line below the controls
+             survives because it is not a restatement of the title — it
+             describes the log source now selected and changes with it. -->
+        <div class="page-head">
           <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <div class="chip active-filter" data-log-source="core">embarch-core</div>
             <div class="chip" data-log-source="api">embarch-api</div>
@@ -994,9 +975,10 @@
               Pause
             </button>
           </div>
+          <p id="debug-subtitle">Live-tailed embarch-core log</p>
         </div>
         <div id="debug-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
-        <div class="console" id="log-console" style="height:calc(100vh - 260px);">
+        <div class="console" id="log-console" style="height:calc(100vh - 225px);">
           <p class="placeholder-note">waiting for embarch-core…</p>
         </div>
       </section>

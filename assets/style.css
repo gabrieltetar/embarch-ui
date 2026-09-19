@@ -286,20 +286,20 @@ a:hover {
   overflow-y: auto;
   padding: 28px 32px 24px;
 }
+/* The Debug tab's controls row and the line under it. Every tab used to
+ * open with an <h1> and a sentence here, both of which the topbar already
+ * said — the topbar title is taken from the nav item, so the heading could
+ * only ever be the same word one line lower. The rule for that h1 is gone
+ * with it; what is left is the one subtitle that says something the title
+ * never did (which log source is selected), and it now sits below the
+ * controls rather than beside them. */
 .page-head {
-  margin-bottom: 22px;
-}
-.page-head h1 {
-  font-size: 21px;
-  font-weight: 650;
-  margin: 0 0 4px;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
+  margin-bottom: 16px;
 }
 .page-head p {
   font-size: 13px;
   color: var(--text-tertiary);
-  margin: 0;
+  margin: 8px 0 0;
 }
 
 .footer-bar {
