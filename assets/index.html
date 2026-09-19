@@ -19,7 +19,13 @@
     } catch (_) {}
   })();
 </script>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<!-- IBM Plex is served by this binary, not by fonts.googleapis.com: the
+     CDN link this replaces failed silently on an offline bench and took
+     the trace view's glyph-width assumption with it. The @font-face
+     rules live in style.css; these two preloads start the fetch for the
+     two faces every page uses before the CSS is parsed. -->
+<link rel="preload" href="/fonts/ibm-plex-sans-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/ibm-plex-mono-400-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="stylesheet" href="/style.css">

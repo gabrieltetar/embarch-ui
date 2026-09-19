@@ -7438,13 +7438,19 @@
     // tall enough to raise a vertical scrollbar.
     var width = Math.max(640, svg.clientWidth || svg.parentElement.clientWidth || 900);
     var lanes = traceLanesInOrder(view);
-    // ~6.6 px per character at 11.5 px IBM Plex Mono, plus the 12 px the
-    // label is inset from the plot and a little breathing room.
+    // 6.9 px per character at 11.5 px IBM Plex Mono — the font's advance is
+    // exactly 0.6 em and every glyph shares it, so this is arithmetic, not
+    // an estimate. It read 6.6 until 2026-09-19, which under-measured every
+    // label by 4.5%; it is checkable now because the font is served by this
+    // binary instead of fetched from a CDN that could quietly not answer
+    // (`tests/browser/drive_fonts.py` measures it in a real browser and
+    // fails if the two drift). Plus the 12 px the label is inset from the
+    // plot and a little breathing room.
     var widest = 0;
     lanes.forEach(function (l) { widest = Math.max(widest, l.label.length); });
     traceGutter = Math.max(
       TRACE_GUTTER_MIN,
-      Math.min(TRACE_GUTTER_MAX, Math.ceil(widest * 6.6) + 24)
+      Math.min(TRACE_GUTTER_MAX, Math.ceil(widest * 6.9) + 24)
     );
     var plotLeft = traceGutter;
     var plotRight = width - TRACE_PAD_RIGHT;
@@ -7550,7 +7556,7 @@
       );
       if (lane.unnamed) {
         parts.push(
-          '<line x1="' + (traceGutter - 12 - Math.min(240, lane.label.length * 6.6)) + '" y1="' +
+          '<line x1="' + (traceGutter - 12 - Math.min(240, lane.label.length * 6.9)) + '" y1="' +
           (mid + 7) + '" x2="' + (traceGutter - 12) + '" y2="' + (mid + 7) +
           '" stroke="var(--text-tertiary)" stroke-width="1" stroke-dasharray="2 2"/>'
         );

@@ -19,10 +19,10 @@ mod study_designer;
 mod time_chart;
 mod trace;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use embarch_core_client::CoreClient;
@@ -80,6 +80,20 @@ const FAVICON_PNG: &[u8] = include_bytes!("../assets/brand/favicon-64.png");
 /// PNG stays as the second `<link>`: an SVG icon is the one asset type a
 /// browser is allowed to decline, and a blank tab is a worse default.
 const FAVICON_SVG: &str = include_str!("../assets/brand/embarch-mark.svg");
+
+/// IBM Plex, baked in rather than fetched from fonts.googleapis.com
+/// (`assets/style.css`'s `@font-face` block says why at length): a bench
+/// machine is regularly offline, and the CDN link these replace failed
+/// *silently* — the app fell back to Segoe UI and the trace view's
+/// hardcoded 6.6 px-per-character lane gutter stopped matching the font it
+/// was measured against. Latin subsets, ~91 KB for all four, which is the
+/// whole cost of never depending on Google to render the UI. Sans is one
+/// variable file covering 400-700; Mono ships the two weights the
+/// stylesheet actually pairs it with. SIL OFL
+/// 1.1, licence text beside them in `assets/fonts/`.
+const FONT_SANS_VAR: &[u8] = include_bytes!("../assets/fonts/ibm-plex-sans-var-latin.woff2");
+const FONT_MONO_400: &[u8] = include_bytes!("../assets/fonts/ibm-plex-mono-400-latin.woff2");
+const FONT_MONO_600: &[u8] = include_bytes!("../assets/fonts/ibm-plex-mono-600-latin.woff2");
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -236,6 +250,7 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/app.js", get(app_js))
         .route("/favicon.png", get(favicon_png))
         .route("/favicon.svg", get(favicon_svg))
+        .route("/fonts/{file}", get(font))
         .route("/events", get(events))
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/enroll", post(api_enroll))
@@ -395,6 +410,29 @@ async fn favicon_svg() -> impl IntoResponse {
         ],
         FAVICON_SVG,
     )
+}
+
+/// The four `@font-face` sources. One route over a match rather than four
+/// handlers: the set is closed, and an unknown name is a typo in the
+/// stylesheet, which should 404 rather than resolve to something. The files
+/// are immutable — a new subset would arrive under a new name — so they are
+/// cached for a year, unlike `style.css`, which changes constantly and is
+/// deliberately not cached at all.
+async fn font(Path(file): Path<String>) -> Response {
+    let body: &'static [u8] = match file.as_str() {
+        "ibm-plex-sans-var-latin.woff2" => FONT_SANS_VAR,
+        "ibm-plex-mono-400-latin.woff2" => FONT_MONO_400,
+        "ibm-plex-mono-600-latin.woff2" => FONT_MONO_600,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn favicon_png() -> impl IntoResponse {

@@ -40,11 +40,23 @@ and the one where a card has to say why instead of showing a dead toggle.
 python3 tests/browser/drive_build.py
 ```
 
+`drive_fonts.py` is the fourth, and the only one that is about every page
+rather than one tab: IBM Plex is served out of this binary (`embarch-ui`
+decision 42), and this checks in a real browser that the faces actually load,
+that no request went to a font CDN, and that the shipped Plex Mono's advance
+is the number `assets/app.js` sizes the trace gutter from. It found that
+constant wrong by 4.5% the first time it ran. It needs nothing but the UI.
+
+```sh
+python3 tests/browser/drive_fonts.py
+```
+
 **Not wired into `cargo test`**, deliberately: it needs geckodriver, a release
 build and three processes, and a test that cannot run on a checkout is worse
 than a script somebody runs on purpose. Run it after any change to
 `assets/app.js`, `assets/index.html`, `src/live_study.rs` or
-`src/studies_api.rs`.
+`src/studies_api.rs` — and `drive_fonts.py` after any change to
+`assets/style.css`'s `@font-face` block or `assets/fonts/`.
 
 **What the stub is for.** Five of its fixtures are states a bench will not
 produce on demand: a study embarch-core reports as `interrupted`, one whose
