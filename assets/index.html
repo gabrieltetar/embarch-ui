@@ -202,10 +202,6 @@
                 <span>Firmware repo path</span>
                 <input id="sd-project-path" type="text" class="sd-input mono" spellcheck="false" placeholder="/home/you/src/your-firmware" />
               </label>
-              <label class="sd-field" style="flex:0 1 190px;">
-                <span>Static GATT extractor</span>
-                <input id="sd-project-extractor" type="text" class="sd-input mono" spellcheck="false" placeholder="(none)" title="name of a registered GattConfigExtractor, e.g. reference-dut; leave blank to skip static extraction" />
-              </label>
               <div class="sd-toolbar-actions">
                 <select id="sd-project-recents" class="sd-input"><option value="">Recent projects…</option></select>
                 <button id="sd-project-open" class="btn btn-primary">Open</button>
@@ -214,6 +210,32 @@
             <p class="placeholder-note" style="margin-top:8px;">Studies are read from and written to <span class="mono">&lt;repo&gt;/embarch/studies/</span>, and the custom-action registry from <span class="mono">&lt;repo&gt;/embarch/study-actions.toml</span>. A repo with no <span class="mono">embarch/</span> directory yet is fine — it gets created on the first save.</p>
             <p id="sd-project-error" class="sd-error" style="display:none;"></p>
           </div>
+
+          <!-- Reading the firmware's own source used to be a pure side
+               effect: it ran lazily the first time some other panel needed a
+               characteristic name, cached for the life of the project, and
+               logged its failures where nobody running the UI would see
+               them. So "did reading the source find anything?" was a
+               question you answered by squinting at whether another card's
+               chips looked right. This is that question, asked directly. -->
+          <details id="sd-static" class="sd-submenu" style="margin-top:14px;">
+            <summary>Static firmware analysis</summary>
+            <div class="sd-submenu-body">
+              <p class="placeholder-note" style="margin:0 0 10px;">Reads the firmware repo's own source for its GATT table — no board, no bench, nothing flashed. What it finds is an assertion about the <em>tree</em>: a characteristic behind a disabled Kconfig is declared here and absent from a live discovery, and the two are kept apart everywhere they meet.</p>
+              <div class="sd-toolbar" style="align-items:flex-end;">
+                <label class="sd-field" style="flex:0 1 230px;">
+                  <span>Static GATT extractor</span>
+                  <input id="sd-project-extractor" type="text" class="sd-input mono" spellcheck="false" placeholder="(none)" title="zephyr-ble-def is the one extractor this build ships; leave blank to skip static extraction" />
+                </label>
+                <div class="sd-toolbar-actions">
+                  <button id="sd-static-run" class="btn" title="Re-read the repo's source now, discarding what was cached">Run GATT extractor</button>
+                  <button id="sd-discover" class="btn" title="Live GattDiscover against the DUT — needs the dev-bench and the board">Discover GATT (live)</button>
+                </div>
+              </div>
+              <p id="sd-static-note" class="placeholder-note" style="margin:10px 0 0;">Not run yet in this session — press <span class="mono">Run GATT extractor</span> to read the source.</p>
+              <div id="sd-static-result" style="margin-top:10px;"></div>
+            </div>
+          </details>
         </div>
 
         <div id="sd-body" style="display:none;">
@@ -223,23 +245,19 @@
                 <span>Study name</span>
                 <input id="sd-name" type="text" class="sd-input" value="untitled-study" spellcheck="false" />
               </label>
-              <!-- Beside the study name because the log level belongs to the
-                   saved study, not to the run and not to the log tap —
-                   embarch-study-designer decision 51 rejected making it a
-                   property of the tap, so it must not sit in Streams. -->
-              <label class="sd-field" style="flex:0 1 240px;">
-                <span>dev-bench log level</span>
-                <select id="sd-log-level" class="sd-input"></select>
-              </label>
               <div class="sd-toolbar-actions">
                 <button id="sd-new-study" class="btn" title="Start a new, empty, immediately-saveable study in this project">New study</button>
                 <button id="sd-save" class="btn">Save</button>
                 <select id="sd-load-select" class="sd-input sd-select-load"><option value="">Load saved study…</option></select>
                 <button id="sd-delete" class="btn" title="Delete the selected saved study">Delete</button>
-                <button id="sd-discover" class="btn">Discover GATT</button>
+                <button id="sd-buildopts-open" class="btn" title="Which builds this study is for, the firmware it builds, and the dev-bench log level it asks for">Build options…</button>
               </div>
             </div>
-            <p id="sd-log-level-note" class="placeholder-note" style="margin-top:10px;"></p>
+            <!-- What is behind the button, on the page. A modal that hides
+                 three saved properties of the study would otherwise make
+                 "what does this study actually require?" a thing you have to
+                 open a dialog to answer. -->
+            <p id="sd-buildopts-summary" class="placeholder-note mono" style="margin-top:10px;"></p>
             <!-- A run-only study, shown in the Load dropdown's own area
                  rather than as a second list: it is the same library, and
                  the only difference is that this one has no rows to load. -->
@@ -248,6 +266,132 @@
           </div>
 
           <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">Steps — run top to bottom</div>
+            <div class="table-scroll">
+              <table class="data-table sd-table">
+                <thead>
+                  <tr>
+                    <th style="width:34px;">#</th>
+                    <th style="width:150px;">Step name</th>
+                    <th style="width:210px;">Action</th>
+                    <th>Parameters</th>
+                    <th style="width:110px;" title="wait this long before starting the step's action — not taken out of its timeout">Wait&nbsp;first&nbsp;(ms)</th>
+                    <th style="width:110px;">Timeout&nbsp;(ms)</th>
+                    <th style="width:80px;">On&nbsp;fail</th>
+                    <th style="width:96px;"></th>
+                  </tr>
+                </thead>
+                <tbody id="sd-rows"></tbody>
+              </table>
+            </div>
+            <div class="sd-row-actions">
+              <button id="sd-add-row" class="btn">+ Add step</button>
+              <button id="sd-add-capture-template" class="btn" title="Insert the connect / open-window / stimulate / close-window shape a stimulate-and-capture study needs">+ Capture-window template</button>
+              <span style="flex:1;"></span>
+              <button id="sd-run" class="btn btn-primary">Run study</button>
+            </div>
+            <!-- Advisory, never a gate: this note never disables Run. See
+                 embarch-study-designer's `limits` advisory band. -->
+            <p id="sd-caps-note" class="placeholder-note" style="margin-top:10px;"></p>
+            <p id="sd-build-error" class="sd-error" style="display:none;"></p>
+          </div>
+
+          <!-- One panel, four sections: what comes off the link, what the
+               link is known to carry, the state machines a step hands the
+               link to, and the names this repo gives the bytes. They were
+               four cards, which read as four unrelated subjects stacked
+               below the step table rather than as the one question they all
+               answer. -->
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">Define the wire</div>
+            <p class="placeholder-note" style="margin:8px 0 0;">What this study records off the link, what the link is known to carry, the protocols a step can hand it to, and the names this repo gives the bytes.</p>
+
+            <div class="sd-panel-section">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Streams — what this study records alongside its steps</div>
+              <div class="sd-toolbar-actions">
+                <button id="sd-add-gatt-tap" class="btn">+ GATT notify tap</button>
+                <button id="sd-add-tap" class="btn">+ Outpost trace tap</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin:8px 0 12px;">A <strong>GATT notify tap</strong> gives one characteristic its own file, decoded with a layout your firmware repo declares in <span class="mono">embarch/study-structs.toml</span> — pick the layout, or leave it raw. Something has to subscribe to that characteristic for it to capture anything, so a monitor step must cover it. An <strong>outpost trace tap</strong> names a <em>signal</em>, never a carrier, so the identical saved study runs unchanged after the bench is rewired; routes are declared in the <a href="#topology" class="mono">Topology</a> tab. Any study with a monitor step also gets a full GATT transcript at <span class="mono">streams/gatt.csv</span> automatically — you do not declare it and it is not capped.</p>
+            <div class="table-scroll">
+              <table class="data-table sd-table">
+                <thead>
+                  <tr>
+                    <th style="width:34px;">#</th>
+                    <th style="width:200px;">Output name</th>
+                    <th style="width:230px;">Signal / characteristic</th>
+                    <th>Decoding</th>
+                    <th style="width:220px;" title="a record magic makes this capture checkable end to end: Core scans for it and verifies each record's trailing CRC-32">Record framing</th>
+                    <th style="width:60px;"></th>
+                  </tr>
+                </thead>
+                <tbody id="sd-taps"></tbody>
+              </table>
+            </div>
+            <p class="placeholder-note" style="margin-top:10px;"><strong>Record framing</strong> is what turns "the file has bytes in it" into "these are the bytes the DUT computed a checksum over". Give a GATT tap the magic its records begin with — <span class="mono">GWF1</span> as text, or <span class="mono">0x42 0x53 0x53 0x03</span> as bytes — and embarch-core finds the record boundaries and checks each record's trailing CRC-32 after the run. Leave it blank and the capture is simply not checked, which is an honest answer and not a passing one.</p>
+            <p id="sd-taps-empty" class="placeholder-note" style="margin-top:10px;">No taps — this study records its steps and nothing else.</p>
+            </div>
+
+
+            <div class="sd-panel-section">
+            <div class="card-title">Detected characteristics — not yet registered</div>
+            <p class="placeholder-note" style="margin-bottom:10px;">Found by live <span class="mono">GattDiscover</span> and/or by reading the firmware repo's own source. Register one to give it a name and a set of clickable values you can pick from a step row. Nothing here invents what a characteristic means — the names and the bytes are yours.</p>
+            <div id="sd-unregistered" class="chip-pool">run <span class="mono">Run GATT extractor</span> or <span class="mono">Discover GATT (live)</span>, under <strong>Static firmware analysis</strong> on the project panel, to populate this</div>
+            </div>
+
+
+            <div class="sd-panel-section">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Protocols — the <span class="mono">.eap</span> manifests this study's steps hand the link to</div>
+              <div class="sd-toolbar-actions">
+                <button id="sd-eap-open" class="btn">Author .eap files…</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin:8px 0 10px;">A <span class="mono">RunProtocol</span> step hands the BLE link to a declared state machine for the length of that step — a request/chunk/consume handshake that would otherwise be a dozen brittle write steps. Manifests live in <span class="mono">&lt;firmware-repo&gt;/embarch/protocols/</span>; the study carries a resolved copy, so it replays identically on a machine that is not yours. This card is read-only: what a study carries is derived from the steps that name it, never authored separately.</p>
+            <div id="sd-protocols-carried"></div>
+            </div>
+
+
+            <div class="sd-panel-section">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Registered actions and payload layouts — this repo's own</div>
+              <div class="sd-toolbar-actions">
+                <button id="sd-add-layout" class="btn">+ Payload layout</button>
+              </div>
+            </div>
+            <p class="placeholder-note" style="margin:8px 0 10px;">Click a registered action to edit or rename it, a layout to edit its fields. Deleting or renaming one that a saved study still uses is <strong>refused</strong>, naming the studies. Saving rewrites <span class="mono">study-actions.toml</span> / <span class="mono">study-structs.toml</span> whole, so <strong>comments you hand-wrote in those files are lost</strong>.</p>
+            <div id="sd-registered" class="chip-pool">no registered action in this repo yet</div>
+            <div class="card-title" style="margin:16px 0 6px; font-size:13px;">Payload layouts</div>
+            <div id="sd-layouts" class="chip-pool">no payload layout in this repo yet</div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Build options: the two cards that used to sit between the study
+             toolbar and the step table, plus the dev-bench log level that sat
+             beside the study name. All three are properties of the saved
+             study rather than of the run, and all three are set once and then
+             read — which is exactly the shape that belongs behind a button
+             rather than taking a third of the page above the steps. -->
+        <div id="sd-buildopts-backdrop" class="dialog-backdrop" style="display:none;"></div>
+        <div id="sd-buildopts-dialog" class="dialog dialog-wide" style="display:none;">
+          <!-- One flex child, not two: `.card-title` is `space-between`, so a
+               bare trailing span lands against the far edge of a wide dialog
+               with the title alone on the left. -->
+          <div class="card-title"><span>Build options — <span id="sd-buildopts-name" class="mono"></span></span></div>
+          <p class="placeholder-note" style="margin:8px 0 0;">Everything here travels with the saved study: it is part of the experiment, not part of this particular run.</p>
+
+          <div class="sd-dialog-section">
+            <div class="card-title" style="margin:0;">dev-bench log level</div>
+            <p class="placeholder-note" style="margin:8px 0 10px;">A property of the study, not of the run and not of the log tap — embarch-study-designer decision 51 rejected making it a property of the tap, so it must not sit in Streams either.</p>
+            <select id="sd-log-level" class="sd-input" style="max-width:280px;"></select>
+            <p id="sd-log-level-note" class="placeholder-note" style="margin-top:10px;"></p>
+          </div>
+
+          <div class="sd-dialog-section">
             <div class="sd-toolbar">
               <div class="card-title" style="margin:0;">Requires — which builds this study is for</div>
               <div class="sd-toolbar-actions">
@@ -272,7 +416,7 @@
             <p class="placeholder-note" style="margin-top:10px;">dev-bench's version is read back off the bench itself over <span class="mono">HelloAck</span> — the one version string in this suite genuinely reported by the thing it describes. The DUT's is what the configured firmware repo's own <span class="mono">git describe</span> says, which is an assertion about the tree, not a reading off the board: a run against it is recorded as <span class="mono">Declared</span>.</p>
           </div>
 
-          <div class="card" id="sd-build-card" style="margin-bottom:16px;">
+          <div class="sd-dialog-section" id="sd-build-card">
             <div class="sd-toolbar">
               <div class="card-title" style="margin:0;">Build — the DUT firmware this study puts on the board</div>
               <div class="sd-toolbar-actions">
@@ -328,95 +472,10 @@
             </div>
           </div>
 
-          <div class="card" style="margin-bottom:16px;">
-            <div class="card-title">Steps — run top to bottom</div>
-            <div class="table-scroll">
-              <table class="data-table sd-table">
-                <thead>
-                  <tr>
-                    <th style="width:34px;">#</th>
-                    <th style="width:150px;">Step name</th>
-                    <th style="width:210px;">Action</th>
-                    <th>Parameters</th>
-                    <th style="width:110px;" title="wait this long before starting the step's action — not taken out of its timeout">Wait&nbsp;first&nbsp;(ms)</th>
-                    <th style="width:110px;">Timeout&nbsp;(ms)</th>
-                    <th style="width:80px;">On&nbsp;fail</th>
-                    <th style="width:96px;"></th>
-                  </tr>
-                </thead>
-                <tbody id="sd-rows"></tbody>
-              </table>
-            </div>
-            <div class="sd-row-actions">
-              <button id="sd-add-row" class="btn">+ Add step</button>
-              <button id="sd-add-capture-template" class="btn" title="Insert the connect / open-window / stimulate / close-window shape a stimulate-and-capture study needs">+ Capture-window template</button>
-              <span style="flex:1;"></span>
-              <button id="sd-run" class="btn btn-primary">Run study</button>
-            </div>
-            <!-- Advisory, never a gate: this note never disables Run. See
-                 embarch-study-designer's `limits` advisory band. -->
-            <p id="sd-caps-note" class="placeholder-note" style="margin-top:10px;"></p>
-            <p id="sd-build-error" class="sd-error" style="display:none;"></p>
+          <div class="sd-row-actions" style="margin-top:16px;">
+            <span style="flex:1;"></span>
+            <button id="sd-buildopts-close" class="btn btn-primary">Done</button>
           </div>
-
-          <div class="card" style="margin-bottom:16px;">
-            <div class="sd-toolbar">
-              <div class="card-title" style="margin:0;">Streams — what this study records alongside its steps</div>
-              <div class="sd-toolbar-actions">
-                <button id="sd-add-gatt-tap" class="btn">+ GATT notify tap</button>
-                <button id="sd-add-tap" class="btn">+ Outpost trace tap</button>
-              </div>
-            </div>
-            <p class="placeholder-note" style="margin:8px 0 12px;">A <strong>GATT notify tap</strong> gives one characteristic its own file, decoded with a layout your firmware repo declares in <span class="mono">embarch/study-structs.toml</span> — pick the layout, or leave it raw. Something has to subscribe to that characteristic for it to capture anything, so a monitor step must cover it. An <strong>outpost trace tap</strong> names a <em>signal</em>, never a carrier, so the identical saved study runs unchanged after the bench is rewired; routes are declared in the <a href="#topology" class="mono">Topology</a> tab. Any study with a monitor step also gets a full GATT transcript at <span class="mono">streams/gatt.csv</span> automatically — you do not declare it and it is not capped.</p>
-            <div class="table-scroll">
-              <table class="data-table sd-table">
-                <thead>
-                  <tr>
-                    <th style="width:34px;">#</th>
-                    <th style="width:200px;">Output name</th>
-                    <th style="width:230px;">Signal / characteristic</th>
-                    <th>Decoding</th>
-                    <th style="width:220px;" title="a record magic makes this capture checkable end to end: Core scans for it and verifies each record's trailing CRC-32">Record framing</th>
-                    <th style="width:60px;"></th>
-                  </tr>
-                </thead>
-                <tbody id="sd-taps"></tbody>
-              </table>
-            </div>
-            <p class="placeholder-note" style="margin-top:10px;"><strong>Record framing</strong> is what turns "the file has bytes in it" into "these are the bytes the DUT computed a checksum over". Give a GATT tap the magic its records begin with — <span class="mono">GWF1</span> as text, or <span class="mono">0x42 0x53 0x53 0x03</span> as bytes — and embarch-core finds the record boundaries and checks each record's trailing CRC-32 after the run. Leave it blank and the capture is simply not checked, which is an honest answer and not a passing one.</p>
-            <p id="sd-taps-empty" class="placeholder-note" style="margin-top:10px;">No taps — this study records its steps and nothing else.</p>
-          </div>
-
-          <div class="card" style="margin-bottom:16px;">
-            <div class="card-title">Detected characteristics — not yet registered</div>
-            <p class="placeholder-note" style="margin-bottom:10px;">Found by live <span class="mono">GattDiscover</span> and/or by reading the firmware repo's own source. Register one to give it a name and a set of clickable values you can pick from a step row. Nothing here invents what a characteristic means — the names and the bytes are yours.</p>
-            <div id="sd-unregistered" class="chip-pool">run <span class="mono">Discover GATT</span> to populate this</div>
-          </div>
-
-          <div class="card" style="margin-bottom:16px;">
-            <div class="sd-toolbar">
-              <div class="card-title" style="margin:0;">Protocols — the <span class="mono">.eap</span> manifests this study's steps hand the link to</div>
-              <div class="sd-toolbar-actions">
-                <button id="sd-eap-open" class="btn">Author .eap files…</button>
-              </div>
-            </div>
-            <p class="placeholder-note" style="margin:8px 0 10px;">A <span class="mono">RunProtocol</span> step hands the BLE link to a declared state machine for the length of that step — a request/chunk/consume handshake that would otherwise be a dozen brittle write steps. Manifests live in <span class="mono">&lt;firmware-repo&gt;/embarch/protocols/</span>; the study carries a resolved copy, so it replays identically on a machine that is not yours. This card is read-only: what a study carries is derived from the steps that name it, never authored separately.</p>
-            <div id="sd-protocols-carried"></div>
-          </div>
-
-          <div class="card" style="margin-bottom:16px;">
-            <div class="sd-toolbar">
-              <div class="card-title" style="margin:0;">Registered actions and payload layouts — this repo's own</div>
-              <div class="sd-toolbar-actions">
-                <button id="sd-add-layout" class="btn">+ Payload layout</button>
-              </div>
-            </div>
-            <p class="placeholder-note" style="margin:8px 0 10px;">Click a registered action to edit or rename it, a layout to edit its fields. Deleting or renaming one that a saved study still uses is <strong>refused</strong>, naming the studies. Saving rewrites <span class="mono">study-actions.toml</span> / <span class="mono">study-structs.toml</span> whole, so <strong>comments you hand-wrote in those files are lost</strong>.</p>
-            <div id="sd-registered" class="chip-pool">no registered action in this repo yet</div>
-            <div class="card-title" style="margin:16px 0 6px; font-size:13px;">Payload layouts</div>
-            <div id="sd-layouts" class="chip-pool">no payload layout in this repo yet</div>
-          </div>
-
         </div>
 
         <div id="sd-runcheck-backdrop" class="dialog-backdrop" style="display:none;"></div>

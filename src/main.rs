@@ -286,6 +286,10 @@ async fn async_main() -> anyhow::Result<()> {
         // "new" as a perfectly good slug, so that path would be ambiguous
         // with a real study named "new" on the sibling `{slug}` route.
         .route("/api/study-designer/new-study", post(study_designer::api_new_study))
+        .route(
+            "/api/study-designer/static-analysis",
+            post(study_designer::api_static_analysis),
+        )
         .route("/api/study-designer/actions", get(study_designer::api_actions))
         .route("/api/study-designer/bench-state", get(study_designer::api_bench_state))
         .route("/api/study-designer/version-check", get(study_designer::api_version_check))

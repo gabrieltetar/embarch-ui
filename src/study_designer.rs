@@ -193,8 +193,14 @@ impl StudyDesigner {
 
     /// Runs the configured `static_extractor` at most once per project.
     /// An unrecognized name is a named error the first time it's needed,
-    /// not a silent guess — `reference-dut` is the only name this crate
+    /// not a silent guess — `zephyr-ble-def` is the only name this crate
     /// currently ships an extractor for (`embarch-study-designer` decision 33).
+    ///
+    /// The failure is *logged* here and swallowed, because every caller of
+    /// this is a request that has something else to answer and a repo with a
+    /// broken extractor still has an action registry, saved studies and a
+    /// live GATT table. [`Self::force_static_extraction`] is the surface that
+    /// hands the failure to a human who asked for the extraction itself.
     fn static_extraction(&self) -> Option<StaticGatt> {
         let mut cached = self.0.static_gatt.lock().unwrap();
         if let Some(computed) = cached.as_ref() {
@@ -206,23 +212,32 @@ impl StudyDesigner {
             // the project opened a moment later.
             return None;
         };
-        let computed = match project.static_extractor.as_deref() {
-            Some("zephyr-ble-def") => ZephyrBleDefExtractor
-                .extract_labeled(&project.firmware_repo_path)
-                .map(|extracted| StaticGatt {
-                    services: extracted.services.iter().cloned().collect(),
-                    symbols: extracted.characteristic_symbols().collect(),
-                    service_symbols: extracted.service_symbols().collect(),
-                })
-                .map_err(|e| tracing::warn!("static GATT extraction failed: {e}"))
-                .ok(),
-            Some(other) => {
-                tracing::warn!("unrecognized static_extractor '{other}' — only 'reference-dut' exists today");
-                None
-            }
-            None => None,
-        };
+        let computed = run_static_extraction(&project)
+            .map_err(|e| tracing::warn!("static GATT extraction failed: {e}"))
+            .ok()
+            .flatten();
         *cached = Some(computed.clone());
+        computed
+    }
+
+    /// Re-runs the extractor **now**, discarding the cache, and returns what
+    /// it found or why it found nothing.
+    ///
+    /// The cached path above exists because a repo's source tree doesn't
+    /// change while a request is being served. It does change while the tab
+    /// is open — that is what editing firmware *is* — so an explicit "run the
+    /// extractor" button that served a cached answer would be a button that
+    /// does nothing after its first press. This is the one entry point that
+    /// invalidates first and reports the error rather than logging it.
+    fn force_static_extraction(&self) -> Result<Option<StaticGatt>, String> {
+        let Some(project) = self.project() else {
+            return Err(NO_PROJECT.to_string());
+        };
+        let computed = run_static_extraction(&project);
+        // Cached on failure too, as `None`: the next ordinary request must
+        // not silently re-run an extractor that just failed, and the error
+        // itself has already been handed to the human who asked.
+        *self.0.static_gatt.lock().unwrap() = Some(computed.clone().unwrap_or(None));
         computed
     }
 
@@ -250,6 +265,41 @@ impl StudyDesigner {
         self.0.live_gatt.lock().unwrap().clone()
     }
 }
+
+/// The extraction proper, with its failure returned rather than logged.
+///
+/// `Ok(None)` and `Err(_)` are different answers and are kept apart all the
+/// way to the browser: no extractor configured is the ordinary state of a
+/// repo nobody has pointed one at, and an extractor that ran and failed is a
+/// fault. Collapsing them is how "static analysis found nothing" came to mean
+/// both "there is nothing" and "nobody looked".
+fn run_static_extraction(project: &StudyDesignerConfig) -> Result<Option<StaticGatt>, String> {
+    match project.static_extractor.as_deref() {
+        Some(STATIC_EXTRACTOR_NAME) => ZephyrBleDefExtractor
+            .extract_labeled(&project.firmware_repo_path)
+            .map(|extracted| {
+                Some(StaticGatt {
+                    services: extracted.services.iter().cloned().collect(),
+                    symbols: extracted.characteristic_symbols().collect(),
+                    service_symbols: extracted.service_symbols().collect(),
+                })
+            })
+            .map_err(|e| e.to_string()),
+        Some(other) => Err(format!(
+            "unrecognized static extractor '{other}' — '{STATIC_EXTRACTOR_NAME}' is the only one \
+             this build ships"
+        )),
+        None => Ok(None),
+    }
+}
+
+/// The one extractor name this build answers to
+/// (`embarch-study-designer` decision 33). Named once because the
+/// project panel's placeholder, the refusal text and the match arm all have
+/// to agree, and they did not: the refusal said `reference-dut` while the
+/// match arm read `zephyr-ble-def`, so the only way to learn the right name
+/// was to read this file.
+const STATIC_EXTRACTOR_NAME: &str = "zephyr-ble-def";
 
 /// One static extraction, cached per project: the GATT table plus the C
 /// identifiers behind it (`embarch-study-designer` decision 56).
@@ -4465,6 +4515,91 @@ mod tests {
         assert!(cached.as_ref().unwrap().is_none(), "...and as having produced nothing");
     }
 
+    /// The distinction the whole static-analysis panel rests on: "no
+    /// extractor configured" and "an extractor ran and failed" are different
+    /// answers, and the forced path returns the second rather than logging it
+    /// and handing back the first. Collapsing them is how "static analysis
+    /// found nothing" came to mean both "there is nothing" and "nobody
+    /// looked".
+    #[test]
+    fn an_unrecognized_extractor_is_an_error_not_an_empty_extraction() {
+        let core = Arc::new(
+            embarch_core_client::CoreClient::new(
+                &toml::from_str("base_url = \"http://127.0.0.1:1\"\n").unwrap(),
+            )
+            .unwrap(),
+        );
+        let scratch = Scratch::new("bad-extractor");
+        let sd = StudyDesigner::new(
+            Some(StudyDesignerConfig {
+                firmware_repo_path: scratch.0.clone(),
+                static_extractor: Some("not-an-extractor".to_string()),
+            }),
+            core,
+        );
+        let err = sd.force_static_extraction().expect_err("an unknown name must not pass");
+        assert!(err.contains("not-an-extractor"), "the refusal must name what was asked for: {err}");
+        assert!(
+            err.contains(STATIC_EXTRACTOR_NAME),
+            "...and what would have worked: {err}"
+        );
+        // Cached as `Some(None)` so the ordinary lazy path doesn't quietly
+        // re-run an extractor that has just failed in front of a human.
+        let cached = sd.0.static_gatt.lock().unwrap();
+        assert_eq!(cached.as_ref().map(Option::is_none), Some(true));
+    }
+
+    /// No name configured is the ordinary state of a repo nobody has pointed
+    /// an extractor at, and the forced path must not dress it up as a fault.
+    #[test]
+    fn forcing_with_no_extractor_configured_is_not_an_error() {
+        let core = Arc::new(
+            embarch_core_client::CoreClient::new(
+                &toml::from_str("base_url = \"http://127.0.0.1:1\"\n").unwrap(),
+            )
+            .unwrap(),
+        );
+        let scratch = Scratch::new("force-no-extractor");
+        let sd = StudyDesigner::new(
+            Some(StudyDesignerConfig {
+                firmware_repo_path: scratch.0.clone(),
+                static_extractor: None,
+            }),
+            core,
+        );
+        assert!(sd.force_static_extraction().unwrap().is_none());
+    }
+
+    /// The cache is what makes the lazy path affordable and what would make
+    /// an explicit "run the extractor" button a button that does nothing
+    /// after its first press — so the forced path discards it first.
+    #[test]
+    fn forcing_discards_the_cache_rather_than_serving_it() {
+        let core = Arc::new(
+            embarch_core_client::CoreClient::new(
+                &toml::from_str("base_url = \"http://127.0.0.1:1\"\n").unwrap(),
+            )
+            .unwrap(),
+        );
+        let scratch = Scratch::new("force-discards");
+        let sd = StudyDesigner::new(
+            Some(StudyDesignerConfig {
+                firmware_repo_path: scratch.0.clone(),
+                static_extractor: Some("not-an-extractor".to_string()),
+            }),
+            core,
+        );
+        // Pretend a previous extraction had found something: the lazy path
+        // would serve this forever.
+        *sd.0.static_gatt.lock().unwrap() = Some(Some(StaticGatt {
+            services: Vec::new(),
+            symbols: vec![(Uuid([0u8; 16]), "stale_symbol".to_string())],
+            service_symbols: Vec::new(),
+        }));
+        assert!(sd.static_extraction().is_some(), "the lazy path serves the cache");
+        assert!(sd.force_static_extraction().is_err(), "the forced path re-runs");
+    }
+
     /// With no project open there is nothing to have computed, so the absence
     /// must *not* be cached — otherwise the "no" gets served to the project
     /// opened a moment later.
@@ -5772,6 +5907,131 @@ pub async fn api_open_project(
         ),
         survey: Some(survey),
         recents: load_recent_projects(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StaticAnalysisRequest {
+    /// The extractor to run, when the panel's field has been edited. `None`
+    /// leaves the project's configured one alone; `Some("")` clears it.
+    ///
+    /// Adopted into the open project rather than used for this one call: an
+    /// extractor picked here is what every *other* surface — the merged
+    /// action list, the characteristic names, the tap pickers — then reads
+    /// through, and a name that only applied to the button that ran it would
+    /// name one thing on this panel and nothing anywhere else.
+    #[serde(default)]
+    static_extractor: Option<String>,
+}
+
+/// One characteristic a static extraction found, as the panel renders it.
+#[derive(Debug, Serialize)]
+pub struct StaticCharacteristic {
+    uuid: String,
+    /// The C identifier it was declared under, where the extraction
+    /// recovered one (`embarch-study-designer` decision 56).
+    name: Option<GattName>,
+    /// The ATT properties byte **as the source declares it** — a
+    /// compile-time assertion about the firmware, not an observation off a
+    /// board. The Detected-characteristics chips already distinguish the two
+    /// and this panel says so in words.
+    properties: u8,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StaticService {
+    uuid: String,
+    name: Option<GattName>,
+    characteristics: Vec<StaticCharacteristic>,
+}
+
+/// What `POST /api/study-designer/static-analysis` answers.
+///
+/// `configured: false` with no error is the ordinary state of a repo nobody
+/// has pointed an extractor at, and is deliberately not an error — see
+/// [`run_static_extraction`].
+#[derive(Debug, Serialize)]
+pub struct StaticAnalysisResponse {
+    extractor: Option<String>,
+    configured: bool,
+    error: Option<String>,
+    services: Vec<StaticService>,
+    characteristic_count: usize,
+}
+
+/// Runs the firmware repo's static GATT extractor on demand and reports what
+/// it read out of the source.
+///
+/// This exists because the extraction was, until now, only ever a *side
+/// effect*: it ran lazily the first time something else needed a name, cached
+/// for the life of the project, and reported its failures to a log nobody
+/// running the UI is reading. An engineer who wanted to know whether reading
+/// the firmware source had found anything had to infer it from whether some
+/// other panel's chips looked right.
+pub async fn api_static_analysis(
+    State(state): State<crate::AppState>,
+    Json(req): Json<StaticAnalysisRequest>,
+) -> axum::response::Response {
+    let sd = state.study_designer;
+    let Some(project) = sd.project() else { return not_configured() };
+
+    if let Some(requested) = req.static_extractor.as_deref() {
+        let requested = requested.trim();
+        let requested = (!requested.is_empty()).then(|| requested.to_string());
+        if requested != project.static_extractor {
+            let config = StudyDesignerConfig {
+                firmware_repo_path: project.firmware_repo_path.clone(),
+                static_extractor: requested.clone(),
+            };
+            // The full project switch, not a field poke: changing which
+            // extractor runs invalidates the live GATT table too, for the
+            // same reason opening a different repo does — every name on
+            // screen was resolved through the old one.
+            sd.open_project(config);
+            remember_recent_project(&RecentProject {
+                path: project.firmware_repo_path.to_string_lossy().into_owned(),
+                static_extractor: requested,
+            });
+        }
+    }
+
+    let extractor = sd.project().and_then(|p| p.static_extractor.clone());
+    let (extraction, error) = match sd.force_static_extraction() {
+        Ok(found) => (found, None),
+        Err(e) => (None, Some(e)),
+    };
+
+    let names = match &extraction {
+        Some(extraction) => GattNameBook::new()
+            .with_symbols(extraction.symbols.clone())
+            .with_service_symbols(extraction.service_symbols.clone()),
+        None => GattNameBook::new(),
+    };
+    let services: Vec<StaticService> = extraction
+        .iter()
+        .flat_map(|extraction| extraction.services.iter())
+        .map(|service| StaticService {
+            uuid: service.uuid.to_hyphenated().to_string(),
+            name: names.service(service.uuid),
+            characteristics: service
+                .characteristics
+                .iter()
+                .map(|chrc| StaticCharacteristic {
+                    uuid: chrc.uuid.to_hyphenated().to_string(),
+                    name: names.get(chrc.uuid),
+                    properties: chrc.properties,
+                })
+                .collect(),
+        })
+        .collect();
+
+    Json(StaticAnalysisResponse {
+        configured: extractor.is_some(),
+        extractor,
+        error,
+        characteristic_count: services.iter().map(|s| s.characteristics.len()).sum(),
+        services,
     })
     .into_response()
 }

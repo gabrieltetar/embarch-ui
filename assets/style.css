@@ -1460,3 +1460,80 @@ table.data-table {
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+
+/* A submenu on a card: a disclosure whose summary reads as a heading rather
+   than as a link, so a rarely-pressed tool can sit on a panel without
+   spending the panel's vertical budget. */
+.sd-submenu {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.sd-submenu > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 620;
+  color: var(--text-secondary);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sd-submenu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sd-submenu > summary::before {
+  content: "▸";
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.sd-submenu[open] > summary::before {
+  content: "▾";
+}
+
+.sd-submenu-body {
+  padding-top: 12px;
+}
+
+/* One section of a multi-section card or dialog: the rule that used to be
+   the gap between two cards. */
+.sd-panel-section + .sd-panel-section,
+.sd-dialog-section {
+  border-top: 1px solid var(--border);
+  margin-top: 20px;
+  padding-top: 18px;
+}
+
+.sd-panel-section:first-of-type {
+  margin-top: 18px;
+}
+
+/* One service the static extractor read out of the source. */
+.sd-static-service {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.sd-static-service > .sd-static-service-name {
+  font-size: 12.5px;
+  font-weight: 620;
+  margin-bottom: 6px;
+}
+
+.sd-static-chrc {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.sd-static-chrc > .sd-static-props {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}

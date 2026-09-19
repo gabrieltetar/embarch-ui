@@ -2366,7 +2366,7 @@
     if (!pool) return;
     var items = sdUnregistered();
     if (!items.length) {
-      pool.innerHTML = '<span class="placeholder-note">nothing detected yet — run <span class="mono">Discover GATT</span> with the dev-bench and DUT connected, or set <span class="mono">[study_designer].static_extractor</span> to read them from the firmware source</span>';
+      pool.innerHTML = '<span class="placeholder-note">nothing detected yet — run <span class="mono">Discover GATT (live)</span> with the dev-bench and DUT connected, or <span class="mono">Run GATT extractor</span> to read them out of the firmware source. Both are under <strong>Static firmware analysis</strong> on the project panel.</span>';
       return;
     }
     pool.innerHTML = "";
@@ -2559,12 +2559,37 @@
     var resp = await fetch("/api/study-designer/studies/" + encodeURIComponent(slug));
     var text = await resp.text();
     if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
-    var loaded = JSON.parse(text);
-    sdEl("sd-name").value = loaded.name;
-    if (loaded.requires) {
-      sdApplyRequires(loaded.requires);
-      sdApplyBuild(loaded.requires.build || null, loaded.requires.outpost || null);
-    }
+    sdApplyStudy(JSON.parse(text));
+  }
+
+  /* The one and only path from a `Study` to what is on screen.
+   *
+   * It exists because there wasn't one. Loading a study set the name, the
+   * requirements, the build spec, the log level, the taps and the rows;
+   * `sdNewStudy` set the rows and the taps and nothing else — so starting a
+   * new study after opening a saved one left the previous study's
+   * requirements, its build selection and its log level sitting in the
+   * panel, attached to a file that stated none of them. Every one of those
+   * would then have been written back out by the first save.
+   *
+   * The rule this function keeps is that **every field is assigned on every
+   * call**, from the study or from a default. A field restored only when the
+   * study happens to carry it is the same bug in waiting: the next author to
+   * add a property to `Study` gets the leftover for free.
+   */
+  function sdApplyStudy(loaded) {
+    loaded = loaded || {};
+    sdShowBuildError("");
+    sdEl("sd-name").value = loaded.name || "untitled-study";
+    // `{}` rather than a skipped call when the file states no requirements:
+    // `sdApplyRequires` clears both fields and unticks both "any" boxes, and
+    // skipping it is exactly how the previous study's version requirement
+    // survived into the new one.
+    sdApplyRequires(loaded.requires || {});
+    sdApplyBuild(
+      (loaded.requires && loaded.requires.build) || null,
+      (loaded.requires && loaded.requires.outpost) || null
+    );
     // Restored, or left unstated when the file predates the field — never
     // silently reset to Warn, which is the same drop decision 17 records for
     // monitor targets.
@@ -2579,7 +2604,7 @@
       return tap;
     });
     renderSdTaps();
-    sdRows = loaded.rows.map(function (r) {
+    sdRows = (loaded.rows || []).map(function (r) {
       var base = sdNewRow({
         name: r.name,
         timeout_ms: r.timeout_ms,
@@ -2635,6 +2660,10 @@
       return base;
     });
     renderSdRows();
+    // Derived from the rows, so it is stale until they land — and stale in
+    // exactly the way this function exists to stop.
+    renderSdProtocolsCard();
+    renderSdBuildOptsSummary();
   }
 
   async function sdDeleteStudy() {
@@ -2652,6 +2681,12 @@
     btn.disabled = true;
     btn.textContent = "Discovering…";
     sdShowBuildError("");
+    // Reported beside the button as well as into the step table's error
+    // line: this button sits on the project card now, and `sd-build-error`
+    // is inside `sd-body`, which is hidden whenever no project is open —
+    // so on exactly the path where this fails most obviously, the old
+    // surface says nothing at all.
+    sdStaticNote("discovering against the DUT…", false);
     try {
       // The device name comes from the step table's own `ble_connect` row.
       // A discovery that connects to whatever advertises first is a coin
@@ -2670,13 +2705,22 @@
         }),
       });
       if (!resp.ok) {
-        sdShowBuildError("discover failed: " + resp.status + " " + (await resp.text()));
+        var why = "discover failed: " + resp.status + " " + (await resp.text());
+        sdShowBuildError(why);
+        sdStaticNote(why, true);
         return;
       }
       var data = await resp.json();
       sdAdoptActions(data);
+      sdStaticNote(
+        "live discovery found " + (data.subscribable || []).length +
+          " notify-capable characteristic" + ((data.subscribable || []).length === 1 ? "" : "s") +
+          " — observed off the board, not read out of the source.",
+        false
+      );
     } catch (e) {
       sdShowBuildError("discover failed: " + String(e));
+      sdStaticNote("discover failed: " + String(e), true);
     } finally {
       btn.disabled = false;
       btn.textContent = original;
@@ -3823,6 +3867,7 @@
       sdEl("sd-build-on").disabled = true;
       sdEl("sd-build-body").style.display = "none";
       note.textContent = sdBuildSurvey.reason || "this bench cannot build the open repo";
+      renderSdBuildOptsSummary();
       return;
     }
     sdEl("sd-build-on").disabled = false;
@@ -3833,6 +3878,7 @@
     sdRenderBuildTargets();
     sdRenderBuildFlags();
     sdSyncBuildToggle();
+    renderSdBuildOptsSummary();
   }
 
   // The four axes, filled from the live scan. A blank first option is "don't
@@ -4067,6 +4113,193 @@
     sdSyncReqAny();
   }
 
+  /* ---- the Build options dialog ----------------------------------------
+   *
+   * Three properties of the saved study — which builds it is for, the
+   * firmware it builds and flashes, and the dev-bench log level it asks for
+   * — used to take about a third of the page between the study toolbar and
+   * the step table, every one of them set once per study and then read. They
+   * are behind a button now, with the one-line summary below standing in for
+   * them on the page: a modal that hid all three would otherwise make "what
+   * does this study require?" a question you have to open a dialog to
+   * answer.
+   */
+
+  function sdReqSummaryText(inputId, anyId) {
+    if (sdEl(anyId).checked) return "any";
+    var stated = sdEl(inputId).value.trim();
+    return stated || "unstated";
+  }
+
+  function renderSdBuildOptsSummary() {
+    var el = sdEl("sd-buildopts-summary");
+    if (!el) return;
+    var bits = [
+      "dev-bench " + sdReqSummaryText("sd-req-bench", "sd-req-bench-any"),
+      "DUT " + sdReqSummaryText("sd-req-dut", "sd-req-dut-any"),
+    ];
+    var spec = sdBuildSpecPayload();
+    if (spec) {
+      var target = [spec.app, spec.board, spec.variant, spec.revision]
+        .filter(function (x) { return x; })
+        .join(" / ");
+      bits.push(
+        "builds " + (target || "the project default") +
+        (spec.snippets.length ? " + " + spec.snippets.length + " snippet" + (spec.snippets.length === 1 ? "" : "s") : "")
+      );
+    } else {
+      bits.push("no build — runs against whatever is on the board");
+    }
+    var outpost = sdOutpostPayload();
+    if (outpost) {
+      var modes = (outpost.set || []).map(function (f) { return f; })
+        .concat((outpost.clear || []).map(function (f) { return "no " + f; }));
+      bits.push("mode: " + modes.join(", "));
+    }
+    // The level the study *states*, never the one the picker happens to be
+    // showing: an untouched picker shows the server's default without the
+    // study asserting it, and a summary that read the select would turn that
+    // into a claim the file does not make.
+    bits.push("log level " + (sdLogLevel || "unstated (server default)"));
+    el.textContent = bits.join("  ·  ");
+  }
+
+  function sdOpenBuildOpts() {
+    sdEl("sd-buildopts-name").textContent = sdEl("sd-name").value || "untitled-study";
+    sdEl("sd-buildopts-backdrop").style.display = "block";
+    sdEl("sd-buildopts-dialog").style.display = "block";
+  }
+
+  function sdCloseBuildOpts() {
+    sdEl("sd-buildopts-backdrop").style.display = "none";
+    sdEl("sd-buildopts-dialog").style.display = "none";
+    renderSdBuildOptsSummary();
+  }
+
+  /* ---- static firmware analysis ----------------------------------------
+   *
+   * Reading the firmware repo's own source for its GATT table was, until
+   * now, only ever a side effect: it ran lazily the first time some other
+   * panel needed a characteristic name, cached for the life of the open
+   * project, and reported its failures to a server log nobody running this
+   * UI is reading. This is the same extraction, asked for on purpose, with
+   * what it found and why it found nothing both on screen.
+   */
+
+  function sdStaticNote(text, bad) {
+    var el = sdEl("sd-static-note");
+    if (!el) return;
+    el.textContent = text;
+    el.className = bad ? "sd-error" : "placeholder-note";
+    el.style.margin = "10px 0 0";
+  }
+
+  /* The ATT properties byte, as bit names. Declared in the source, not
+   * observed off a board — which the panel says in words, because a
+   * property this list shows and a live discovery contradicts is a real
+   * thing that happens and must not read as a measurement. */
+  function sdPropNames(properties) {
+    return [
+      [0x02, "read"],
+      [0x04, "write-no-resp"],
+      [0x08, "write"],
+      [0x10, "notify"],
+      [0x20, "indicate"],
+    ]
+      .filter(function (bit) { return properties & bit[0]; })
+      .map(function (bit) { return bit[1]; });
+  }
+
+  function renderSdStaticResult(data) {
+    var box = sdEl("sd-static-result");
+    box.innerHTML = "";
+    if (!data.services.length) return;
+    data.services.forEach(function (service) {
+      var card = document.createElement("div");
+      card.className = "sd-static-service";
+      var head = document.createElement("div");
+      head.className = "sd-static-service-name";
+      head.innerHTML =
+        (service.name ? escapeHtml(service.name.label) + " " : "") +
+        '<span class="mono placeholder-note">' + escapeHtml(service.uuid) + "</span>";
+      if (service.name) head.title = service.name.origin;
+      card.appendChild(head);
+      service.characteristics.forEach(function (chrc) {
+        var row = document.createElement("div");
+        row.className = "sd-static-chrc";
+        var props = sdPropNames(chrc.properties);
+        row.innerHTML =
+          "<span>" + (chrc.name ? escapeHtml(chrc.name.label) : '<span class="placeholder-note">unnamed</span>') + "</span>" +
+          '<span class="mono placeholder-note">' + escapeHtml(chrc.uuid) + "</span>" +
+          '<span class="sd-static-props">' + (props.length ? escapeHtml(props.join(" · ")) : "no properties declared") + "</span>";
+        if (chrc.name) row.title = chrc.name.origin;
+        card.appendChild(row);
+      });
+      box.appendChild(card);
+    });
+  }
+
+  async function sdRunStaticAnalysis() {
+    var btn = sdEl("sd-static-run");
+    var original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Reading source…";
+    sdStaticNote("reading the firmware repo's source…", false);
+    try {
+      var resp = await fetch("/api/study-designer/static-analysis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Sent every time, so the field on this panel is the extractor that
+        // runs — including when it has just been cleared, which is how you
+        // turn static extraction off.
+        body: JSON.stringify({ static_extractor: sdEl("sd-project-extractor").value }),
+      });
+      var text = await resp.text();
+      if (!resp.ok) {
+        sdEl("sd-static-result").innerHTML = "";
+        return sdStaticNote(resp.status + " " + text, true);
+      }
+      var data = JSON.parse(text);
+      renderSdStaticResult(data);
+      if (data.error) {
+        sdStaticNote(data.extractor + " failed: " + data.error, true);
+      } else if (!data.configured) {
+        // Not an error, and deliberately not phrased as one: a repo nobody
+        // has pointed an extractor at is the ordinary starting state, and
+        // "found nothing" must not mean both "there is nothing" and "nobody
+        // looked".
+        sdStaticNote(
+          "no extractor configured — nothing was read. zephyr-ble-def is the one this build ships.",
+          false
+        );
+      } else {
+        sdStaticNote(
+          data.extractor + " read " + data.services.length +
+            (data.services.length === 1 ? " service, " : " services, ") +
+            data.characteristic_count +
+            (data.characteristic_count === 1 ? " characteristic" : " characteristics") +
+            " out of the source — declared, not observed off a board.",
+          false
+        );
+      }
+      // Every panel that renders a characteristic name resolves it through
+      // this extraction, so they are all stale the moment it re-runs.
+      if (sdEl("sd-body").style.display !== "none") {
+        try {
+          await loadSdActions();
+        } catch (e) {
+          /* the extraction itself is what this button reports on */
+        }
+      }
+      sdLoadProject();
+    } catch (e) {
+      sdStaticNote(String(e), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
   // Prefilling is what makes a mandatory field a help rather than a tax: the
   // common case is "the builds currently in front of me", and typing a hash by
   // hand to say that would guarantee people paste `any` to get past it,
@@ -4102,6 +4335,9 @@
         el.title = row.error || "";
       }
     });
+    // Prefilling writes into the requirement fields, so the line on the page
+    // that reports them is stale until this has run.
+    renderSdBuildOptsSummary();
   }
 
   // --- tap rows -----------------------------------------------------------
@@ -4799,8 +5035,11 @@
 
     // Opened straight away when nothing is open, so the first thing an
     // engineer sees on a fresh machine is the field they need rather than a
-    // button they have to find.
+    // button they have to find. The static-analysis submenu opens with it,
+    // because the extractor field lives in there and opening a project is
+    // when you pick one.
     sdEl("sd-project-picker").style.display = state.path ? "none" : "";
+    if (!state.path) sdEl("sd-static").open = true;
     if (state.path && !sdEl("sd-project-path").value) {
       sdEl("sd-project-path").value = state.path;
       sdEl("sd-project-extractor").value = state.static_extractor || "";
@@ -4853,6 +5092,10 @@
       // being watched on the Live Study tab.
       sdRows = [];
       sdTaps = [];
+      // Read out of the *previous* repo's source, down to the C identifiers
+      // behind the names — the server drops its own copy on the same switch.
+      sdEl("sd-static-result").innerHTML = "";
+      sdStaticNote("not run yet against this project.", false);
       await sdEnterProject();
     } catch (e) {
       err.textContent = String(e);
@@ -4876,16 +5119,16 @@
       var text = await resp.text();
       if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
       // The file the server wrote is already a valid, runnable, loadable
-      // `Study` — so the table is reset to empty rather than to the
-      // capture-window template, and what is on screen matches what is on
-      // disk.
-      sdRows = [];
-      sdTaps = [];
-      renderSdRows();
-      renderSdTaps();
-      sdShowBuildError("");
+      // `Study`, so **the new study is loaded rather than approximated**:
+      // what is on screen is what is on disk, byte for byte, and "new" and
+      // "load" cannot drift apart because new *is* a load. This used to
+      // reset the two tables by hand and leave every other panel showing the
+      // study that was open a moment ago.
+      var slug = JSON.parse(text).slug;
       await loadSdStudies();
-      sdEl("sd-load-select").value = JSON.parse(text).slug;
+      sdEl("sd-load-select").value = slug;
+      sdCloseStored();
+      await sdLoadStudy(slug);
     } catch (e) {
       sdShowBuildError(String(e));
     } finally {
@@ -4986,7 +5229,14 @@
       renderSdLogLevelNote();
     });
     sdEl("sd-delete").addEventListener("click", sdDeleteStudy);
-    sdEl("sd-discover").addEventListener("click", sdDiscover);
+    sdEl("sd-buildopts-open").addEventListener("click", sdOpenBuildOpts);
+    sdEl("sd-buildopts-close").addEventListener("click", sdCloseBuildOpts);
+    sdEl("sd-buildopts-backdrop").addEventListener("click", sdCloseBuildOpts);
+    // One listener on the dialog rather than one per control: every field in
+    // here feeds the summary line on the page, and a summary that is only
+    // recomputed on close is wrong for as long as the dialog is open.
+    sdEl("sd-buildopts-dialog").addEventListener("change", renderSdBuildOptsSummary);
+    sdEl("sd-buildopts-dialog").addEventListener("input", renderSdBuildOptsSummary);
     sdEl("sd-load-select").addEventListener("change", function (ev) {
       var slug = ev.target.value;
       var known = sdStudyIndex[slug];
@@ -5100,6 +5350,12 @@
     sdEl("sd-project-open").addEventListener("click", function () {
       sdOpenProject();
     });
+    // Wired here, not in `sdWireStudyDesigner`: both buttons live on the
+    // project card, which is on screen before any project is open, and that
+    // function does not run until one is. `Discover GATT` used to be on the
+    // study toolbar inside `sd-body`, where that distinction never came up.
+    sdEl("sd-static-run").addEventListener("click", sdRunStaticAnalysis);
+    sdEl("sd-discover").addEventListener("click", sdDiscover);
     sdEl("sd-project-recents").addEventListener("change", function (ev) {
       var opt = ev.target.selectedOptions[0];
       if (!opt || !opt.value) return;
