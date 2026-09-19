@@ -639,6 +639,21 @@
       // Not an error state: embarch-api may simply never have run here.
       empty: "nothing logged by embarch-api yet",
     },
+    // **Stored, not tailed**, which is why it carries no `events`: these are
+    // finished builds, and a finished build's log does not change. The
+    // picker beside the chips is what selects one — the source is a
+    // directory, not a stream, and the other two sources have nothing to
+    // pick.
+    //
+    // It is here rather than in a Builds tab of its own because the Debug
+    // tab is already the place that switches between log sources
+    // (decision 13), and a build log is a log.
+    builds: {
+      stored: true,
+      subtitle: "Firmware builds this UI ran — the whole log of each, kept on this machine",
+      errorTitle: "build log unreadable",
+      empty: "no firmware build has been run from this UI yet",
+    },
   };
   let logSource = "core";
   let logStream = null;
@@ -736,8 +751,74 @@
   // embarch-api's heading, with no timestamp order between them.
   let logGeneration = 0;
 
+  // Which stored build log the `builds` source is showing. Kept across a
+  // source switch so going core -> builds -> core -> builds comes back to
+  // the same one rather than jumping to the newest.
+  let logBuildId = null;
+
+  // Fills the picker beside the chips. Newest first, which is the one
+  // somebody switching to this source almost always wants, so it is also the
+  // default selection.
+  async function loadBuildLogList() {
+    const pick = document.getElementById("log-build-pick");
+    if (!pick) return;
+    let logs = [];
+    try {
+      const resp = await fetch("/api/build/logs");
+      logs = (await resp.json()).logs || [];
+    } catch (e) {
+      logs = [];
+    }
+    pick.innerHTML = "";
+    if (!logs.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "no builds yet";
+      pick.appendChild(opt);
+      logBuildId = null;
+      return;
+    }
+    logs.forEach((log) => {
+      const opt = document.createElement("option");
+      opt.value = log.id;
+      const when = new Date(log.started_utc_ms).toLocaleString();
+      opt.textContent = when + " · " + log.project + " · " + (log.ok ? "ok" : "failed");
+      pick.appendChild(opt);
+    });
+    if (!logs.some((l) => l.id === logBuildId)) logBuildId = logs[0].id;
+    pick.value = logBuildId;
+  }
+
+  async function loadStoredBuildLog() {
+    const generation = logGeneration;
+    if (!logBuildId) {
+      renderLogsError(null);
+      return;
+    }
+    try {
+      const resp = await fetch("/api/build/logs/" + encodeURIComponent(logBuildId));
+      const text = await resp.text();
+      if (generation !== logGeneration) return;
+      if (!resp.ok) {
+        renderLogsError(text);
+        return;
+      }
+      renderLogsError(null);
+      appendLogLines(text.split("\n"));
+    } catch (e) {
+      if (generation !== logGeneration) return;
+      renderLogsError(String(e));
+    }
+  }
+
   async function loadLogBacklog() {
     const generation = logGeneration;
+    if (LOG_SOURCES[logSource].stored) {
+      await loadBuildLogList();
+      if (generation !== logGeneration) return;
+      await loadStoredBuildLog();
+      return;
+    }
     try {
       const resp = await fetch(LOG_SOURCES[logSource].recent);
       const text = await resp.text();
@@ -775,7 +856,15 @@
     if (subtitle) subtitle.textContent = config.subtitle;
     renderLogsError(null);
 
+    // The picker only belongs to the stored source; the other two have
+    // nothing to pick.
+    const pick = document.getElementById("log-build-pick");
+    if (pick) pick.style.display = config.stored ? "" : "none";
+
     loadLogBacklog();
+    // A stored log is a finished file. There is no stream to open, and
+    // opening one against an absent `events` would be a 404 per switch.
+    if (config.stored) return;
     try {
       logStream = new EventSource(config.events);
       logStream.addEventListener("lines", (evt) => {
@@ -812,6 +901,20 @@
         document.querySelectorAll("#log-console .log-line").forEach(applyLogVisibility);
       });
     });
+
+    const pick = document.getElementById("log-build-pick");
+    if (pick) {
+      pick.addEventListener("change", () => {
+        logBuildId = pick.value || null;
+        // Same generation bump a source switch does, for the same reason: a
+        // fetch already in flight for the previous build must not splice its
+        // lines into this one's console.
+        logGeneration += 1;
+        const console_ = document.getElementById("log-console");
+        if (console_) console_.innerHTML = "";
+        loadStoredBuildLog();
+      });
+    }
 
     const search = document.getElementById("log-search");
     if (search) {
@@ -2458,7 +2561,10 @@
     if (!resp.ok) return sdShowBuildError(resp.status + " " + text);
     var loaded = JSON.parse(text);
     sdEl("sd-name").value = loaded.name;
-    if (loaded.requires) sdApplyRequires(loaded.requires);
+    if (loaded.requires) {
+      sdApplyRequires(loaded.requires);
+      sdApplyBuild(loaded.requires.build || null, loaded.requires.outpost || null);
+    }
     // Restored, or left unstated when the file predates the field — never
     // silently reset to Warn, which is the same drop decision 17 records for
     // monitor targets.
@@ -3686,7 +3792,264 @@
     return {
       dev_bench_version: sdEl("sd-req-bench").value.trim(),
       firmware_version: sdEl("sd-req-dut").value.trim(),
+      build: sdBuildSpecPayload(),
+      outpost: sdOutpostPayload(),
     };
+  }
+
+  // ---- the Build card (decision 11, reversed) -----------------------------
+  //
+  // What this tab can build, as the server reported it: the matched project,
+  // the live target scan, and the flag names. Null until the first survey,
+  // and `{available:false}` on a bench with no embarch-api config — which is
+  // a state the card renders, not an error: the Study Designer works
+  // perfectly well without a build toggle.
+  var sdBuildSurvey = null;
+  // The chosen snippets, **in order**. An array rather than a set of ticked
+  // checkboxes, because west applies `-S` in order and reversals row 109 is
+  // a case where the order decides whether the image works.
+  var sdBuildSnippets = [];
+
+  async function sdLoadBuildSurvey() {
+    var note = sdEl("sd-build-note");
+    try {
+      var resp = await fetch("/api/build/survey");
+      sdBuildSurvey = await resp.json();
+    } catch (e) {
+      sdBuildSurvey = { available: false, reason: String(e), flags: [] };
+    }
+    if (!sdBuildSurvey.available) {
+      sdEl("sd-build-on").checked = false;
+      sdEl("sd-build-on").disabled = true;
+      sdEl("sd-build-body").style.display = "none";
+      note.textContent = sdBuildSurvey.reason || "this bench cannot build the open repo";
+      return;
+    }
+    sdEl("sd-build-on").disabled = false;
+    note.textContent =
+      "project " + sdBuildSurvey.project + ", from " + sdBuildSurvey.config_path +
+      ". Off by default: flashing is the destructive half, and a study that only observes a " +
+      "board somebody just flashed by hand must not silently overwrite it.";
+    sdRenderBuildTargets();
+    sdRenderBuildFlags();
+    sdSyncBuildToggle();
+  }
+
+  // The four axes, filled from the live scan. A blank first option is "don't
+  // narrow on this axis", which the resolver fills from the project's own
+  // default_target — a real answer, and the common one on a single-board
+  // bench, so it is the default rather than something to clear.
+  function sdRenderBuildTargets() {
+    var targets = (sdBuildSurvey.targets && sdBuildSurvey.targets.targets) || [];
+    var axes = [
+      ["sd-build-board", "board"],
+      ["sd-build-app", "app"],
+      ["sd-build-variant", "variant"],
+      ["sd-build-revision", "revision"],
+    ];
+    axes.forEach(function (axis) {
+      var el = sdEl(axis[0]);
+      var want = el.value;
+      var seen = [];
+      targets.forEach(function (t) {
+        var v = t[axis[1]];
+        if (v && seen.indexOf(v) === -1) seen.push(v);
+      });
+      seen.sort();
+      el.innerHTML = "";
+      var blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "(the project's default)";
+      el.appendChild(blank);
+      seen.forEach(function (v) {
+        var opt = document.createElement("option");
+        opt.value = v;
+        opt.textContent = v;
+        el.appendChild(opt);
+      });
+      el.value = want;
+      if (el.value !== want) el.value = "";
+    });
+    var note = sdEl("sd-build-board-note");
+    note.textContent = targets.length + " target(s) in this repo";
+    sdRenderSnippetPool();
+  }
+
+  // The snippets the *chosen app* declares, from the same scan. An app with
+  // none says so rather than showing an empty box.
+  function sdRenderSnippetPool() {
+    var byApp = (sdBuildSurvey && sdBuildSurvey.targets && sdBuildSurvey.targets.snippets_by_app) || {};
+    var app = sdEl("sd-build-app").value;
+    var pool = sdEl("sd-build-snippet-pool");
+    pool.innerHTML = "";
+    var names = app ? byApp[app] || [] : [];
+    if (!app) {
+      pool.textContent = "pick an app to see what it declares";
+      return;
+    }
+    if (!names.length) {
+      pool.textContent = "this app declares no snippets";
+      return;
+    }
+    names.forEach(function (name) {
+      var chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = "+ " + name;
+      chip.title = "append to the ordered list";
+      chip.addEventListener("click", function () {
+        sdBuildSnippets.push(name);
+        sdRenderChosenSnippets();
+      });
+      pool.appendChild(chip);
+    });
+    var appNote = sdEl("sd-build-app-note");
+    var defaults = (sdBuildSurvey.targets && sdBuildSurvey.targets.default_snippets) || [];
+    appNote.textContent = defaults.length
+      ? "project default_snippets: " + defaults.join(", ")
+      : "this project configures no default_snippets";
+  }
+
+  // The chosen list, with move-up / move-down / remove on each. **The
+  // controls exist because the order is the statement**: a picker that
+  // rendered these as a set would be showing a control that does nothing, on
+  // top of a resolver that keeps the order.
+  function sdRenderChosenSnippets() {
+    var box = sdEl("sd-build-snippets");
+    box.innerHTML = "";
+    if (!sdBuildSnippets.length) {
+      box.textContent = "none \u2014 the project's configured default_snippets are used";
+      return;
+    }
+    sdBuildSnippets.forEach(function (name, i) {
+      var chip = document.createElement("span");
+      chip.className = "chip active-filter";
+      chip.textContent = i + 1 + ". " + name + " ";
+      ["\u2191", "\u2193", "\u00d7"].forEach(function (glyph, which) {
+        var btn = document.createElement("a");
+        btn.href = "#";
+        btn.textContent = " " + glyph;
+        btn.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          if (which === 0 && i > 0) {
+            var above = sdBuildSnippets[i - 1];
+            sdBuildSnippets[i - 1] = sdBuildSnippets[i];
+            sdBuildSnippets[i] = above;
+          } else if (which === 1 && i < sdBuildSnippets.length - 1) {
+            var below = sdBuildSnippets[i + 1];
+            sdBuildSnippets[i + 1] = sdBuildSnippets[i];
+            sdBuildSnippets[i] = below;
+          } else if (which === 2) {
+            sdBuildSnippets.splice(i, 1);
+          }
+          sdRenderChosenSnippets();
+        });
+        chip.appendChild(btn);
+      });
+      box.appendChild(chip);
+    });
+  }
+
+  // One row per header flag, three states: don't care, must be set, must be
+  // clear. Three and not two, because a flag's *clear* state can be the
+  // requirement — `trace_self` clear is the standing example — and a
+  // two-state control could not ask for it.
+  function sdRenderBuildFlags() {
+    var box = sdEl("sd-build-flags");
+    box.innerHTML = "";
+    ((sdBuildSurvey && sdBuildSurvey.flags) || []).forEach(function (name) {
+      var row = document.createElement("div");
+      row.className = "req-row";
+      var label = document.createElement("div");
+      label.className = "req-label mono";
+      label.textContent = name;
+      row.appendChild(label);
+      var choices = document.createElement("div");
+      choices.style.display = "flex";
+      choices.style.gap = "12px";
+      [["", "don't care"], ["set", "must be set"], ["clear", "must be clear"]].forEach(function (c) {
+        var wrap = document.createElement("label");
+        wrap.className = "req-any";
+        var radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "sd-build-flag-" + name;
+        radio.value = c[0];
+        radio.checked = c[0] === "";
+        wrap.appendChild(radio);
+        var span = document.createElement("span");
+        span.textContent = c[1];
+        wrap.appendChild(span);
+        choices.appendChild(wrap);
+      });
+      row.appendChild(choices);
+      box.appendChild(row);
+    });
+  }
+
+  function sdSyncBuildToggle() {
+    var on = sdEl("sd-build-on").checked && sdBuildSurvey && sdBuildSurvey.available;
+    sdEl("sd-build-body").style.display = on ? "" : "none";
+  }
+
+  function sdBuildSpecPayload() {
+    if (!sdEl("sd-build-on").checked || !sdBuildSurvey || !sdBuildSurvey.available) return null;
+    var args = sdEl("sd-build-args").value
+      .split("\n")
+      .map(function (a) { return a.trim(); })
+      .filter(function (a) { return a.length > 0; });
+    return {
+      board: sdEl("sd-build-board").value || null,
+      variant: sdEl("sd-build-variant").value || null,
+      revision: sdEl("sd-build-revision").value || null,
+      app: sdEl("sd-build-app").value || null,
+      snippets: sdBuildSnippets.slice(),
+      extra_args: args,
+    };
+  }
+
+  // **Sent whether or not the build toggle is on.** A mode requirement is a
+  // statement about the firmware a study needs, not about who built it: a
+  // study can perfectly well refuse to run against a DUT in the wrong mode
+  // without building anything itself.
+  function sdOutpostPayload() {
+    var set = [];
+    var clear = [];
+    ((sdBuildSurvey && sdBuildSurvey.flags) || []).forEach(function (name) {
+      var picked = document.querySelector(
+        'input[name="sd-build-flag-' + name + '"]:checked'
+      );
+      if (!picked || !picked.value) return;
+      (picked.value === "set" ? set : clear).push(name);
+    });
+    if (!set.length && !clear.length) return null;
+    return { set: set, clear: clear };
+  }
+
+  function sdApplyBuild(spec, outpost) {
+    var on = !!spec;
+    sdEl("sd-build-on").checked = on && sdBuildSurvey && sdBuildSurvey.available;
+    if (spec) {
+      sdEl("sd-build-board").value = spec.board || "";
+      sdEl("sd-build-variant").value = spec.variant || "";
+      sdEl("sd-build-revision").value = spec.revision || "";
+      sdEl("sd-build-app").value = spec.app || "";
+      sdBuildSnippets = (spec.snippets || []).slice();
+      sdEl("sd-build-args").value = (spec.extra_args || []).join("\n");
+    } else {
+      sdBuildSnippets = [];
+      sdEl("sd-build-args").value = "";
+    }
+    sdRenderSnippetPool();
+    sdRenderChosenSnippets();
+    ((sdBuildSurvey && sdBuildSurvey.flags) || []).forEach(function (name) {
+      var want = "";
+      if (outpost && (outpost.set || []).indexOf(name) !== -1) want = "set";
+      if (outpost && (outpost.clear || []).indexOf(name) !== -1) want = "clear";
+      var radio = document.querySelector(
+        'input[name="sd-build-flag-' + name + '"][value="' + want + '"]'
+      );
+      if (radio) radio.checked = true;
+    });
+    sdSyncBuildToggle();
   }
 
   function sdApplyRequires(requires) {
@@ -4154,21 +4517,68 @@
   /// Live Study tab, which is subscribed to this study before this function
   /// is even called — `POST` registers the session server-side. So there is
   /// nothing to race here: switching tabs is a view change, not a handover.
+  // Two shapes, because a run with a build phase in front of it cannot be
+  // one request: `{study_id}` is a study Core already accepted, and
+  // `{build_id}` is a build that has just started and whose study id does
+  // not exist yet. The second lands on the Live Study tab first and attaches
+  // to the run when the build's own stream says it started.
   function sdHandOffToLiveStudy(responseText) {
-    var id;
+    var body;
     try {
-      id = JSON.parse(responseText).study_id;
+      body = JSON.parse(responseText);
     } catch (e) {
       return;
     }
-    if (!id) return;
+    if (body.build_id) {
+      showTab("live-study");
+      lsFollowBuild(body.build_id);
+      return;
+    }
+    if (!body.study_id) return;
     showTab("live-study");
-    lsOpenStudy(id, true);
+    lsOpenStudy(body.study_id, true);
   }
 
   function closeRunCheck() {
     sdEl("sd-runcheck-backdrop").style.display = "none";
     sdEl("sd-runcheck-dialog").style.display = "none";
+  }
+
+  // What this run will put on the board, said before it happens.
+  //
+  // **A stored study's own spec is not read here**, and that is a real gap
+  // rather than an oversight: this dialog knows the table's build settings,
+  // and a run-only file's are in the file. The line says which case it is
+  // instead of quietly describing the wrong study's build.
+  function sdRenderRunCheckBuild() {
+    var el = sdEl("sd-runcheck-build");
+    if (!el) return;
+    if (sdPendingRun && sdPendingRun.kind === "stored") {
+      el.textContent =
+        "If this saved study carries a build spec, it is built and flashed before the run " +
+        "and the build appears as its own card on the Live Study tab.";
+      return;
+    }
+    var spec = sdBuildSpecPayload();
+    if (!spec) {
+      el.textContent =
+        "No firmware is built for this run \u2014 the DUT is whatever is already on the board. " +
+        "Turn on the Build card to build and flash it first.";
+      return;
+    }
+    var bits = [];
+    if (spec.board) bits.push(spec.board);
+    if (spec.app) bits.push("app " + spec.app);
+    if (spec.variant) bits.push(spec.variant);
+    if (spec.revision) bits.push("rev " + spec.revision);
+    bits.push(
+      spec.snippets.length
+        ? "snippets: " + spec.snippets.join(" \u2192 ")
+        : "the project's default snippets"
+    );
+    el.textContent =
+      "This run builds and flashes the DUT first \u2014 " + bits.join(", ") +
+      ". The working tree is built as it stands and is never moved.";
   }
 
   // Decision 11: the mismatch is shown *before* the run, with both strings, so
@@ -4199,6 +4609,7 @@
     var allowWrap = sdEl("sd-runcheck-allow-wrap");
     allowWrap.style.display = mismatched ? "flex" : "none";
     sdEl("sd-runcheck-allow").checked = false;
+    sdRenderRunCheckBuild();
     sdEl("sd-runcheck-backdrop").style.display = "block";
     sdEl("sd-runcheck-dialog").style.display = "block";
     // Fired after the dialog is up, not awaited before it: a pre-flight the
@@ -4512,6 +4923,9 @@
     // Prefilled from live bench state on first paint, which is what makes a
     // mandatory field a help rather than a tax.
     sdLoadBenchState(true);
+    // And what this bench can build, which decides whether the Build card is
+    // a card or an explanation of why it is not one.
+    sdLoadBuildSurvey();
   }
 
   function sdWireStudyDesigner() {
@@ -4534,6 +4948,18 @@
     });
     sdEl("sd-req-refresh").addEventListener("click", function () {
       sdLoadBenchState(false);
+      // The target scan is off the same bench and goes as stale as the
+      // versions do — a west workspace that gained a board since this tab
+      // was opened is exactly the case decision 12's live scan exists for.
+      sdLoadBuildSurvey();
+    });
+    sdEl("sd-build-on").addEventListener("change", sdSyncBuildToggle);
+    sdEl("sd-build-app").addEventListener("change", function () {
+      // The snippet pool is per-app, so changing the app changes what is
+      // offerable. Chosen snippets are **left alone**: dropping them would
+      // silently discard an authored ordering on a mis-click, and one that
+      // the new app does not declare is refused by name at build time.
+      sdRenderSnippetPool();
     });
     sdEl("sd-targets-cancel").addEventListener("click", closeTargetDialog);
     sdEl("sd-targets-backdrop").addEventListener("click", closeTargetDialog);
@@ -4685,6 +5111,11 @@
     });
 
     sdLoadProject();
+    // **Surveyed even with no project open**, because "no project" is one of
+    // the answers: the card would otherwise sit on its "checking…"
+    // placeholder forever on a tab whose data path never runs, which reads
+    // as a request that hung rather than as a state.
+    sdLoadBuildSurvey();
   }
 
   // --- signal routes (decision 10, first half) ----------------------------
@@ -5045,6 +5476,13 @@
         return;
       }
       var data = JSON.parse(text);
+      // A study that builds its own firmware has no id yet — the build has
+      // to finish first. Same two shapes the Study Designer's own Run
+      // handles; see `sdHandOffToLiveStudy`.
+      if (data.build_id) {
+        lsFollowBuild(data.build_id);
+        return;
+      }
       await lsOpenStudy(data.study_id, true);
       lsLoadStudies();
     } catch (e) {
@@ -5053,6 +5491,116 @@
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // ---- the build phase -----------------------------------------------------
+  //
+  // A build is a phase of the run, rendered as its own card above the status
+  // one and torn down by nothing: it stays on screen after the study starts,
+  // because "what was flashed" is part of reading the run that followed.
+  //
+  // The whole log is on disk regardless (the Debug tab's `builds` source).
+  // This card is a live view, bounded like every other console here.
+  var lsBuildStream = null;
+  var LS_BUILD_MAX_LINES = 600;
+
+  function lsBuildLine(kind, text) {
+    var el = document.createElement("div");
+    el.className = "log-line";
+    if (kind === "stderr") el.classList.add("log-warn");
+    if (kind === "info") el.classList.add("log-info");
+    el.textContent = text;
+    return el;
+  }
+
+  function lsFollowBuild(buildId) {
+    var card = lsEl("ls-build-card");
+    var console_ = lsEl("ls-build-console");
+    card.style.display = "block";
+    console_.innerHTML = "";
+    lsEl("ls-build-error").style.display = "none";
+    lsEl("ls-build-log-id").style.display = "none";
+    lsEl("ls-build-badge").textContent = "building";
+    lsEl("ls-build-badge").className = "badge badge-neutral";
+    lsEl("ls-build-what").textContent = buildId;
+
+    if (lsBuildStream) {
+      lsBuildStream.close();
+      lsBuildStream = null;
+    }
+    try {
+      lsBuildStream = new EventSource("/api/build/events?id=" + encodeURIComponent(buildId));
+    } catch (e) {
+      lsEl("ls-build-error").textContent =
+        "the build is running, but this browser could not open its stream: " + String(e) +
+        ". Its log will still be in the Debug tab's builds source when it finishes.";
+      lsEl("ls-build-error").style.display = "block";
+      return;
+    }
+    lsBuildStream.addEventListener("build", function (evt) {
+      var msg;
+      try {
+        msg = JSON.parse(evt.data);
+      } catch (_) {
+        return;
+      }
+      lsOnBuildEvent(msg);
+    });
+  }
+
+  function lsOnBuildEvent(msg) {
+    var console_ = lsEl("ls-build-console");
+    var atBottom =
+      console_.scrollHeight - console_.scrollTop - console_.clientHeight < 40;
+
+    if (msg.kind === "line") {
+      console_.appendChild(lsBuildLine(msg.stream, msg.text));
+      while (console_.children.length > LS_BUILD_MAX_LINES) {
+        console_.removeChild(console_.firstChild);
+      }
+    } else if (msg.kind === "phase") {
+      lsEl("ls-build-badge").textContent =
+        msg.phase === "submit" ? "submitting" : "building";
+    } else if (msg.kind === "lagged") {
+      // This browser fell behind our own broadcast. The card cannot claim to
+      // be complete, and the whole log is on disk, so say both.
+      console_.appendChild(
+        lsBuildLine("info", "\u2026 " + msg.missed + " line(s) missed by this browser \u2014 the whole log is in the Debug tab's builds source")
+      );
+    } else if (msg.kind === "flashed") {
+      lsEl("ls-build-what").textContent = msg.descriptor
+        ? JSON.stringify(msg.descriptor)
+        : msg.version;
+      if (msg.log_id) {
+        var idEl = lsEl("ls-build-log-id");
+        idEl.textContent = msg.log_id;
+        idEl.title = "this build's log, in the Debug tab's builds source";
+        idEl.style.display = "";
+      }
+      console_.appendChild(lsBuildLine("info", "flashed " + msg.version));
+    } else if (msg.kind === "started") {
+      lsEl("ls-build-badge").textContent = "flashed";
+      lsEl("ls-build-badge").className = "badge badge-ok";
+      if (lsBuildStream) {
+        lsBuildStream.close();
+        lsBuildStream = null;
+      }
+      lsOpenStudy(msg.study_id, true);
+      lsLoadStudies();
+    } else if (msg.kind === "failed") {
+      lsEl("ls-build-badge").textContent =
+        msg.phase === "submit" ? "not submitted" : "build failed";
+      lsEl("ls-build-badge").className = "badge badge-error";
+      var err = lsEl("ls-build-error");
+      err.textContent = msg.error || "the build failed";
+      err.style.display = "block";
+      if (lsBuildStream) {
+        lsBuildStream.close();
+        lsBuildStream = null;
+      }
+    }
+
+    if (atBottom) console_.scrollTop = console_.scrollHeight;
   }
 
   // ---- opening one study ---------------------------------------------------

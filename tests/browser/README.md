@@ -30,6 +30,16 @@ registry had forgotten had no reachable provenance or per-tap byte counts).
 python3 tests/browser/drive_live.py <a completed study_id with an outpost tap>
 ```
 
+`drive_build.py` is the third: the Study Designer's Build card and the Debug
+tab's `builds` log source, which need neither the stub nor a study. It drives
+the **unavailable** path on purpose — no project open, no `embarch-api`
+config, nothing ever built — because that is the state a fresh checkout is in
+and the one where a card has to say why instead of showing a dead toggle.
+
+```sh
+python3 tests/browser/drive_build.py
+```
+
 **Not wired into `cargo test`**, deliberately: it needs geckodriver, a release
 build and three processes, and a test that cannot run on a checkout is worse
 than a script somebody runs on purpose. Run it after any change to

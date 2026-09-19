@@ -272,6 +272,62 @@
             <p class="placeholder-note" style="margin-top:10px;">dev-bench's version is read back off the bench itself over <span class="mono">HelloAck</span> — the one version string in this suite genuinely reported by the thing it describes. The DUT's is what the configured firmware repo's own <span class="mono">git describe</span> says, which is an assertion about the tree, not a reading off the board: a run against it is recorded as <span class="mono">Declared</span>.</p>
           </div>
 
+          <div class="card" id="sd-build-card" style="margin-bottom:16px;">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Build — the DUT firmware this study puts on the board</div>
+              <div class="sd-toolbar-actions">
+                <label class="req-any"><input id="sd-build-on" type="checkbox" /> <span>build and flash before running</span></label>
+              </div>
+            </div>
+            <p id="sd-build-note" class="placeholder-note" style="margin:8px 0 12px;">checking what this bench can build…</p>
+            <div id="sd-build-body" style="display:none;">
+              <p class="placeholder-note" style="margin:0 0 12px;">What is stored is the <em>selection</em>, never a build id: it is resolved against the repo as it stands, every time it runs. The working tree is never moved — a study that requires a revision the tree is not at is refused, naming both, rather than checked out.</p>
+              <div class="req-grid">
+                <div class="req-row">
+                  <div class="req-label">board</div>
+                  <select id="sd-build-board" class="sd-input mono"></select>
+                  <div class="req-live" id="sd-build-board-note"></div>
+                </div>
+                <div class="req-row">
+                  <div class="req-label">app</div>
+                  <select id="sd-build-app" class="sd-input mono"></select>
+                  <div class="req-live" id="sd-build-app-note"></div>
+                </div>
+                <div class="req-row">
+                  <div class="req-label">variant</div>
+                  <select id="sd-build-variant" class="sd-input mono"></select>
+                  <div class="req-live">blank takes the project’s own default_target</div>
+                </div>
+                <div class="req-row">
+                  <div class="req-label">revision</div>
+                  <select id="sd-build-revision" class="sd-input mono"></select>
+                  <div class="req-live">blank takes the project’s own default_target</div>
+                </div>
+              </div>
+
+              <div class="card-title" style="margin:18px 0 6px; font-size:13px;">Snippets — in the order west applies them</div>
+              <p class="placeholder-note" style="margin:0 0 8px;">This list is <strong>ordered, not a set</strong>. A snippet can switch off what a later one needs — the BLE-shell snippet re-points the shell backend and turns the traced UART off, so an outpost overlay has to come after it or the tracer loses its own UART. Two orderings of the same names are two different images, down to the build directory.</p>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                <div>
+                  <div class="placeholder-note" style="margin:0 0 6px;">chosen, top to bottom</div>
+                  <div id="sd-build-snippets" class="chip-pool">none — the project’s configured default_snippets are used</div>
+                </div>
+                <div>
+                  <div class="placeholder-note" style="margin:0 0 6px;">this app declares</div>
+                  <div id="sd-build-snippet-pool" class="chip-pool">pick an app first</div>
+                </div>
+              </div>
+
+              <div class="card-title" style="margin:18px 0 6px; font-size:13px;">Extra west flags</div>
+              <textarea id="sd-build-args" class="sd-input mono" rows="2" spellcheck="false" placeholder="one per line, e.g. -p always"></textarea>
+              <p class="placeholder-note" style="margin:6px 0 0;">Opaque passthrough, in the order given. Empty takes the project’s configured default_extra_args.</p>
+
+              <div class="card-title" style="margin:18px 0 6px; font-size:13px;">Outpost mode this study needs</div>
+              <p id="sd-build-flags-note" class="placeholder-note" style="margin:0 0 8px;">Checked against the running firmware’s own header frame before step 1, so nothing runs against a build that is not in this mode. <span class="mono">trace_self</span> is the one whose <em>clear</em> state is usually what is wanted — clear means the trace deliberately omits the outpost’s own drain thread and UART interrupt. Declaring any of these needs an outpost trace tap in the Streams card; the header is read from that capture.</p>
+              <div id="sd-build-flags" class="req-grid"></div>
+            </div>
+          </div>
+
           <div class="card" style="margin-bottom:16px;">
             <div class="card-title">Steps — run top to bottom</div>
             <div class="table-scroll">
@@ -373,7 +429,7 @@
             <input id="sd-runcheck-allow" type="checkbox" />
             <span>Run anyway. embarch-core records the override in the result, with both strings — it is never silently honoured.</span>
           </label>
-          <p class="placeholder-note" style="margin-top:10px;">Reflashing is deliberately not offered here — see <span class="mono">embarch-ui/decisions.md</span>, decision 11. Build and flash through <span class="mono">embarch-api run-study --reflash</span>, which owns the project config and the build machinery.</p>
+          <p id="sd-runcheck-build" class="placeholder-note" style="margin-top:10px;"></p>
           <div class="sd-row-actions" style="margin-top:16px;">
             <span style="flex:1;"></span>
             <button id="sd-runcheck-cancel" class="btn">Cancel</button>
@@ -635,6 +691,20 @@
           </div>
         </div>
 
+        <!-- 1b. The build phase, when this run has one ------------------ -->
+        <div class="card" id="ls-build-card" style="display:none; margin-bottom:16px;">
+          <div class="sd-run-head">
+            <span id="ls-build-badge" class="badge badge-neutral">building</span>
+            <span id="ls-build-what"></span>
+            <span style="flex:1;"></span>
+            <span id="ls-build-log-id" class="mono placeholder-note" style="margin:0; display:none;"></span>
+          </div>
+          <p id="ls-build-error" class="sd-error" style="display:none;"></p>
+          <div class="console" id="ls-build-console" style="height:220px; margin-top:10px;">
+            <p class="placeholder-note">waiting for the build to start…</p>
+          </div>
+        </div>
+
         <div id="ls-body" style="display:none;">
           <!-- 2. Status ------------------------------------------------- -->
           <div class="card" style="margin-bottom:16px;">
@@ -844,6 +914,8 @@
           <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <div class="chip active-filter" data-log-source="core">embarch-core</div>
             <div class="chip" data-log-source="api">embarch-api</div>
+            <div class="chip" data-log-source="builds">builds</div>
+            <select id="log-build-pick" class="sd-input mono" style="display:none; max-width:320px;"></select>
             <div class="search-box">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.5-4.5"/></svg>
               <input id="log-search" type="text" placeholder="search logs…">
