@@ -373,15 +373,14 @@ pub async fn build_and_flash(
 
     let built = built.with_context(|| format!("build failed for '{}'", project.name))?;
     if !built.ready_to_flash() {
+        // `failure_reason` and not a sentence built here: it names the
+        // compiler's own first error, which is what a reader needs from the
+        // banner and what this message used to leave in the console for them
+        // to go find. Its own doc comment records the `Some(1)` it replaced.
         anyhow::bail!(
-            "the build for '{}' did not produce a fresh artifact, so nothing was flashed. \
-             {}",
+            "the build for '{}' failed, so nothing was flashed: {}",
             project.name,
-            if built.timed_out {
-                "It timed out.".to_string()
-            } else {
-                format!("west exited {:?}.", built.exit_code)
-            }
+            built.failure_reason()
         );
     }
 
