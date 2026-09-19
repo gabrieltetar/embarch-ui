@@ -1279,6 +1279,12 @@
    * `null` means "not stated", which leaves the crate's own default in
    * place rather than this browser sending a level it invented. */
   var sdLogLevel = null;
+  /* The name the Study name box was last *filled* with — by a load, by New
+   * study, or by the markup's own initial value. It is how "the box still
+   * holds the open study's name" is told apart from "somebody typed a name
+   * here", which is the whole of what New study needs to know; see
+   * `sdNewStudy`. */
+  var sdLoadedName = "untitled-study";
   /* The saved-study list keyed by slug, so picking one can tell an editable
    * study from a run-only file **before** fetching it — which is what keeps
    * the browser from calling a route it already knows will answer 409. */
@@ -2581,6 +2587,7 @@
     loaded = loaded || {};
     sdShowBuildError("");
     sdEl("sd-name").value = loaded.name || "untitled-study";
+    sdLoadedName = sdEl("sd-name").value;
     // `{}` rather than a skipped call when the file states no requirements:
     // `sdApplyRequires` clears both fields and unticks both "any" boxes, and
     // skipping it is exactly how the previous study's version requirement
@@ -5105,16 +5112,31 @@
     }
   }
 
+  /* "New study" means *start from blank*, and the Study name box is not
+   * where that name comes from — it holds the name of the study that is
+   * **open**. Sending it asked the server to create a file that already
+   * existed, and the answer was a `409` naming a study the author had just
+   * been reading: "'alpha-study' already exists — open it, or pick another
+   * name", about a decision nobody had made.
+   *
+   * So a name is sent only when somebody typed one: the box differing from
+   * what it was last filled with is exactly that test. Otherwise the server
+   * is asked for the first free `untitled-study`, which cannot refuse. A
+   * typed name that really does collide still gets the refusal, because
+   * that one is about somebody's existing work.
+   */
   async function sdNewStudy() {
-    var name = (sdEl("sd-name").value || "").trim();
-    if (!name) return sdShowBuildError("give the study a name first");
+    var typed = (sdEl("sd-name").value || "").trim();
+    var stated = typed && typed !== sdLoadedName;
     var btn = sdEl("sd-new-study");
     btn.disabled = true;
     try {
       var resp = await fetch("/api/study-designer/new-study", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name }),
+        body: JSON.stringify(
+          stated ? { name: typed } : { name: "untitled-study", unique: true }
+        ),
       });
       var text = await resp.text();
       if (!resp.ok) return sdShowBuildError(resp.status + " " + text);

@@ -2515,6 +2515,24 @@ fn study_slug(name: &str) -> Result<String, String> {
     Ok(slug)
 }
 
+/// `base`, or the first `base-N` that no file is using.
+///
+/// Counts from 2 because the first one is `base` itself, and stops at a
+/// bound rather than looping forever: a directory that somehow holds every
+/// suffix is a state worth landing *somewhere* in, and the caller's `exists`
+/// check on the returned path is what would catch it.
+fn first_free_slug(dir: &std::path::Path, base: &str) -> (String, std::path::PathBuf) {
+    let mut slug = base.to_string();
+    let mut path = dir.join(format!("{slug}.json"));
+    let mut n = 2;
+    while path.exists() && n < 1000 {
+        slug = format!("{base}-{n}");
+        path = dir.join(format!("{slug}.json"));
+        n += 1;
+    }
+    (slug, path)
+}
+
 /// `<firmware repo>/embarch/studies` (`embarch-study-designer` decision
 /// 38) — taken from the *open project* rather than from config, so
 /// switching projects moves the studies list with it (decision 14).
@@ -4515,6 +4533,24 @@ mod tests {
         assert!(cached.as_ref().unwrap().is_none(), "...and as having produced nothing");
     }
 
+    /// "New study" names nothing, so it must never be refused for a name it
+    /// invented — the `409` an author actually hit read "'alpha-study'
+    /// already exists", about the study they had open and had not asked to
+    /// duplicate.
+    #[test]
+    fn a_unique_new_study_lands_beside_the_names_already_taken() {
+        let scratch = Scratch::new("first-free-slug");
+        let dir = scratch.0.join("studies");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(first_free_slug(&dir, "untitled-study").0, "untitled-study");
+        std::fs::write(dir.join("untitled-study.json"), "{}").unwrap();
+        assert_eq!(first_free_slug(&dir, "untitled-study").0, "untitled-study-2");
+        std::fs::write(dir.join("untitled-study-2.json"), "{}").unwrap();
+        let (slug, path) = first_free_slug(&dir, "untitled-study");
+        assert_eq!(slug, "untitled-study-3");
+        assert!(!path.exists(), "the path handed back is the one that is free");
+    }
+
     /// The distinction the whole static-analysis panel rests on: "no
     /// extractor configured" and "an extractor ran and failed" are different
     /// answers, and the forced path returns the second rather than logging it
@@ -6039,6 +6075,18 @@ pub async fn api_static_analysis(
 #[derive(Debug, Deserialize)]
 pub struct NewStudyRequest {
     name: String,
+    /// Take `name` as a *base* and land on the first free slug after it —
+    /// `untitled-study`, `untitled-study-2`, and so on — rather than
+    /// refusing a name that is taken.
+    ///
+    /// The refusal below is not weakened by this and is not optional: it
+    /// exists so a deliberately typed name never silently replaces
+    /// somebody's work, and a caller that states a name still gets it.
+    /// This flag is for the other case — "start a blank study", where the
+    /// caller named nothing and being told that the name it invented is
+    /// taken is an error message about a decision nobody made.
+    #[serde(default)]
+    unique: bool,
 }
 
 /// Creates a new, empty, **immediately valid and immediately runnable**
@@ -6066,20 +6114,32 @@ pub async fn api_new_study(
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
     let dir = studies_dir(&project);
-    let path = dir.join(format!("{slug}.json"));
-    if path.exists() {
-        return (
-            StatusCode::CONFLICT,
-            format!("'{slug}' already exists — open it, or pick another name"),
-        )
-            .into_response();
-    }
+    let (slug, path) = if req.unique {
+        // Named after the slug it landed on, not after the base it was asked
+        // for: two files both calling themselves `untitled-study` would show
+        // the same name in the Study name box, and a save from the second
+        // one writes to the first one's slug — the overwrite the `409`
+        // below exists to prevent, arrived at from the other side.
+        first_free_slug(&dir, &slug)
+    } else {
+        let path = dir.join(format!("{slug}.json"));
+        if path.exists() {
+            return (
+                StatusCode::CONFLICT,
+                format!("'{slug}' already exists — open it, or pick another name"),
+            )
+                .into_response();
+        }
+        (slug, path)
+    };
+    // The name the study carries is the one it can be saved back under.
+    let name = if req.unique { slug.clone() } else { req.name.clone() };
     let registry = match sd.registry() {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
     let study = match build_authored(
-        &req.name,
+        &name,
         &[],
         &RequirementsInput::any(),
         &[],
@@ -6133,7 +6193,7 @@ pub async fn api_new_study(
 
     Json(serde_json::json!({
         "slug": slug,
-        "name": req.name,
+        "name": name,
         "path": path.to_string_lossy(),
         "steps": 0,
     }))
