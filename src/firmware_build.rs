@@ -91,21 +91,40 @@ pub struct BuildLogEntry {
     pub bytes: u64,
 }
 
-/// Where `embarch-api`'s project config is read from.
+/// Where `embarch-api`'s project config is read from: this UI's own
+/// `[build].config_path`, then `EMBARCH_API_CONFIG`, then the **open firmware
+/// repo's own `embarch/embarch.toml`**.
+///
+/// **Three sources, and the third is the one that matters.** It is
+/// `embarch-api`'s own documented fallback — "`--config`, or
+/// `EMBARCH_API_CONFIG`, or run from within a firmware repo containing
+/// `embarch/embarch.toml`" — applied to the repo this tab has open rather
+/// than to a working directory, which is the same question asked of the same
+/// file. `embarch init` scaffolds exactly that path, so a repo the suite has
+/// been pointed at once needs **no configuration here at all**.
+///
+/// It was not optional. The VS Code extension sets `EMBARCH_UI_CONFIG` and
+/// nothing else, so without this a real launch reached neither of the first
+/// two sources and the Build card was unavailable on every bench that had not
+/// hand-edited a file for it — the feature shipped inert, which is
+/// [reversals](../embarch-decision-reversals.md) row 33's shape.
 ///
 /// **Resolved per call, not held.** The config is a file an engineer writes
 /// and this process only reads (the posture decision 14 already takes toward
 /// it), so an edit takes effect on the next Build card open rather than on
-/// the next restart.
-///
-/// The env var is the same one `embarch-api` itself honours, which is the
-/// point: a bench that has configured `embarch-api` has configured this, and
-/// a second config file naming the same projects is a second thing to keep
-/// in step.
-pub fn config_path(configured: Option<&Path>) -> Option<PathBuf> {
-    configured
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("EMBARCH_API_CONFIG").map(PathBuf::from))
+/// the next restart — and so does opening a different project.
+pub fn config_path(configured: Option<&Path>, repo: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = configured {
+        return Some(path.to_path_buf());
+    }
+    if let Some(path) = std::env::var_os("EMBARCH_API_CONFIG") {
+        return Some(PathBuf::from(path));
+    }
+    // Only when it is really there: an absent one means this repo has not
+    // been through `embarch init`, which the survey reports as a reason
+    // rather than as a load failure against a path nobody chose.
+    let candidate = repo?.join("embarch").join("embarch.toml");
+    candidate.is_file().then_some(candidate)
 }
 
 /// What the Build card can offer for the currently open firmware repo.
@@ -175,10 +194,15 @@ fn project_for_repo<'a>(config: &'a fwconfig::Config, repo: &Path) -> Option<&'a
 }
 
 pub fn survey(configured: Option<&Path>, repo: &Path) -> BuildSurvey {
-    let Some(path) = config_path(configured) else {
+    let Some(path) = config_path(configured, Some(repo)) else {
         return unavailable(
-            "no embarch-api config is configured, so there are no projects to build. Set \
-             EMBARCH_API_CONFIG, or add `[build] config_path = \"…\"` to this UI's own config.",
+            format!(
+                "no project config was found for this repo, so there is nothing here that knows \
+                 how to build it. `embarch init` in {} would scaffold one at \
+                 embarch/embarch.toml, which is where this looks; EMBARCH_API_CONFIG or \
+                 `[build] config_path` in this UI's own config override it.",
+                repo.display()
+            ),
             None,
         );
     };
@@ -258,8 +282,8 @@ pub async fn build_and_flash(
     allow_version_mismatch: bool,
     on_line: ProgressSink,
 ) -> Result<FlashedFirmware> {
-    let path = config_path(configured_config)
-        .context("no embarch-api config is configured, so there are no projects to build")?;
+    let path = config_path(configured_config, Some(repo))
+        .context("no project config was found for this repo, so there is nothing to build")?;
     let config = fwconfig::Config::load_from_path(&path)?;
     let project = project_for_repo(&config, repo).with_context(|| {
         format!(
@@ -520,6 +544,29 @@ pub fn read_log(id: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The third source is what makes the card work on a bench nobody
+    /// configured for it, so it is the one worth pinning: a repo through
+    /// `embarch init` has `embarch/embarch.toml`, and that is the file.
+    #[test]
+    fn an_init_ed_repo_needs_no_configuration_to_be_buildable() {
+        let dir = std::env::temp_dir().join(format!("efb-{}", now_utc_ms()));
+        std::fs::create_dir_all(dir.join("embarch")).unwrap();
+        // Absent until `embarch init` has run, and absence is a reason, not a
+        // path to fail against.
+        assert_eq!(config_path(None, Some(&dir)), None);
+
+        let scaffolded = dir.join("embarch").join("embarch.toml");
+        std::fs::write(&scaffolded, "").unwrap();
+        assert_eq!(config_path(None, Some(&dir)), Some(scaffolded));
+
+        // An explicit path always wins, and no repo at all is no answer
+        // rather than a guess.
+        let explicit = dir.join("elsewhere.toml");
+        assert_eq!(config_path(Some(&explicit), Some(&dir)), Some(explicit));
+        assert_eq!(config_path(None, None), std::env::var_os("EMBARCH_API_CONFIG").map(PathBuf::from));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_log_name_sorts_chronologically_and_says_what_it_was() {

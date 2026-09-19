@@ -8,9 +8,11 @@ actually has — no firmware repo open, no `embarch-api` config, no build ever
 run — and which is where the card has to say why rather than show a dead
 toggle or sit on a placeholder that reads as a hung request.
 
-The available path is not driven here. It needs a configured project and a
-west workspace, so it is checked on the bench (see
-`embarch-doc/embarch-ui/spec.md`), not in a script anybody can run.
+**Both paths are driven, and which one runs is decided by asking the server**
+rather than by a flag: the survey says whether this bench can build, and the
+available half is skipped with a line saying so where it cannot. That keeps
+one script correct on a fresh checkout and on a configured bench, instead of
+a second script nobody runs on the machine that has the workspace.
 
 Run it the same way as `drive.py`:
 
@@ -19,7 +21,11 @@ Run it the same way as `drive.py`:
     EMBARCH_UI_PORT=4899 ./target/release/embarch-ui &
     python3 tests/browser/drive_build.py
 """
-import json, urllib.request, time, sys
+import json, os, urllib.request, time, sys
+
+# `drive.py`'s harness port by default; point it at a real instance (4890)
+# to drive the available path against a bench's own workspace.
+UI = "http://127.0.0.1:" + os.environ.get("EMBARCH_UI_PORT", "4899")
 BASE = "http://127.0.0.1:4444"
 def rq(method, url, body=None):
     data = json.dumps(body).encode() if body is not None else None
@@ -38,7 +44,7 @@ b = BASE + "/session/" + sid
 def script(js, args=None):
     return rq("POST", b + "/execute/sync", {"script": js, "args": args or []})
 try:
-    rq("POST", b + "/url", {"url": "http://127.0.0.1:4899/"})
+    rq("POST", b + "/url", {"url": UI + "/"})
     script("window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(String(e.message))});")
     time.sleep(2)
 
@@ -47,14 +53,92 @@ try:
     time.sleep(3)
     check("the Build card exists", script("return !!document.getElementById('sd-build-card');"))
     note = script("return document.getElementById('sd-build-note').textContent;")
-    check("an unbuildable bench says why, rather than showing a dead toggle",
-          "cannot" in note or "not" in note or "no " in note, note[:120])
-    check("the toggle is disabled when nothing can be built",
-          script("return document.getElementById('sd-build-on').disabled === true;"))
+    check("the card never sits on its loading placeholder",
+          "checking what this bench" not in note, note[:120])
     check("the body stays hidden while the toggle is off",
           script("return document.getElementById('sd-build-body').style.display === 'none';"))
 
     # --- the Debug tab's builds source ------------------------------------
+    # --- the Build card, available -----------------------------------------
+    #
+    # Only where this bench can actually build. The survey is the authority
+    # on that, so it is asked rather than guessed at from config.
+    with urllib.request.urlopen(UI + "/api/build/survey", timeout=30) as r:
+        survey = json.loads(r.read().decode())
+    if not survey.get("available"):
+        print("SKIP  the available path — this bench has no buildable project open")
+    else:
+        note = script("return document.getElementById('sd-build-note').textContent;")
+        check("the card names the matched project and its config",
+              survey["project"] in note and "embarch.toml" in note, note[:110])
+        check("the toggle is enabled on a buildable bench",
+              script("return document.getElementById('sd-build-on').disabled===false;"))
+
+        script("var t=document.getElementById('sd-build-on');t.checked=true;"
+               "t.dispatchEvent(new Event('change'));")
+        time.sleep(1)
+        check("ticking it reveals the window",
+              script("return document.getElementById('sd-build-body').style.display!=='none';"))
+
+        boards = script("return Array.from(document.getElementById('sd-build-board')"
+                        ".options).map(o=>o.value);")
+        check("the board picker is filled from the live scan", len(boards) > 1 and boards[0] == "",
+              boards[:6])
+        check("the first option on each axis is the project's own default",
+              script("return document.getElementById('sd-build-board')"
+                     ".options[0].textContent;") == "(the project's default)")
+
+        # Snippets are per app, so the pool is empty until one is chosen.
+        check("the snippet pool asks for an app before offering anything",
+              "pick an app" in script("return document.getElementById"
+                                      "('sd-build-snippet-pool').textContent;"))
+        by_app = (survey.get("targets") or {}).get("snippets_by_app") or {}
+        app = next((a for a, ss in by_app.items() if len(ss) >= 2), None)
+        if app is None:
+            print("SKIP  the ordered snippet list — no app in this repo declares two snippets")
+        else:
+            script("var a=document.getElementById('sd-build-app');a.value=arguments[0];"
+                   "a.dispatchEvent(new Event('change'));", [app])
+            time.sleep(1)
+            pool = script("return Array.from(document.querySelectorAll"
+                          "('#sd-build-snippet-pool .chip')).map(c=>c.textContent.trim());")
+            check("choosing an app offers exactly what it declares",
+                  len(pool) == len(by_app[app]), f"{len(pool)} vs {len(by_app[app])}")
+
+            first, second = by_app[app][0], by_app[app][1]
+            script("var c=Array.from(document.querySelectorAll('#sd-build-snippet-pool .chip'));"
+                   "c.find(x=>x.textContent.trim()==='+ '+arguments[0]).click();"
+                   "c.find(x=>x.textContent.trim()==='+ '+arguments[1]).click();", [first, second])
+            time.sleep(1)
+            chosen = script("return Array.from(document.querySelectorAll"
+                            "('#sd-build-snippets .chip')).map(c=>c.textContent.trim());")
+            check("chosen snippets are numbered in the order they were added",
+                  len(chosen) == 2 and chosen[0].startswith("1. " + first)
+                  and chosen[1].startswith("2. " + second), chosen)
+
+            # **The whole point of the control.** West applies -S in order and
+            # reversals row 109 is the case where that order decides whether
+            # the image works, so a picker that cannot reorder is a picker
+            # that lies.
+            script("document.querySelectorAll('#sd-build-snippets .chip')[1]"
+                   ".querySelectorAll('a')[0].click();")
+            time.sleep(1)
+            after = script("return Array.from(document.querySelectorAll"
+                           "('#sd-build-snippets .chip')).map(c=>c.textContent.trim());")
+            check("move-up actually reorders, and renumbers",
+                  after[0].startswith("1. " + second) and after[1].startswith("2. " + first), after)
+
+        rows = script("return Array.from(document.querySelectorAll"
+                      "('#sd-build-flags .req-row .req-label')).map(e=>e.textContent);")
+        check("one mode row per served header flag",
+              rows == survey["flags"], rows)
+        states = script("return Array.from(document.querySelectorAll"
+                        "('input[name=\"sd-build-flag-trace_self\"]')).map(r=>r.value);")
+        check("each flag offers don't-care / set / clear", states == ["", "set", "clear"], states)
+        check("don't care is the default",
+              script("return document.querySelector"
+                     "('input[name=\"sd-build-flag-trace_self\"]').checked===true;"))
+
     script("document.querySelector('.nav-item[data-tab=\"debug\"]').click();")
     time.sleep(1)
     check("the builds chip exists",
