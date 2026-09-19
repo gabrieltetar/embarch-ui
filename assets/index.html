@@ -59,10 +59,6 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6M8.5 11l1.8 1.8L13.5 9M8.5 16.5h7"/></svg>
         <span class="nav-label">Study Designer</span>
       </button>
-      <button class="nav-item" data-tab="enroll">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M6 8h12l-1 4a5 5 0 0 1-10 0Z"/><path d="M18 18h3M19.5 16.5v3"/></svg>
-        <span class="nav-label">Enroll</span>
-      </button>
       <button class="nav-item" data-tab="live-study">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h3.2l1.6-6 2 10 2.2-8 1.6 4H21"/></svg>
         <span class="nav-label">Live Study</span>
@@ -129,8 +125,14 @@
       </section>
 
       <section class="tab-panel" data-tab="topology">
+        <div id="topology-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
         <div class="card" style="margin-bottom:16px; padding:26px 30px;">
           <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
+          <div class="topo-enroll-strip">
+            <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the dev-bench or DUT box above, or click a probe then a box</div>
+            <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
+            <p class="placeholder-note" style="margin-top:10px;">Two boards using visibly different probes (different identifier/serial) can both stay plugged in — drag each onto its box. Two boards that happen to share the exact same probe type can't be told apart this way; unplug down to one of them and enroll it alone instead. Dropping onto a box that already holds a board re-enrols it — that is the migration path, the same way re-declaring a signal moves its route.</p>
+          </div>
         </div>
         <div class="card" style="margin-bottom:16px;">
           <div class="sd-toolbar">
@@ -162,8 +164,8 @@
           <div class="card">
             <div class="card-title">Boards</div>
             <table class="data-table">
-              <thead><tr><th>Role</th><th>Chip</th><th>Probe</th><th>Status</th></tr></thead>
-              <tbody id="topology-table-body"><tr><td colspan="4" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
+              <thead><tr><th>Role</th><th>Chip</th><th>Probe</th><th>Status</th><th>Enrolled</th></tr></thead>
+              <tbody id="topology-table-body"><tr><td colspan="5" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
             </table>
           </div>
           <div class="card">
@@ -610,32 +612,6 @@
         </div>
       </section>
 
-      <section class="tab-panel" data-tab="enroll">
-        <div id="enroll-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
-        <div class="card" style="margin-bottom:16px;">
-          <div class="card-title">Attached probes — drag onto a role below, or click a card then a zone</div>
-          <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
-          <p class="placeholder-note" style="margin-top:10px;">Two boards using visibly different probes (different identifier/serial) can both stay plugged in — drag each onto its role. Two boards that happen to share the exact same probe type can't be told apart this way; unplug down to one of them and enroll it alone instead.</p>
-        </div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-bottom:16px;">
-          <div class="drop-zone" id="zone-dev-bench" data-role="dev-bench">
-            <div class="drop-zone-label">dev-bench</div>
-            <div class="placeholder-note">drop here</div>
-          </div>
-          <div class="drop-zone" id="zone-dut" data-role="dut">
-            <div class="drop-zone-label">dut</div>
-            <div class="placeholder-note">drop here</div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-title">Enrolled boards</div>
-          <table class="data-table">
-            <thead><tr><th>Role</th><th>Chip</th><th>Probe</th><th>Enrolled</th></tr></thead>
-            <tbody id="enroll-table-body"><tr><td colspan="4" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
-          </table>
-        </div>
-      </section>
-
       <div id="sig-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="sig-dialog" class="dialog" style="display:none;">
         <div class="card-title">Declare a signal's route</div>
@@ -678,6 +654,7 @@
       <div id="assign-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="assign-dialog" class="dialog card" style="display:none; top:30%; width:340px;">
         <div class="card-title">Enroll <span id="assign-probe-label" class="mono"></span> as <span id="assign-role-label" class="mono"></span></div>
+        <p id="assign-replace-note" class="placeholder-note" style="display:none; margin:0 0 10px;"></p>
         <label style="display:block; font-size:12.5px; color:var(--text-secondary); margin-bottom:6px;">Chip
           <input id="assign-chip" list="chip-suggestions" placeholder="e.g. nRF54L15" style="width:100%; margin-top:4px; padding:8px 10px; border-radius:8px; border:1px solid var(--border-strong); background:var(--bg-surface-2); color:var(--text-primary); font-family:var(--font-mono); font-size:13px;">
         </label>

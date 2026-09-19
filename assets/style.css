@@ -460,7 +460,7 @@ table.data-table {
   font-style: italic;
 }
 
-/* Enroll tab — drag-and-drop probe assignment. */
+/* Topology tab — drag-and-drop probe assignment onto the diagram. */
 .chip-pool {
   display: flex;
   flex-wrap: wrap;
@@ -489,31 +489,28 @@ table.data-table {
   background: var(--accent-soft-bg);
   color: var(--accent-strong);
 }
-.drop-zone {
-  border: 2px dashed var(--border-strong);
-  border-radius: 12px;
-  padding: 18px;
-  text-align: center;
+.topo-enroll-strip {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+/* The role boxes in the diagram are the drop targets (decision 43). The
+   cursor and the hover stroke are the only thing saying so before a drag
+   starts, since the box is a picture of the bench first and a control
+   second. */
+.topo-drop {
   cursor: pointer;
-  background: var(--bg-surface);
-  transition: border-color 0.15s, background 0.15s;
 }
-.drop-zone.dragover {
-  border-color: var(--accent);
-  background: var(--accent-soft-bg);
+.topo-drop rect {
+  transition: stroke 0.15s, fill 0.15s;
 }
-.drop-zone.highlight {
-  animation: embarch-ui-highlight-pulse 1.5s ease-in-out 3;
+.topo-drop:hover rect {
+  stroke: var(--accent);
 }
-@keyframes embarch-ui-highlight-pulse {
-  0%, 100% { border-color: var(--border-strong); box-shadow: none; }
-  50% { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft-bg); }
-}
-.drop-zone-label {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 6px;
+.topo-drop.dragover rect {
+  stroke: var(--accent);
+  stroke-width: 2.6;
+  fill: var(--accent-soft-bg);
 }
 
 /* Debug tab — lifted from Debug.dc.html verbatim (decision 8). */
@@ -1134,7 +1131,7 @@ table.data-table {
  * repo-wide GATT scan picked up its third service, and growing. No new
  * tokens and no new components: the dialog is `.dialog`, the rows are the
  * same checkbox-plus-mono-label shape `.sd-param` already renders, and the
- * summary chip in the cell is `.probe-card` from the Enroll tab.
+ * summary chip in the cell is `.probe-card` from the Topology tab.
  */
 
 .sd-targets-bar {

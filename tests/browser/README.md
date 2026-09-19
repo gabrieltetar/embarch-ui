@@ -40,7 +40,19 @@ and the one where a card has to say why instead of showing a dead toggle.
 python3 tests/browser/drive_build.py
 ```
 
-`drive_fonts.py` is the fourth, and the only one that is about every page
+`drive_topology.py` is the fourth: enrolling a board on the Topology tab,
+which absorbed the Enroll tab (`embarch-ui` decision 43). It brings its own
+stub — `stub_core.py` serves an empty bench for the fixtures above, and this
+one needs attached probes, a role already enrolled, and a `POST /probes/enroll`
+that records what it was sent — so it needs nothing but geckodriver and a
+release build. The drop target is an SVG `<g>` rebuilt on every snapshot, so
+`tests/element_ids.rs` cannot see any of it.
+
+```sh
+python3 tests/browser/drive_topology.py
+```
+
+`drive_fonts.py` is the fifth, and the only one that is about every page
 rather than one tab: IBM Plex is served out of this binary (`embarch-ui`
 decision 42), and this checks in a real browser that the faces actually load,
 that no request went to a font CDN, and that the shipped Plex Mono's advance

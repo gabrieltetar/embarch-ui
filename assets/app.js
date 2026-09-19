@@ -50,8 +50,17 @@
   // own any more (the Trace tab's `#trace?study=…&tap=…` went with that tab),
   // and splitting anyway costs nothing and keeps an old bookmark landing on a
   // tab rather than nowhere.
+  // A fragment naming a tab that has been folded into another one resolves
+  // to its new home rather than to null: `#enroll` was a real address —
+  // typed, bookmarked, and the destination an agent was told to point a
+  // human at — and the Enroll tab's whole surface is on `#topology` now.
+  // Falling through to the stored tab instead would land that link on
+  // whichever tab that browser happened to have open last.
+  const RETIRED_FRAGMENTS = { enroll: "topology" };
+
   function tabFromHash() {
-    const name = (location.hash || "").replace(/^#/, "").split("?")[0];
+    const raw = (location.hash || "").replace(/^#/, "").split("?")[0];
+    const name = RETIRED_FRAGMENTS[raw] || raw;
     return document.querySelector(`.nav-item[data-tab="${CSS.escape(name)}"]`) ? name : null;
   }
 
@@ -147,11 +156,12 @@
       '<p class="placeholder-note">' + escapeHtml(snapshot.error) + "</p>";
   }
 
-  // Role/chip/probe/confirmed-timestamp rows — Dashboard's and the Enroll
-  // tab's own "Enrolled boards" table. Distinct from `boardsTableRows`
-  // below (Topology's Role/Chip/Probe/Status-badge shape, fixed to the
-  // two canonical roles) — this one lists every actually-enrolled entry,
-  // whatever its role happens to be named.
+  // Role/chip/probe/confirmed-timestamp rows — Dashboard's "Enrolled
+  // boards" table, and since the Enroll tab was folded into Topology
+  // (decision 43) its only caller. Distinct from
+  // `boardsTableRows` below, which leads with the two canonical roles
+  // whether or not a board holds them — this one lists every actually-
+  // enrolled entry, whatever its role happens to be named.
   //
   // The last column is labeled "Enrolled" (never "Validated"/"Confirmed"/
   // "Verified"): `confirmed_at_utc_ms` is enrolment time, unmoving until
@@ -172,13 +182,32 @@
     )).join("");
   }
 
+  // Topology's one Boards table, carrying both columns the fold had to
+  // reconcile: the live `Status` badge this tab already drew, and the
+  // `Enrolled` instant the Enroll tab's own table carried. The same
+  // labelling rule applies to that last column as in `enrolledTableRows`
+  // above — it is enrolment time, never a freshness check.
+  //
+  // **The two canonical roles are always rows, and a board enrolled under
+  // any other role is a row too.** Leading with `ROLES` is what makes "dut:
+  // not enrolled" visible at all — an entry-driven table shows an absence
+  // as nothing. But the enrolment file is keyed by a role string Core
+  // accepts freely, so a table built from `ROLES` *alone* silently omits
+  // any board outside the pair, which is exactly the class of row the
+  // Enroll tab's own table existed to show.
   function boardsTableRows(snapshot) {
-    return ROLES.map(({ role, label }) => {
-      const board = findEnrolled(snapshot, role);
+    const canonical = new Set(ROLES.map((r) => r.role));
+    const rows = ROLES.map(({ role, label }) => ({ label, board: findEnrolled(snapshot, role) }));
+    (snapshot.enrolled || []).forEach((board) => {
+      if (!canonical.has(board.role)) rows.push({ label: board.role, board });
+    });
+    return rows.map(({ label, board }) => {
       const chip = board ? escapeHtml(board.chip) : "—";
       const probe = board ? escapeHtml(board.probe_serial) : "—";
+      const at = board ? formatTimestamp(board.confirmed_at_utc_ms) : "—";
       return "<tr><td>" + escapeHtml(label) + '</td><td class="mono">' + chip +
-        '</td><td class="mono">' + probe + "</td><td>" + boardStatusBadge(snapshot, board) + "</td></tr>";
+        '</td><td class="mono">' + probe + "</td><td>" + boardStatusBadge(snapshot, board) +
+        "</td><td>" + at + "</td></tr>";
     }).join("");
   }
 
@@ -261,19 +290,30 @@
       return (attached ? "attached · " : "not attached · ") + board.chip;
     }
 
+    // **The box a role is drawn as is the target a probe is dropped on**
+    // (decision 43). The whole node — rect and both labels — is one `<g>`
+    // so a drop on the chip name counts as a drop on the box; a `<rect>`
+    // alone would leave the text a dead zone sitting on top of it. The
+    // role travels in the markup rather than in a closure because this
+    // whole string is rebuilt on every snapshot, so no listener bound to
+    // an element here would survive the next poll — the listeners live on
+    // the `<svg>` and read this attribute (`initEnrollOnDiagram`).
+    function roleNode(role, x, centre, label, sub) {
+      return '<g class="topo-drop" data-enroll-role="' + role + '">' +
+        '<rect x="' + x + '" y="80" width="200" height="80" rx="12" fill="var(--bg-surface-2)" stroke="var(--border-strong)" stroke-width="1.4"/>' +
+        '<text x="' + centre + '" y="112" text-anchor="middle" fill="var(--text-primary)" font-size="14" font-weight="600" font-family="IBM Plex Sans, sans-serif">' + escapeHtml(label) + "</text>" +
+        '<text x="' + centre + '" y="132" text-anchor="middle" fill="var(--text-tertiary)" font-size="11.5" font-family="IBM Plex Mono, monospace">' + escapeHtml(sub) + "</text>" +
+        "</g>";
+    }
+
     svg.innerHTML =
       '<rect x="30" y="80" width="220" height="80" rx="12" fill="var(--bg-surface-2)" stroke="var(--border-strong)" stroke-width="1.4"/>' +
       '<text x="140" y="112" text-anchor="middle" fill="var(--text-primary)" font-size="14" font-weight="600" font-family="IBM Plex Sans, sans-serif">this machine</text>' +
       '<text x="140" y="132" text-anchor="middle" fill="var(--text-tertiary)" font-size="11.5" font-family="IBM Plex Mono, monospace">' +
       (snapshot.core_reachable ? "embarch-core" : "embarch-core (unreachable)") + "</text>" +
 
-      '<rect x="390" y="80" width="200" height="80" rx="12" fill="var(--bg-surface-2)" stroke="var(--border-strong)" stroke-width="1.4"/>' +
-      '<text x="490" y="112" text-anchor="middle" fill="var(--text-primary)" font-size="14" font-weight="600" font-family="IBM Plex Sans, sans-serif">' + escapeHtml(boxLabel(devBench, "dev-bench")) + "</text>" +
-      '<text x="490" y="132" text-anchor="middle" fill="var(--text-tertiary)" font-size="11.5" font-family="IBM Plex Mono, monospace">' + escapeHtml(boxSub(devBench, devBenchAttached)) + "</text>" +
-
-      '<rect x="740" y="80" width="200" height="80" rx="12" fill="var(--bg-surface-2)" stroke="var(--border-strong)" stroke-width="1.4"/>' +
-      '<text x="840" y="112" text-anchor="middle" fill="var(--text-primary)" font-size="14" font-weight="600" font-family="IBM Plex Sans, sans-serif">' + escapeHtml(boxLabel(dut, "dut")) + "</text>" +
-      '<text x="840" y="132" text-anchor="middle" fill="var(--text-tertiary)" font-size="11.5" font-family="IBM Plex Mono, monospace">' + escapeHtml(boxSub(dut, dutAttached)) + "</text>" +
+      roleNode("dev-bench", 390, 490, boxLabel(devBench, "dev-bench"), boxSub(devBench, devBenchAttached)) +
+      roleNode("dut", 740, 840, boxLabel(dut, "dut"), boxSub(dut, dutAttached)) +
 
       '<line x1="250" y1="120" x2="390" y2="120" stroke="' + linkColor + '" stroke-width="2"/>' +
       '<text x="320" y="108" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">serial</text>' +
@@ -288,6 +328,16 @@
     const height = Math.max(230, SIGNAL_LANE_TOP + laneCount * SIGNAL_LANE_STEP + 10);
     svg.setAttribute("viewBox", "0 0 1000 " + height);
     svg.setAttribute("height", String(height));
+
+    // A snapshot landing mid-drag rebuilds the node under the cursor, and
+    // with it the class that says "you are over this box". The drag is
+    // still in progress, so the highlight is restored rather than left for
+    // the next `dragover` — which, over a node the pointer is already
+    // inside and no longer moving across, may not come.
+    if (dragoverRole) {
+      const g = svg.querySelector('[data-enroll-role="' + CSS.escape(dragoverRole) + '"]');
+      if (g) g.classList.add("dragover");
+    }
   }
 
   function isDirect(sig) {
@@ -394,7 +444,9 @@
   }
 
   function renderTopology(snapshot) {
+    renderErrorBanner("topology-error", snapshot);
     renderTopologyDiagram(snapshot);
+    renderProbePool(snapshot);
     document.getElementById("topology-table-body").innerHTML = boardsTableRows(snapshot);
     document.getElementById("topology-alerts-list").innerHTML = alertsListHtml(snapshot.alerts);
     document.getElementById("signals-table-body").innerHTML = signalsTableRows(snapshot);
@@ -421,15 +473,20 @@
     // `carrierCell` is where that shows, per row.
   }
 
-  // --- Enroll tab ---------------------------------------------------------
-  // Drag-and-drop, matching embarch-core's own retired `/enroll` page's
-  // interaction model (embarch-core/src/enroll_page.rs) — but submitting
-  // through embarch-ui's own `/api/enroll`, which already holds a live
-  // `CoreClient` server-side, rather than asking a human to paste in
-  // Core's bearer token by hand the way that static page had to.
+  // --- Enrolling, on the Topology tab --------------------------------------
+  // Drag-and-drop, inherited from embarch-core's own retired `/enroll` page
+  // (embarch-core/src/enroll_page.rs) by way of this UI's own retired Enroll
+  // tab — but submitting through `/api/enroll`, which already holds a live
+  // `CoreClient` server-side, rather than asking a human to paste in Core's
+  // bearer token by hand the way that static page had to.
+  //
+  // **The drop target is the diagram, not a pair of rectangles beside it**
+  // (decision 43): the same box that says a role is empty is the box a probe
+  // is dropped onto to fill it.
   let selectedSerial = null;
   let lastProbesKey = null;
   let latestSnapshot = null;
+  let dragoverRole = null;
 
   function probeLabel(serial) {
     const probes = (latestSnapshot && latestSnapshot.probes) || [];
@@ -475,10 +532,28 @@
     });
   }
 
+  // **Re-enrolling is the migration path, not a mistake** — the same shape
+  // as re-declaring a signal to move its route (decision 10), so an occupied
+  // role opens the ordinary dialog rather than refusing the drop. Two
+  // consequences are deliberate: the chip field arrives pre-filled from the
+  // enrolment being replaced, because a board that moved to another probe
+  // is the same chip and retyping it is the only way to get it wrong; and
+  // the dialog names what it displaces, so a mis-drop is visible before the
+  // button is pressed rather than after the row is gone.
   function openAssignDialog(serial, role) {
+    const existing = findEnrolled(latestSnapshot || {}, role);
     document.getElementById("assign-probe-label").textContent = probeLabel(serial);
     document.getElementById("assign-role-label").textContent = role;
-    document.getElementById("assign-chip").value = "";
+    document.getElementById("assign-chip").value = existing ? existing.chip : "";
+    const note = document.getElementById("assign-replace-note");
+    if (existing) {
+      note.style.display = "block";
+      note.textContent =
+        "replaces " + existing.role + " — " + existing.chip + " on probe " + existing.probe_serial;
+    } else {
+      note.style.display = "none";
+      note.textContent = "";
+    }
     document.getElementById("assign-result").textContent = "";
     const dialog = document.getElementById("assign-dialog");
     dialog.dataset.serial = serial;
@@ -523,50 +598,62 @@
     }
   }
 
-  function initEnrollTab() {
-    document.querySelectorAll(".drop-zone").forEach((zone) => {
-      zone.addEventListener("dragover", (ev) => {
+  // Listeners live on the `<svg>`, never on a node: `renderTopologyDiagram`
+  // rewrites the whole picture on every snapshot, so anything bound to a
+  // role box is gone within five seconds of being bound. Delegation also
+  // means a box that does not exist yet — the diagram before the first
+  // snapshot lands — becomes droppable the moment it is drawn.
+  function initEnrollOnDiagram() {
+    const svg = document.getElementById("topology-diagram");
+    if (svg) {
+      const roleAt = (ev) => {
+        const g = ev.target && ev.target.closest && ev.target.closest("[data-enroll-role]");
+        return g ? g.getAttribute("data-enroll-role") : null;
+      };
+      const clearHighlight = () => {
+        svg.querySelectorAll(".topo-drop.dragover").forEach((g) => g.classList.remove("dragover"));
+        dragoverRole = null;
+      };
+      svg.addEventListener("dragover", (ev) => {
+        const role = roleAt(ev);
+        if (!role) return;
+        // Only a node accepts the drop. Without the `preventDefault` the
+        // browser treats the whole SVG as a non-target and no `drop` ever
+        // fires; calling it unconditionally would make the empty space
+        // between the boxes look droppable and then swallow the drop.
         ev.preventDefault();
-        zone.classList.add("dragover");
+        if (role !== dragoverRole) {
+          clearHighlight();
+          dragoverRole = role;
+          const g = ev.target.closest("[data-enroll-role]");
+          if (g) g.classList.add("dragover");
+        }
       });
-      zone.addEventListener("dragleave", () => zone.classList.remove("dragover"));
-      zone.addEventListener("drop", (ev) => {
+      svg.addEventListener("dragleave", (ev) => {
+        if (roleAt(ev) === dragoverRole) clearHighlight();
+      });
+      svg.addEventListener("drop", (ev) => {
+        const role = roleAt(ev);
+        clearHighlight();
+        if (!role) return;
         ev.preventDefault();
-        zone.classList.remove("dragover");
         const serial = ev.dataTransfer.getData("text/plain");
-        if (serial) openAssignDialog(serial, zone.dataset.role);
+        if (serial) openAssignDialog(serial, role);
       });
       // Click-to-assign fallback for anyone who'd rather select-then-click
       // than drag — same flow, different trigger; also what makes this
       // usable on touch devices, where native drag-and-drop is patchy.
-      zone.addEventListener("click", () => {
-        if (selectedSerial) openAssignDialog(selectedSerial, zone.dataset.role);
+      svg.addEventListener("click", (ev) => {
+        const role = roleAt(ev);
+        if (role && selectedSerial) openAssignDialog(selectedSerial, role);
       });
-    });
+    }
     const cancelBtn = document.getElementById("assign-cancel");
     const confirmBtn = document.getElementById("assign-confirm");
     const backdrop = document.getElementById("assign-dialog-backdrop");
     if (cancelBtn) cancelBtn.addEventListener("click", closeAssignDialog);
     if (confirmBtn) confirmBtn.addEventListener("click", confirmAssign);
     if (backdrop) backdrop.addEventListener("click", closeAssignDialog);
-
-    // `?role=<role>` pre-fill, matching embarch-core's own retired
-    // `/enroll` page: a per-alert "re-enroll this board" link can land
-    // here with a role named, highlighting and scrolling to that zone.
-    const highlightRole = new URLSearchParams(location.search).get("role");
-    if (highlightRole) {
-      const zone = document.querySelector('.drop-zone[data-role="' + highlightRole.replace(/"/g, "") + '"]');
-      if (zone) {
-        zone.classList.add("highlight");
-        zone.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    }
-  }
-
-  function renderEnroll(snapshot) {
-    renderErrorBanner("enroll-error", snapshot);
-    renderProbePool(snapshot);
-    document.getElementById("enroll-table-body").innerHTML = enrolledTableRows(snapshot);
   }
 
   function renderSnapshot(snapshot) {
@@ -574,7 +661,6 @@
     renderStatusChip(snapshot);
     renderDashboard(snapshot);
     renderTopology(snapshot);
-    renderEnroll(snapshot);
   }
 
   // Suite-wide SSE convergence (decision 6): one
@@ -8892,7 +8978,7 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     initNav();
-    initEnrollTab();
+    initEnrollOnDiagram();
     initSignals();
     initStudyDesignerTab();
     initLiveStudyTab();

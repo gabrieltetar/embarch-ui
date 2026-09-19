@@ -4,8 +4,8 @@
 //! touched), submission/execution via `embarch-core-client` over HTTP+Bearer
 //! (decision 5). Unlike `study-designer-ui`, which shells out
 //! to `embarch-api`'s CLI for `run-study`/`study-status`, this talks to
-//! `embarch-core` directly through the same shared client the Dashboard/
-//! Topology/Enroll tabs already use.
+//! `embarch-core` directly through the same shared client the Dashboard
+//! and Topology tabs already use.
 //!
 //! **A project can be opened at runtime** (decision 14) — this used to
 //! say the tab was "disabled entirely (every

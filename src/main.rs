@@ -1,8 +1,9 @@
 //! embarch-ui: one consolidated human-facing UI for the EmbArch suite.
 //!
 //! The app shell is live against the reviewed mockups, the Dashboard/
-//! Topology tabs render real data from `embarch-core`, the Enroll tab
-//! submits real enrollments, the Study Designer tab builds and runs a
+//! Topology tabs render real data from `embarch-core` — and Topology
+//! submits real enrolments, dropped onto the diagram itself since the
+//! Enroll tab folded into it (decision 43) — the Study Designer tab builds and runs a
 //! `Study`, and the Debug tab live-tails Core's own log — entirely through
 //! `embarch-core-client` (decision 5's amendment: no in-process hardware
 //! access, and decision 7: never a direct logfile read). See
@@ -500,8 +501,11 @@ struct EnrollRequest {
 /// its own, so it has no choice but to ask a human to paste in a bearer
 /// token by hand — this handler already holds a live `CoreClient`
 /// server-side. The browser talking to embarch-ui never sees Core's token
-/// at all, a real UX improvement over the page this tab replaces, not just
-/// a straight port of it.
+/// at all, a real UX improvement over the page this route replaces, not
+/// just a straight port of it.
+///
+/// Its caller is the Topology tab; the Enroll tab that used to own it was
+/// folded into Topology (decision 43) without the route changing at all.
 async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> impl IntoResponse {
     match state
         .core
