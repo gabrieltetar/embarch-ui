@@ -22,6 +22,22 @@ pub struct Config {
     /// `[dev_bench].source_path` already works.
     #[serde(default)]
     pub study_designer: Option<StudyDesignerConfig>,
+    /// Where `embarch-api`'s project config is, for the Study Designer's
+    /// build toggle (decision 11, reversed).
+    ///
+    /// Absent is the ordinary case: `EMBARCH_API_CONFIG` is checked next,
+    /// and a bench that has configured `embarch-api` at all has already
+    /// answered this. The field exists for the bench where this UI runs
+    /// without that variable set — not so a second list of projects can be
+    /// written here, which is why it is a *path to that file* rather than a
+    /// projects table of its own.
+    #[serde(default)]
+    pub build: Option<BuildConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildConfig {
+    pub config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,7 +68,7 @@ fn default_core() -> CoreConfig {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { core: default_core(), study_designer: None }
+        Config { core: default_core(), study_designer: None, build: None }
     }
 }
 

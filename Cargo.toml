@@ -36,6 +36,15 @@ embarch-study-designer = { path = "../embarch-study-designer", features = ["stud
 # probe-rs/serialport count in `cargo tree -e normal`, not the crate's
 # absence.
 embarch-core-client = { path = "../embarch-api/crates/embarch-core-client" }
+# The suite's one implementation of "turn a selection into a Zephyr build and
+# run it," shared with embarch-api rather than duplicated (decision 11,
+# reversed 2026-09-18). This is what lets a study build its own DUT firmware
+# before it runs; the alternative was a copy of ~4,300 lines of build
+# machinery here, or a dependency on `embarch-api` — a direction the suite
+# has nowhere. It links no hardware: a build is `west` in a subprocess and
+# files on disk, and the flash still goes over HTTP to Core like every other
+# hardware-adjacent call this crate makes.
+embarch-firmware-build = { path = "../embarch-api/crates/embarch-firmware-build" }
 futures-util = "0.3"
 # `Study.streams`/`Study.requires` are `heapless`-backed, so authoring one
 # means constructing `heapless::String`/`Vec` directly (Phase D's tap and

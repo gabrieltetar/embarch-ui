@@ -26,15 +26,17 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use embarch_core_client::{CoreClient, StudyRunOptions};
 use embarch_study_designer::limits::{
+    MAX_BUILD_EXTRA_ARGS, MAX_BUILD_EXTRA_ARG_LEN, MAX_BUILD_TARGET_FIELD_LEN,
     MAX_DECODERS_PER_STUDY, MAX_FIRMWARE_VERSION_LEN, MAX_RECORD_MAGIC_LEN, MAX_SIGNAL_NAME_LEN,
-    MAX_STREAMS_PER_STUDY, MAX_STREAM_NAME_LEN,
+    MAX_SNIPPETS_PER_BUILD, MAX_SNIPPET_NAME_LEN, MAX_STREAMS_PER_STUDY, MAX_STREAM_NAME_LEN,
 };
 use embarch_study_designer::eap_repo::RepoProtocols;
 use embarch_study_designer::{DevBenchLogLevel, ProtocolDef, RecordCheck, RecordFraming};
 use embarch_study_designer::{
     build_study, merge_actions, requirement_satisfied, validate_taps, Action, ActionRegistry,
-    BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattName, GattNameBook,
-    GattServiceInfo, Provenance, RegisteredAction, Requirements, RoleChoice, RowAction, Step,
+    BuildSpec, BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattName,
+    GattNameBook, GattServiceInfo, OutpostModeRequirement, Provenance, RegisteredAction,
+    Requirements, RoleChoice, RowAction, Step,
     StreamEncoding, StreamScope, Outcome, StreamSource, StreamTap, StructLayout, StructRegistry,
     Study, StudyResult, TableRow, Uuid, VersionSource, REQUIREMENT_ANY,
 };
@@ -122,7 +124,7 @@ impl StudyDesigner {
         self.0.project.lock().unwrap().clone()
     }
 
-    fn repo_path(&self) -> Option<std::path::PathBuf> {
+    pub(crate) fn repo_path(&self) -> Option<std::path::PathBuf> {
         self.project().map(|p| p.firmware_repo_path)
     }
 
@@ -393,6 +395,149 @@ fn discovery_failure(result: &StudyResult) -> Option<String> {
 pub struct RequirementsInput {
     dev_bench_version: String,
     firmware_version: String,
+    /// The firmware this study builds for itself, when the Build card's
+    /// toggle is on (decision 11, reversed). Absent is the common case and
+    /// means what it always meant: the DUT is whatever somebody already
+    /// flashed.
+    #[serde(default)]
+    build: Option<BuildSpecInput>,
+    /// The outpost trace mode this study needs, authored as flag *names*
+    /// rather than as a byte — see [`OutpostModeInput`].
+    #[serde(default)]
+    outpost: Option<OutpostModeInput>,
+}
+
+/// A build spec as the Build card authors it: plain `String`s, converted to
+/// the `heapless` shape here so an over-long field is a named refusal
+/// rather than a truncation.
+///
+/// **Snippets arrive as an ordered list and are stored in that order.** The
+/// picker is a list an engineer arranges, not a set of checkboxes, because
+/// west applies `-S` in order and
+/// `embarch-decision-reversals.md` row 109 is a case where the order is the
+/// difference between a working image and one whose tracer has no UART.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BuildSpecInput {
+    #[serde(default)]
+    board: Option<String>,
+    #[serde(default)]
+    variant: Option<String>,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    app: Option<String>,
+    #[serde(default)]
+    snippets: Vec<String>,
+    #[serde(default)]
+    extra_args: Vec<String>,
+}
+
+/// An outpost mode requirement as the Build card authors it: two lists of
+/// flag **names**.
+///
+/// **Names rather than a byte, on this hop only.** The stored
+/// `OutpostModeRequirement` is two `u8` masks, which is the right shape for
+/// a check; it is the wrong shape for a thing a human types, a thing a
+/// reviewer reads in a diff of `requires`, and a thing this file has to
+/// report an error about. `HeaderFlags::bit` is the one table both
+/// directions go through, so a name this build does not know is a named
+/// refusal instead of a silently-zero mask.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OutpostModeInput {
+    #[serde(default)]
+    set: Vec<String>,
+    #[serde(default)]
+    clear: Vec<String>,
+}
+
+impl OutpostModeInput {
+    fn mask(names: &[String], which: &str) -> Result<u8, String> {
+        let mut mask = 0u8;
+        for name in names {
+            let bit = embarch_study_designer::outpost::HeaderFlags::bit(name.trim())
+                .ok_or_else(|| {
+                    let known: Vec<&str> = embarch_study_designer::outpost::HeaderFlags::NAMED
+                        .iter()
+                        .map(|(_, n)| *n)
+                        .collect();
+                    format!(
+                        "requires.outpost.{which} names '{}', which is not an outpost header                          flag. Known flags: {}",
+                        name.trim(),
+                        known.join(", ")
+                    )
+                })?;
+            mask |= bit;
+        }
+        Ok(mask)
+    }
+
+    fn build(&self) -> Result<OutpostModeRequirement, String> {
+        let requirement = OutpostModeRequirement {
+            required_set: Self::mask(&self.set, "set")?,
+            required_clear: Self::mask(&self.clear, "clear")?,
+        };
+        requirement.validate().map_err(|e| e.to_string())?;
+        Ok(requirement)
+    }
+}
+
+impl BuildSpecInput {
+    fn build(&self) -> Result<BuildSpec, String> {
+        let axis = |raw: &Option<String>, what: &str| -> Result<Option<HString<MAX_BUILD_TARGET_FIELD_LEN>>, String> {
+            let Some(raw) = raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+                // An empty box in the dialog is "don't narrow on this axis",
+                // which is a real answer — the resolver fills it from the
+                // project's own `default_target`. Only a *stored* blank is
+                // refused, and this is where the two stop being the same
+                // thing.
+                return Ok(None);
+            };
+            HString::try_from(raw)
+                .map(Some)
+                .map_err(|_| too_long(what, raw, MAX_BUILD_TARGET_FIELD_LEN))
+        };
+
+        let mut snippets: HVec<HString<MAX_SNIPPET_NAME_LEN>, MAX_SNIPPETS_PER_BUILD> = HVec::new();
+        for name in self.snippets.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let name = HString::try_from(name)
+                .map_err(|_| too_long("build.snippets entry", name, MAX_SNIPPET_NAME_LEN))?;
+            snippets.push(name).map_err(|_| {
+                format!(
+                    "this build names more than {MAX_SNIPPETS_PER_BUILD} snippets, which is all                      a study can carry"
+                )
+            })?;
+        }
+
+        let mut extra_args: HVec<HString<MAX_BUILD_EXTRA_ARG_LEN>, MAX_BUILD_EXTRA_ARGS> =
+            HVec::new();
+        for arg in self.extra_args.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let arg = HString::try_from(arg)
+                .map_err(|_| too_long("build.extra_args entry", arg, MAX_BUILD_EXTRA_ARG_LEN))?;
+            extra_args.push(arg).map_err(|_| {
+                format!(
+                    "this build names more than {MAX_BUILD_EXTRA_ARGS} extra west flags, which                      is all a study can carry"
+                )
+            })?;
+        }
+
+        let spec = BuildSpec {
+            board: axis(&self.board, "build.board")?,
+            variant: axis(&self.variant, "build.variant")?,
+            revision: axis(&self.revision, "build.revision")?,
+            app: axis(&self.app, "build.app")?,
+            snippets,
+            extra_args,
+        };
+        spec.validate().map_err(|e| e.to_string())?;
+        Ok(spec)
+    }
+}
+
+fn too_long(what: &str, raw: &str, cap: usize) -> String {
+    format!(
+        "requires.{what} is {} characters and a study can carry {cap}",
+        raw.chars().count()
+    )
 }
 
 impl RequirementsInput {
@@ -403,6 +548,8 @@ impl RequirementsInput {
         RequirementsInput {
             dev_bench_version: REQUIREMENT_ANY.to_string(),
             firmware_version: REQUIREMENT_ANY.to_string(),
+            build: None,
+            outpost: None,
         }
     }
 
@@ -425,6 +572,8 @@ impl RequirementsInput {
         let requires = Requirements {
             dev_bench_version: field(&self.dev_bench_version, "dev_bench_version")?,
             firmware_version: field(&self.firmware_version, "firmware_version")?,
+            build: self.build.as_ref().map(BuildSpecInput::build).transpose()?,
+            outpost: self.outpost.as_ref().map(OutpostModeInput::build).transpose()?,
         };
         requires.validate().map_err(|e| e.to_string())?;
         Ok(requires)
@@ -1604,7 +1753,7 @@ pub async fn api_run(
     State(state): State<crate::AppState>,
     Json(req): Json<RunRequest>,
 ) -> axum::response::Response {
-    let sd = state.study_designer;
+    let sd = state.study_designer.clone();
     // A project is a precondition rather than an input here — this route
     // reads nothing off it, but it has nothing to answer about without one.
     if sd.project().is_none() {
@@ -1639,28 +1788,264 @@ pub async fn api_run(
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
-    // `flashed_firmware_version` stays `None`, and that is not an omission:
-    // this UI never builds or flashes anything (decision 5's
-    // amendment routes every hardware-adjacent operation through Core), so it
-    // has nothing it could honestly claim to have put on the DUT. Claiming
-    // otherwise is exactly what would turn `VersionSource::FlashedThisRun`
-    // from a fact into an assertion.
+    // **No slug**: this study is the table as it stands, which may never
+    // have been saved. A build still runs and still reports what it
+    // flashed; there is simply no file to write the built version back
+    // into, and inventing one would be saving a study nobody asked to save.
+    submit_run(&state, study, req.allow_version_mismatch, None).await
+}
+
+
+/// Submits a study, **building and flashing its DUT firmware first when it
+/// declares one** (decision 11, reversed).
+///
+/// Both run routes go through here, for the reason `run_saved_study`'s own
+/// comment already gives about itself: two routes post a study, and one of
+/// them had to not be a second implementation.
+///
+/// # Two different response shapes, and why
+///
+/// Without a build spec this is exactly what it always was — a `post_study`
+/// and a `{ "study_id": … }`, synchronous, unchanged.
+///
+/// With one, the work is tens of seconds of `west` and this returns
+/// `{ "build_id": … }` **immediately**, with the build running in a
+/// background task publishing to `GET /api/build/events`. Not because a long
+/// request is untidy: a build the browser cannot watch is a spinner, and the
+/// owner asked for the log to be a phase of the run, which it can only be if
+/// it arrives while it is happening. The browser follows the stream and
+/// picks up the study id from its terminal frame.
+///
+/// # What happens to the study's own `firmware_version`
+///
+/// **Rewritten on the saved file only when the engineer waved a mismatch
+/// through, and never over an explicit `any`.**
+///
+/// The build refuses before it starts when the working tree is not at the
+/// revision the study requires, so in the ordinary case the two already
+/// agree and there is nothing to write. The case that is left is the one
+/// worth automating: a study pinned to a revision the tree has moved past,
+/// run anyway on purpose. Writing the built version back is what stops that
+/// study asking the same stale question tomorrow.
+///
+/// `any` is exempt, and that is not a special case bolted on — it is the
+/// same rule decision 11 states for the checkbox. `any` is a deliberate
+/// statement that the build does not matter, and silently converting it
+/// into a pin would erase a distinction the whole of decision 40 rests on.
+async fn submit_run(
+    state: &crate::AppState,
+    study: Study,
+    allow_version_mismatch: bool,
+    saved_slug: Option<String>,
+) -> axum::response::Response {
+    let Some(spec) = study.requires.build.clone() else {
+        return post_and_hand_off(state, study, allow_version_mismatch, None).await;
+    };
+
+    let sd = state.study_designer.clone();
+    let Some(repo) = sd.repo_path() else { return not_configured() };
+
+    let run = state.build_runs.start();
+    let build_id = run.id.clone();
+
+    let state = state.clone();
+    tokio::spawn(async move {
+        let required = study.requires.firmware_version.as_str().to_string();
+        run.emit(serde_json::json!({ "kind": "phase", "phase": "build" }));
+
+        let emitter = {
+            let run = run.clone();
+            std::sync::Arc::new(move |stream: &str, text: &str| {
+                run.emit(serde_json::json!({
+                    "kind": "line",
+                    "stream": stream,
+                    "text": text,
+                }));
+            })
+        };
+
+        let flashed = crate::firmware_build::build_and_flash(
+            &sd.0.core,
+            &state.build_locks,
+            state.build_config_path.as_deref(),
+            &repo,
+            &spec,
+            &required,
+            allow_version_mismatch,
+            emitter,
+        )
+        .await;
+
+        let flashed = match flashed {
+            Ok(f) => f,
+            Err(e) => {
+                run.finish(serde_json::json!({
+                    "kind": "failed",
+                    "phase": "build",
+                    "error": format!("{e:#}"),
+                }));
+                return;
+            }
+        };
+
+        run.emit(serde_json::json!({
+            "kind": "flashed",
+            "version": flashed.version,
+            "artifact_path": flashed.artifact_path,
+            "descriptor": flashed.descriptor,
+            "log_id": flashed.log_id,
+        }));
+
+        let mut study = study;
+        let rewrote = match update_saved_firmware_version(
+            &sd,
+            saved_slug.as_deref(),
+            &required,
+            &flashed.version,
+        ) {
+            Ok(rewrote) => rewrote,
+            Err(e) => {
+                // A study that could not be rewritten is not a run that
+                // failed. Said out loud rather than swallowed: the engineer
+                // is about to see a run whose requirement still names the
+                // old revision.
+                run.emit(serde_json::json!({
+                    "kind": "line",
+                    "stream": "info",
+                    "text": format!("the saved study's firmware_version was not updated: {e:#}"),
+                }));
+                false
+            }
+        };
+        if rewrote {
+            // The study about to be posted carries the same value the file
+            // now does, so the result's provenance and the file agree.
+            if let Ok(v) = HString::try_from(flashed.version.as_str()) {
+                study.requires.firmware_version = v;
+            }
+            run.emit(serde_json::json!({
+                "kind": "line",
+                "stream": "info",
+                "text": format!(
+                    "this study required '{required}' and now requires '{}' — the saved file \
+                     was updated to what was just flashed",
+                    flashed.version
+                ),
+            }));
+        }
+
+        run.emit(serde_json::json!({ "kind": "phase", "phase": "submit" }));
+        let posted = post_study_only(
+            &sd.0.core,
+            &study,
+            allow_version_mismatch,
+            Some(flashed.version.clone()),
+        )
+        .await;
+
+        match posted {
+            Ok(study_id) => {
+                state.live.ensure(&study_id);
+                run.finish(serde_json::json!({ "kind": "started", "study_id": study_id }));
+            }
+            Err(e) => run.finish(serde_json::json!({
+                "kind": "failed",
+                "phase": "submit",
+                "error": e,
+            })),
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "build_id": build_id })),
+    )
+        .into_response()
+}
+
+/// `post_study` plus the live-session hand-off, for a run with no build
+/// phase in front of it.
+async fn post_and_hand_off(
+    state: &crate::AppState,
+    study: Study,
+    allow_version_mismatch: bool,
+    flashed: Option<String>,
+) -> axum::response::Response {
+    let sd = state.study_designer.clone();
+    match post_study_only(&sd.0.core, &study, allow_version_mismatch, flashed).await {
+        Ok(study_id) => {
+            // Registering a live session subscribes embarch-ui once to
+            // Core's event stream for this study and starts the rings the
+            // Live Study tab reads. The tab needs nothing else to attach.
+            state.live.ensure(&study_id);
+            Json(serde_json::json!({ "study_id": study_id })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    }
+}
+
+async fn post_study_only(
+    core: &CoreClient,
+    study: &Study,
+    allow_version_mismatch: bool,
+    flashed_firmware_version: Option<String>,
+) -> Result<String, String> {
     let options = StudyRunOptions {
-        allow_version_mismatch: req.allow_version_mismatch,
-        flashed_firmware_version: None,
+        allow_version_mismatch,
+        // **Set only when this process genuinely flashed the board.** Until
+        // 2026-09-18 it was unconditionally `None` and the comment said why:
+        // this UI built nothing, so claiming otherwise would have turned
+        // `VersionSource::FlashedThisRun` from a fact into an assertion. It
+        // now builds, so on that path the claim is a fact — and on every
+        // other path it is still `None`, for the original reason.
+        flashed_firmware_version,
     };
-    let study_id = match sd.0.core.post_study(&study, &options).await {
-        Ok(resp) => resp.study_id,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    core.post_study(study, &options)
+        .await
+        .map(|resp| resp.study_id)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Writes `built` into a saved study's `requires.firmware_version`, when the
+/// rules in [`submit_run`]'s doc comment say to. Returns whether it wrote.
+///
+/// **A whole-value edit of the parsed JSON, not a re-serialization of the
+/// `Study`.** The file also carries `_embarch_ui_rows` and `_embarch_ui_taps`
+/// — the authoring sidecars that make it loadable back into the table — and
+/// rewriting it from the runnable `Study` alone would silently turn an
+/// editable study into one the editor refuses with a `409`. None of the
+/// three CRCs cover `requires`, so nothing needs resealing.
+fn update_saved_firmware_version(
+    sd: &StudyDesigner,
+    slug: Option<&str>,
+    required: &str,
+    built: &str,
+) -> Result<bool, String> {
+    let Some(slug) = slug else { return Ok(false) };
+    if required == REQUIREMENT_ANY || required == built {
+        return Ok(false);
+    }
+    let Some(project) = sd.project() else { return Ok(false) };
+    let slug = study_slug(slug)?;
+    let path = studies_dir(&project).join(format!("{slug}.json"));
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+    let mut value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} isn't valid JSON: {e}", path.display()))?;
+    let Some(requires) = value.get_mut("requires").and_then(|r| r.as_object_mut()) else {
+        return Err(format!("{} has no `requires` object to update", path.display()));
     };
+    requires.insert(
+        "firmware_version".to_string(),
+        serde_json::Value::String(built.to_string()),
+    );
 
-    // The hand-off, and the only thing this route does with the study id
-    // besides return it: registering a live session subscribes embarch-ui
-    // once to Core's event stream for this study and starts the rings the
-    // Live Study tab reads. The tab itself needs nothing else to attach.
-    state.live.ensure(&study_id);
-
-    Json(serde_json::json!({ "study_id": study_id })).into_response()
+    let rendered = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("couldn't re-render {}: {e}", path.display()))?;
+    std::fs::write(&path, format!("{rendered}\n"))
+        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
+    Ok(true)
 }
 
 /// What a pre-flight found. **Never gates**: every field is a reading, and
@@ -1855,6 +2240,8 @@ pub async fn api_study_summary(
         requires: RequirementsOut {
             dev_bench_version: version_field(&value, "dev_bench_version"),
             firmware_version: version_field(&value, "firmware_version"),
+            build: requires_object(&value, "build"),
+            outpost: requires_object(&value, "outpost"),
         },
         // Absent means the field predates `dev_bench_log_level`, and such a
         // study ran at the crate's default — which is what is reported,
@@ -1982,21 +2369,11 @@ pub async fn run_saved_study(
         return (StatusCode::BAD_REQUEST, format!("'{slug}.json': {e}")).into_response();
     }
 
-    let options = StudyRunOptions {
-        allow_version_mismatch,
-        // Same reason `api_run` leaves it `None`: this UI flashes nothing,
-        // so it has nothing it could honestly claim to have put on the DUT.
-        flashed_firmware_version: None,
-    };
-    let study_id = match sd.0.core.post_study(&study, &options).await {
-        Ok(resp) => resp.study_id,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
-    };
-
-    // Same hand-off as `api_run`'s — see there.
-    state.live.ensure(&study_id);
-
-    Json(serde_json::json!({ "study_id": study_id })).into_response()
+    // The slug is passed on so a build that ran under a waved-through
+    // version mismatch can write what it flashed back into this file — see
+    // `submit_run`, which is also where the rule that it usually does not
+    // lives.
+    submit_run(state, study, allow_version_mismatch, Some(slug)).await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2680,6 +3057,33 @@ struct LoadedStudy {
 struct RequirementsOut {
     dev_bench_version: String,
     firmware_version: String,
+    /// The build spec and the outpost mode, **passed back verbatim** rather
+    /// than reshaped into a typed mirror.
+    ///
+    /// Both are authored by the Build card and read back by it, and the one
+    /// authority on their shape is `embarch-study-designer`. A typed copy
+    /// here would be a third spelling of the same thing — after
+    /// `BuildSpecInput` and `BuildSpec` — whose only job would be to agree
+    /// with the other two, which is the sort of agreement that lapses
+    /// quietly. `null` is a study that declares neither, which is most of
+    /// them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outpost: Option<serde_json::Value>,
+}
+
+/// One `requires` sub-object as it was saved, or `None`.
+///
+/// `null` and absent are both `None` on purpose: a study saved before these
+/// fields existed has neither key, and one saved with the toggle off has
+/// them as `null`, and they mean the same thing to a reader.
+fn requires_object(value: &serde_json::Value, field: &str) -> Option<serde_json::Value> {
+    value
+        .get("requires")
+        .and_then(|r| r.get(field))
+        .filter(|v| !v.is_null())
+        .cloned()
 }
 
 /// A tap as it loads back into the table. **Structurally [`TapInput`]**, and
@@ -2864,6 +3268,8 @@ pub async fn api_studies_load(
     let requires = RequirementsOut {
         dev_bench_version: version_field(&value, "dev_bench_version"),
         firmware_version: version_field(&value, "firmware_version"),
+        build: requires_object(&value, "build"),
+        outpost: requires_object(&value, "outpost"),
     };
 
     let taps = match value.get("_embarch_ui_taps") {
@@ -4080,6 +4486,8 @@ mod tests {
         RequirementsInput {
             dev_bench_version: dev_bench.to_string(),
             firmware_version: firmware.to_string(),
+            build: None,
+            outpost: None,
         }
     }
 

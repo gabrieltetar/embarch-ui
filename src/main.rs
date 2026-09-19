@@ -10,6 +10,7 @@
 //! for the full architecture.
 
 mod config;
+mod firmware_build;
 mod live_study;
 mod logs;
 mod snapshot;
@@ -137,6 +138,17 @@ pub(crate) struct AppState {
     /// per study, never one per browser** — which is what lets a tab opened
     /// or reloaded mid-run replay the whole run so far.
     live: Arc<live_study::LiveStudies>,
+    /// Per-project build locks, so two runs that both want to build the
+    /// same project queue rather than stomp one output directory. The same
+    /// `BuildLocks` `embarch-api` holds, from the same crate — and held per
+    /// process, not per request, which is the whole point of a lock.
+    build_locks: Arc<embarch_firmware_build::build::BuildLocks>,
+    /// Build-and-flash runs this process has started, and what each has
+    /// said so far — what `GET /api/build/events` streams.
+    build_runs: Arc<firmware_build::BuildRuns>,
+    /// Where `embarch-api`'s project config is, when this UI's own config
+    /// names it. `None` falls through to `EMBARCH_API_CONFIG`.
+    build_config_path: Option<std::path::PathBuf>,
 }
 
 /// One decoded capture, keyed by the study and tap it was decoded from.
@@ -200,6 +212,8 @@ async fn async_main() -> anyhow::Result<()> {
 
     let live = live_study::LiveStudies::new(core.clone());
 
+    let build_config_path = config.build.as_ref().map(|b| b.config_path.clone());
+
     let state = AppState {
         snapshot_rx: rx,
         core,
@@ -211,6 +225,9 @@ async fn async_main() -> anyhow::Result<()> {
         table_cache: Arc::new(tokio::sync::Mutex::new(None)),
         time_chart_cache: Arc::new(tokio::sync::Mutex::new(None)),
         live,
+        build_locks: Arc::new(embarch_firmware_build::build::BuildLocks::new()),
+        build_runs: firmware_build::BuildRuns::new(),
+        build_config_path,
     };
 
     let app = Router::new()
@@ -321,6 +338,10 @@ async fn async_main() -> anyhow::Result<()> {
         )
         .route("/api/logs/recent", get(api_logs_recent))
         .route("/api/logs/events", get(api_logs_events))
+        .route("/api/build/survey", get(firmware_build::api_build_survey))
+        .route("/api/build/events", get(firmware_build::api_build_events))
+        .route("/api/build/logs", get(firmware_build::api_build_logs))
+        .route("/api/build/logs/{id}", get(firmware_build::api_build_log))
         .route("/api/api-logs/recent", get(api_api_logs_recent))
         .route("/api/api-logs/events", get(api_api_logs_events))
         .with_state(state);
