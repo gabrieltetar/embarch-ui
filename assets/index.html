@@ -113,7 +113,7 @@
           <div class="card">
             <div class="card-title">Enrolled boards</div>
             <table class="data-table">
-              <thead><tr><th>Role</th><th>Chip</th><th>Probe</th><th>Enrolled</th></tr></thead>
+              <thead><tr><th>Role</th><th>Board type</th><th>Probe</th><th>Enrolled</th></tr></thead>
               <tbody id="enrolled-table-body"><tr><td colspan="4" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
             </table>
           </div>
@@ -157,9 +157,9 @@
         <div class="card" style="margin-bottom:16px; padding:26px 30px;">
           <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
           <div class="topo-enroll-strip">
-            <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the dev-bench or DUT box above, or click a probe then a box</div>
+            <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the Dev bench or DUT box above, or click a probe then a box</div>
             <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
-            <p class="placeholder-note" style="margin-top:10px;">Two boards using visibly different probes (different identifier/serial) can both stay plugged in — drag each onto its box. Two boards that happen to share the exact same probe type can't be told apart this way; unplug down to one of them and enroll it alone instead. Dropping onto a box that already holds a board re-enrols it — that is the migration path, the same way re-declaring a signal moves its route.</p>
+            <p class="placeholder-note" style="margin-top:10px;">A probe and a board are separate things: this says <em>which probe serves which role</em>, and the board name on each box says <em>which board type is in it</em>. Only two probes are ever identified — the DUT's and the dev bench's — and the same probe can serve a different board tomorrow. Dropping onto a box that already holds a probe re-binds it, reading that board's identity again; that is the migration path, not a mistake.</p>
           </div>
         </div>
         <div class="card" style="margin-bottom:16px;">
@@ -188,32 +188,23 @@
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:16px;">
-          <div class="card-title">Roles</div>
-          <p class="placeholder-note" style="margin:8px 0 12px;">There are exactly two roles, <span class="mono">DUT</span> and <span class="mono">Dev bench</span>, and both are rows whether or not a board holds one &mdash; nothing else can render &ldquo;DUT: not enrolled&rdquo;. What a board is <em>called</em> is a separate fact from the role it is in, held in this project&rsquo;s catalog below. A row whose role is neither of the two is a board name written where a role belongs, from before the two were separate; clear it and re-enrol the board.</p>
-          <table class="data-table">
-            <thead><tr><th style="width:190px;">Role</th><th>Board</th><th>Chip</th><th>Probe</th><th>Status</th><th>Enrolled</th><th style="width:44px;"></th></tr></thead>
-            <tbody id="topology-table-body"><tr><td colspan="7" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
-          </table>
-        </div>
-
-        <!-- The project's board catalog (decision 44): what boards exist,
-             independent of which one is plugged in today. No probe serial
-             here on purpose — one probe gets moved between three boards
-             over a week, so a probe is a fact about the current wiring,
-             which is the enrolment's business and the saved topology's,
-             never the board's. -->
+        <!-- The project's board catalog (decisions 44, 45): the board
+             *types* this repo builds for — shapes, not pieces of hardware,
+             the same sense Zephyr means by a board. No probe serial here on
+             purpose: a probe is moved between boards, so which probe serves
+             a role is a separate binding, made on the diagram above. -->
         <div class="card">
           <div class="sd-toolbar">
-            <div class="card-title" style="margin:0;">Boards in this project</div>
+            <div class="card-title" style="margin:0;">Board types in this project</div>
             <div class="sd-toolbar-actions">
-              <button id="board-add" class="btn btn-icon" title="Add a board to this project">+</button>
+              <button id="board-rescan" class="btn" title="Read the board targets this repo builds for and add any that are missing">Rescan</button>
+              <button id="board-add" class="btn btn-icon" title="Add a board type to this project">+</button>
             </div>
           </div>
           <p id="board-catalog-path" class="placeholder-note" style="margin:8px 0 12px;">reading…</p>
           <div id="board-catalog-error" class="sd-error" style="display:none; margin-bottom:10px;"></div>
           <table class="data-table">
-            <thead><tr><th style="width:190px;">Name</th><th>Chip</th><th>Builds as</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
+            <thead><tr><th style="width:190px;">Board type</th><th>Chip</th><th>Builds as</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
             <tbody id="board-catalog-body"><tr><td colspan="5" class="placeholder-note">reading…</td></tr></tbody>
           </table>
         </div>
@@ -466,33 +457,22 @@
             <p id="sd-build-note" class="placeholder-note" style="margin:8px 0 12px;">checking what this bench can build…</p>
             <div id="sd-build-body" style="display:none;">
               <p class="placeholder-note" style="margin:0 0 12px;">What is stored is the <em>selection</em>, never a build id: it is resolved against the repo as it stands, every time it runs. The working tree is never moved — a study that requires a revision the tree is not at is refused, naming both, rather than checked out.</p>
+              <!-- decision 45: board, variant and revision are not the
+                   study's any more. The DUT role holds a board type, and a
+                   run builds for whatever is in that role at the moment it
+                   runs — the same reason a study names a signal and never a
+                   carrier. This line is a read-out of that, and the
+                   Topology tab is where it is changed. -->
               <div class="req-grid">
                 <div class="req-row">
                   <div class="req-label">board</div>
-                  <select id="sd-build-board" class="sd-input mono"></select>
-                  <div class="req-live" id="sd-build-board-note"></div>
-                  <!-- decision 44: the board enrolled as DUT is a named
-                       board in this project's catalog, and a catalog entry
-                       can say what it builds as. Offered rather than
-                       applied: the west target a study builds is the
-                       study's, and a bench swap must not silently
-                       re-target a saved one. -->
-                  <button id="sd-build-from-dut" class="btn" style="display:none; margin-top:8px;"></button>
+                  <div id="sd-build-role-board" class="req-live mono">reading the DUT role…</div>
+                  <div class="req-live">Set on the <a href="#topology">Topology</a> tab, by the board type in the DUT role. A study stores no board of its own.</div>
                 </div>
                 <div class="req-row">
                   <div class="req-label">app</div>
                   <select id="sd-build-app" class="sd-input mono"></select>
                   <div class="req-live" id="sd-build-app-note"></div>
-                </div>
-                <div class="req-row">
-                  <div class="req-label">variant</div>
-                  <select id="sd-build-variant" class="sd-input mono"></select>
-                  <div class="req-live">blank takes the project’s own default_target</div>
-                </div>
-                <div class="req-row">
-                  <div class="req-label">revision</div>
-                  <select id="sd-build-revision" class="sd-input mono"></select>
-                  <div class="req-live">blank takes the project’s own default_target</div>
                 </div>
               </div>
 
@@ -711,19 +691,13 @@
       <div id="assign-dialog" class="dialog card" style="display:none; top:30%; width:340px;">
         <div class="card-title">Enroll <span id="assign-probe-label" class="mono"></span> as <span id="assign-role-label" class="mono"></span></div>
         <p id="assign-replace-note" class="placeholder-note" style="display:none; margin:0 0 10px;"></p>
-        <label class="sd-field" style="margin-bottom:10px;"><span>Board &mdash; which physical board is in this role</span>
+        <p class="placeholder-note" style="margin:0 0 10px;">Binding a probe reads the identity of whatever board is on it, so this needs the board type already picked on the box &mdash; that is what says which chip to attach as.</p>
+        <label class="sd-field" style="margin-bottom:10px;"><span>Board type in this role</span>
           <select id="assign-board" class="sd-input mono"></select>
         </label>
-        <label class="sd-field" id="assign-new-board-field" style="display:none; margin-bottom:10px;"><span>New board&rsquo;s name</span>
-          <input id="assign-new-board" type="text" class="sd-input mono" spellcheck="false" placeholder="client-nucleo" />
+        <label style="display:block; font-size:12.5px; color:var(--text-secondary); margin-bottom:6px;">Chip &mdash; from that board type
+          <input id="assign-chip" readonly style="width:100%; margin-top:4px; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-family:var(--font-mono); font-size:13px;">
         </label>
-        <label style="display:block; font-size:12.5px; color:var(--text-secondary); margin-bottom:6px;">Chip
-          <input id="assign-chip" list="chip-suggestions" placeholder="e.g. nRF54L15" style="width:100%; margin-top:4px; padding:8px 10px; border-radius:8px; border:1px solid var(--border-strong); background:var(--bg-surface-2); color:var(--text-primary); font-family:var(--font-mono); font-size:13px;">
-        </label>
-        <datalist id="chip-suggestions">
-          <option value="nRF54L15">
-          <option value="esp32c5">
-        </datalist>
         <div id="assign-result" class="placeholder-note" style="margin:10px 0;"></div>
         <div style="display:flex; gap:8px; justify-content:flex-end;">
           <button type="button" class="btn" id="assign-cancel">Cancel</button>
@@ -733,10 +707,10 @@
 
       <div id="board-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="board-dialog" class="dialog" style="display:none;">
-        <div class="card-title">A board in this project</div>
-        <p class="placeholder-note">Saved to <span class="mono">embarch/boards.toml</span> in the open firmware repo, so the bench is described where the studies that run on it live. Re-saving the same name edits that board.</p>
+        <div class="card-title">A board type in this project</div>
+        <p class="placeholder-note">A board <em>type</em> is a shape this repo builds for &mdash; what Zephyr means by a board &mdash; not an individual piece of hardware. Saved to <span class="mono">embarch/boards.toml</span>, so the bench is described where the studies that run on it live. <strong>Rescan</strong> adds the targets the repo builds for; nothing it finds overwrites what you typed. Re-saving the same name edits that type.</p>
         <div class="sd-form-grid">
-          <label class="sd-field"><span>Name</span><input id="board-name" type="text" class="sd-input mono" spellcheck="false" placeholder="client-nucleo" /></label>
+          <label class="sd-field"><span>Name</span><input id="board-name" type="text" class="sd-input mono" spellcheck="false" placeholder="nrf54l15dk" /></label>
           <label class="sd-field"><span>Chip &mdash; the probe-rs target</span><input id="board-chip" list="chip-suggestions" type="text" class="sd-input mono" spellcheck="false" placeholder="nRF54L15" /></label>
           <label class="sd-field"><span>Builds as &mdash; the west board</span><input id="board-build-target" type="text" class="sd-input mono" spellcheck="false" placeholder="nrf54l15dk/nrf54l15/cpuapp" /></label>
           <label class="sd-field"><span>Variant</span><input id="board-variant" type="text" class="sd-input mono" spellcheck="false" /></label>
@@ -749,6 +723,22 @@
           <span style="flex:1;"></span>
           <button id="board-cancel" class="btn">Cancel</button>
           <button id="board-save" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+
+      <div id="role-board-backdrop" class="dialog-backdrop" style="display:none;"></div>
+      <div id="role-board-dialog" class="dialog card" style="display:none; top:30%; width:420px;">
+        <div class="card-title" id="role-board-title">Board type in this role</div>
+        <p class="placeholder-note" style="margin:0 0 10px;">Which <em>shape</em> of board is in this role &mdash; what a run builds for. It is not a probe and not a specific unit: the probe that serves this role is bound by dragging one onto the box, and which physical board is on that probe is answered by its hardware ID when you press <strong>Validate topology</strong>. Picking a board type opens nothing and touches no hardware.</p>
+        <label class="sd-field"><span>Board type</span>
+          <select id="role-board-select" class="sd-input mono"></select>
+        </label>
+        <p id="role-board-result" class="sd-error" style="display:none; margin-top:10px;"></p>
+        <div class="sd-row-actions" style="margin-top:16px;">
+          <button id="role-board-retract" class="btn" title="Clear this role — its board type and its probe binding both go">Retract role</button>
+          <span style="flex:1;"></span>
+          <button id="role-board-cancel" class="btn">Cancel</button>
+          <button id="role-board-save" class="btn btn-primary">Set</button>
         </div>
       </div>
 

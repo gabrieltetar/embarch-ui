@@ -42,13 +42,19 @@ PROBES = [
 # dev-bench is enrolled (the replace path), dut is not (the empty path), and
 # `sniffer` is enrolled under a role outside the canonical pair — the row the
 # retired Enroll tab's own table was the only place to see.
+# dev-bench holds both halves; dut holds neither yet (the state a bench is
+# in while it is being set up, and the one the old row shape could not
+# represent at all); `sniffer` is a leftover role from before the
+# vocabulary closed.
 ENROLLED = [
-    {"probe_serial": "000683001234", "role": "dev-bench", "name": "bench-esp32c5",
+    {"probe_serial": "000683001234", "role": "dev-bench",
+     "name": "esp32c5_devkitc/esp32c5/hpcore",
      "chip": "esp32c5", "hardware_id": "aa:bb", "confirmed_at_utc_ms": NOW_MS,
      "link_serial": None},
     {"probe_serial": "ZZZ999", "role": "sniffer", "chip": "nRF52840",
      "hardware_id": "cc:dd", "confirmed_at_utc_ms": NOW_MS, "link_serial": None},
 ]
+BOARD_WRITES = []
 # One declared signal whose carrier is *not* in the port enumeration below —
 # the failing route the validate pass has to report as a failure rather than
 # as a route it could not check.
@@ -158,6 +164,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._text("", 204)
         return self._text("not found in the stub", 404)
 
+    def do_PUT(self):
+        if self.headers.get("authorization") != "Bearer " + TOKEN:
+            return self._text("unauthorized", 401)
+        path = urlparse(self.path).path
+        length = int(self.headers.get("content-length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        if path.startswith("/probes/enrolled/") and path.endswith("/board"):
+            role = path.split("/")[3]
+            BOARD_WRITES.append({"role": role, **body})
+            global ENROLLED
+            row = next((b for b in ENROLLED if b["role"] == role), None)
+            if row is None:
+                row = {"probe_serial": None, "role": role, "name": "", "chip": "",
+                       "hardware_id": None, "confirmed_at_utc_ms": None,
+                       "link_port_serial": None, "link_port_interface": None}
+                ENROLLED = ENROLLED + [row]
+            row["name"] = body["board"]
+            row["chip"] = body["chip"]
+            return self._json(row)
+        return self._text("not found in the stub", 404)
+
     def do_DELETE(self):
         if self.headers.get("authorization") != "Bearer " + TOKEN:
             return self._text("unauthorized", 401)
@@ -256,50 +283,87 @@ try:
                  "[data-enroll-role]')).map(function(g){return g.getAttribute('data-enroll-role')});")
           == ["dev-bench", "dut"])
 
-    # --- the Roles table ---------------------------------------------------
-    cells = script("return Array.from(document.querySelectorAll('#topology-table-body tr'))"
-                   ".map(function(tr){return Array.from(tr.children).map(function(td)"
-                   "{return td.textContent.trim()})});")
-    check("every row carries the board, the status badge and the enrolled instant",
-          all(len(r) == 7 for r in cells), cells)
-    check("a role is shown as a role, not as the lowercase wire spelling",
-          [r[0] for r in cells[:2]] == ["Dev bench", "DUT"], [r[0] for r in cells])
-    check("the board's own name is its own column",
-          cells[0][1].startswith("bench-esp32c5"), cells[0][1])
-    check("a name with no catalog entry says so rather than rendering as resolved",
-          "not in catalog" in script("return document.getElementById('topology-table-body').innerHTML;"))
-    check("an enrolled role shows a real timestamp, an empty one a dash",
-          cells[0][5] != "—" and cells[1][5] == "—", [cells[0][5], cells[1][5]])
-    check("a board enrolled outside the pair is still a row, flagged as not a role",
-          any(r[0].startswith("sniffer") and "not a role" in r[0] for r in cells),
-          [r[0] for r in cells])
-
-    # --- what the alert list became ----------------------------------------
+    # --- the roles table is gone; the diagram carries it -------------------
+    check("the roles table is folded into the diagram, not sitting beside it",
+          script("return !document.getElementById('topology-table-body');"))
     check("the Topology tab no longer carries an alert list",
           script("return !document.getElementById('topology-alerts-list');"))
     check("the Dashboard keeps its own alert cards",
           script("return !!document.getElementById('dashboard-alerts-list');"))
 
-    # --- the diagram's boxes are titled by role ----------------------------
+    # --- the boxes: role title, board line, no chip, no status yet ---------
     labels = script("return Array.from(document.querySelectorAll('#topology-diagram "
                     "[data-enroll-role] text')).map(function(t){return t.textContent});")
-    check("the box's title is the role and the board is underneath it",
-          labels[0] == "Dev bench" and "bench-esp32c5" in labels[1], labels)
-    check("an empty role still has a title",
-          labels[2] == "DUT" and labels[3] == "not enrolled", labels)
+    check("the box's title is the role and the board type is under it",
+          labels[0] == "Dev bench" and labels[1] == "esp32c5_devkitc/esp32c5/hpcore", labels)
+    check("a role with no board type says what to do rather than going blank",
+          labels[2] == "DUT" and labels[3] == "pick a board type", labels)
+    check("the chip is not on the diagram any more",
+          not any("esp32c5\u0020" in t or t.strip() == "esp32c5" for t in labels), labels)
+    check("no status is shown before Validate topology has run",
+          not any("validated" in t or "●" in t for t in labels), labels)
+    check("the board line is its own click target",
+          script("return Array.from(document.querySelectorAll('#topology-diagram "
+                 "[data-board-role]')).map(function(g){return g.getAttribute('data-board-role')});")
+          == ["dev-bench", "dut"])
+
+    # --- the board-type catalog, which the DUT picker reads ----------------
+    check("the catalog names the file it is",
+          "boards.toml" in script("return document.getElementById('board-catalog-path').textContent;"))
+    script("document.getElementById('board-add').click();")
+    time.sleep(0.3)
+    script("document.getElementById('board-name').value='nrf52840dk/nrf52840';"
+           "document.getElementById('board-chip').value='nRF52840_xxAA';"
+           "document.getElementById('board-build-target').value='nrf52840dk/nrf52840';"
+           "document.getElementById('board-save').click();")
+    time.sleep(1.2)
+    check("a saved board type lands in the catalog table",
+          "nrf52840dk" in script("return document.getElementById('board-catalog-body')"
+                                 ".textContent;"))
+    check("and in the file the card names",
+          os.path.exists(REPO + "/embarch/boards.toml"))
+
+    # --- picking a board type on the box -----------------------------------
+    script("document.querySelector('[data-board-role=\"dut\"] text')"
+           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    time.sleep(0.5)
+    check("clicking the board line opens the picker rather than the enrol dialog",
+          script("return document.getElementById('role-board-dialog').style.display === 'block' "
+                 "&& document.getElementById('assign-dialog').style.display !== 'block';"))
+    dut_options = script("return Array.from(document.getElementById('role-board-select').options)"
+                         ".map(function(o){return o.value});")
+    check("the DUT picker offers this project's board types",
+          dut_options == ["nrf52840dk/nrf52840"], dut_options)
+    script("document.getElementById('role-board-cancel').click();")
+    time.sleep(0.3)
+
+    script("document.querySelector('[data-board-role=\"dev-bench\"] text')"
+           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    time.sleep(0.4)
+    bench_options = script("return Array.from(document.getElementById('role-board-select').options)"
+                           ".map(function(o){return o.textContent});")
+    check("the dev-bench picker is the suite's fixed supported list, not the catalog",
+          bench_options == ["nRF54L15 DK — nRF54L15", "ESP32 C5 DK — esp32c5"], bench_options)
+    script("document.getElementById('role-board-select').value='nrf54l15dk/nrf54l15/cpuapp';"
+           "document.getElementById('role-board-save').click();")
+    time.sleep(1.2)
+    check("picking a board type writes it with no probe opened",
+          BOARD_WRITES == [{"role": "dev-bench", "board": "nrf54l15dk/nrf54l15/cpuapp",
+                            "chip": "nRF54L15"}], BOARD_WRITES)
 
     # --- click-to-assign, onto the label rather than the rect --------------
     script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();")
     script("var g=document.querySelector('[data-enroll-role=\"dev-bench\"]');"
            "g.querySelector('text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
     time.sleep(0.5)
-    check("clicking the box's *label* opens the dialog, not just the rect",
+    check("clicking the box's *title* opens the enrol dialog, not just the rect",
           script("return document.getElementById('assign-dialog').style.display === 'block';"))
-    check("the chip arrives pre-filled from the enrolment being replaced",
-          script("return document.getElementById('assign-chip').value;") == "esp32c5")
+    check("the chip is read out of the role's board type rather than typed",
+          script("return document.getElementById('assign-chip').value;") == "nRF54L15" and
+          script("return document.getElementById('assign-chip').readOnly;"))
     note = script("return document.getElementById('assign-replace-note').textContent;")
-    check("the dialog names what it displaces",
-          "esp32c5" in note and "000683001234" in note, note)
+    check("the dialog names the probe it would replace",
+          "000683001234" in note, note)
 
     script("document.getElementById('assign-cancel').click();")
     time.sleep(0.3)
@@ -327,42 +391,16 @@ try:
     time.sleep(0.5)
     check("dropping opens the dialog for that role",
           script("return document.getElementById('assign-role-label').textContent;") == "DUT")
-    check("an unenrolled role pre-fills nothing and displaces nothing",
-          script("return document.getElementById('assign-chip').value === '' && "
-                 "document.getElementById('assign-replace-note').style.display === 'none';"))
+    check("a role with no probe bound displaces nothing",
+          script("return document.getElementById('assign-replace-note').style.display === 'none';"))
 
-    script("document.getElementById('assign-chip').value='nRF54L15';"
-           "document.getElementById('assign-board').value='__new__';"
+    script("document.getElementById('assign-board').value='nrf52840dk/nrf52840';"
            "document.getElementById('assign-board').dispatchEvent(new Event('change'));"
-           "document.getElementById('assign-new-board').value='wearable-rev6';"
            "document.getElementById('assign-confirm').click();")
     time.sleep(1.5)
-    check("the enrolment reached Core with the dropped probe's serial and the board's name",
-          POSTED == [{"role": "dut", "chip": "nRF54L15", "probe_serial": "ABC123",
-                      "name": "wearable-rev6"}], POSTED)
-
-    # --- the board catalog --------------------------------------------------
-    check("the catalog names the file it is",
-          "boards.toml" in script("return document.getElementById('board-catalog-path').textContent;"))
-    script("document.getElementById('board-add').click();")
-    time.sleep(0.3)
-    script("document.getElementById('board-name').value='client-nucleo';"
-           "document.getElementById('board-chip').value='STM32F407VG';"
-           "document.getElementById('board-build-target').value='nucleo_f407zg';"
-           "document.getElementById('board-save').click();")
-    time.sleep(1)
-    check("a saved board lands in the catalog table",
-          "client-nucleo" in script("return document.getElementById('board-catalog-body')"
-                                        ".textContent;"))
-    check("and in the file the card names",
-          os.path.exists(REPO + "/embarch/boards.toml"))
-    script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();"
-           "var g=document.querySelector('[data-enroll-role=\"dut\"]');"
-           "g.querySelector('rect').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    time.sleep(0.4)
-    check("the enroll dialog picks a board from the catalog",
-          "client-nucleo" in script("return document.getElementById('assign-board').innerHTML;"))
-    script("document.getElementById('assign-cancel').click();")
+    check("the enrolment carries the dropped probe and the board type's own chip",
+          POSTED == [{"role": "dut", "chip": "nRF52840_xxAA", "probe_serial": "ABC123",
+                      "name": "nrf52840dk/nrf52840"}], POSTED)
 
     # --- Validate topology --------------------------------------------------
     script("document.getElementById('topo-validate').click();")
@@ -378,6 +416,13 @@ try:
           "MISSING-BRIDGE" in report, report[:600])
     check("the leftover role is called out as one",
           "sniffer" in report, report[:600])
+
+    labels = script("return Array.from(document.querySelectorAll('#topology-diagram "
+                    "[data-enroll-role] text')).map(function(t){return t.textContent});")
+    check("the verdict lands on the box, which was blank until this run",
+          any("validated" in t for t in labels), labels)
+    check("a role Core refused shows as failed on its own box",
+          any("failed" in t for t in labels), labels)
 
     # --- saving and loading a bench ----------------------------------------
     script("document.getElementById('topo-profile-save').click();")
@@ -395,6 +440,9 @@ try:
     applied = script("return document.getElementById('topo-apply-report').textContent;")
     check("loading re-declares the signals straight away",
           "signal outpost" in applied and "applied" in applied, applied[:300])
+    check("and the board types, which claim nothing about silicon",
+          "board" in applied and BOARD_WRITES[-1]["role"] in ("dut", "dev-bench"),
+          [applied[:300], BOARD_WRITES[-1:]])
     check("and proposes each enrolment rather than performing it",
           script("return document.querySelectorAll('[data-proposal-role]').length;") >= 1,
           applied[:400])
@@ -405,11 +453,31 @@ try:
           len(POSTED) == before + 1 and POSTED[-1]["role"] == "dut", POSTED[-1:])
 
     # --- retracting a role --------------------------------------------------
+    #
+    # A leftover role is in neither box, so its only control is on the
+    # validate report — the line that found it.
+    script("document.getElementById('topo-validate').click();")
+    time.sleep(2)
+    check("the leftover role's finding carries its own clear control",
+          script("return !!document.querySelector('#topo-validate-report "
+                 "[data-unenroll-role=\"sniffer\"]');"))
     script("window.confirm=function(){return true};"
-           "document.querySelector('[data-unenroll-role=\"sniffer\"]').click();")
+           "document.querySelector('#topo-validate-report [data-unenroll-role=\"sniffer\"]')"
+           ".click();")
     time.sleep(1.2)
     check("the leftover role can be cleared, which nothing could do before",
           DELETED == ["sniffer"], DELETED)
+
+    # And a canonical role is retracted from its own picker, since it has
+    # no row anywhere either.
+    script("document.querySelector('[data-board-role=\"dut\"] text')"
+           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    time.sleep(0.4)
+    check("a role in a box is retracted from the picker that sets it",
+          script("return document.getElementById('role-board-retract').offsetParent !== null;"))
+    script("document.getElementById('role-board-retract').click();")
+    time.sleep(1.2)
+    check("retracting a role reaches Core", DELETED == ["sniffer", "dut"], DELETED)
 
     check("no uncaught JS error anywhere in the run",
           script("return window.__errs;") == [], script("return window.__errs;"))

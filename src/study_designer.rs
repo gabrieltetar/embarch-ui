@@ -1914,12 +1914,21 @@ async fn submit_run(
             })
         };
 
+        // Which board the DUT role holds is read here, at the moment of the
+        // run, rather than stored in the study (decision 45) — so the same
+        // saved study builds for whatever board type is in the role today.
+        let role_target = crate::topology::role_target(
+            Some(&repo),
+            &state.snapshot_rx.borrow().enrolled,
+            "dut",
+        );
         let flashed = crate::firmware_build::build_and_flash(
             &sd.0.core,
             &state.build_locks,
             state.build_config_path.as_deref(),
             &repo,
             &spec,
+            role_target,
             &required,
             allow_version_mismatch,
             emitter,

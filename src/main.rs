@@ -274,6 +274,12 @@ async fn async_main() -> anyhow::Result<()> {
             axum::routing::delete(topology::api_delete_board),
         )
         .route("/api/topology/link", post(topology::api_link))
+        .route("/api/topology/pickers", get(topology::api_pickers))
+        .route(
+            "/api/topology/roles/{role}/board",
+            post(topology::api_set_role_board),
+        )
+        .route("/api/topology/boards/rescan", post(topology::api_rescan_boards))
         .route("/api/topology/validate", post(topology::api_validate))
         .route(
             "/api/topology/profiles",

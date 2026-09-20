@@ -51,6 +51,21 @@ fn role_label(role: &str) -> &str {
     }
 }
 
+/// The board types `embarch-dev-bench`'s firmware supports, served from
+/// here rather than restated in `app.js` — the same rule every other
+/// vocabulary in this UI is under (spec.md, "A limit enforced server-side
+/// is *served*").
+///
+/// **A dev bench is not a project's board.** The DUT box picks from the
+/// open repo's catalog, because what a DUT is is that repo's business; the
+/// bench is a piece of the suite, and offering a board the bench firmware
+/// cannot be built for would be offering a bench that cannot exist.
+pub const SUPPORTED_DEV_BENCH_BOARDS: [(&str, &str, &str); 2] = [
+    // (board type as west names it, the label a human reads, probe-rs chip)
+    ("nrf54l15dk/nrf54l15/cpuapp", "nRF54L15 DK", "nRF54L15"),
+    ("esp32c5_devkitc/esp32c5/hpcore", "ESP32 C5 DK", "esp32c5"),
+];
+
 // ---- the board catalog ------------------------------------------------------
 
 /// One physical board a human owns, as `embarch/boards.toml` records it.
@@ -253,6 +268,66 @@ fn now_utc_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// What a run should build for, taken from the role rather than from the
+/// study (decision 45).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoleTarget {
+    pub board: String,
+    pub variant: String,
+    pub revision: String,
+    /// The board type's own name, for the line that says where this came
+    /// from.
+    pub from_board: String,
+}
+
+/// The west target the board type in `role` builds as, or `None` when the
+/// role holds no board or the catalog cannot say what it builds as.
+///
+/// **Two lookups, in this order.** A role's board type is a string Core
+/// stores; what that type builds as is the project's business, so the
+/// catalog is asked first. A dev-bench board falls back to the suite's
+/// supported list, which carries the west target directly — a bench is not
+/// a project's board and need not be in its catalog.
+pub fn role_target(
+    repo: Option<&Path>,
+    enrolled: &[embarch_core_client::EnrolledBoardResponse],
+    role: &str,
+) -> Option<RoleTarget> {
+    let row = enrolled.iter().find(|b| b.role == role)?;
+    if row.name.is_empty() {
+        return None;
+    }
+    if let Some(entry) = repo
+        .and_then(|repo| load_catalog(repo).ok())
+        .and_then(|catalog| catalog.boards.into_iter().find(|b| b.name == row.name))
+    {
+        let board = if entry.build_target.is_empty() { entry.name.clone() } else { entry.build_target };
+        return Some(RoleTarget {
+            board,
+            variant: entry.variant,
+            revision: entry.revision,
+            from_board: row.name.clone(),
+        });
+    }
+    if role == "dev-bench" {
+        if let Some((board, _, _)) =
+            SUPPORTED_DEV_BENCH_BOARDS.iter().find(|(board, _, _)| *board == row.name)
+        {
+            return Some(RoleTarget {
+                board: (*board).to_string(),
+                variant: String::new(),
+                revision: String::new(),
+                from_board: row.name.clone(),
+            });
+        }
+    }
+    // A board type Core holds that this project has never heard of. Not an
+    // error and not a guess: the caller says so and builds what the study
+    // asked for, which is the behaviour that existed before roles named a
+    // board at all.
+    None
+}
+
 // ---- routes -----------------------------------------------------------------
 
 /// The open project's repo, or the `409` every route here answers without
@@ -316,6 +391,106 @@ pub async fn api_save_board(State(state): State<AppState>, Json(board): Json<Boa
     }
 }
 
+/// `POST /api/topology/boards/rescan` — merge the board types this repo
+/// actually builds for into the catalog.
+///
+/// **The scan seeds, the file wins.** Every board target the west scan
+/// finds that the catalog does not already name is appended with its chip
+/// left for a human (the scan knows west targets, not probe-rs ones); every
+/// entry already in the file is left exactly as it is, including its chip,
+/// notes and any hand-corrected spelling. A rescan can therefore only ever
+/// *add* rows — it is the button for "I added a board to the repo", not a
+/// regeneration that would quietly discard what someone typed.
+///
+/// A board type in the file that the scan no longer finds is **kept and
+/// reported**, never deleted: a repo can build for a board on a branch that
+/// is not checked out right now, and a catalog that silently shrank when
+/// someone switched branches would be worse than one that is occasionally
+/// generous.
+pub async fn api_rescan_boards(State(state): State<AppState>) -> Response {
+    let repo = match repo(&state) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let configured = state.build_config_path.clone();
+    let scan_repo = repo.clone();
+    let survey = tokio::task::spawn_blocking(move || {
+        crate::firmware_build::survey(configured.as_deref(), &scan_repo)
+    })
+    .await;
+    let survey = match survey {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("the target scan panicked: {e:?}"))
+                .into_response()
+        }
+    };
+    if !survey.available {
+        return (
+            StatusCode::BAD_REQUEST,
+            survey.reason.unwrap_or_else(|| "this repo cannot be scanned".to_string()),
+        )
+            .into_response();
+    }
+
+    let mut catalog = match load_catalog(&repo) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+    };
+
+    // `targets` is `resolve::list_targets`' own object, passed through
+    // rather than reshaped (`BuildSurvey::targets`), so it is read here the
+    // way the picker in `app.js` reads it: `targets.targets[].board`.
+    let mut scanned: Vec<String> = survey
+        .targets
+        .as_ref()
+        .and_then(|t| t.get("targets"))
+        .and_then(|t| t.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("board").and_then(|b| b.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    scanned.sort();
+    scanned.dedup();
+
+    let mut added: Vec<String> = Vec::new();
+    for board in &scanned {
+        if catalog.boards.iter().any(|b| b.name == *board || b.build_target == *board) {
+            continue;
+        }
+        catalog.boards.push(Board {
+            name: board.clone(),
+            build_target: board.clone(),
+            ..Board::default()
+        });
+        added.push(board.clone());
+    }
+    let unseen: Vec<String> = catalog
+        .boards
+        .iter()
+        .filter(|b| {
+            let target = if b.build_target.is_empty() { &b.name } else { &b.build_target };
+            !scanned.iter().any(|s| s == target)
+        })
+        .map(|b| b.name.clone())
+        .collect();
+
+    catalog.boards.sort_by(|a, b| a.name.cmp(&b.name));
+    if let Err(e) = save_catalog(&repo, &catalog) {
+        return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response();
+    }
+    Json(json!({
+        "scanned": scanned,
+        "added": added,
+        "not_in_scan": unseen,
+        "boards": catalog.boards,
+    }))
+    .into_response()
+}
+
 /// `DELETE /api/topology/boards/{name}` — forget a board.
 ///
 /// **Removing a board from the catalog does not unenrol anything**, and says
@@ -344,6 +519,64 @@ pub async fn api_delete_board(
         Ok(()) => Json(json!({ "removed": name, "boards": catalog.boards })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetRoleBoardRequest {
+    /// The board type. Empty is not a board: clearing which board is in a
+    /// role is done by retracting the role, not by naming nothing.
+    pub board: String,
+    /// The probe-rs chip that board type attaches as. The browser sends
+    /// what the picker's entry carries rather than deriving it, because the
+    /// two lists that fill that picker (the project catalog and the
+    /// supported-bench list) are both served from here.
+    pub chip: String,
+}
+
+/// `POST /api/topology/roles/{role}/board` — which board type is in a role,
+/// through Core's `PUT /probes/enrolled/{role}/board`.
+///
+/// A proxy for the same two reasons `/api/enroll` is: the write is Core's,
+/// and the browser holds no bearer token. **It opens no probe** — that is
+/// the whole point of the half it writes (decision 45).
+pub async fn api_set_role_board(
+    State(state): State<AppState>,
+    axum::extract::Path(role): axum::extract::Path<String>,
+    Json(req): Json<SetRoleBoardRequest>,
+) -> Response {
+    match state.core.set_role_board(&role, &req.board, &req.chip).await {
+        Ok(row) => {
+            state.poke.notify_one();
+            Json(row).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+/// `GET /api/topology/pickers` — what each role's board picker offers.
+///
+/// Two lists with two different owners, and the split is the decision
+/// (45): the DUT's comes from the open project, because what a DUT is is
+/// that repo's business, and the dev bench's is the suite's fixed
+/// supported set. Served rather than restated in `app.js`, like every other
+/// vocabulary here.
+pub async fn api_pickers(State(state): State<AppState>) -> Response {
+    let dut: Vec<serde_json::Value> = match state.study_designer.repo_path() {
+        Some(repo) => match load_catalog(&repo) {
+            Ok(catalog) => catalog
+                .boards
+                .iter()
+                .map(|b| json!({ "board": b.name, "label": b.name, "chip": b.chip }))
+                .collect(),
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    let dev_bench: Vec<serde_json::Value> = SUPPORTED_DEV_BENCH_BOARDS
+        .iter()
+        .map(|(board, label, chip)| json!({ "board": board, "label": label, "chip": chip }))
+        .collect();
+    Json(json!({ "dut": dut, "dev-bench": dev_bench })).into_response()
 }
 
 /// `DELETE /api/enrolled/{role}` — retract a role, through Core's
@@ -397,6 +630,13 @@ pub async fn api_link(State(state): State<AppState>, Json(req): Json<LinkRequest
 }
 
 // ---- validation -------------------------------------------------------------
+
+/// A row's probe serial, or a phrase saying it has none — a role can hold
+/// a board type with nothing bound to it (decision 45), and "probe " with
+/// an empty string after it reads as a bug rather than as a state.
+fn probe_text(board: &embarch_core_client::EnrolledBoardResponse) -> &str {
+    board.probe_serial.as_deref().unwrap_or("(none bound)")
+}
 
 /// One line of the validation report. `status` is `pass`, `fail`, `warn` or
 /// `empty`, and each means something a human acts on differently: `fail` is
@@ -477,11 +717,31 @@ pub async fn api_validate(State(state): State<AppState>) -> Response {
             ));
             continue;
         };
-        let who = if board.name.is_empty() {
-            format!("probe {} ({})", board.probe_serial, board.chip)
-        } else {
-            format!("{} — probe {} ({})", board.name, board.probe_serial, board.chip)
-        };
+        if board.name.is_empty() {
+            checks.push(Check::new(
+                &format!("role:{role}"),
+                format!("Role {}", role_label(role)),
+                "empty",
+                "no board type is in this role — pick one on the diagram, so a run knows what to \
+                 build for"
+                    .to_string(),
+            ));
+            continue;
+        }
+        if board.probe_serial.is_none() {
+            checks.push(Check::new(
+                &format!("role:{role}"),
+                format!("Role {}", role_label(role)),
+                "empty",
+                format!(
+                    "{} is in this role, but no probe is bound to it — drop one on the box \
+                     before anything can read this board's identity",
+                    board.name
+                ),
+            ));
+            continue;
+        }
+        let who = format!("{} — probe {} ({})", board.name, probe_text(board), board.chip);
         match state.core.validate(role).await {
             Ok(resp) => {
                 let mut check = Check::new(
@@ -716,7 +976,10 @@ pub async fn api_save_profile(
         snapshot.enrolled.iter().find(|b| b.role == role).map(|b| RoleBinding {
             board: b.name.clone(),
             chip: b.chip.clone(),
-            probe_serial: b.probe_serial.clone(),
+            // A role saved with no probe bound saves as one: a bench
+            // description is worth keeping even before it is wired, and an
+            // empty serial in the file would read as a probe named "".
+            probe_serial: b.probe_serial.clone().unwrap_or_default(),
             link_port_serial: b.link_port_serial.clone(),
             link_port_interface: b.link_port_interface,
         })
@@ -859,8 +1122,31 @@ pub async fn api_apply_profile(
     let mut proposals: Vec<serde_json::Value> = Vec::new();
     for (role, binding) in [("dev-bench", &profile.dev_bench), ("dut", &profile.dut)] {
         let Some(binding) = binding else { continue };
+        // **The board half applies now, like the signals.** It names a
+        // shape a repo builds for and claims nothing about silicon
+        // (decision 45), so a loaded bench describes itself immediately;
+        // only the probe binding below, which is an identity claim, waits
+        // for a human.
+        if !binding.board.is_empty() && !binding.chip.is_empty() {
+            match state.core.set_role_board(role, &binding.board, &binding.chip).await {
+                Ok(_) => applied.push(json!({
+                    "what": format!("{role} board"),
+                    "ok": true,
+                    "detail": format!("{} ({})", binding.board, binding.chip),
+                })),
+                Err(e) => applied.push(json!({
+                    "what": format!("{role} board"),
+                    "ok": false,
+                    "detail": format!("{e:#}"),
+                })),
+            }
+        }
+        if binding.probe_serial.is_empty() {
+            continue;
+        }
         let current = snapshot.enrolled.iter().find(|b| b.role == role);
-        let already = current.is_some_and(|b| b.probe_serial == binding.probe_serial);
+        let already = current
+            .is_some_and(|b| b.probe_serial.as_deref() == Some(binding.probe_serial.as_str()));
         let attached = snapshot
             .probes
             .iter()

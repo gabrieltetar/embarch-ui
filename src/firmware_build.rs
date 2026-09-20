@@ -278,6 +278,14 @@ pub async fn build_and_flash(
     configured_config: Option<&Path>,
     repo: &Path,
     spec: &BuildSpec,
+    // `role_target`: what the DUT role currently holds, when it holds
+    // anything (`crate::topology::role_target`). **It wins over the study's
+    // own board/variant/revision** (decision 45): a study names what it
+    // does, and which board is on the bench today is the bench's fact, the
+    // same way a study names a signal and never a carrier. A study carrying
+    // an older explicit target is not silently reinterpreted — the override
+    // is announced on the build log before anything is built.
+    role_target: Option<crate::topology::RoleTarget>,
     required_firmware: &str,
     allow_version_mismatch: bool,
     on_line: ProgressSink,
@@ -315,10 +323,43 @@ pub async fn build_and_flash(
     // the spec are not `&str` of the right lifetime.
     let snippets: Vec<String> = spec.snippets.iter().map(|s| s.as_str().to_string()).collect();
     let extra_args: Vec<String> = spec.extra_args.iter().map(|s| s.as_str().to_string()).collect();
+    let (board, variant, revision) = match &role_target {
+        Some(target) => {
+            let named = spec.board.as_ref().map(|s| s.as_str());
+            if let Some(named) = named.filter(|named| *named != target.board) {
+                on_line(
+                    "info",
+                    &format!(
+                        "this study names board '{named}', and the DUT role holds \
+                         '{}' ({}) — building for the role",
+                        target.board, target.from_board
+                    ),
+                );
+            } else {
+                on_line(
+                    "info",
+                    &format!(
+                        "building for the DUT role's board: {} ({})",
+                        target.board, target.from_board
+                    ),
+                );
+            }
+            (
+                Some(target.board.as_str()),
+                Some(target.variant.as_str()).filter(|v| !v.is_empty()),
+                Some(target.revision.as_str()).filter(|v| !v.is_empty()),
+            )
+        }
+        None => (
+            spec.board.as_ref().map(|s| s.as_str()),
+            spec.variant.as_ref().map(|s| s.as_str()),
+            spec.revision.as_ref().map(|s| s.as_str()),
+        ),
+    };
     let selection = resolve::Selection {
-        board: spec.board.as_ref().map(|s| s.as_str()),
-        variant: spec.variant.as_ref().map(|s| s.as_str()),
-        revision: spec.revision.as_ref().map(|s| s.as_str()),
+        board,
+        variant,
+        revision,
         app: spec.app.as_ref().map(|s| s.as_str()),
         snippets: &snippets,
         extra_args: &extra_args,
