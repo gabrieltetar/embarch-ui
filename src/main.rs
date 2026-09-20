@@ -18,6 +18,7 @@ mod snapshot;
 mod studies_api;
 mod study_designer;
 mod time_chart;
+mod topology;
 mod trace;
 
 use axum::extract::{Path, State};
@@ -257,6 +258,35 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/enroll", post(api_enroll))
         .route("/api/signals", post(api_declare_signal))
         .route("/api/signals/{name}", axum::routing::delete(api_remove_signal))
+        // ---- Topology: the board catalog, saved benches, validation ------
+        //
+        // Three owners, three routes (decision 44): the catalog and the
+        // profiles are project files this binary reads and writes, while
+        // every enrolment, signal and link write still goes to Core over
+        // HTTP+Bearer like everything else hardware-adjacent (decision 5).
+        .route("/api/enrolled/{role}", axum::routing::delete(topology::api_unenroll))
+        .route(
+            "/api/topology/boards",
+            get(topology::api_boards).post(topology::api_save_board),
+        )
+        .route(
+            "/api/topology/boards/{name}",
+            axum::routing::delete(topology::api_delete_board),
+        )
+        .route("/api/topology/link", post(topology::api_link))
+        .route("/api/topology/validate", post(topology::api_validate))
+        .route(
+            "/api/topology/profiles",
+            get(topology::api_profiles).post(topology::api_save_profile),
+        )
+        .route(
+            "/api/topology/profiles/{slug}",
+            axum::routing::delete(topology::api_delete_profile),
+        )
+        .route(
+            "/api/topology/profiles/{slug}/apply",
+            post(topology::api_apply_profile),
+        )
         // ---- Live Study -------------------------------------------------
         .route("/api/live/events", get(live_study::api_live_events))
         .route("/api/live/run", post(live_study::api_live_run))
@@ -489,6 +519,11 @@ struct EnrollRequest {
     chip: String,
     #[serde(default)]
     probe_serial: Option<String>,
+    /// What the board being enrolled is called (decision 44) — picked from
+    /// the project's catalog in the dialog, sent through to Core, and
+    /// interpreted by neither this handler nor Core.
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// Submits to `embarch-core`'s existing `POST /probes/enroll` over
@@ -509,7 +544,7 @@ struct EnrollRequest {
 async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> impl IntoResponse {
     match state
         .core
-        .enroll_probe(&req.role, &req.chip, req.probe_serial.as_deref())
+        .enroll_probe(&req.role, &req.chip, req.probe_serial.as_deref(), req.name.as_deref())
         .await
     {
         Ok(resp) => {

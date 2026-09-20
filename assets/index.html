@@ -126,6 +126,34 @@
 
       <section class="tab-panel" data-tab="topology">
         <div id="topology-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
+
+        <!-- decision 44. Two things live here rather than beside the
+             diagram: the saved-bench picker, which is the same shape the
+             saved-study picker has on Live Study, and Validate topology,
+             which replaced the alert list. An alert answered "did a
+             mismatch happen at some point" — a question nobody is asking
+             at the moment they look at this tab, and one that says nothing
+             at all about a signal route, since a signal mismatch is never
+             written to that log. This button answers "is the bench in
+             front of me what this tab says it is", now, check by check. -->
+        <div class="card" style="margin-bottom:16px;">
+          <div class="sd-toolbar">
+            <div class="card-title" style="margin:0;">Bench &mdash; <span id="topo-profile-name" class="mono">unsaved</span></div>
+            <div class="sd-toolbar-actions">
+              <select id="topo-profile-picker" class="sd-input mono" style="min-width:210px;"><option value="">no project open</option></select>
+              <button id="topo-profile-load" class="btn" title="Apply this saved topology">Load</button>
+              <button id="topo-profile-save" class="btn" title="Save the bench as it stands now">Save as&hellip;</button>
+              <button id="topo-profile-delete" class="btn btn-icon-danger" title="Delete the selected saved topology">&#10005;</button>
+              <span style="flex:1;"></span>
+              <button id="topo-validate" class="btn btn-primary">Validate topology</button>
+            </div>
+          </div>
+          <p class="placeholder-note" style="margin:8px 0 0;">A saved topology lives in this project&rsquo;s <span class="mono">embarch/topologies/</span>, beside its studies, and holds which named board played which role, on which probe, plus every declared signal. <strong>Loading one never touches hardware</strong>: the signals and the dev-bench link are re-declared straight away, and each enrolment comes back as a proposal to confirm, because binding a role to a probe means reading that chip&rsquo;s live hardware ID and a file on disk cannot stand in for it.</p>
+          <div id="topo-profile-error" class="sd-error" style="display:none; margin-top:10px;"></div>
+          <div id="topo-apply-report" style="display:none; margin-top:12px;"></div>
+          <div id="topo-validate-report" style="display:none; margin-top:12px;"></div>
+        </div>
+
         <div class="card" style="margin-bottom:16px; padding:26px 30px;">
           <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
           <div class="topo-enroll-strip">
@@ -138,7 +166,7 @@
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">DUT signals</div>
             <div class="sd-toolbar-actions">
-              <button id="sig-declare" class="btn btn-primary">+ Declare a signal</button>
+              <button id="sig-declare" class="btn btn-icon" title="Declare a signal's route">+</button>
             </div>
           </div>
           <p class="placeholder-note" style="margin:8px 0 12px;">A wire between two headers is invisible to software, so a signal's route can only ever be <em>stated</em>. Declaring is idempotent by name — re-declaring is how a route moves, and no saved study has to change, because a study names the signal and never the carrier. This tab is the only place a signal route can be declared; there is deliberately no CLI for it.</p>
@@ -160,18 +188,34 @@
           </div>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap:16px;">
-          <div class="card">
-            <div class="card-title">Boards</div>
-            <table class="data-table">
-              <thead><tr><th>Role</th><th>Chip</th><th>Probe</th><th>Status</th><th>Enrolled</th></tr></thead>
-              <tbody id="topology-table-body"><tr><td colspan="5" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
-            </table>
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-title">Roles</div>
+          <p class="placeholder-note" style="margin:8px 0 12px;">There are exactly two roles, <span class="mono">DUT</span> and <span class="mono">Dev bench</span>, and both are rows whether or not a board holds one &mdash; nothing else can render &ldquo;DUT: not enrolled&rdquo;. What a board is <em>called</em> is a separate fact from the role it is in, held in this project&rsquo;s catalog below. A row whose role is neither of the two is a board name written where a role belongs, from before the two were separate; clear it and re-enrol the board.</p>
+          <table class="data-table">
+            <thead><tr><th style="width:190px;">Role</th><th>Board</th><th>Chip</th><th>Probe</th><th>Status</th><th>Enrolled</th><th style="width:44px;"></th></tr></thead>
+            <tbody id="topology-table-body"><tr><td colspan="7" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
+          </table>
+        </div>
+
+        <!-- The project's board catalog (decision 44): what boards exist,
+             independent of which one is plugged in today. No probe serial
+             here on purpose — one probe gets moved between three boards
+             over a week, so a probe is a fact about the current wiring,
+             which is the enrolment's business and the saved topology's,
+             never the board's. -->
+        <div class="card">
+          <div class="sd-toolbar">
+            <div class="card-title" style="margin:0;">Boards in this project</div>
+            <div class="sd-toolbar-actions">
+              <button id="board-add" class="btn btn-icon" title="Add a board to this project">+</button>
+            </div>
           </div>
-          <div class="card">
-            <div class="card-title">Alerts</div>
-            <div id="topology-alerts-list"><p class="placeholder-note">waiting for embarch-core…</p></div>
-          </div>
+          <p id="board-catalog-path" class="placeholder-note" style="margin:8px 0 12px;">reading…</p>
+          <div id="board-catalog-error" class="sd-error" style="display:none; margin-bottom:10px;"></div>
+          <table class="data-table">
+            <thead><tr><th style="width:190px;">Name</th><th>Chip</th><th>Builds as</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
+            <tbody id="board-catalog-body"><tr><td colspan="5" class="placeholder-note">reading…</td></tr></tbody>
+          </table>
         </div>
       </section>
 
@@ -427,6 +471,13 @@
                   <div class="req-label">board</div>
                   <select id="sd-build-board" class="sd-input mono"></select>
                   <div class="req-live" id="sd-build-board-note"></div>
+                  <!-- decision 44: the board enrolled as DUT is a named
+                       board in this project's catalog, and a catalog entry
+                       can say what it builds as. Offered rather than
+                       applied: the west target a study builds is the
+                       study's, and a bench swap must not silently
+                       re-target a saved one. -->
+                  <button id="sd-build-from-dut" class="btn" style="display:none; margin-top:8px;"></button>
                 </div>
                 <div class="req-row">
                   <div class="req-label">app</div>
@@ -618,7 +669,12 @@
         <p class="placeholder-note">The <span class="mono">name</span> is what a study taps this signal by (<span class="mono">StreamSource::Signal</span>). Declaring the same name again moves the route — that is the migration path, not a mistake.</p>
         <div class="sd-form-grid">
           <label class="sd-field"><span>Signal name</span><input id="sig-name" type="text" class="sd-input mono" spellcheck="false" placeholder="outpost-uart" /></label>
-          <label class="sd-field"><span>Origin role</span><input id="sig-origin" type="text" class="sd-input mono" spellcheck="false" value="dut" /></label>
+          <label class="sd-field"><span>Origin role</span>
+            <select id="sig-origin" class="sd-input mono">
+              <option value="dut">dut</option>
+              <option value="dev-bench">dev-bench</option>
+            </select>
+          </label>
           <label class="sd-field"><span>Direction</span>
             <select id="sig-direction" class="sd-input">
               <option value="dut-to-host">dut-to-host</option>
@@ -655,6 +711,12 @@
       <div id="assign-dialog" class="dialog card" style="display:none; top:30%; width:340px;">
         <div class="card-title">Enroll <span id="assign-probe-label" class="mono"></span> as <span id="assign-role-label" class="mono"></span></div>
         <p id="assign-replace-note" class="placeholder-note" style="display:none; margin:0 0 10px;"></p>
+        <label class="sd-field" style="margin-bottom:10px;"><span>Board &mdash; which physical board is in this role</span>
+          <select id="assign-board" class="sd-input mono"></select>
+        </label>
+        <label class="sd-field" id="assign-new-board-field" style="display:none; margin-bottom:10px;"><span>New board&rsquo;s name</span>
+          <input id="assign-new-board" type="text" class="sd-input mono" spellcheck="false" placeholder="client-nucleo" />
+        </label>
         <label style="display:block; font-size:12.5px; color:var(--text-secondary); margin-bottom:6px;">Chip
           <input id="assign-chip" list="chip-suggestions" placeholder="e.g. nRF54L15" style="width:100%; margin-top:4px; padding:8px 10px; border-radius:8px; border:1px solid var(--border-strong); background:var(--bg-surface-2); color:var(--text-primary); font-family:var(--font-mono); font-size:13px;">
         </label>
@@ -666,6 +728,40 @@
         <div style="display:flex; gap:8px; justify-content:flex-end;">
           <button type="button" class="btn" id="assign-cancel">Cancel</button>
           <button type="button" class="btn btn-primary" id="assign-confirm">Enroll</button>
+        </div>
+      </div>
+
+      <div id="board-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
+      <div id="board-dialog" class="dialog" style="display:none;">
+        <div class="card-title">A board in this project</div>
+        <p class="placeholder-note">Saved to <span class="mono">embarch/boards.toml</span> in the open firmware repo, so the bench is described where the studies that run on it live. Re-saving the same name edits that board.</p>
+        <div class="sd-form-grid">
+          <label class="sd-field"><span>Name</span><input id="board-name" type="text" class="sd-input mono" spellcheck="false" placeholder="client-nucleo" /></label>
+          <label class="sd-field"><span>Chip &mdash; the probe-rs target</span><input id="board-chip" list="chip-suggestions" type="text" class="sd-input mono" spellcheck="false" placeholder="nRF54L15" /></label>
+          <label class="sd-field"><span>Builds as &mdash; the west board</span><input id="board-build-target" type="text" class="sd-input mono" spellcheck="false" placeholder="nrf54l15dk/nrf54l15/cpuapp" /></label>
+          <label class="sd-field"><span>Variant</span><input id="board-variant" type="text" class="sd-input mono" spellcheck="false" /></label>
+          <label class="sd-field"><span>Revision</span><input id="board-revision" type="text" class="sd-input mono" spellcheck="false" /></label>
+          <label class="sd-field" style="grid-column:1 / -1;"><span>Notes</span><input id="board-notes" type="text" class="sd-input" spellcheck="false" placeholder="which drawer, which cable, what is wrong with it" /></label>
+        </div>
+        <p class="placeholder-note" style="margin-top:10px;">&ldquo;Builds as&rdquo; is the <em>west</em> board target, a different thing from the physical board this record is &mdash; it is what the Study Designer&rsquo;s Build card wants.</p>
+        <p id="board-result" class="sd-error" style="display:none;"></p>
+        <div class="sd-row-actions" style="margin-top:16px;">
+          <span style="flex:1;"></span>
+          <button id="board-cancel" class="btn">Cancel</button>
+          <button id="board-save" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+
+      <div id="topo-save-backdrop" class="dialog-backdrop" style="display:none;"></div>
+      <div id="topo-save-dialog" class="dialog card" style="display:none; top:30%; width:420px;">
+        <div class="card-title">Save this bench</div>
+        <p class="placeholder-note" style="margin:0 0 10px;">Writes both roles as they are enrolled right now &mdash; board name, chip, probe serial, and dev-bench&rsquo;s declared link &mdash; plus every declared signal, to <span class="mono">embarch/topologies/</span>. Saving the same name overwrites that file.</p>
+        <label class="sd-field"><span>Name</span><input id="topo-save-name" type="text" class="sd-input mono" spellcheck="false" placeholder="bench-a" /></label>
+        <p id="topo-save-result" class="sd-error" style="display:none; margin-top:10px;"></p>
+        <div class="sd-row-actions" style="margin-top:16px;">
+          <span style="flex:1;"></span>
+          <button id="topo-save-cancel" class="btn">Cancel</button>
+          <button id="topo-save-confirm" class="btn btn-primary">Save</button>
         </div>
       </div>
 

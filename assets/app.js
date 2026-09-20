@@ -110,6 +110,15 @@
     { role: "dut", label: "DUT" },
   ];
 
+  // The label a role is *shown* as. The wire spelling stays lowercase
+  // everywhere it is sent (`dut`, `dev-bench`); this is the only place the
+  // two differ, and they differ because "dut" rendered in a table reads as
+  // a name someone typed rather than as the fixed slot it is.
+  function roleLabel(role) {
+    const found = ROLES.find((r) => r.role === role);
+    return found ? found.label : role;
+  }
+
   function findEnrolled(snapshot, role) {
     return (snapshot.enrolled || []).find((b) => b.role === role) || null;
   }
@@ -197,17 +206,46 @@
   // Enroll tab's own table existed to show.
   function boardsTableRows(snapshot) {
     const canonical = new Set(ROLES.map((r) => r.role));
-    const rows = ROLES.map(({ role, label }) => ({ label, board: findEnrolled(snapshot, role) }));
+    const rows = ROLES.map(({ role, label }) => ({ role, label, board: findEnrolled(snapshot, role), foreign: false }));
     (snapshot.enrolled || []).forEach((board) => {
-      if (!canonical.has(board.role)) rows.push({ label: board.role, board });
+      if (!canonical.has(board.role)) {
+        rows.push({ role: board.role, label: board.role, board, foreign: true });
+      }
     });
-    return rows.map(({ label, board }) => {
+    return rows.map(({ role, label, board, foreign }) => {
       const chip = board ? escapeHtml(board.chip) : "—";
       const probe = board ? escapeHtml(board.probe_serial) : "—";
       const at = board ? formatTimestamp(board.confirmed_at_utc_ms) : "—";
-      return "<tr><td>" + escapeHtml(label) + '</td><td class="mono">' + chip +
+      // **A foreign row is shown as what it is, not hidden.** It is a board
+      // name written where a role belongs — the state this bench was
+      // actually in — and the only surface that can clear it is the one
+      // that can see it. Core refuses to create another (decision 44), so
+      // this row only ever shrinks.
+      const roleCell = foreign
+        ? escapeHtml(label) + ' <span class="badge badge-warning">not a role</span>'
+        : escapeHtml(label);
+      // The board's own name, resolved against the project catalog where
+      // there is one. An unresolved name still renders — the board is on
+      // the bench either way — with a note, never silently dropped.
+      let who = '<span class="placeholder-note">—</span>';
+      if (board) {
+        if (!board.name) {
+          who = '<span class="placeholder-note">unnamed</span>';
+        } else if (boardCatalogHas(board.name)) {
+          who = '<span class="mono">' + escapeHtml(board.name) + "</span>";
+        } else {
+          who =
+            '<span class="mono">' + escapeHtml(board.name) + "</span> " +
+            '<span class="badge badge-neutral" title="no board of this name in this project\u2019s catalog">not in catalog</span>';
+        }
+      }
+      const action = board
+        ? '<button class="btn btn-icon-danger" data-unenroll-role="' + escapeHtml(role) +
+          '" title="Retract this role — the board stays on the bench, the role goes empty">&#10005;</button>'
+        : "";
+      return "<tr><td>" + roleCell + "</td><td>" + who + '</td><td class="mono">' + chip +
         '</td><td class="mono">' + probe + "</td><td>" + boardStatusBadge(snapshot, board) +
-        "</td><td>" + at + "</td></tr>";
+        "</td><td>" + at + '</td><td style="text-align:right;">' + action + "</td></tr>";
     }).join("");
   }
 
@@ -282,12 +320,16 @@
     const linkColor = devBenchAttached ? "var(--accent)" : "var(--border-strong)";
     const bleColor = devBenchAttached && dutAttached ? "var(--text-secondary)" : "var(--border-strong)";
 
-    function boxLabel(board, fallback) {
-      return board ? board.role : fallback;
-    }
+    // **The role is the box's title, filled or empty** (decision 44). It
+    // used to be the enrolled board's `role` string when one was enrolled
+    // and a hard-coded fallback when it was not — which read as a name,
+    // because before names existed the role *was* the name. What is in the
+    // role goes underneath: the board, then whether it is attached, then
+    // the chip.
     function boxSub(board, attached) {
       if (!board) return "not enrolled";
-      return (attached ? "attached · " : "not attached · ") + board.chip;
+      const who = board.name || "unnamed board";
+      return who + " · " + (attached ? "attached" : "not attached") + " · " + board.chip;
     }
 
     // **The box a role is drawn as is the target a probe is dropped on**
@@ -312,8 +354,8 @@
       '<text x="140" y="132" text-anchor="middle" fill="var(--text-tertiary)" font-size="11.5" font-family="IBM Plex Mono, monospace">' +
       (snapshot.core_reachable ? "embarch-core" : "embarch-core (unreachable)") + "</text>" +
 
-      roleNode("dev-bench", 390, 490, boxLabel(devBench, "dev-bench"), boxSub(devBench, devBenchAttached)) +
-      roleNode("dut", 740, 840, boxLabel(dut, "dut"), boxSub(dut, dutAttached)) +
+      roleNode("dev-bench", 390, 490, roleLabel("dev-bench"), boxSub(devBench, devBenchAttached)) +
+      roleNode("dut", 740, 840, roleLabel("dut"), boxSub(dut, dutAttached)) +
 
       '<line x1="250" y1="120" x2="390" y2="120" stroke="' + linkColor + '" stroke-width="2"/>' +
       '<text x="320" y="108" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">serial</text>' +
@@ -437,7 +479,8 @@
           "<td>" + carrierCell(snapshot, sig) + "</td>" +
           '<td style="text-align:right; white-space:nowrap;">' +
           '<button class="btn" data-signal-edit="' + escapeHtml(sig.name) + '">Move route</button> ' +
-          '<button class="btn" data-signal-remove="' + escapeHtml(sig.name) + '">Remove</button>' +
+          '<button class="btn btn-icon-danger" data-signal-remove="' + escapeHtml(sig.name) +
+          '" title="Retract this signal">&#10005;</button>' +
           "</td></tr>"
       )
       .join("");
@@ -448,7 +491,6 @@
     renderTopologyDiagram(snapshot);
     renderProbePool(snapshot);
     document.getElementById("topology-table-body").innerHTML = boardsTableRows(snapshot);
-    document.getElementById("topology-alerts-list").innerHTML = alertsListHtml(snapshot.alerts);
     document.getElementById("signals-table-body").innerHTML = signalsTableRows(snapshot);
 
     // **An empty signal list and an unanswerable one are different states.**
@@ -532,6 +574,44 @@
     });
   }
 
+  // The dialog picks the board from this project's catalog, plus two
+  // entries that are not boards: an unnamed enrolment, and a name typed on
+  // the spot. **Typing one here does not add it to the catalog** — the
+  // enrolment records the string either way, and a board that only ever
+  // existed as a typo in a dialog is not something to write into a repo
+  // file. It renders as "not in catalog" until someone adds it, which is
+  // the true statement about it.
+  function fillAssignBoards(current) {
+    const select = document.getElementById("assign-board");
+    if (!select) return;
+    const options = boardCatalog.map(function (b) {
+      return '<option value="' + escapeHtml(b.name) + '">' + escapeHtml(b.name) +
+        (b.chip ? " — " + escapeHtml(b.chip) : "") + "</option>";
+    });
+    if (current && !boardCatalogHas(current)) {
+      options.unshift(
+        '<option value="' + escapeHtml(current) + '">' + escapeHtml(current) + " (not in catalog)</option>"
+      );
+    }
+    options.push('<option value="__new__">a board not listed here…</option>');
+    options.push('<option value="">leave unnamed</option>');
+    select.innerHTML = options.join("");
+    select.value = current || (boardCatalog.length ? boardCatalog[0].name : "");
+    syncAssignNewBoard();
+  }
+
+  function syncAssignNewBoard() {
+    const select = document.getElementById("assign-board");
+    const field = document.getElementById("assign-new-board-field");
+    if (!select || !field) return;
+    field.style.display = select.value === "__new__" ? "block" : "none";
+    // Picking a catalog board fills the chip from it — the chip is a fact
+    // about that board, and retyping it is the only way to get it wrong.
+    const board = boardCatalog.find((b) => b.name === select.value);
+    const chip = document.getElementById("assign-chip");
+    if (board && board.chip && chip && !chip.value) chip.value = board.chip;
+  }
+
   // **Re-enrolling is the migration path, not a mistake** — the same shape
   // as re-declaring a signal to move its route (decision 10), so an occupied
   // role opens the ordinary dialog rather than refusing the drop. Two
@@ -543,13 +623,15 @@
   function openAssignDialog(serial, role) {
     const existing = findEnrolled(latestSnapshot || {}, role);
     document.getElementById("assign-probe-label").textContent = probeLabel(serial);
-    document.getElementById("assign-role-label").textContent = role;
+    document.getElementById("assign-role-label").textContent = roleLabel(role);
     document.getElementById("assign-chip").value = existing ? existing.chip : "";
+    fillAssignBoards(existing ? existing.name : "");
     const note = document.getElementById("assign-replace-note");
     if (existing) {
       note.style.display = "block";
       note.textContent =
-        "replaces " + existing.role + " — " + existing.chip + " on probe " + existing.probe_serial;
+        "replaces " + (existing.name || "an unnamed board") + " — " + existing.chip +
+        " on probe " + existing.probe_serial;
     } else {
       note.style.display = "none";
       note.textContent = "";
@@ -573,8 +655,15 @@
     const role = dialog.dataset.role;
     const chip = document.getElementById("assign-chip").value.trim();
     const result = document.getElementById("assign-result");
+    const picked = document.getElementById("assign-board").value;
+    const name =
+      picked === "__new__" ? document.getElementById("assign-new-board").value.trim() : picked;
     if (!chip) {
       result.innerHTML = '<span style="color:var(--danger);">chip is required</span>';
+      return;
+    }
+    if (picked === "__new__" && !name) {
+      result.innerHTML = '<span style="color:var(--danger);">name the board, or leave it unnamed</span>';
       return;
     }
     result.textContent = "enrolling…";
@@ -582,7 +671,7 @@
       const resp = await fetch("/api/enroll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, chip, probe_serial: serial }),
+        body: JSON.stringify({ role, chip, probe_serial: serial, name }),
       });
       const text = await resp.text();
       if (!resp.ok) {
@@ -590,7 +679,9 @@
         return;
       }
       const board = JSON.parse(text);
-      result.innerHTML = '<span style="color:var(--success);">enrolled &#39;' + escapeHtml(board.role) + "&#39; — chip " + escapeHtml(board.chip) + "</span>";
+      result.innerHTML =
+        '<span style="color:var(--success);">enrolled ' + escapeHtml(roleLabel(board.role)) +
+        " — " + escapeHtml(board.name || "unnamed") + ", chip " + escapeHtml(board.chip) + "</span>";
       selectedSerial = null;
       setTimeout(closeAssignDialog, 700);
     } catch (e) {
@@ -651,6 +742,8 @@
     const cancelBtn = document.getElementById("assign-cancel");
     const confirmBtn = document.getElementById("assign-confirm");
     const backdrop = document.getElementById("assign-dialog-backdrop");
+    const boardSelect = document.getElementById("assign-board");
+    if (boardSelect) boardSelect.addEventListener("change", syncAssignNewBoard);
     if (cancelBtn) cancelBtn.addEventListener("click", closeAssignDialog);
     if (confirmBtn) confirmBtn.addEventListener("click", confirmAssign);
     if (backdrop) backdrop.addEventListener("click", closeAssignDialog);
@@ -4011,7 +4104,51 @@
     });
     var note = sdEl("sd-build-board-note");
     note.textContent = targets.length + " target(s) in this repo";
+    sdSyncBuildFromDut();
     sdRenderSnippetPool();
+  }
+
+  // **The DUT is a named board, and a named board can say what it builds
+  // as** (decision 44). This offers that target rather than applying it:
+  // which west target a study builds is the study's own field, and a bench
+  // rewired this morning must not silently re-target a study saved last
+  // week. The button is shown only when the DUT's catalog entry names a
+  // target the scan actually found — an offer to pick something that is not
+  // in the repo is worse than no offer.
+  function sdSyncBuildFromDut() {
+    var button = document.getElementById("sd-build-from-dut");
+    if (!button) return;
+    var dut = latestSnapshot ? findEnrolled(latestSnapshot, "dut") : null;
+    var entry = dut && dut.name ? boardCatalog.find(function (b) { return b.name === dut.name; }) : null;
+    var select = sdEl("sd-build-board");
+    var known = entry && entry.build_target &&
+      Array.prototype.some.call(select.options, function (o) { return o.value === entry.build_target; });
+    if (!known) {
+      button.style.display = "none";
+      return;
+    }
+    button.style.display = "inline-flex";
+    button.textContent = "Use " + entry.name + "’s target — " + entry.build_target;
+    button.dataset.target = entry.build_target;
+    button.dataset.variant = entry.variant || "";
+    button.dataset.revision = entry.revision || "";
+  }
+
+  function sdApplyBuildFromDut() {
+    var button = document.getElementById("sd-build-from-dut");
+    if (!button) return;
+    var set = function (id, value) {
+      var el = sdEl(id);
+      if (!value) return;
+      if (Array.prototype.some.call(el.options, function (o) { return o.value === value; })) {
+        el.value = value;
+      }
+    };
+    set("sd-build-board", button.dataset.target);
+    set("sd-build-variant", button.dataset.variant);
+    set("sd-build-revision", button.dataset.revision);
+    sdRenderSnippetPool();
+    renderSdBuildOptsSummary();
   }
 
   // The snippets the *chosen app* declares, from the same scan. An app with
@@ -5535,7 +5672,19 @@
     sigEl("sig-result").style.display = "none";
     sigEl("sig-name").value = existing ? existing.name : "";
     sigEl("sig-name").readOnly = !!existing;
-    sigEl("sig-origin").value = existing ? existing.origin_role : "dut";
+    // The origin picker holds the two roles. A signal declared before the
+    // vocabulary closed can name something else, and that value gets its
+    // own option rather than falling silently back to `dut` — re-declaring
+    // a signal must not quietly re-point it at a different origin.
+    const origin = existing ? existing.origin_role : "dut";
+    const originSelect = sigEl("sig-origin");
+    if (!Array.prototype.some.call(originSelect.options, (o) => o.value === origin)) {
+      const extra = document.createElement("option");
+      extra.value = origin;
+      extra.textContent = origin + " (not a role)";
+      originSelect.appendChild(extra);
+    }
+    originSelect.value = origin;
     sigEl("sig-direction").value = existing ? existing.direction : "dut-to-host";
     sigEl("sig-route").value = existing && existing.route ? existing.route.kind : "direct";
     sigEl("sig-rx").value = (existing && existing.route && existing.route.rx_pin) || "";
@@ -5587,7 +5736,7 @@
 
     var body = {
       name: name,
-      origin_role: sigEl("sig-origin").value.trim() || "dut",
+      origin_role: sigEl("sig-origin").value || "dut",
       direction: sigEl("sig-direction").value,
       route: route,
     };
@@ -5612,6 +5761,538 @@
       err.style.display = "block";
       err.textContent = resp.status + " " + (await resp.text());
     }
+  }
+
+  // --- The board catalog, saved benches, and Validate topology -------------
+  //
+  // Three surfaces the Topology tab grew in decision 44, and one thing they
+  // have in common: **none of them is a second owner of hardware state.**
+  // The catalog and the saved benches are project files this binary reads
+  // and writes; every enrolment, signal and link write still goes to Core
+  // over HTTP+Bearer (decision 5), and validation is Core's own live checks
+  // rendered, never re-derived here.
+
+  let boardCatalog = [];
+
+  function boardCatalogHas(name) {
+    return boardCatalog.some((b) => b.name === name);
+  }
+
+  function topoEl(id) {
+    return document.getElementById(id);
+  }
+
+  function showError(el, text) {
+    if (!el) return;
+    if (!text) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = text;
+  }
+
+  function boardCatalogRows() {
+    if (!boardCatalog.length) {
+      return (
+        '<tr><td colspan="5" class="placeholder-note">No board in this project yet. A board is ' +
+        "a name, a chip and what it builds as — add one, then say which role it is in by " +
+        "dropping a probe on the diagram.</td></tr>"
+      );
+    }
+    return boardCatalog
+      .map(function (b) {
+        const builds = b.build_target
+          ? '<span class="mono">' + escapeHtml(b.build_target) +
+            (b.variant ? "@" + escapeHtml(b.variant) : "") +
+            (b.revision ? "@" + escapeHtml(b.revision) : "") + "</span>"
+          : '<span class="placeholder-note">—</span>';
+        return (
+          '<tr><td class="mono">' + escapeHtml(b.name) + "</td>" +
+          '<td class="mono">' + escapeHtml(b.chip || "—") + "</td>" +
+          "<td>" + builds + "</td>" +
+          "<td>" + (b.notes ? escapeHtml(b.notes) : '<span class="placeholder-note">—</span>') + "</td>" +
+          '<td style="text-align:right; white-space:nowrap;">' +
+          '<button class="btn" data-board-edit="' + escapeHtml(b.name) + '">Edit</button> ' +
+          '<button class="btn btn-icon-danger" data-board-remove="' + escapeHtml(b.name) +
+          '" title="Forget this board. Nothing is unenrolled — a role holding it keeps its ' +
+          'name, which then shows as not in catalog.">&#10005;</button>' +
+          "</td></tr>"
+        );
+      })
+      .join("");
+  }
+
+  function renderBoardCatalog() {
+    const body = topoEl("board-catalog-body");
+    if (body) body.innerHTML = boardCatalogRows();
+    if (typeof sdSyncBuildFromDut === "function") sdSyncBuildFromDut();
+    // The enrol dialog picks from the same list, so it is refilled here
+    // rather than at open time — a board added while the dialog is shut is
+    // in the picker the next time it opens either way.
+    if (latestSnapshot) {
+      const tbody = topoEl("topology-table-body");
+      if (tbody) tbody.innerHTML = boardsTableRows(latestSnapshot);
+    }
+  }
+
+  async function loadBoardCatalog() {
+    const err = topoEl("board-catalog-error");
+    const path = topoEl("board-catalog-path");
+    try {
+      const resp = await fetch("/api/topology/boards");
+      const text = await resp.text();
+      if (resp.status === 409) {
+        // No project open. Not an error to shout about: the catalog is a
+        // project file, and the Study Designer's project panel is the way
+        // in — which the message says.
+        boardCatalog = [];
+        showError(err, null);
+        if (path) path.textContent = text;
+        renderBoardCatalog();
+        return;
+      }
+      if (!resp.ok) {
+        showError(err, resp.status + " " + text);
+        return;
+      }
+      const body = JSON.parse(text);
+      boardCatalog = body.boards || [];
+      showError(err, null);
+      if (path) path.textContent = body.path;
+      renderBoardCatalog();
+    } catch (e) {
+      showError(err, String(e));
+    }
+  }
+
+  function openBoardDialog(existing) {
+    showError(topoEl("board-result"), null);
+    topoEl("board-name").value = existing ? existing.name : "";
+    topoEl("board-name").readOnly = !!existing;
+    topoEl("board-chip").value = (existing && existing.chip) || "";
+    topoEl("board-build-target").value = (existing && existing.build_target) || "";
+    topoEl("board-variant").value = (existing && existing.variant) || "";
+    topoEl("board-revision").value = (existing && existing.revision) || "";
+    topoEl("board-notes").value = (existing && existing.notes) || "";
+    topoEl("board-dialog").style.display = "block";
+    topoEl("board-dialog-backdrop").style.display = "block";
+  }
+
+  function closeBoardDialog() {
+    topoEl("board-dialog").style.display = "none";
+    topoEl("board-dialog-backdrop").style.display = "none";
+  }
+
+  async function saveBoard() {
+    const result = topoEl("board-result");
+    const body = {
+      name: topoEl("board-name").value.trim(),
+      chip: topoEl("board-chip").value.trim(),
+      build_target: topoEl("board-build-target").value.trim(),
+      variant: topoEl("board-variant").value.trim(),
+      revision: topoEl("board-revision").value.trim(),
+      notes: topoEl("board-notes").value.trim(),
+    };
+    if (!body.name) {
+      showError(result, "a board needs a name");
+      return;
+    }
+    const resp = await fetch("/api/topology/boards", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      showError(result, resp.status + " " + text);
+      return;
+    }
+    boardCatalog = JSON.parse(text).boards || [];
+    renderBoardCatalog();
+    closeBoardDialog();
+  }
+
+  async function removeBoard(name) {
+    const resp = await fetch("/api/topology/boards/" + encodeURIComponent(name), {
+      method: "DELETE",
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      showError(topoEl("board-catalog-error"), resp.status + " " + text);
+      return;
+    }
+    boardCatalog = JSON.parse(text).boards || [];
+    showError(topoEl("board-catalog-error"), null);
+    renderBoardCatalog();
+  }
+
+  // ---- retracting a role ----
+  //
+  // The counterpart enrolling went without: until this existed, a board
+  // enrolled by mistake — or under an invented role, before roles closed to
+  // a fixed pair — stayed in Core's enrollment file for good.
+  async function unenrollRole(role) {
+    const label = roleLabel(role);
+    if (!window.confirm("Retract " + label + "? The board stays on the bench; the role goes empty.")) {
+      return;
+    }
+    const resp = await fetch("/api/enrolled/" + encodeURIComponent(role), { method: "DELETE" });
+    if (!resp.ok) {
+      const text = await resp.text();
+      showError(topoEl("topo-profile-error"), resp.status + " " + text);
+      return;
+    }
+    showError(topoEl("topo-profile-error"), null);
+  }
+
+  // ---- Validate topology ----
+
+  function checkRowHtml(check) {
+    const badge =
+      check.status === "pass"
+        ? '<span class="badge badge-success">pass</span>'
+        : check.status === "fail"
+        ? '<span class="badge badge-danger">fail</span>'
+        : check.status === "warn"
+        ? '<span class="badge badge-warning">warn</span>'
+        : '<span class="badge badge-neutral">empty</span>';
+    // **A log is shown, never summarised.** When Core refused something,
+    // its own words are what a human acts on; a paraphrase here would be a
+    // second, worse description of a failure this UI did not diagnose.
+    const log = check.log
+      ? '<pre class="topo-check-log">' + escapeHtml(check.log) + "</pre>"
+      : "";
+    return (
+      '<div class="topo-check">' +
+      '<div class="topo-check-head">' + badge +
+      '<span class="topo-check-label">' + escapeHtml(check.label) + "</span></div>" +
+      '<p class="placeholder-note" style="margin:4px 0 0;">' + escapeHtml(check.detail) + "</p>" +
+      log +
+      "</div>"
+    );
+  }
+
+  async function validateTopology() {
+    const report = topoEl("topo-validate-report");
+    const button = topoEl("topo-validate");
+    if (!report) return;
+    report.style.display = "block";
+    report.innerHTML = '<p class="placeholder-note">validating — each role is a live probe attach…</p>';
+    if (button) button.disabled = true;
+    try {
+      const resp = await fetch("/api/topology/validate", { method: "POST" });
+      const text = await resp.text();
+      if (!resp.ok) {
+        report.innerHTML =
+          '<div class="sd-error">' + escapeHtml(resp.status + " " + text) + "</div>";
+        return;
+      }
+      const body = JSON.parse(text);
+      const head =
+        '<div class="topo-check-summary">' +
+        (body.ok
+          ? '<span class="badge badge-success">every check passed</span>'
+          : '<span class="badge badge-danger">' + body.failed + " failed</span>") +
+        (body.warned ? ' <span class="badge badge-warning">' + body.warned + " to look at</span>" : "") +
+        ' <span class="placeholder-note">' + formatTimestamp(body.checked_at_utc_ms) + "</span></div>";
+      report.innerHTML = head + (body.checks || []).map(checkRowHtml).join("");
+    } catch (e) {
+      report.innerHTML = '<div class="sd-error">' + escapeHtml(String(e)) + "</div>";
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  // ---- saved benches ----
+
+  let savedProfiles = [];
+
+  function renderProfilePicker() {
+    const picker = topoEl("topo-profile-picker");
+    if (!picker) return;
+    const previous = picker.value;
+    if (!savedProfiles.length) {
+      picker.innerHTML = '<option value="">no saved topology</option>';
+      return;
+    }
+    picker.innerHTML = savedProfiles
+      .map(function (p) {
+        const label = p.error
+          ? p.slug + " — unreadable"
+          : p.name + " · " + formatTimestamp(p.saved_at_utc_ms);
+        return '<option value="' + escapeHtml(p.slug) + '">' + escapeHtml(label) + "</option>";
+      })
+      .join("");
+    if (previous) picker.value = previous;
+  }
+
+  async function loadProfiles() {
+    const err = topoEl("topo-profile-error");
+    try {
+      const resp = await fetch("/api/topology/profiles");
+      const text = await resp.text();
+      if (resp.status === 409) {
+        savedProfiles = [];
+        renderProfilePicker();
+        return;
+      }
+      if (!resp.ok) {
+        showError(err, resp.status + " " + text);
+        return;
+      }
+      savedProfiles = JSON.parse(text).profiles || [];
+      showError(err, null);
+      renderProfilePicker();
+    } catch (e) {
+      showError(err, String(e));
+    }
+  }
+
+  function openSaveTopologyDialog() {
+    showError(topoEl("topo-save-result"), null);
+    topoEl("topo-save-name").value = topoEl("topo-profile-name").textContent === "unsaved"
+      ? ""
+      : topoEl("topo-profile-name").textContent;
+    topoEl("topo-save-dialog").style.display = "block";
+    topoEl("topo-save-backdrop").style.display = "block";
+  }
+
+  function closeSaveTopologyDialog() {
+    topoEl("topo-save-dialog").style.display = "none";
+    topoEl("topo-save-backdrop").style.display = "none";
+  }
+
+  async function saveTopology() {
+    const name = topoEl("topo-save-name").value.trim();
+    const result = topoEl("topo-save-result");
+    if (!name) {
+      showError(result, "a topology needs a name");
+      return;
+    }
+    const resp = await fetch("/api/topology/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name }),
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      showError(result, resp.status + " " + text);
+      return;
+    }
+    const body = JSON.parse(text);
+    savedProfiles = body.profiles || [];
+    renderProfilePicker();
+    topoEl("topo-profile-picker").value = body.saved;
+    topoEl("topo-profile-name").textContent = name;
+    closeSaveTopologyDialog();
+  }
+
+  async function deleteTopology() {
+    const slug = topoEl("topo-profile-picker").value;
+    if (!slug) return;
+    if (!window.confirm("Delete the saved topology '" + slug + "'? The bench itself is untouched.")) {
+      return;
+    }
+    const resp = await fetch("/api/topology/profiles/" + encodeURIComponent(slug), {
+      method: "DELETE",
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      showError(topoEl("topo-profile-error"), resp.status + " " + text);
+      return;
+    }
+    savedProfiles = JSON.parse(text).profiles || [];
+    showError(topoEl("topo-profile-error"), null);
+    renderProfilePicker();
+  }
+
+  // **Loading applies two halves and proposes the third.** Signals and the
+  // dev-bench link are declarations, so they go straight in. An enrolment
+  // is an identity claim — a role bound to a probe after a live hardware-ID
+  // read — so each one comes back as a proposal with a button, and pressing
+  // it runs the ordinary enroll. A file on disk is not evidence about what
+  // is plugged in.
+  function proposalHtml(p) {
+    const notes = [];
+    if (p.already_enrolled) notes.push("this role already holds that probe");
+    if (!p.probe_attached) notes.push("that probe is not attached right now");
+    if (p.displaces && p.displaces.probe_serial !== p.probe_serial) {
+      notes.push(
+        "replaces " + (p.displaces.board || "an unnamed board") + " on probe " + p.displaces.probe_serial
+      );
+    }
+    return (
+      '<div class="topo-check">' +
+      '<div class="topo-check-head">' +
+      '<span class="badge badge-neutral">' + escapeHtml(roleLabel(p.role)) + "</span>" +
+      '<span class="topo-check-label mono">' + escapeHtml(p.board || "unnamed board") + "</span>" +
+      '<span style="flex:1;"></span>' +
+      '<button class="btn btn-primary" data-proposal-role="' + escapeHtml(p.role) + '">Enroll</button>' +
+      "</div>" +
+      '<p class="placeholder-note" style="margin:4px 0 0;">chip ' + escapeHtml(p.chip) +
+      " · probe " + escapeHtml(p.probe_serial) +
+      (notes.length ? " · " + escapeHtml(notes.join(" · ")) : "") + "</p>" +
+      "</div>"
+    );
+  }
+
+  let pendingProposals = [];
+
+  async function applyTopology() {
+    const slug = topoEl("topo-profile-picker").value;
+    const report = topoEl("topo-apply-report");
+    if (!slug || !report) return;
+    report.style.display = "block";
+    report.innerHTML = '<p class="placeholder-note">loading…</p>';
+    const resp = await fetch("/api/topology/profiles/" + encodeURIComponent(slug) + "/apply", {
+      method: "POST",
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      report.innerHTML = '<div class="sd-error">' + escapeHtml(resp.status + " " + text) + "</div>";
+      return;
+    }
+    const body = JSON.parse(text);
+    pendingProposals = body.proposals || [];
+    topoEl("topo-profile-name").textContent = body.name;
+    const applied = (body.applied || [])
+      .map(function (a) {
+        const badge = a.ok
+          ? '<span class="badge badge-success">applied</span>'
+          : '<span class="badge badge-warning">not applied</span>';
+        return (
+          '<div class="topo-check"><div class="topo-check-head">' + badge +
+          '<span class="topo-check-label">' + escapeHtml(a.what) + "</span></div>" +
+          '<p class="placeholder-note" style="margin:4px 0 0;">' + escapeHtml(a.detail) + "</p></div>"
+        );
+      })
+      .join("");
+    const proposals = pendingProposals.map(proposalHtml).join("");
+    report.innerHTML =
+      '<div class="topo-check-summary"><span class="badge badge-neutral">loaded ' +
+      escapeHtml(body.name) + "</span> " +
+      '<span class="placeholder-note">the declarations are in; each enrolment is yours to confirm, ' +
+      "because binding a role to a probe reads that chip&rsquo;s live hardware ID</span></div>" +
+      applied +
+      proposals;
+  }
+
+  async function confirmProposal(role) {
+    const p = pendingProposals.find(function (x) {
+      return x.role === role;
+    });
+    if (!p) return;
+    const report = topoEl("topo-apply-report");
+    const resp = await fetch("/api/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role: p.role,
+        chip: p.chip,
+        probe_serial: p.probe_serial,
+        name: p.board,
+      }),
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      showError(topoEl("topo-profile-error"), resp.status + " " + text);
+      return;
+    }
+    showError(topoEl("topo-profile-error"), null);
+    // dev-bench's link is amended onto its enrolment row, so Core refuses
+    // it while the role is empty — which is exactly the state the apply
+    // step deferred it from. Now that the row exists, declare it.
+    if (p.role === "dev-bench" && (p.link_port_serial || p.link_port_interface !== null)) {
+      await fetch("/api/topology/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ serial: p.link_port_serial, interface: p.link_port_interface }),
+      });
+    }
+    pendingProposals = pendingProposals.filter(function (x) {
+      return x.role !== role;
+    });
+    if (report) {
+      const remaining = pendingProposals.map(proposalHtml).join("");
+      report.innerHTML =
+        '<div class="topo-check-summary"><span class="badge badge-success">enrolled ' +
+        escapeHtml(roleLabel(role)) + "</span></div>" + remaining;
+    }
+  }
+
+  function initTopologyTab() {
+    const addBoard = topoEl("board-add");
+    if (addBoard) addBoard.addEventListener("click", () => openBoardDialog(null));
+    const boardCancel = topoEl("board-cancel");
+    if (boardCancel) boardCancel.addEventListener("click", closeBoardDialog);
+    const boardBackdrop = topoEl("board-dialog-backdrop");
+    if (boardBackdrop) boardBackdrop.addEventListener("click", closeBoardDialog);
+    const boardSave = topoEl("board-save");
+    if (boardSave) boardSave.addEventListener("click", saveBoard);
+
+    const catalogBody = topoEl("board-catalog-body");
+    if (catalogBody) {
+      catalogBody.addEventListener("click", function (ev) {
+        const edit = ev.target.closest("[data-board-edit]");
+        if (edit) {
+          const name = edit.getAttribute("data-board-edit");
+          openBoardDialog(boardCatalog.find((b) => b.name === name) || { name: name });
+          return;
+        }
+        const remove = ev.target.closest("[data-board-remove]");
+        if (remove) {
+          const name = remove.getAttribute("data-board-remove");
+          if (
+            window.confirm(
+              "Forget the board '" + name + "'? Nothing is unenrolled — a role holding it keeps " +
+                "the name, which then shows as not in catalog."
+            )
+          ) {
+            removeBoard(name);
+          }
+        }
+      });
+    }
+
+    const rolesBody = topoEl("topology-table-body");
+    if (rolesBody) {
+      rolesBody.addEventListener("click", function (ev) {
+        const btn = ev.target.closest("[data-unenroll-role]");
+        if (btn) unenrollRole(btn.getAttribute("data-unenroll-role"));
+      });
+    }
+
+    const validate = topoEl("topo-validate");
+    if (validate) validate.addEventListener("click", validateTopology);
+
+    const save = topoEl("topo-profile-save");
+    if (save) save.addEventListener("click", openSaveTopologyDialog);
+    const saveCancel = topoEl("topo-save-cancel");
+    if (saveCancel) saveCancel.addEventListener("click", closeSaveTopologyDialog);
+    const saveBackdrop = topoEl("topo-save-backdrop");
+    if (saveBackdrop) saveBackdrop.addEventListener("click", closeSaveTopologyDialog);
+    const saveConfirm = topoEl("topo-save-confirm");
+    if (saveConfirm) saveConfirm.addEventListener("click", saveTopology);
+    const load = topoEl("topo-profile-load");
+    if (load) load.addEventListener("click", applyTopology);
+    const del = topoEl("topo-profile-delete");
+    if (del) del.addEventListener("click", deleteTopology);
+
+    const applyReport = topoEl("topo-apply-report");
+    if (applyReport) {
+      applyReport.addEventListener("click", function (ev) {
+        const btn = ev.target.closest("[data-proposal-role]");
+        if (btn) confirmProposal(btn.getAttribute("data-proposal-role"));
+      });
+    }
+
+    const fromDut = document.getElementById("sd-build-from-dut");
+    if (fromDut) fromDut.addEventListener("click", sdApplyBuildFromDut);
+
+    loadBoardCatalog();
+    loadProfiles();
   }
 
   function initSignals() {
@@ -8980,6 +9661,7 @@
     initNav();
     initEnrollOnDiagram();
     initSignals();
+    initTopologyTab();
     initStudyDesignerTab();
     initLiveStudyTab();
     initTimeChart();

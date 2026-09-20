@@ -380,6 +380,72 @@ a:hover {
   color: var(--on-accent);
 }
 
+/* A compact square button for an add or a remove that sits inside a table
+   row or a toolbar, where a word-wide button would out-weigh the row it
+   acts on. The danger variant is the only red control on the Topology tab:
+   both things it does — retracting a role, forgetting a board — are
+   reversible by re-stating them, so it warns rather than shouts. */
+.btn-icon {
+  padding: 7px 11px;
+  font-size: 14px;
+  line-height: 1;
+  justify-content: center;
+}
+.btn-icon-danger {
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1;
+  justify-content: center;
+  color: var(--danger);
+  border-color: var(--border-strong);
+  background: var(--bg-surface-2);
+}
+.btn-icon-danger:hover {
+  border-color: var(--danger);
+  background: var(--danger-soft-bg);
+}
+
+/* One line of the Validate-topology report, and one proposal of a loaded
+   topology — the same shape, because both are "here is a thing, here is
+   what is true about it, here is what you can do". */
+.topo-check {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: var(--bg-surface-2);
+}
+.topo-check-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.topo-check-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.topo-check-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 4px;
+}
+/* Core's own words, verbatim and wrapped — a mismatch reason or a refusal
+   is the thing a human acts on, so it is never truncated into an ellipsis. */
+.topo-check-log {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
