@@ -329,8 +329,8 @@ try:
     check("the sidebar names the open project",
           script("return document.getElementById('project-current-name').textContent;")
           == "embarch-ui-topology-drive-repo")
-    check("and carries its full path under it",
-          script("return document.getElementById('project-current-path').textContent;") == REPO)
+    check("and where it is under that — the parent, since the name is the line above",
+          script("return document.getElementById('project-current-path').textContent;") == "/tmp")
     script("document.getElementById('project-button').click();")
     time.sleep(0.4)
     check("the control opens the picker from any tab",
