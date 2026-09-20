@@ -260,11 +260,6 @@ a:hover {
   color: var(--text-tertiary);
   overflow: hidden;
   white-space: nowrap;
-  /* Truncated at the *start*: two checkouts of the same firmware differ in
-     their last segments, and an ellipsis at the end would hide exactly the
-     part that tells them apart. */
-  direction: rtl;
-  text-align: left;
   text-overflow: ellipsis;
 }
 
