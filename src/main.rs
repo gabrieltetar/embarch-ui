@@ -24,15 +24,16 @@ mod trace;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use embarch_core_client::CoreClient;
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use snapshot::Snapshot;
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use study_designer::StudyDesigner;
 use tokio::sync::{watch, Notify};
@@ -427,16 +428,82 @@ async fn poll_loop(core: Arc<CoreClient>, tx: watch::Sender<Snapshot>, poke: Arc
     }
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+/// **The three assets that change on every deploy are served
+/// revalidating, with an `ETag`** — and this is a defect that cost a whole
+/// rework's worth of confusion before it was found (2026-09-20).
+///
+/// `index.html`, `style.css` and `app.js` are `include_str!`-embedded, so a
+/// new binary *is* a new page. They were served with no `Cache-Control`, no
+/// `ETag` and no `Last-Modified` at all, which does not mean "do not
+/// cache": with no validators and no directives a browser applies heuristic
+/// caching and reuses what it has. So a redeploy changed nothing on screen,
+/// a reload changed nothing, and the page kept rendering a build from
+/// before the work — while `curl` against the same port served the new one.
+/// The fonts and the favicons already carried headers; these three, the
+/// only ones that move, did not.
+///
+/// `no-cache` means *revalidate*, not *do not store*: with the `ETag` below
+/// a reload against an unchanged binary is a `304` and a few bytes, and
+/// against a new one it is the new asset. **The tag is derived from the
+/// bytes**, not from a version string, so it cannot go stale by someone
+/// forgetting to bump it — the failure this whole entry is about.
+fn asset_etag(bytes: &[u8]) -> String {
+    // FNV-1a, 64-bit: no dependency, and strong enough for "are these the
+    // same bytes I served last time" — the question an ETag asks.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("\"{hash:016x}\"")
 }
 
-async fn style_css() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE_CSS)
+fn revalidating_asset(
+    headers: &header::HeaderMap,
+    content_type: &'static str,
+    body: &'static [u8],
+) -> Response {
+    static TAGS: OnceLock<StdMutex<HashMap<usize, String>>> = OnceLock::new();
+    let tags = TAGS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let etag = {
+        let mut tags = tags.lock().unwrap();
+        tags.entry(body.as_ptr() as usize)
+            .or_insert_with(|| asset_etag(body))
+            .clone()
+    };
+
+    let unchanged = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|sent| sent.split(',').any(|tag| tag.trim() == etag));
+    if unchanged {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [(header::ETAG, etag), (header::CACHE_CONTROL, "no-cache".to_string())],
+        )
+            .into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::ETAG, etag),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
-async fn app_js() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
+async fn index(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/html; charset=utf-8", INDEX_HTML.as_bytes())
+}
+
+async fn style_css(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/css; charset=utf-8", STYLE_CSS.as_bytes())
+}
+
+async fn app_js(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/javascript; charset=utf-8", APP_JS.as_bytes())
 }
 
 async fn favicon_svg() -> impl IntoResponse {
