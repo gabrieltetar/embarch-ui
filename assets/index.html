@@ -68,6 +68,17 @@
         <span class="nav-label">Debug</span>
       </button>
     </div>
+    <!-- The open project, at the foot of the sidebar, because it is the one
+         piece of state every tab on this page is relative to: the board
+         catalog, the saved benches, the studies, the build card. It used to
+         be a card on the Study Designer, which made "which repo am I looking
+         at?" a question you answered by leaving the tab you were on. -->
+    <button id="project-button" class="sidebar-project" type="button"
+            title="The firmware repo every tab on this page reads and writes">
+      <span class="sidebar-project-label">Project</span>
+      <span class="sidebar-project-name" id="project-current-name">none open</span>
+      <span class="sidebar-project-path mono" id="project-current-path">pick a firmware repo</span>
+    </button>
     <div class="sidebar-footer">
       <span>embarch-ui v0.1.0</span>
       <span id="bound-port">:4890</span>
@@ -204,43 +215,26 @@
           <p id="board-catalog-path" class="placeholder-note" style="margin:8px 0 12px;">reading…</p>
           <div id="board-catalog-error" class="sd-error" style="display:none; margin-bottom:10px;"></div>
           <table class="data-table">
-            <thead><tr><th style="width:190px;">Board type</th><th>Chip</th><th>Builds as</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
-            <tbody id="board-catalog-body"><tr><td colspan="5" class="placeholder-note">reading…</td></tr></tbody>
+            <thead><tr><th style="width:190px;">Board type</th><th style="width:150px;">Revisions</th><th style="width:170px;">Variants</th><th>Apps</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
+            <tbody id="board-catalog-body"><tr><td colspan="6" class="placeholder-note">reading…</td></tr></tbody>
           </table>
         </div>
       </section>
 
       <section class="tab-panel" data-tab="study-designer">
 
-        <!-- decision 14. This card replaces the old
-             "Not configured" dead end: the config field is still the
-             zero-click default, and an explicit human pick is now the way in
-             when it is absent. A typed path rather than a file picker, on
-             purpose — a browser directory picker yields no usable path, and
-             the path has to be resolved server-side anyway, because the
-             server is what reads the files. -->
+        <!-- The project itself is picked at the foot of the sidebar, where
+             every tab can see which repo it is reading. What stays here is
+             the half that is only this tab's: the summary of what the open
+             project holds, and the static analysis of its source. -->
         <div id="sd-project" class="card" style="margin-bottom:16px;">
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">Project — the firmware repo this tab reads and writes</div>
             <div class="sd-toolbar-actions">
-              <button id="sd-project-toggle" class="btn" title="Open a different firmware repo">Open project…</button>
+              <button id="sd-project-toggle" class="btn" title="Opens the project picker — the same one at the foot of the sidebar">Change project…</button>
             </div>
           </div>
           <p id="sd-project-current" class="placeholder-note" style="margin:8px 0 0;">reading…</p>
-          <div id="sd-project-picker" style="display:none; margin-top:12px;">
-            <div class="sd-toolbar" style="align-items:flex-end;">
-              <label class="sd-field" style="flex:1 1 380px;">
-                <span>Firmware repo path</span>
-                <input id="sd-project-path" type="text" class="sd-input mono" spellcheck="false" placeholder="/home/you/src/your-firmware" />
-              </label>
-              <div class="sd-toolbar-actions">
-                <select id="sd-project-recents" class="sd-input"><option value="">Recent projects…</option></select>
-                <button id="sd-project-open" class="btn btn-primary">Open</button>
-              </div>
-            </div>
-            <p class="placeholder-note" style="margin-top:8px;">Studies are read from and written to <span class="mono">&lt;repo&gt;/embarch/studies/</span>, and the custom-action registry from <span class="mono">&lt;repo&gt;/embarch/study-actions.toml</span>. A repo with no <span class="mono">embarch/</span> directory yet is fine — it gets created on the first save.</p>
-            <p id="sd-project-error" class="sd-error" style="display:none;"></p>
-          </div>
 
           <!-- Reading the firmware's own source used to be a pure side
                effect: it ran lazily the first time some other panel needed a
@@ -705,6 +699,39 @@
         </div>
       </div>
 
+      <!-- decision 14's picker, now the whole page's rather than one tab's.
+           A typed path rather than a file picker, on purpose — a browser
+           directory picker yields no usable path, and the path has to be
+           resolved server-side anyway, because the server is what reads the
+           files. The config field is still the zero-click default; an
+           explicit human pick is the way in when it is absent. -->
+      <div id="project-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
+      <div id="project-dialog" class="dialog" style="display:none; width:min(640px,92vw);">
+        <div class="card-title">Project — the firmware repo this page reads and writes</div>
+        <p class="placeholder-note">One project at a time, for every tab: the board catalog and saved benches on Topology, the studies and the Build card here, the firmware this bench builds. Studies are read from and written to <span class="mono">&lt;repo&gt;/embarch/studies/</span>, and the custom-action registry from <span class="mono">&lt;repo&gt;/embarch/study-actions.toml</span>. A repo with no <span class="mono">embarch/</span> directory yet is fine — it gets created on the first save.</p>
+        <label class="sd-field" style="margin-top:12px;">
+          <span>Firmware repo path</span>
+          <input id="project-path" type="text" class="sd-input mono" spellcheck="false" placeholder="/home/you/src/your-firmware" />
+        </label>
+        <div class="sd-toolbar" style="align-items:flex-end; margin-top:10px;">
+          <label class="sd-field" style="flex:1 1 260px;">
+            <span>Recent projects</span>
+            <select id="project-recents" class="sd-input"><option value="">Recent projects…</option></select>
+          </label>
+          <label class="sd-field" style="flex:1 1 220px;">
+            <span>Static GATT extractor</span>
+            <input id="project-extractor" type="text" class="sd-input mono" spellcheck="false" placeholder="(none)" title="zephyr-ble-def is the one extractor this build ships; leave blank to skip static extraction" />
+          </label>
+        </div>
+        <p id="project-summary" class="placeholder-note mono" style="margin-top:12px;">reading…</p>
+        <p id="project-error" class="sd-error" style="display:none;"></p>
+        <div class="sd-row-actions" style="margin-top:16px;">
+          <span style="flex:1;"></span>
+          <button id="project-cancel" class="btn">Cancel</button>
+          <button id="project-open" class="btn btn-primary">Open</button>
+        </div>
+      </div>
+
       <div id="board-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="board-dialog" class="dialog" style="display:none;">
         <div class="card-title">A board type in this project</div>
@@ -733,6 +760,16 @@
         <label class="sd-field"><span>Board type</span>
           <select id="role-board-select" class="sd-input mono"></select>
         </label>
+        <!-- A revision and a variant that really exist *together*, as this
+             repo's own scan reports them. Two independent dropdowns would
+             offer combinations `west build` then refuses — a board revision
+             can be backed only with a named variant, and vice versa — so
+             what is picked here is one scanned combination, never a pair
+             assembled out of two lists. -->
+        <label class="sd-field" id="role-board-combo-field" style="margin-top:12px;"><span>Build combination — revision and variant</span>
+          <select id="role-board-combo" class="sd-input mono"></select>
+        </label>
+        <p id="role-board-combo-note" class="placeholder-note" style="margin:6px 0 0;"></p>
         <p id="role-board-result" class="sd-error" style="display:none; margin-top:10px;"></p>
         <div class="sd-row-actions" style="margin-top:16px;">
           <button id="role-board-retract" class="btn" title="Clear this role — its board type and its probe binding both go">Retract role</button>

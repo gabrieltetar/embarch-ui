@@ -213,6 +213,94 @@ a:hover {
 .nav-item.active svg {
   opacity: 1;
 }
+/* The open project, at the foot of the sidebar: a button that looks like a
+   status line until you hover it, because it is read far more often than it
+   is pressed. Three stacked lines — the word Project, the repo's own
+   directory name, and the path in mono, truncated from the left so the end
+   of a long path (the part that distinguishes two checkouts of the same
+   repo) is what survives. */
+.sidebar-project {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 11px 20px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.sidebar-project:hover {
+  background: var(--bg-surface-2);
+}
+.sidebar-project-label {
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.sidebar-project-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-project.is-empty .sidebar-project-name {
+  color: var(--warning);
+}
+.sidebar-project-path {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  white-space: nowrap;
+  /* Truncated at the *start*: two checkouts of the same firmware differ in
+     their last segments, and an ellipsis at the end would hide exactly the
+     part that tells them apart. */
+  direction: rtl;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+/* What a board type can be built as, in the catalog list: one chip per
+   revision, variant or app the repo's scan found. The one a build would use
+   today is `is-pinned` — the catalog's own recorded combination — so the
+   list answers "what can I build?" and "what is picked?" in one glance. */
+.build-chip {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 1px 7px;
+  margin: 1px 3px 1px 0;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.build-chip.is-pinned {
+  border-color: transparent;
+  background: var(--accent-soft-bg);
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+/* A pin `embarch/boards.toml` still carries that this repo's scan no longer
+   backs. Shown, never dropped: it is what a build for that role would ask
+   for, and it is about to be refused. */
+.build-chip.is-stale {
+  border-color: transparent;
+  background: var(--warning-soft-bg);
+  color: var(--warning);
+  font-weight: 650;
+}
+
 .sidebar-footer {
   padding: 13px 20px;
   border-top: 1px solid var(--border);

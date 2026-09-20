@@ -228,6 +228,56 @@ REPO = "/tmp/embarch-ui-topology-drive-repo"
 subprocess.run(["rm", "-rf", REPO], check=False)
 os.makedirs(REPO + "/.git", exist_ok=True)
 
+# A real enough Zephyr tree for the *build menu*: the board catalog lists what
+# each board type can be built as, and the DUT picker binds to one of those
+# combinations rather than to a board name alone.
+#
+# The fixture is shaped around the case a cross product gets wrong. `plank`
+# declares revisions 1 and 2 and one named variant, `ns`. Bare `cpuapp`
+# builds at 1 (the default revision, implicitly backed) and at 2 (an overlay
+# backs it); the `ns` variant is backed only at 2, because Zephyr does not
+# extend the default-revision shortcut to a named variant. So revisions ×
+# variants is four combinations and only **three** are real — which is what
+# the picker must offer.
+BOARD_DIR = REPO + "/boards/acme/plank"
+os.makedirs(BOARD_DIR, exist_ok=True)
+os.makedirs(REPO + "/app/blinky", exist_ok=True)
+os.makedirs(REPO + "/embarch", exist_ok=True)
+open(REPO + "/app/blinky/CMakeLists.txt", "w").close()
+with open(BOARD_DIR + "/board.yml", "w") as f:
+    f.write("board:\n"
+            "  name: plank\n"
+            "  socs:\n"
+            "    - name: nrf54l15\n"
+            "      variants:\n"
+            "        - name: ns\n"
+            "          cpucluster: cpuapp\n"
+            "  revision:\n"
+            '    default: "1"\n'
+            "    revisions:\n"
+            '      - name: "1"\n'
+            '      - name: "2"\n')
+for name in ["plank_nrf54l15_cpuapp.dts", "plank_nrf54l15_cpuapp_ns.dts",
+             "plank_nrf54l15_cpuapp_2.overlay", "plank_nrf54l15_cpuapp_ns_2.overlay"]:
+    open(BOARD_DIR + "/" + name, "w").close()
+# `embarch/embarch.toml` in the repo is `embarch-api`'s own documented
+# fallback and the one this UI resolves per call, so no environment variable
+# is needed to make the scan available.
+with open(REPO + "/embarch/embarch.toml", "w") as f:
+    f.write('[core]\nbase_url = "http://127.0.0.1:%d"\ntoken = "%s"\n\n'
+            "[[projects]]\n"
+            'name = "plank"\n'
+            'source_path = "%s"\n'
+            'discovery = "zephyr-west"\n'
+            'flash_format = "hex"\n'
+            # Both are required of a `zephyr-west` project by
+            # `embarch-api`'s own config validation, and neither is executed
+            # by a target scan: the scan is a filesystem walk over
+            # `boards/` and `app/`, which is exactly why this fixture needs
+            # no toolchain.
+            'west_binary = "west"\n'
+            'build_dir_root = "%s/build"\n' % (CORE_PORT, TOKEN, REPO, REPO))
+
 cfg = "/tmp/embarch-ui-topology-drive.toml"
 with open(cfg, "w") as f:
     f.write('[core]\nbase_url = "http://127.0.0.1:%d"\ntoken = "%s"\n' % (CORE_PORT, TOKEN))
@@ -272,6 +322,26 @@ try:
           script("return document.querySelector('.tab-panel[data-tab=\"topology\"]')"
                  ".classList.contains('active');"))
 
+    # --- the open project, at the foot of the sidebar ----------------------
+    #
+    # Shell furniture, not a tab's: every tab on this page is relative to one
+    # firmware repo, and this is where it is named and changed from.
+    check("the sidebar names the open project",
+          script("return document.getElementById('project-current-name').textContent;")
+          == "embarch-ui-topology-drive-repo")
+    check("and carries its full path under it",
+          script("return document.getElementById('project-current-path').textContent;") == REPO)
+    script("document.getElementById('project-button').click();")
+    time.sleep(0.4)
+    check("the control opens the picker from any tab",
+          script("return document.getElementById('project-dialog').style.display === 'block';"))
+    check("which offers the recents the server remembers",
+          script("return document.getElementById('project-recents').options.length;") >= 1)
+    script("document.getElementById('project-cancel').click();")
+    time.sleep(0.3)
+    check("the Study Designer's own project card no longer carries a second picker",
+          script("return !document.getElementById('sd-project-picker');"))
+
     # --- the pool and the targets ------------------------------------------
     check("the probe pool renders inside the diagram card",
           script("return !!document.getElementById('probes-pool').closest('.card')"
@@ -295,7 +365,7 @@ try:
     labels = script("return Array.from(document.querySelectorAll('#topology-diagram "
                     "[data-enroll-role] text')).map(function(t){return t.textContent});")
     check("the box's title is the role and the board type is under it",
-          labels[0] == "Dev bench" and labels[1] == "esp32c5_devkitc/esp32c5/hpcore", labels)
+          labels[0] == "Dev bench" and labels[1] == "Espressif ESP32-C5-DevKitC", labels)
     check("a role with no board type says what to do rather than going blank",
           labels[2] == "DUT" and labels[3] == "pick a board type", labels)
     check("the chip is not on the diagram any more",
@@ -343,13 +413,75 @@ try:
     bench_options = script("return Array.from(document.getElementById('role-board-select').options)"
                            ".map(function(o){return o.textContent});")
     check("the dev-bench picker is the suite's fixed supported list, not the catalog",
-          bench_options == ["nRF54L15 DK — nRF54L15", "ESP32 C5 DK — esp32c5"], bench_options)
+          bench_options == ["Nordic nRF54L15 DK — nRF54L15",
+                            "Espressif ESP32-C5-DevKitC — esp32c5"], bench_options)
+    check("a dev-bench board is offered no build combination — it is not a project board",
+          script("return document.getElementById('role-board-combo-field').style.display "
+                 "=== 'none';"))
     script("document.getElementById('role-board-select').value='nrf54l15dk/nrf54l15/cpuapp';"
            "document.getElementById('role-board-save').click();")
     time.sleep(1.2)
     check("picking a board type writes it with no probe opened",
           BOARD_WRITES == [{"role": "dev-bench", "board": "nrf54l15dk/nrf54l15/cpuapp",
                             "chip": "nRF54L15"}], BOARD_WRITES)
+
+    # --- what a board type can be *built* as (the catalog's own columns) ----
+    #
+    # The list used to carry the chip and the west target. Neither is what a
+    # human reads a bench list for; what this repo can build each board as
+    # is, and it is the same menu the DUT picker binds to.
+    check("a board type the repo's scan does not have says so rather than going blank",
+          "not in the scan" in script("return document.getElementById('board-catalog-body')"
+                                      ".textContent;"))
+    script("document.getElementById('board-rescan').click();")
+    time.sleep(1.6)
+    row = script("return Array.from(document.querySelectorAll('#board-catalog-body tr'))"
+                 ".filter(function(r){return r.textContent.indexOf('plank')===0;})"
+                 ".map(function(r){return Array.from(r.cells).map(function(c){"
+                 "return c.textContent.trim()});})[0];")
+    check("the scan's board type is in the catalog after a rescan", bool(row), row)
+    check("its revisions are listed, from the repo's own scan",
+          row and row[1].replace(" ", "") == "12", row)
+    check("its variants are listed beside them",
+          row and row[2] == "ns", row)
+    check("and the apps it is in the tree for",
+          row and row[3] == "blinky", row)
+    check("the chip and the west target are off the list, not out of the row",
+          "nRF52840_xxAA" not in script("return document.getElementById('board-catalog-body')"
+                                        ".textContent;"))
+
+    # --- picking a *real* combination for the DUT --------------------------
+    script("document.querySelector('[data-board-role=\"dut\"] text')"
+           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    time.sleep(0.6)
+    script("document.getElementById('role-board-select').value='plank';"
+           "document.getElementById('role-board-select')"
+           ".dispatchEvent(new Event('change'));")
+    time.sleep(0.4)
+    combos = script("return Array.from(document.getElementById('role-board-combo').options)"
+                    ".map(function(o){return o.textContent});")
+    check("the picker offers the combinations the scan found, not revisions × variants",
+          len(combos) == 3, combos)
+    check("each one names its revision and its variant, and carries the west qualifier",
+          combos and combos[0].startswith("rev 1 · no variant — plank@1/nrf54l15/cpuapp"), combos)
+    check("the combination Zephyr does not back is not offered",
+          not any("rev 1 · variant ns" in c for c in combos), combos)
+    script("document.getElementById('role-board-combo').value='2';"
+           "document.getElementById('role-board-save').click();")
+    time.sleep(1.4)
+    # One gesture, two owners, and the split is the point: which board type
+    # is in a role is Core's fact and reaches Core unchanged, while which
+    # combination of it this repo builds is the project's and lands in the
+    # project's own file. Core is never told about a revision.
+    check("Core is told the board type and nothing about the combination",
+          BOARD_WRITES[-1] == {"role": "dut", "board": "plank", "chip": ""}, BOARD_WRITES[-1])
+    with open(REPO + "/embarch/boards.toml") as f:
+        catalog = f.read()
+    plank = catalog.split('name = "plank"')[-1]
+    check("and the combination is recorded on the board in the project's own file",
+          'revision = "2"' in plank and 'variant = "ns"' in plank, plank)
+    check("the list marks the combination a build would use now",
+          script("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');"))
 
     # --- click-to-assign, onto the label rather than the rect --------------
     script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();")

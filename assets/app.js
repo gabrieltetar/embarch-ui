@@ -207,8 +207,9 @@
       return '<tr><td colspan="4" class="placeholder-note">none enrolled yet</td></tr>';
     }
     return enrolled.map((b) => (
-      "<tr><td>" + escapeHtml(roleLabel(b.role)) + '</td><td class="mono">' +
-      escapeHtml(b.name || b.chip || "—") +
+      "<tr><td>" + escapeHtml(roleLabel(b.role)) + '</td><td class="mono" title="' +
+      escapeHtml(b.name || "") + '">' +
+      escapeHtml(boardTypeLabel(b.role, b.name) || b.chip || "—") +
       // A role can hold a board type and no probe (decision 45); both
       // cells say so rather than rendering an empty string that reads as a
       // value.
@@ -296,7 +297,7 @@
     // on the diagram it was one more thing to read past.
     function boxBoard(board) {
       if (!board || !board.name) return "pick a board type";
-      return board.name;
+      return boardTypeLabel(board.role, board.name);
     }
 
     // **The box a role is drawn as is the target a probe is dropped on**
@@ -5197,39 +5198,101 @@
     return state.path + " — " + bits.join(" · ");
   }
 
-  function sdRenderProject(state) {
-    var current = sdEl("sd-project-current");
-    current.textContent = sdProjectSummary(state);
-    current.className = state.path ? "placeholder-note mono" : "sd-error";
+  // The open project is the whole page's, not one tab's: the board catalog
+  // and the saved benches on Topology, the studies and the Build card here,
+  // and every "no project open" message in the server. So it is rendered in
+  // **one** function, from **one** state object, onto three surfaces — the
+  // sidebar's control, this tab's summary line, and the picker dialog's
+  // fields. Two renderers of the same fact is how a footer comes to name a
+  // repo a tab has already switched away from.
+  var projectState = { path: null, recents: [] };
 
-    var select = sdEl("sd-project-recents");
-    select.innerHTML = '<option value="">Recent projects…</option>';
-    (state.recents || []).forEach(function (r) {
-      var opt = document.createElement("option");
-      opt.value = r.path;
-      opt.textContent = r.path + (r.static_extractor ? " (" + r.static_extractor + ")" : "");
-      opt.dataset.extractor = r.static_extractor || "";
-      select.appendChild(opt);
-    });
+  // The directory the repo is, which is what a human calls it. The full path
+  // is one line below it in the sidebar and in the dialog, so nothing is
+  // hidden by shortening this.
+  function projectShortName(path) {
+    if (!path) return "none open";
+    var parts = String(path).split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : path;
+  }
 
-    // Opened straight away when nothing is open, so the first thing an
-    // engineer sees on a fresh machine is the field they need rather than a
-    // button they have to find. The static-analysis submenu opens with it,
-    // because the extractor field lives in there and opening a project is
-    // when you pick one.
-    sdEl("sd-project-picker").style.display = state.path ? "none" : "";
-    if (!state.path) sdEl("sd-static").open = true;
-    if (state.path && !sdEl("sd-project-path").value) {
-      sdEl("sd-project-path").value = state.path;
-      sdEl("sd-project-extractor").value = state.static_extractor || "";
+  function renderProject(state) {
+    projectState = state || { path: null, recents: [] };
+
+    var button = document.getElementById("project-button");
+    var name = document.getElementById("project-current-name");
+    var path = document.getElementById("project-current-path");
+    if (button && name && path) {
+      name.textContent = projectShortName(state.path);
+      path.textContent = state.path || "pick a firmware repo";
+      button.classList.toggle("is-empty", !state.path);
+      button.title = state.path
+        ? state.path + " — the firmware repo every tab on this page reads and writes"
+        : "No project open. Pick a firmware repo — every tab on this page is relative to it.";
     }
+
+    var current = sdEl("sd-project-current");
+    if (current) {
+      current.textContent = sdProjectSummary(state);
+      current.className = state.path ? "placeholder-note mono" : "sd-error";
+    }
+
+    var summary = document.getElementById("project-summary");
+    if (summary) {
+      summary.textContent = sdProjectSummary(state);
+      summary.className = state.path ? "placeholder-note mono" : "sd-error";
+    }
+
+    var select = document.getElementById("project-recents");
+    if (select) {
+      select.innerHTML = '<option value="">Recent projects…</option>';
+      (state.recents || []).forEach(function (r) {
+        var opt = document.createElement("option");
+        opt.value = r.path;
+        opt.textContent = r.path + (r.static_extractor ? " (" + r.static_extractor + ")" : "");
+        opt.dataset.extractor = r.static_extractor || "";
+        select.appendChild(opt);
+      });
+    }
+
+    // The static-analysis submenu opens itself when nothing is open, because
+    // the extractor a project is opened with is picked in there and a fresh
+    // machine has never seen it.
+    if (!state.path && sdEl("sd-static")) sdEl("sd-static").open = true;
+    if (state.path) {
+      var field = document.getElementById("project-path");
+      if (field && !field.value) field.value = state.path;
+      var extractor = document.getElementById("project-extractor");
+      if (extractor && !extractor.value) extractor.value = state.static_extractor || "";
+      if (sdEl("sd-project-extractor") && !sdEl("sd-project-extractor").value) {
+        sdEl("sd-project-extractor").value = state.static_extractor || "";
+      }
+    }
+  }
+
+  function openProjectDialog() {
+    var dialog = document.getElementById("project-dialog");
+    if (!dialog) return;
+    showError(document.getElementById("project-error"), null);
+    var field = document.getElementById("project-path");
+    if (field && !field.value && projectState.path) field.value = projectState.path;
+    dialog.style.display = "block";
+    document.getElementById("project-dialog-backdrop").style.display = "block";
+    if (field) field.focus();
+  }
+
+  function closeProjectDialog() {
+    var dialog = document.getElementById("project-dialog");
+    if (!dialog) return;
+    dialog.style.display = "none";
+    document.getElementById("project-dialog-backdrop").style.display = "none";
   }
 
   async function sdLoadProject() {
     try {
       var resp = await fetch("/api/study-designer/project");
       var state = await resp.json();
-      sdRenderProject(state);
+      renderProject(state);
       if (state.path) {
         await sdEnterProject();
       } else {
@@ -5242,13 +5305,15 @@
   }
 
   async function sdOpenProject(path, extractor) {
-    var err = sdEl("sd-project-error");
+    var err = document.getElementById("project-error");
     err.style.display = "none";
     var body = {
-      path: path !== undefined ? path : sdEl("sd-project-path").value,
-      static_extractor: (extractor !== undefined ? extractor : sdEl("sd-project-extractor").value) || null,
+      path: path !== undefined ? path : document.getElementById("project-path").value,
+      static_extractor:
+        (extractor !== undefined ? extractor : document.getElementById("project-extractor").value) ||
+        null,
     };
-    var btn = sdEl("sd-project-open");
+    var btn = document.getElementById("project-open");
     btn.disabled = true;
     try {
       var resp = await fetch("/api/study-designer/project", {
@@ -5263,7 +5328,8 @@
         return;
       }
       var state = JSON.parse(text);
-      sdRenderProject(state);
+      renderProject(state);
+      closeProjectDialog();
       // Everything the previous project put on screen is about the previous
       // project: the table, the taps and the saved-study list. The server
       // drops its own per-project caches on the same switch. A *run* is not
@@ -5276,6 +5342,12 @@
       sdEl("sd-static-result").innerHTML = "";
       sdStaticNote("not run yet against this project.", false);
       await sdEnterProject();
+      // The board catalog, the saved benches and both role pickers are the
+      // *project's*, so a switch that left them on screen would be showing
+      // one repo's bench under another repo's name. Reloaded here rather
+      // than on the next visit to the Topology tab, which may never come.
+      await loadBoardCatalog();
+      await loadProfiles();
     } catch (e) {
       err.textContent = String(e);
       err.style.display = "block";
@@ -5537,29 +5609,15 @@
     var body = sdEl("sd-body");
     if (!body) return;
 
-    sdEl("sd-project-toggle").addEventListener("click", function () {
-      var picker = sdEl("sd-project-picker");
-      picker.style.display = picker.style.display === "none" ? "" : "none";
-    });
-    sdEl("sd-project-open").addEventListener("click", function () {
-      sdOpenProject();
-    });
+    // This tab's own button opens the *same* dialog the sidebar's control
+    // does — one picker, reachable from where you already are.
+    sdEl("sd-project-toggle").addEventListener("click", openProjectDialog);
     // Wired here, not in `sdWireStudyDesigner`: both buttons live on the
     // project card, which is on screen before any project is open, and that
     // function does not run until one is. `Discover GATT` used to be on the
     // study toolbar inside `sd-body`, where that distinction never came up.
     sdEl("sd-static-run").addEventListener("click", sdRunStaticAnalysis);
     sdEl("sd-discover").addEventListener("click", sdDiscover);
-    sdEl("sd-project-recents").addEventListener("change", function (ev) {
-      var opt = ev.target.selectedOptions[0];
-      if (!opt || !opt.value) return;
-      sdEl("sd-project-path").value = opt.value;
-      sdEl("sd-project-extractor").value = opt.dataset.extractor || "";
-      // Picking a recent project opens it: an extra click on Open would be
-      // asking twice for the same decision.
-      sdOpenProject(opt.value, opt.dataset.extractor || "");
-    });
-
     sdLoadProject();
     // **Surveyed even with no project open**, because "no project" is one of
     // the answers: the card would otherwise sit on its "checking…"
@@ -5723,6 +5781,12 @@
 
   let boardCatalog = [];
 
+  // What this repo can actually build each catalog row for, as the server
+  // grouped its own target scan (`GET /api/topology/boards`). `available:
+  // false` carries the reason and is a *state*, not a failure: a repo with
+  // no `embarch-api` project config is a repo whose boards are still boards.
+  let boardBuilds = { available: false, reason: null, by_board: {} };
+
   function boardCatalogHas(name) {
     return boardCatalog.some((b) => b.name === name);
   }
@@ -5742,25 +5806,79 @@
     el.textContent = text;
   }
 
+  // One axis of a catalog row's build menu — its revisions, its variants, or
+  // the apps it is in the tree for.
+  //
+  // **The chip and the west target used to be the two columns here, and
+  // neither is a thing a human reads a bench list for**: a chip is a
+  // property you set once and a west target restates the board's own name.
+  // What is worth knowing is what this repo can *build* that board as, which
+  // is the same menu the DUT picker offers — so the list and the picker are
+  // two views of one scan rather than two descriptions of one row.
+  //
+  // Four states, each said differently, because they are four different
+  // facts: the scan could not run at all, this board is not in the scan,
+  // the board is in the scan and declares none of this axis, and here they
+  // are. Folding any pair together would state something about the bench
+  // nobody established.
+  function boardBuildCell(board, axis) {
+    if (!boardBuilds.available) {
+      return '<span class="placeholder-note" title="' +
+        escapeHtml(boardBuilds.reason || "this repo's targets could not be scanned") +
+        '">not scanned</span>';
+    }
+    const entry = (boardBuilds.by_board || {})[board.name];
+    if (!entry) {
+      return '<span class="placeholder-note" title="Nothing in this repo\'s target scan builds ' +
+        'for this board type. Press Rescan after adding it to the repo, or check the row\'s ' +
+        '“Builds as”.">not in the scan</span>';
+    }
+    const values = entry[axis] || [];
+    // Which one a build would use today, as `embarch/boards.toml` pins it.
+    const pinned = axis === "revisions" ? board.revision : axis === "variants" ? board.variant : "";
+    let html = values
+      .map(function (v) {
+        return '<span class="build-chip' + (v && v === pinned ? " is-pinned" : "") + '">' +
+          escapeHtml(v) + "</span>";
+      })
+      .join("");
+    // A pin the scan no longer backs is shown, not dropped: it is what a
+    // build for this role would ask for, and a list that hid it would be
+    // silent about exactly the row that is about to fail.
+    if (pinned && values.indexOf(pinned) === -1) {
+      html += '<span class="build-chip is-stale" title="Pinned in embarch/boards.toml, but this ' +
+        'repo\'s scan does not have it — a build for this board would be refused.">' +
+        escapeHtml(pinned) + " ?</span>";
+    }
+    if (!html) {
+      return '<span class="placeholder-note">' +
+        (axis === "apps" ? "no app" : "none declared") + "</span>";
+    }
+    return html;
+  }
+
   function boardCatalogRows() {
     if (!boardCatalog.length) {
       return (
-        '<tr><td colspan="5" class="placeholder-note">No board in this project yet. A board is ' +
+        '<tr><td colspan="6" class="placeholder-note">No board in this project yet. A board is ' +
         "a name, a chip and what it builds as — add one, then say which role it is in by " +
         "dropping a probe on the diagram.</td></tr>"
       );
     }
     return boardCatalog
       .map(function (b) {
-        const builds = b.build_target
-          ? '<span class="mono">' + escapeHtml(b.build_target) +
-            (b.variant ? "@" + escapeHtml(b.variant) : "") +
-            (b.revision ? "@" + escapeHtml(b.revision) : "") + "</span>"
-          : '<span class="placeholder-note">—</span>';
+        // The chip and the west target are still this row's, and still
+        // editable — they are on the row's own tooltip and in its Edit
+        // dialog rather than holding a column each.
+        const detail = [
+          b.chip ? "chip " + b.chip : "no chip set",
+          b.build_target ? "builds as " + b.build_target : "no west target set",
+        ].join(" · ");
         return (
-          '<tr><td class="mono">' + escapeHtml(b.name) + "</td>" +
-          '<td class="mono">' + escapeHtml(b.chip || "—") + "</td>" +
-          "<td>" + builds + "</td>" +
+          '<tr><td class="mono" title="' + escapeHtml(detail) + '">' + escapeHtml(b.name) + "</td>" +
+          "<td>" + boardBuildCell(b, "revisions") + "</td>" +
+          "<td>" + boardBuildCell(b, "variants") + "</td>" +
+          "<td>" + boardBuildCell(b, "apps") + "</td>" +
           "<td>" + (b.notes ? escapeHtml(b.notes) : '<span class="placeholder-note">—</span>') + "</td>" +
           '<td style="text-align:right; white-space:nowrap;">' +
           '<button class="btn" data-board-edit="' + escapeHtml(b.name) + '">Edit</button> ' +
@@ -5790,9 +5908,10 @@
       const text = await resp.text();
       if (resp.status === 409) {
         // No project open. Not an error to shout about: the catalog is a
-        // project file, and the Study Designer's project panel is the way
-        // in — which the message says.
+        // project file, and the sidebar's project picker is the way in —
+        // which the message says.
         boardCatalog = [];
+        boardBuilds = { available: false, reason: text, by_board: {} };
         showError(err, null);
         if (path) path.textContent = text;
         renderBoardCatalog();
@@ -5804,6 +5923,7 @@
       }
       const body = JSON.parse(text);
       boardCatalog = body.boards || [];
+      boardBuilds = body.builds || { available: false, reason: null, by_board: {} };
       showError(err, null);
       if (path) path.textContent = body.path;
       renderBoardCatalog();
@@ -5886,7 +6006,10 @@
       }
       const body = JSON.parse(text);
       boardCatalog = body.boards || [];
-      renderBoardCatalog();
+      // Re-read rather than render what the rescan returned: a rescan adds
+      // board types, and what each one can be built as is the half this
+      // response does not carry.
+      await loadBoardCatalog();
       await loadRolePickers();
       // Said out loud, both halves: what the scan added, and what is in the
       // file that the scan did not find — a board type on a branch that is
@@ -6231,7 +6354,21 @@
   // project's catalog, the dev bench's from the suite's supported set.
   // Both are **served**, never restated here — the same rule every other
   // vocabulary in this tab is under.
-  let rolePickers = { dut: [], "dev-bench": [] };
+  let rolePickers = { dut: [], "dev-bench": [], builds: { available: false, by_board: {} } };
+
+  // A dev-bench board type is a west qualifier — `nrf54l15dk/nrf54l15/cpuapp`
+  // — and that is what Core stores and what a build is for, so it stays the
+  // value everywhere it is *sent*. It is not what a human reads on a
+  // diagram, though: the picture answers "which board is on the desk", and a
+  // slash-separated path answers a different question. The label comes from
+  // the served supported list (decision 45), never from a table typed here,
+  // and a type the list does not carry renders unchanged.
+  function boardTypeLabel(role, name) {
+    if (!name) return name;
+    if (role !== "dev-bench") return name;
+    const found = (rolePickers["dev-bench"] || []).find((o) => o.board === name);
+    return found && found.label ? found.label : name;
+  }
 
   async function loadRolePickers() {
     try {
@@ -6241,6 +6378,76 @@
     } catch (e) {
       /* the picker falls back to whatever it last had; the box still draws */
     }
+  }
+
+  // How one scanned combination reads in the picker. The west qualifier is
+  // the honest spelling and is shown, but it leads with the two axes a human
+  // is choosing between — a revision and a variant — because
+  // `nrf54l15dk@0.9.0/nrf54l15/cpuapp/ns` differs from its neighbour in one
+  // character and a list of those is a list of near-identical strings.
+  function comboLabel(combo) {
+    const bits = [];
+    bits.push(combo.revision ? "rev " + combo.revision : "no revision");
+    bits.push(combo.variant ? "variant " + combo.variant : "no variant");
+    let label = bits.join(" · ") + " — " + combo.qualifier;
+    if (combo.apps && combo.apps.length) label += "  (" + combo.apps.join(", ") + ")";
+    return label;
+  }
+
+  // The combinations offered for whatever board type is selected right now.
+  //
+  // **Only combinations the repo's own scan reports**, never a revision list
+  // crossed with a variant list: a revision can be backed only *with* a
+  // named variant and a variant only at one revision, so a cross product
+  // offers targets `west build` then refuses. Where there is nothing to
+  // offer — a dev-bench board, a repo that cannot be scanned, a board type
+  // the scan does not have — the field goes away and the note says which of
+  // those it is, because "no combinations" and "could not look" are not the
+  // same sentence.
+  function renderRoleCombos(role) {
+    const field = topoEl("role-board-combo-field");
+    const select = topoEl("role-board-combo");
+    const note = topoEl("role-board-combo-note");
+    if (!field || !select || !note) return;
+    const builds = rolePickers.builds || { available: false, by_board: {} };
+    const board = topoEl("role-board-select").value;
+    const entry = role === "dut" && builds.available ? (builds.by_board || {})[board] : null;
+    const combos = entry ? entry.combos || [] : [];
+
+    if (!combos.length) {
+      field.style.display = "none";
+      select.innerHTML = "";
+      let text = "";
+      if (role === "dut" && !builds.available) {
+        text = "This repo's build targets could not be scanned, so no combination is offered " +
+          "and the board type is set on its own." + (builds.reason ? " " + builds.reason : "");
+      } else if (role === "dut" && board) {
+        text = "Nothing in this repo's target scan builds for this board type — press Rescan " +
+          "in Board types below, or check what it builds as.";
+      }
+      note.textContent = text;
+      note.style.display = text ? "" : "none";
+      return;
+    }
+
+    const picked = (rolePickers[role] || []).find((o) => o.board === board) || {};
+    select.innerHTML = combos
+      .map(function (c, i) {
+        return '<option value="' + i + '">' + escapeHtml(comboLabel(c)) + "</option>";
+      })
+      .join("");
+    // Opens on what `embarch/boards.toml` already pins for this board, so
+    // confirming the dialog is not silently a change of target.
+    const current = combos.findIndex(function (c) {
+      return c.revision === (picked.revision || "") && c.variant === (picked.variant || "");
+    });
+    select.value = String(current >= 0 ? current : 0);
+    field.style.display = "";
+    note.textContent = combos.length === 1
+      ? "The one combination this repo builds this board for."
+      : combos.length + " combinations in this repo's scan. What you pick is recorded on the " +
+        "board in embarch/boards.toml, and is what a run for this role builds.";
+    note.style.display = "";
   }
 
   function openBoardPicker(role) {
@@ -6266,6 +6473,7 @@
     }
     const current = findEnrolled(latestSnapshot || {}, role);
     if (current && current.name) select.value = current.name;
+    renderRoleCombos(role);
     showError(topoEl("role-board-result"), null);
     dialog.dataset.role = role;
     dialog.style.display = "block";
@@ -6307,15 +6515,34 @@
       showError(topoEl("role-board-result"), "there is no board type to pick yet");
       return;
     }
+    // One request, so the role and the combination cannot half-apply. The
+    // combination is sent only when one was actually offered: a request that
+    // named an empty revision and variant would *clear* the board's pin,
+    // which is a decision nobody made by picking a board type.
+    const body = { board: board, chip: chip };
+    const comboField = topoEl("role-board-combo-field");
+    if (comboField && comboField.style.display !== "none") {
+      const builds = rolePickers.builds || { by_board: {} };
+      const entry = (builds.by_board || {})[board];
+      const combo = entry && entry.combos ? entry.combos[Number(topoEl("role-board-combo").value)] : null;
+      if (combo) {
+        body.revision = combo.revision;
+        body.variant = combo.variant;
+      }
+    }
     const resp = await fetch("/api/topology/roles/" + encodeURIComponent(role) + "/board", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ board: board, chip: chip }),
+      body: JSON.stringify(body),
     });
     if (!resp.ok) {
       showError(topoEl("role-board-result"), resp.status + " " + (await resp.text()));
       return;
     }
+    // The pin the server just wrote is on the catalog row, which the list
+    // above and the picker both render from.
+    await loadBoardCatalog();
+    await loadRolePickers();
     // The board in this role changed, so whatever the last Validate said
     // about it describes a different board. Dropped rather than kept: a
     // stale badge is a claim nobody made.
@@ -6403,6 +6630,15 @@
         // same box, and one gesture must not do both.
         ev.stopPropagation();
         openBoardPicker(pick.getAttribute("data-board-role"));
+      });
+    }
+    // Changing the board type changes which combinations exist, so the
+    // second select is rebuilt rather than left showing the previous
+    // board's revisions.
+    const pickSelect = topoEl("role-board-select");
+    if (pickSelect) {
+      pickSelect.addEventListener("change", function () {
+        renderRoleCombos(topoEl("role-board-dialog").dataset.role);
       });
     }
     const pickCancel = topoEl("role-board-cancel");
@@ -9793,8 +10029,41 @@
     });
   }
 
+  // The project control and its dialog: shell furniture, wired with the rest
+  // of the shell rather than inside a tab, because the control is on screen
+  // on every tab and the dialog is opened from two of them.
+  function initProjectPicker() {
+    const button = document.getElementById("project-button");
+    if (button) button.addEventListener("click", openProjectDialog);
+    const cancel = document.getElementById("project-cancel");
+    if (cancel) cancel.addEventListener("click", closeProjectDialog);
+    const backdrop = document.getElementById("project-dialog-backdrop");
+    if (backdrop) backdrop.addEventListener("click", closeProjectDialog);
+    const open = document.getElementById("project-open");
+    if (open) open.addEventListener("click", function () { sdOpenProject(); });
+    const path = document.getElementById("project-path");
+    if (path) {
+      path.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") sdOpenProject();
+      });
+    }
+    const recents = document.getElementById("project-recents");
+    if (recents) {
+      recents.addEventListener("change", function (ev) {
+        const opt = ev.target.selectedOptions[0];
+        if (!opt || !opt.value) return;
+        document.getElementById("project-path").value = opt.value;
+        document.getElementById("project-extractor").value = opt.dataset.extractor || "";
+        // Picking a recent project opens it: an extra click on Open would be
+        // asking twice for the same decision.
+        sdOpenProject(opt.value, opt.dataset.extractor || "");
+      });
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     initNav();
+    initProjectPicker();
     initEnrollOnDiagram();
     initSignals();
     initTopologyTab();

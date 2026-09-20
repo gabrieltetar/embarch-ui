@@ -316,8 +316,8 @@ struct StaticGatt {
 
 /// Said in one place, because it is both an HTTP body and (via
 /// [`StudyDesigner::registry`]) an error string a different layer renders.
-const NO_PROJECT: &str = "no project is open — open a firmware repo, or set \
-     [study_designer].firmware_repo_path in embarch-ui's config";
+const NO_PROJECT: &str = "no project is open — pick a firmware repo in Project, at the bottom \
+     of the sidebar, or set [study_designer].firmware_repo_path in embarch-ui's config";
 
 /// The answer for a route that needs an open project and hasn't got one.
 ///

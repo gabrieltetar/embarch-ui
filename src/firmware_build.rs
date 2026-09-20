@@ -764,7 +764,8 @@ pub async fn api_build_survey(
     let Some(repo) = state.study_designer.repo_path() else {
         return axum::response::Json(
             serde_json::to_value(unavailable(
-                "no firmware repo is open, so there is no project to build. Open one first.",
+                "no firmware repo is open, so there is no project to build. Pick one in \
+                 Project, at the bottom of the sidebar.",
                 None,
             ))
             .unwrap_or_default(),

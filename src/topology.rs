@@ -62,9 +62,33 @@ fn role_label(role: &str) -> &str {
 /// cannot be built for would be offering a bench that cannot exist.
 pub const SUPPORTED_DEV_BENCH_BOARDS: [(&str, &str, &str); 2] = [
     // (board type as west names it, the label a human reads, probe-rs chip)
-    ("nrf54l15dk/nrf54l15/cpuapp", "nRF54L15 DK", "nRF54L15"),
-    ("esp32c5_devkitc/esp32c5/hpcore", "ESP32 C5 DK", "esp32c5"),
+    ("nrf54l15dk/nrf54l15/cpuapp", "Nordic nRF54L15 DK", "nRF54L15"),
+    ("esp32c5_devkitc/esp32c5/hpcore", "Espressif ESP32-C5-DevKitC", "esp32c5"),
 ];
+
+/// How a dev-bench board type is *shown*: the label above, never the west
+/// qualifier it is keyed by.
+///
+/// The wire value stays the qualifier everywhere it is sent — it is what
+/// Core stores and what a build is for — but `nrf54l15dk/nrf54l15/cpuapp`
+/// on a diagram box is a path, not a board, and a human reading the picture
+/// wants to know which DK is on the desk. A type this list does not carry is
+/// returned unchanged rather than blanked: an unknown bench board is still
+/// the bench's board.
+pub fn dev_bench_label(board: &str) -> &str {
+    SUPPORTED_DEV_BENCH_BOARDS
+        .iter()
+        .find(|(qualifier, _, _)| *qualifier == board)
+        .map(|(_, label, _)| *label)
+        .unwrap_or(board)
+}
+
+/// The board type in a role, as a report line spells it: the bench's label
+/// for a bench board, the name a human typed for anything else. A DUT's
+/// name is already a name someone chose, so it is never translated.
+fn board_display(role: &str, name: &str) -> String {
+    if role == "dev-bench" { dev_bench_label(name).to_string() } else { name.to_string() }
+}
 
 // ---- the board catalog ------------------------------------------------------
 
@@ -143,6 +167,197 @@ fn save_catalog(repo: &Path, catalog: &Catalog) -> anyhow::Result<()> {
     let text = toml::to_string_pretty(catalog)?;
     std::fs::write(&path, text)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))
+}
+
+// ---- what this repo can build a board for -----------------------------------
+
+/// One buildable combination of a west board, as this repo's own target
+/// scan reports it.
+///
+/// **A combination, not a cross product.** `revisions` and `variants` below
+/// are the axes a human reads at a glance; this is what actually exists
+/// together — `ref_board@evt1` may be buildable only *with* a named variant,
+/// and a picker offering the two lists independently would offer a target
+/// `west build` then refuses. That refusal is the whole reason the DUT
+/// picker binds to one of these rather than to two dropdowns.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BoardCombo {
+    /// Empty where the board declares no revisions at all — a real state,
+    /// not a missing value, and shown as one.
+    pub revision: String,
+    pub variant: String,
+    pub soc: String,
+    pub cpucluster: String,
+    /// `board[@revision]/soc[/cpucluster][/variant]`: exactly what
+    /// `west build -b` takes, assembled once here so nothing downstream
+    /// re-derives it from the parts.
+    pub qualifier: String,
+    /// The apps this combination is buildable for. Kept per combination
+    /// rather than per board because a board can be in the tree for one app
+    /// and not another.
+    pub apps: Vec<String>,
+}
+
+/// What a catalog row can be built as, summarised for the list and enumerated
+/// for the picker.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BoardBuilds {
+    pub revisions: Vec<String>,
+    pub variants: Vec<String>,
+    pub apps: Vec<String>,
+    pub combos: Vec<BoardCombo>,
+}
+
+/// The west board a catalog row is scanned under: `build_target` when it has
+/// one, else the row's own name, cut back to the bare board.
+///
+/// A `build_target` is a full qualifier (`nrf54l15dk/nrf54l15/cpuapp`) and
+/// the scan reports the board alone (`nrf54l15dk`), so the SoC, cpucluster
+/// and any `@revision` are stripped before the two are compared. Comparing
+/// them whole is what made an entry with a perfectly good target look absent
+/// from its own repo's scan.
+fn scan_key(board: &Board) -> String {
+    let raw = if board.build_target.trim().is_empty() { &board.name } else { &board.build_target };
+    raw.split('/').next().unwrap_or(raw).split('@').next().unwrap_or(raw).trim().to_string()
+}
+
+/// Groups the repo's scanned targets by west board.
+///
+/// Returns `None` with a reason when the repo cannot be scanned at all —
+/// unconfigured, not a west project, a project config that names a different
+/// repo. **That is a state, not an error**: the catalog is still a catalog,
+/// and the list says "not scanned" rather than claiming a board builds for
+/// nothing. Same split every other unreadable source in this UI is under.
+async fn scan_by_west_board(
+    state: &AppState,
+    repo: &Path,
+) -> (Option<std::collections::BTreeMap<String, BoardBuilds>>, Option<String>) {
+    let configured = state.build_config_path.clone();
+    let scan_repo = repo.to_path_buf();
+    let survey = tokio::task::spawn_blocking(move || {
+        crate::firmware_build::survey(configured.as_deref(), &scan_repo)
+    })
+    .await;
+    let survey = match survey {
+        Ok(s) => s,
+        Err(e) => return (None, Some(format!("the target scan panicked: {e:?}"))),
+    };
+    if !survey.available {
+        return (
+            None,
+            Some(survey.reason.unwrap_or_else(|| "this repo cannot be scanned".to_string())),
+        );
+    }
+
+    // `resolve::list_targets`' own object, read the way `app.js`'s build
+    // picker reads it (`targets.targets[]`) rather than reshaped — one shape
+    // for the whole suite (`BuildSurvey::targets`).
+    let rows = survey
+        .targets
+        .as_ref()
+        .and_then(|t| t.get("targets"))
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let field = |row: &serde_json::Value, key: &str| -> String {
+        row.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    };
+
+    let mut by_board: std::collections::BTreeMap<String, BoardBuilds> =
+        std::collections::BTreeMap::new();
+    // Keyed by the combination itself, so two apps sharing one target land in
+    // one row with two apps rather than in two rows that read as two targets.
+    let mut combos: std::collections::BTreeMap<
+        (String, BoardCombo),
+        std::collections::BTreeSet<String>,
+    > = std::collections::BTreeMap::new();
+    for row in &rows {
+        let board = field(row, "board");
+        if board.is_empty() {
+            continue;
+        }
+        let revision = field(row, "revision");
+        let variant = field(row, "variant");
+        let soc = field(row, "soc");
+        let cpucluster = field(row, "cpucluster");
+        let mut qualifier = board.clone();
+        if !revision.is_empty() {
+            qualifier.push('@');
+            qualifier.push_str(&revision);
+        }
+        if !soc.is_empty() {
+            qualifier.push('/');
+            qualifier.push_str(&soc);
+        }
+        if !cpucluster.is_empty() {
+            qualifier.push('/');
+            qualifier.push_str(&cpucluster);
+        }
+        if !variant.is_empty() {
+            qualifier.push('/');
+            qualifier.push_str(&variant);
+        }
+        let combo = BoardCombo {
+            revision,
+            variant,
+            soc,
+            cpucluster,
+            qualifier,
+            apps: Vec::new(),
+        };
+        let app = field(row, "app");
+        let entry = combos.entry((board, combo)).or_default();
+        if !app.is_empty() {
+            entry.insert(app);
+        }
+    }
+
+    for ((board, mut combo), apps) in combos {
+        combo.apps = apps.into_iter().collect();
+        let builds = by_board.entry(board).or_default();
+        if !combo.revision.is_empty() && !builds.revisions.contains(&combo.revision) {
+            builds.revisions.push(combo.revision.clone());
+        }
+        if !combo.variant.is_empty() && !builds.variants.contains(&combo.variant) {
+            builds.variants.push(combo.variant.clone());
+        }
+        for app in &combo.apps {
+            if !builds.apps.contains(app) {
+                builds.apps.push(app.clone());
+            }
+        }
+        builds.combos.push(combo);
+    }
+    for builds in by_board.values_mut() {
+        builds.revisions.sort();
+        builds.variants.sort();
+        builds.apps.sort();
+    }
+    (Some(by_board), None)
+}
+
+/// The same thing keyed by **catalog name**, which is what every surface
+/// that renders a catalog row already holds. Keying the served object by the
+/// west board instead would hand the browser this file's `scan_key` rule to
+/// re-implement, and a second implementation of a matching rule is how a row
+/// comes to render as unbuildable in one place and buildable in another.
+async fn builds_by_catalog_name(
+    state: &AppState,
+    repo: &Path,
+    boards: &[Board],
+) -> serde_json::Value {
+    let (by_west_board, reason) = scan_by_west_board(state, repo).await;
+    let Some(by_west_board) = by_west_board else {
+        return json!({ "available": false, "reason": reason, "by_board": {} });
+    };
+    let mut by_board = serde_json::Map::new();
+    for board in boards {
+        if let Some(builds) = by_west_board.get(&scan_key(board)) {
+            by_board.insert(board.name.clone(), json!(builds));
+        }
+    }
+    json!({ "available": true, "reason": serde_json::Value::Null, "by_board": by_board })
 }
 
 // ---- a saved topology profile -----------------------------------------------
@@ -332,33 +547,45 @@ pub fn role_target(
 
 /// The open project's repo, or the `409` every route here answers without
 /// one. **`409`, not `404`**: the catalog is not missing, the question is
-/// unanswerable until a project is open — and the Study Designer's own
-/// project panel is the way out, which the message names.
+/// unanswerable until a project is open — and the project picker at the
+/// foot of the sidebar is the way out, which the message names.
 fn repo(state: &AppState) -> Result<PathBuf, Box<Response>> {
     state.study_designer.repo_path().ok_or_else(|| {
         Box::new(
             (
                 StatusCode::CONFLICT,
-                "no firmware repo is open, so this project has no board catalog yet — open one \
-                 on the Study Designer tab first",
+                "no firmware repo is open, so this project has no board catalog yet — pick one \
+                 in Project, at the bottom of the sidebar",
             )
                 .into_response(),
         )
     })
 }
 
-/// `GET /api/topology/boards` — the catalog, plus where it lives.
+/// `GET /api/topology/boards` — the catalog, where it lives, and **what
+/// each row can actually be built as**.
+///
+/// The list used to render a row's chip and its west target, which are the
+/// two things a human reading a bench list already knows and cannot act on.
+/// What is worth knowing is which revisions and variants this repo has in
+/// the tree for that board — that is the menu a DUT is picked from — so the
+/// scan rides along with the catalog rather than being a second call the
+/// list would have to sequence itself behind.
 pub async fn api_boards(State(state): State<AppState>) -> Response {
     let repo = match repo(&state) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
     match load_catalog(&repo) {
-        Ok(catalog) => Json(json!({
-            "path": boards_path(&repo).to_string_lossy(),
-            "boards": catalog.boards,
-        }))
-        .into_response(),
+        Ok(catalog) => {
+            let builds = builds_by_catalog_name(&state, &repo, &catalog.boards).await;
+            Json(json!({
+                "path": boards_path(&repo).to_string_lossy(),
+                "boards": catalog.boards,
+                "builds": builds,
+            }))
+            .into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
     }
 }
@@ -531,6 +758,18 @@ pub struct SetRoleBoardRequest {
     /// two lists that fill that picker (the project catalog and the
     /// supported-bench list) are both served from here.
     pub chip: String,
+    /// The combination picked alongside the board type, when the picker
+    /// offered one: a `(revision, variant)` pair the repo's own scan
+    /// reports, never a pair typed from two independent lists.
+    ///
+    /// `None` leaves the catalog row alone, which is what a dev-bench pick
+    /// and a repo that cannot be scanned both send. `Some("")` is a real
+    /// value — a board with no revisions declared builds at none, and
+    /// clearing a stale pin is the same gesture as setting one.
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub variant: Option<String>,
 }
 
 /// `POST /api/topology/roles/{role}/board` — which board type is in a role,
@@ -546,10 +785,45 @@ pub async fn api_set_role_board(
 ) -> Response {
     match state.core.set_role_board(&role, &req.board, &req.chip).await {
         Ok(row) => {
+            // **Core's write first, the project file second, and only ever
+            // in that order.** Which board type is in a role is Core's fact;
+            // which combination of it this repo builds is the project's
+            // (decision 44). Writing the file first would leave a catalog
+            // pinned to a combination for a role that was then refused.
+            let pinned = pin_combination(&state, &req);
             state.poke.notify_one();
-            Json(row).into_response()
+            Json(json!({ "role": row, "pinned": pinned })).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+/// Records the picked combination on the catalog row, when one was picked.
+///
+/// Silent about a board that is not in the catalog and about a repo that is
+/// not open: both are states the picker already renders honestly (a
+/// dev-bench type is not a project board at all, and an unresolved name
+/// shows as *not in catalog*), and neither is a reason to fail a write to
+/// Core that has already happened.
+fn pin_combination(state: &AppState, req: &SetRoleBoardRequest) -> serde_json::Value {
+    let (Some(revision), Some(variant)) = (req.revision.as_ref(), req.variant.as_ref()) else {
+        return serde_json::Value::Null;
+    };
+    let Some(repo) = state.study_designer.repo_path() else {
+        return serde_json::Value::Null;
+    };
+    let Ok(mut catalog) = load_catalog(&repo) else {
+        return serde_json::Value::Null;
+    };
+    let Some(entry) = catalog.boards.iter_mut().find(|b| b.name == req.board) else {
+        return serde_json::Value::Null;
+    };
+    entry.revision = revision.clone();
+    entry.variant = variant.clone();
+    let pinned = json!({ "board": req.board, "revision": revision, "variant": variant });
+    match save_catalog(&repo, &catalog) {
+        Ok(()) => pinned,
+        Err(e) => json!({ "board": req.board, "error": format!("{e:#}") }),
     }
 }
 
@@ -561,13 +835,29 @@ pub async fn api_set_role_board(
 /// supported set. Served rather than restated in `app.js`, like every other
 /// vocabulary here.
 pub async fn api_pickers(State(state): State<AppState>) -> Response {
+    let mut builds = json!({ "available": false, "reason": serde_json::Value::Null, "by_board": {} });
     let dut: Vec<serde_json::Value> = match state.study_designer.repo_path() {
         Some(repo) => match load_catalog(&repo) {
-            Ok(catalog) => catalog
-                .boards
-                .iter()
-                .map(|b| json!({ "board": b.name, "label": b.name, "chip": b.chip }))
-                .collect(),
+            Ok(catalog) => {
+                builds = builds_by_catalog_name(&state, &repo, &catalog.boards).await;
+                catalog
+                    .boards
+                    .iter()
+                    .map(|b| {
+                        json!({
+                            "board": b.name,
+                            "label": b.name,
+                            "chip": b.chip,
+                            // What this row is *currently* pinned to in
+                            // `boards.toml`, so the picker opens on the
+                            // combination a build would use today rather
+                            // than on whichever one sorts first.
+                            "revision": b.revision,
+                            "variant": b.variant,
+                        })
+                    })
+                    .collect()
+            }
             Err(_) => Vec::new(),
         },
         None => Vec::new(),
@@ -576,7 +866,7 @@ pub async fn api_pickers(State(state): State<AppState>) -> Response {
         .iter()
         .map(|(board, label, chip)| json!({ "board": board, "label": label, "chip": chip }))
         .collect();
-    Json(json!({ "dut": dut, "dev-bench": dev_bench })).into_response()
+    Json(json!({ "dut": dut, "dev-bench": dev_bench, "builds": builds })).into_response()
 }
 
 /// `DELETE /api/enrolled/{role}` — retract a role, through Core's
@@ -736,12 +1026,17 @@ pub async fn api_validate(State(state): State<AppState>) -> Response {
                 format!(
                     "{} is in this role, but no probe is bound to it — drop one on the box \
                      before anything can read this board's identity",
-                    board.name
+                    board_display(role, &board.name)
                 ),
             ));
             continue;
         }
-        let who = format!("{} — probe {} ({})", board.name, probe_text(board), board.chip);
+        let who = format!(
+            "{} — probe {} ({})",
+            board_display(role, &board.name),
+            probe_text(board),
+            board.chip
+        );
         match state.core.validate(role).await {
             Ok(resp) => {
                 let mut check = Check::new(
