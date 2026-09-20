@@ -416,6 +416,11 @@ try:
           "MISSING-BRIDGE" in report, report[:600])
     check("the leftover role is called out as one",
           "sniffer" in report, report[:600])
+    # A dev-bench board type comes from the suite's list, so the catalog
+    # check must not nag about it — found on the live bench, first pass
+    # after a board type was declared there.
+    check("a supported bench board is not reported as missing from the project catalog",
+          "no board type of that name" not in report, report[-400:])
 
     labels = script("return Array.from(document.querySelectorAll('#topology-diagram "
                     "[data-enroll-role] text')).map(function(t){return t.textContent});")

@@ -892,19 +892,31 @@ pub async fn api_validate(State(state): State<AppState>) -> Response {
         }
     }
 
-    // ---- names that no longer resolve ----
+    // ---- board types that no longer resolve ----
+    //
+    // **The dev bench is checked against the suite's list, not the
+    // project's** (decision 45). A bench board type is the suite's fact —
+    // it is what `embarch-dev-bench`'s firmware supports — so warning that
+    // it is absent from a firmware repo's catalog would nag on every pass
+    // about a file that was never meant to name it. Found on the live
+    // bench, on the first pass after the board half was declared.
     if let Some(repo) = state.study_designer.repo_path() {
         if let Ok(catalog) = load_catalog(&repo) {
             for board in snapshot.enrolled.iter().filter(|b| !b.name.is_empty()) {
+                let supported_bench = board.role == "dev-bench"
+                    && SUPPORTED_DEV_BENCH_BOARDS.iter().any(|(b, _, _)| *b == board.name);
+                if supported_bench {
+                    continue;
+                }
                 if !catalog.boards.iter().any(|c| c.name == board.name) {
                     checks.push(Check::new(
                         &format!("name:{}", board.name),
                         format!("Board '{}'", board.name),
                         "warn",
                         format!(
-                            "enrolled as '{}' but no board of that name is in this project's \
-                             catalog — either it belongs to another project, or it was never \
-                             added here",
+                            "in the '{}' role, but no board type of that name is in this \
+                             project's catalog — either it belongs to another project, or \
+                             Rescan has not been pressed since it was added to the repo",
                             board.role
                         ),
                     ));
