@@ -5216,6 +5216,20 @@
     return parts.length ? parts[parts.length - 1] : path;
   }
 
+  // The path under it, shortened from the *front*: two checkouts of one
+  // firmware differ in their last segments, so that is the end worth
+  // keeping. Shortened here rather than by CSS — `direction: rtl` truncates
+  // on the correct side but reorders the leading `/` of an absolute path to
+  // the far end, which reads as a trailing slash that is not in the path.
+  // The full path is on the control's tooltip and in the dialog either way.
+  function projectPathDisplay(path) {
+    if (!path) return "pick a firmware repo";
+    var sep = String(path).indexOf("\\") >= 0 && String(path).indexOf("/") < 0 ? "\\" : "/";
+    var parts = String(path).split(/[\\/]/).filter(Boolean);
+    if (parts.length <= 2) return path;
+    return "…" + sep + parts.slice(-2).join(sep);
+  }
+
   function renderProject(state) {
     projectState = state || { path: null, recents: [] };
 
@@ -5224,7 +5238,7 @@
     var path = document.getElementById("project-current-path");
     if (button && name && path) {
       name.textContent = projectShortName(state.path);
-      path.textContent = state.path || "pick a firmware repo";
+      path.textContent = projectPathDisplay(state.path);
       button.classList.toggle("is-empty", !state.path);
       button.title = state.path
         ? state.path + " — the firmware repo every tab on this page reads and writes"
