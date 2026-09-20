@@ -5216,18 +5216,23 @@
     return parts.length ? parts[parts.length - 1] : path;
   }
 
-  // The path under it, shortened from the *front*: two checkouts of one
-  // firmware differ in their last segments, so that is the end worth
-  // keeping. Shortened here rather than by CSS — `direction: rtl` truncates
-  // on the correct side but reorders the leading `/` of an absolute path to
-  // the far end, which reads as a trailing slash that is not in the path.
-  // The full path is on the control's tooltip and in the dialog either way.
+  // The line under the name is **where** that repo is — its last two parent
+  // directories — not the path again: the name line already carries the last
+  // segment, and the sidebar is 236 px wide, so a full path there is a
+  // string cut off at whichever end the CSS chooses. Two checkouts of one
+  // firmware differ exactly here, which is what makes the parent the useful
+  // half. The whole path is on the control's tooltip and in the dialog.
+  //
+  // Computed rather than left to `direction: rtl`, which truncates on the
+  // right side but reorders an absolute path's leading `/` to the far end —
+  // rendering a trailing slash that is not in the path.
   function projectPathDisplay(path) {
     if (!path) return "pick a firmware repo";
     var sep = String(path).indexOf("\\") >= 0 && String(path).indexOf("/") < 0 ? "\\" : "/";
     var parts = String(path).split(/[\\/]/).filter(Boolean);
-    if (parts.length <= 2) return path;
-    return "…" + sep + parts.slice(-2).join(sep);
+    var parent = parts.slice(0, -1);
+    if (!parent.length) return path;
+    return (parent.length > 2 ? "…" + sep : sep) + parent.slice(-2).join(sep);
   }
 
   function renderProject(state) {
