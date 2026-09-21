@@ -244,7 +244,6 @@
           <details id="sd-static" class="sd-submenu" style="margin-top:14px;">
             <summary>Static firmware analysis</summary>
             <div class="sd-submenu-body">
-              <p class="placeholder-note" style="margin:0 0 10px;">Reads the firmware repo's own source for its GATT table — no board, no bench, nothing flashed. What it finds is an assertion about the <em>tree</em>: a characteristic behind a disabled Kconfig is declared here and absent from a live discovery, and the two are kept apart everywhere they meet.</p>
               <div class="sd-toolbar" style="align-items:flex-end;">
                 <label class="sd-field" style="flex:0 1 230px;">
                   <span>Static GATT extractor</span>
@@ -285,7 +284,7 @@
                  rather than as a second list: it is the same library, and
                  the only difference is that this one has no rows to load. -->
             <div id="sd-stored-panel" style="display:none; margin-top:12px;"></div>
-            <p id="sd-toolbar-note" class="placeholder-note" style="margin-top:10px;">Saved studies live in <span class="mono">&lt;firmware-repo&gt;/embarch/studies/</span> as plain <span class="mono">Study</span> JSON — re-runnable straight from the CLI with <span class="mono">embarch-api run-study --study-file</span>, not only from here.</p>
+            <p id="sd-toolbar-note" class="placeholder-note" style="margin-top:10px;"><span class="mono">&lt;firmware-repo&gt;/embarch/studies/</span></p>
           </div>
 
           <div class="card" style="margin-bottom:16px;">
@@ -327,7 +326,6 @@
                answer. -->
           <div class="card" style="margin-bottom:16px;">
             <div class="card-title">Define the wire</div>
-            <p class="placeholder-note" style="margin:8px 0 0;">What this study records off the link, what the link is known to carry, the protocols a step can hand it to, and the names this repo gives the bytes.</p>
 
             <div class="sd-panel-section">
             <div class="sd-toolbar">
@@ -337,7 +335,6 @@
                 <button id="sd-add-tap" class="btn">+ Outpost trace tap</button>
               </div>
             </div>
-            <p class="placeholder-note" style="margin:8px 0 12px;">A <strong>GATT notify tap</strong> gives one characteristic its own file, decoded with a layout your firmware repo declares in <span class="mono">embarch/study-structs.toml</span> — pick the layout, or leave it raw. Something has to subscribe to that characteristic for it to capture anything, so a monitor step must cover it. An <strong>outpost trace tap</strong> names a <em>signal</em>, never a carrier, so the identical saved study runs unchanged after the bench is rewired; routes are declared in the <a href="#topology" class="mono">Topology</a> tab. Any study with a monitor step also gets a full GATT transcript at <span class="mono">streams/gatt.csv</span> automatically — you do not declare it and it is not capped.</p>
             <div class="table-scroll">
               <table class="data-table sd-table">
                 <thead>
@@ -353,14 +350,12 @@
                 <tbody id="sd-taps"></tbody>
               </table>
             </div>
-            <p class="placeholder-note" style="margin-top:10px;"><strong>Record framing</strong> is what turns "the file has bytes in it" into "these are the bytes the DUT computed a checksum over". Give a GATT tap the magic its records begin with — <span class="mono">GWF1</span> as text, or <span class="mono">0x42 0x53 0x53 0x03</span> as bytes — and embarch-core finds the record boundaries and checks each record's trailing CRC-32 after the run. Leave it blank and the capture is simply not checked, which is an honest answer and not a passing one.</p>
             <p id="sd-taps-empty" class="placeholder-note" style="margin-top:10px;">No taps — this study records its steps and nothing else.</p>
             </div>
 
 
             <div class="sd-panel-section">
             <div class="card-title">Detected characteristics — not yet registered</div>
-            <p class="placeholder-note" style="margin-bottom:10px;">Found by live <span class="mono">GattDiscover</span> and/or by reading the firmware repo's own source. Register one to give it a name and a set of clickable values you can pick from a step row. Nothing here invents what a characteristic means — the names and the bytes are yours.</p>
             <div id="sd-unregistered" class="chip-pool">run <span class="mono">Run GATT extractor</span> or <span class="mono">Discover GATT (live)</span>, under <strong>Static firmware analysis</strong> on the project panel, to populate this</div>
             </div>
 
@@ -372,7 +367,7 @@
                 <button id="sd-eap-open" class="btn">Author .eap files…</button>
               </div>
             </div>
-            <p class="placeholder-note" style="margin:8px 0 10px;">A <span class="mono">RunProtocol</span> step hands the BLE link to a declared state machine for the length of that step — a request/chunk/consume handshake that would otherwise be a dozen brittle write steps. Manifests live in <span class="mono">&lt;firmware-repo&gt;/embarch/protocols/</span>; the study carries a resolved copy, so it replays identically on a machine that is not yours. This card is read-only: what a study carries is derived from the steps that name it, never authored separately.</p>
+            <p class="placeholder-note" style="margin:8px 0 10px;"><span class="mono">&lt;firmware-repo&gt;/embarch/protocols/</span></p>
             <div id="sd-protocols-carried"></div>
             </div>
 
@@ -384,7 +379,6 @@
                 <button id="sd-add-layout" class="btn">+ Payload layout</button>
               </div>
             </div>
-            <p class="placeholder-note" style="margin:8px 0 10px;">Click a registered action to edit or rename it, a layout to edit its fields. Deleting or renaming one that a saved study still uses is <strong>refused</strong>, naming the studies. Saving rewrites <span class="mono">study-actions.toml</span> / <span class="mono">study-structs.toml</span> whole, so <strong>comments you hand-wrote in those files are lost</strong>.</p>
             <div id="sd-registered" class="chip-pool">no registered action in this repo yet</div>
             <div class="card-title" style="margin:16px 0 6px; font-size:13px;">Payload layouts</div>
             <div id="sd-layouts" class="chip-pool">no payload layout in this repo yet</div>
@@ -405,11 +399,9 @@
                bare trailing span lands against the far edge of a wide dialog
                with the title alone on the left. -->
           <div class="card-title"><span>Build options — <span id="sd-buildopts-name" class="mono"></span></span></div>
-          <p class="placeholder-note" style="margin:8px 0 0;">Everything here travels with the saved study: it is part of the experiment, not part of this particular run.</p>
 
           <div class="sd-dialog-section">
             <div class="card-title" style="margin:0;">dev-bench log level</div>
-            <p class="placeholder-note" style="margin:8px 0 10px;">A property of the study, not of the run and not of the log tap — embarch-study-designer decision 51 rejected making it a property of the tap, so it must not sit in Streams either.</p>
             <select id="sd-log-level" class="sd-input" style="max-width:280px;"></select>
             <p id="sd-log-level-note" class="placeholder-note" style="margin-top:10px;"></p>
           </div>
@@ -421,7 +413,6 @@
                 <button id="sd-req-refresh" class="btn" title="Re-read what the bench currently reports">Re-read bench</button>
               </div>
             </div>
-            <p class="placeholder-note" style="margin:8px 0 12px;">Both fields are mandatory, and <span class="mono">any</span> is a real answer that has to be given rather than reached by leaving a field blank. Prefilled from what is in front of you right now; a study is the experiment, so this travels with the saved file.</p>
             <div class="req-grid">
               <div class="req-row">
                 <div class="req-label">dev-bench</div>
@@ -436,7 +427,6 @@
                 <div id="sd-req-dut-live" class="req-live">reading…</div>
               </div>
             </div>
-            <p class="placeholder-note" style="margin-top:10px;">dev-bench's version is read back off the bench itself over <span class="mono">HelloAck</span> — the one version string in this suite genuinely reported by the thing it describes. The DUT's is what the configured firmware repo's own <span class="mono">git describe</span> says, which is an assertion about the tree, not a reading off the board: a run against it is recorded as <span class="mono">Declared</span>.</p>
           </div>
 
           <div class="sd-dialog-section" id="sd-build-card">
@@ -448,7 +438,6 @@
             </div>
             <p id="sd-build-note" class="placeholder-note" style="margin:8px 0 12px;">checking what this bench can build…</p>
             <div id="sd-build-body" style="display:none;">
-              <p class="placeholder-note" style="margin:0 0 12px;">What is stored is the <em>selection</em>, never a build id: it is resolved against the repo as it stands, every time it runs. The working tree is never moved — a study that requires a revision the tree is not at is refused, naming both, rather than checked out.</p>
               <!-- decision 45: board, variant and revision are not the
                    study's any more. The DUT role holds a board type, and a
                    run builds for whatever is in that role at the moment it
@@ -469,7 +458,6 @@
               </div>
 
               <div class="card-title" style="margin:18px 0 6px; font-size:13px;">Snippets — in the order west applies them</div>
-              <p class="placeholder-note" style="margin:0 0 8px;">This list is <strong>ordered, not a set</strong>. A snippet can switch off what a later one needs — the BLE-shell snippet re-points the shell backend and turns the traced UART off, so an outpost overlay has to come after it or the tracer loses its own UART. Two orderings of the same names are two different images, down to the build directory.</p>
               <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                 <div>
                   <div class="placeholder-note" style="margin:0 0 6px;">chosen, top to bottom</div>
@@ -483,10 +471,8 @@
 
               <div class="card-title" style="margin:18px 0 6px; font-size:13px;">Extra west flags</div>
               <textarea id="sd-build-args" class="sd-input mono" rows="2" spellcheck="false" placeholder="one per line, e.g. -p always"></textarea>
-              <p class="placeholder-note" style="margin:6px 0 0;">Opaque passthrough, in the order given. Empty takes the project’s configured default_extra_args.</p>
 
               <div class="card-title" style="margin:18px 0 6px; font-size:13px;">Outpost mode this study needs</div>
-              <p id="sd-build-flags-note" class="placeholder-note" style="margin:0 0 8px;">Checked against the running firmware’s own header frame before step 1, so nothing runs against a build that is not in this mode. <span class="mono">trace_self</span> is the one whose <em>clear</em> state is usually what is wanted — clear means the trace deliberately omits the outpost’s own drain thread and UART interrupt. Declaring any of these needs an outpost trace tap in the Streams card; the header is read from that capture.</p>
               <div id="sd-build-flags" class="req-grid"></div>
             </div>
           </div>
@@ -500,7 +486,6 @@
         <div id="sd-runcheck-backdrop" class="dialog-backdrop" style="display:none;"></div>
         <div id="sd-runcheck-dialog" class="dialog" style="display:none;">
           <div class="card-title">Before this run</div>
-          <p class="placeholder-note">What this study requires, against what the bench actually has. Shown before the run so the choice is made against the real discrepancy rather than in the abstract.</p>
           <div id="sd-runcheck-body"></div>
           <div id="sd-runcheck-caps" style="margin-top:14px;"></div>
           <label id="sd-runcheck-allow-wrap" class="req-any" style="margin-top:14px; display:none;">
@@ -522,7 +507,6 @@
         <div id="sd-targets-backdrop" class="dialog-backdrop" style="display:none;"></div>
         <div id="sd-targets-dialog" class="dialog" style="display:none;">
           <div class="card-title">Characteristics to subscribe to</div>
-          <p class="placeholder-note">Only what discovery actually found — live, or read out of the firmware repo's source. There is deliberately no free-text UUID box: a step that names a characteristic nothing has seen is a run that fails on the bench.</p>
           <div class="sd-targets-bar">
             <input id="sd-targets-filter" type="text" class="sd-input" spellcheck="false" placeholder="filter by name or UUID…" />
             <span id="sd-targets-count" class="placeholder-note"></span>
@@ -539,7 +523,6 @@
         <div id="sd-register-backdrop" class="dialog-backdrop" style="display:none;"></div>
         <div id="sd-register-dialog" class="dialog" style="display:none;">
           <div class="card-title">Register a custom action</div>
-          <p class="placeholder-note">Give this characteristic a name you'll recognize, and for a write, the exact bytes for each choice. Bytes are yours literally — typed as text or as <span class="mono">0x</span>/decimal tokens — never a number this tool encodes on your behalf.</p>
           <div class="sd-form-grid">
             <label class="sd-field"><span>Action name</span><input id="sd-reg-name" type="text" class="sd-input" spellcheck="false" /></label>
             <label class="sd-field"><span>Operation</span>
@@ -579,7 +562,6 @@
         <div id="sd-layout-backdrop" class="dialog-backdrop" style="display:none;"></div>
         <div id="sd-layout-dialog" class="dialog" style="display:none;">
           <div class="card-title" id="sd-layout-title">Payload layout</div>
-          <p class="placeholder-note">A layout describes how a captured notification's bytes become CSV columns. <strong>Header</strong> fields are read once at offset 0; <strong>repeat</strong> fields are read over and over across whatever follows, one CSV row per repetition. Nothing here interprets what a field means — the names and the widths are yours.</p>
           <div class="sd-form-grid">
             <label class="sd-field"><span>Layout name</span><input id="sd-layout-name" type="text" class="sd-input mono" spellcheck="false" /></label>
           </div>
@@ -605,7 +587,6 @@
         <div id="sd-eap-backdrop" class="dialog-backdrop" style="display:none;"></div>
         <div id="sd-eap-dialog" class="dialog dialog-wide" style="display:none;">
           <div class="card-title">Protocol manifests — <span class="mono">&lt;firmware-repo&gt;/embarch/protocols/</span></div>
-          <p class="placeholder-note">Plain text, checked by the same parser that resolves a manifest into a study. Nothing here auto-saves, and nothing is written until it parses and resolves — a refused save leaves the file byte-identical.</p>
           <div id="sd-eap-duplicates" class="sd-error" style="display:none;"></div>
           <div class="eap-layout">
             <div class="eap-files">
@@ -638,7 +619,6 @@
       <div id="sig-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="sig-dialog" class="dialog" style="display:none;">
         <div class="card-title">Declare a signal's route</div>
-        <p class="placeholder-note">The <span class="mono">name</span> is what a study taps this signal by (<span class="mono">StreamSource::Signal</span>). Declaring the same name again moves the route — that is the migration path, not a mistake.</p>
         <div class="sd-form-grid">
           <label class="sd-field"><span>Signal name</span><input id="sig-name" type="text" class="sd-input mono" spellcheck="false" placeholder="outpost-uart" /></label>
           <label class="sd-field"><span>Origin role</span>
@@ -683,7 +663,6 @@
       <div id="assign-dialog" class="dialog card" style="display:none; top:30%; width:340px;">
         <div class="card-title">Enroll <span id="assign-probe-label" class="mono"></span> as <span id="assign-role-label" class="mono"></span></div>
         <p id="assign-replace-note" class="placeholder-note" style="display:none; margin:0 0 10px;"></p>
-        <p class="placeholder-note" style="margin:0 0 10px;">Binding a probe reads the identity of whatever board is on it, so this needs the board type already picked on the box &mdash; that is what says which chip to attach as.</p>
         <label class="sd-field" style="margin-bottom:10px;"><span>Board type in this role</span>
           <select id="assign-board" class="sd-input mono"></select>
         </label>
@@ -706,7 +685,6 @@
       <div id="project-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="project-dialog" class="dialog" style="display:none; width:min(640px,92vw);">
         <div class="card-title">Project — the firmware repo this page reads and writes</div>
-        <p class="placeholder-note">One project at a time, for every tab: the board catalog and saved benches on Topology, the studies and the Build card here, the firmware this bench builds. Studies are read from and written to <span class="mono">&lt;repo&gt;/embarch/studies/</span>, and the custom-action registry from <span class="mono">&lt;repo&gt;/embarch/study-actions.toml</span>. A repo with no <span class="mono">embarch/</span> directory yet is fine — it gets created on the first save.</p>
         <label class="sd-field" style="margin-top:12px;">
           <span>Firmware repo path</span>
           <input id="project-path" type="text" class="sd-input mono" spellcheck="false" placeholder="/home/you/src/your-firmware" />
@@ -794,7 +772,6 @@
         <div style="display:grid; grid-template-columns: minmax(280px, 380px) 1fr; gap:16px; margin-bottom:16px;">
           <div class="card">
             <div class="card-title">Run a saved study</div>
-            <p class="placeholder-note" style="margin-top:0;">The Study Designer authors and saves; running and watching happen here. Its own Run button posts the study and lands you on this tab.</p>
             <label class="sd-field" style="margin-top:10px;">
               <span>Saved study</span>
               <select id="ls-study-picker" class="sd-input mono"><option value="">no project open</option></select>
@@ -812,7 +789,6 @@
               <input id="ls-open-id" type="text" class="sd-input mono" spellcheck="false" placeholder="a study_id" style="flex:1; min-width:0;" />
               <button id="ls-open" class="btn">Open</button>
             </div>
-            <p class="placeholder-note" style="margin-top:8px;">For a study older than embarch-core&rsquo;s retention window, which the list beside this one can no longer show.</p>
           </div>
 
           <div class="card">
@@ -866,7 +842,7 @@
           <!-- 3. Steps -------------------------------------------------- -->
           <div class="card" style="margin-bottom:16px;">
             <div class="card-title">Steps</div>
-            <p id="ls-steps-note" class="placeholder-note" style="margin-top:0;">Rows fill in as each step reports, not once the study ends.</p>
+            <p id="ls-steps-note" class="placeholder-note" style="margin-top:0;"></p>
             <div class="table-scroll">
               <table class="data-table">
                 <thead><tr><th style="width:34px;">#</th><th style="width:180px;">Step</th><th style="width:110px;">Outcome</th><th>Captured / discovered</th></tr></thead>
@@ -903,7 +879,6 @@
                 <button id="tc-reload" class="btn">Redraw</button>
               </div>
             </div>
-            <p class="placeholder-note" style="margin-top:10px;">Step bands, GATT traffic, decoded struct rows, sample strips and the trace&rsquo;s own markers, on <strong>one</strong> X axis. Every position here comes from <span class="mono">core_rx_utc_ms</span> &mdash; embarch-core&rsquo;s own receipt clock &mdash; and never from a capture&rsquo;s <span class="mono">rx_utc_ms</span>, which in a study CSV is dev-bench uptime and is comparable with nothing outside its own tap.</p>
             <p id="tc-error" class="sd-error" style="display:none;"></p>
           </div>
 
@@ -928,7 +903,6 @@
                   <svg id="tc-chart" width="100%" style="display:block;"></svg>
                 </div>
               </div>
-              <p class="placeholder-note" style="margin-top:10px;">A number at a lane&rsquo;s left or right edge counts events that are real and <strong>outside this window</strong> &mdash; a tap&rsquo;s scope is routinely narrower than the study, and a point mark is never clamped to an edge the way a step band is, because a clamped point would be drawn at a time it was not at. A lane with a note beside it is one this chart cannot place at all, and the note says why.</p>
             </div>
 
             <div id="tc-detail" class="card" style="display:none; margin-bottom:16px;"></div>
@@ -947,7 +921,6 @@
                 <button id="trace-load" class="btn">Redraw</button>
               </div>
             </div>
-            <p class="placeholder-note" style="margin-top:10px;">An outpost trace is the one capture here that is <strong>not</strong> live: it is recorded for the duration of a study and decoded afterwards (<span class="mono">embarch-outpost/decisions.md</span>, decision 10). The honest shape for the data rather than an omission &mdash; everything above this card is push-driven.</p>
             <p id="trace-error" class="sd-error" style="display:none;"></p>
           </div>
 
@@ -992,7 +965,6 @@
                 <button class="btn btn-tiny" data-lane-action="reset">Reset order</button>
               </div>
               <div id="trace-lane-list" class="trace-lane-list"></div>
-              <p class="placeholder-note" style="margin:10px 0 0;">Hiding a lane changes this chart and nothing else. The Load repartition below is computed across every lane in the capture and stays that way &mdash; a filter here can never quietly change a share down there.</p>
             </div>
             <p id="trace-steps-note" class="placeholder-note" style="margin-top:10px;"></p>
             <div id="trace-plot" class="trace-plot">
@@ -1005,7 +977,6 @@
 
           <div class="card" style="margin-bottom:16px;">
             <div class="card-title">Load repartition</div>
-            <p class="placeholder-note" style="margin-top:0;">Where the CPU's time went, per traced subject. <strong>Read the coverage line first:</strong> a repartition computed across an interval where records were dropped is not a measurement, and this capture's own losses are stated rather than smoothed over.</p>
             <div id="trace-load-coverage" style="margin:12px 0;"></div>
             <p id="trace-load-filter" class="placeholder-note" style="display:none; margin:12px 0; color:var(--warning);"></p>
             <div class="table-scroll" style="max-height:420px;">
@@ -1014,7 +985,6 @@
                 <tbody id="trace-load-rows"></tbody>
               </table>
             </div>
-            <p class="placeholder-note" style="margin-top:10px;">Four kinds of span are left out of a total and counted in <em>Not counted</em> instead, because their drawn width is an extent and not a duration: one that crosses a gap, one with no closing record, one with no opening record, and one that <strong>began and ended inside a single frame</strong> — a frame is this capture's resolution, so a span inside one has no measurable length at all. <em>Entries</em> counts every span regardless — &ldquo;this subject ran N times&rdquo; survives all four doubts. Shares are of the whole window and <strong>deliberately do not sum to 100%</strong>: an ISR runs inside whatever it interrupted, and Zephyr's idle thread is reported both as a thread and as idle records.</p>
           </div>
 
           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
@@ -1026,7 +996,6 @@
                   <tbody id="trace-gaps"></tbody>
                 </table>
               </div>
-              <p class="placeholder-note" style="margin-top:10px;">A gap band is a <strong>bound, not a measurement</strong>. A gap record is always the first record of the frame that reports it, so the losses happened somewhere between the previous frame's arrival and that one's — <em>From</em> and <em>To</em> are those two arrivals. A gap band is not an empty interval either: the records at both its edges survived and are still drawn.</p>
             </div>
             <div class="card">
               <div class="card-title">Markers</div>
@@ -1036,7 +1005,6 @@
                   <tbody id="trace-markers"></tbody>
                 </table>
               </div>
-              <p class="placeholder-note" style="margin-top:10px;">A marker's <span class="mono">arg</span> is the engineer's own value, passed through as the number it is. Nothing here interprets it.</p>
             </div>
           </div>
           </div>
