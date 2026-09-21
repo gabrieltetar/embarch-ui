@@ -2159,21 +2159,8 @@
       // rather than silently snapping to something else — `build_study`
       // refuses it server-side too.
       var opInvalid = ops.indexOf(row.rawOp) < 0;
-      var confirmed = [];
-      if (v.sources.live) confirmed.push("live");
-      if (v.sources.static_extraction) confirmed.push("source");
 
       var html = '<div class="sd-params">';
-      html +=
-        '<div class="sd-param" style="flex:1 1 260px;"><span>' +
-        escapeHtml(v.characteristic_name) + "</span>" +
-        '<span class="mono" style="font-size:11px;">' + escapeHtml(uuidStr(v.uuid)) + "</span>" +
-        '<span style="font-size:11px; color:var(--text-tertiary);">' +
-        escapeHtml(propsLabel(v.properties)) +
-        (confirmed.length
-          ? " · found on this DUT (" + confirmed.join("+") + ")"
-          : " · not seen by discovery yet") +
-        "</span></div>";
       html +=
         '<label class="sd-param" style="flex:0 1 110px;"><span>Operation</span>' +
         '<select data-field="rawOp">' +
