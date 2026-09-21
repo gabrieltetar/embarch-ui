@@ -5825,8 +5825,10 @@
     el.textContent = text;
   }
 
-  // One axis of a catalog row's build menu — its revisions, its variants, or
-  // the apps it is in the tree for.
+  // One axis of a catalog row's build menu — its revisions or its variants.
+  // **Not its apps** (decision 49): which apps a board type is in the tree
+  // for is a fact about the tree, not about the bench, and a study names the
+  // app it builds.
   //
   // **The chip and the west target used to be the two columns here, and
   // neither is a thing a human reads a bench list for**: a chip is a
@@ -5854,7 +5856,7 @@
     }
     const values = entry[axis] || [];
     // Which one a build would use today, as `embarch/boards.toml` pins it.
-    const pinned = axis === "revisions" ? board.revision : axis === "variants" ? board.variant : "";
+    const pinned = axis === "revisions" ? board.revision : board.variant;
     let html = values
       .map(function (v) {
         return '<span class="build-chip' + (v && v === pinned ? " is-pinned" : "") + '">' +
@@ -5870,8 +5872,7 @@
         escapeHtml(pinned) + " ?</span>";
     }
     if (!html) {
-      return '<span class="placeholder-note">' +
-        (axis === "apps" ? "no app" : "none declared") + "</span>";
+      return '<span class="placeholder-note">none declared</span>';
     }
     return html;
   }
@@ -5879,9 +5880,8 @@
   function boardCatalogRows() {
     if (!boardCatalog.length) {
       return (
-        '<tr><td colspan="6" class="placeholder-note">No board in this project yet. A board is ' +
-        "a name, a chip and what it builds as — add one, then say which role it is in by " +
-        "dropping a probe on the diagram.</td></tr>"
+        '<tr><td colspan="5" class="placeholder-note">No board type in this project yet — ' +
+        "add one, or Rescan.</td></tr>"
       );
     }
     return boardCatalog
@@ -5897,7 +5897,6 @@
           '<tr><td class="mono" title="' + escapeHtml(detail) + '">' + escapeHtml(b.name) + "</td>" +
           "<td>" + boardBuildCell(b, "revisions") + "</td>" +
           "<td>" + boardBuildCell(b, "variants") + "</td>" +
-          "<td>" + boardBuildCell(b, "apps") + "</td>" +
           "<td>" + (b.notes ? escapeHtml(b.notes) : '<span class="placeholder-note">—</span>') + "</td>" +
           '<td style="text-align:right; white-space:nowrap;">' +
           '<button class="btn" data-board-edit="' + escapeHtml(b.name) + '">Edit</button> ' +
@@ -6399,18 +6398,19 @@
     }
   }
 
-  // How one scanned combination reads in the picker. The west qualifier is
-  // the honest spelling and is shown, but it leads with the two axes a human
-  // is choosing between — a revision and a variant — because
-  // `nrf54l15dk@0.9.0/nrf54l15/cpuapp/ns` differs from its neighbour in one
-  // character and a list of those is a list of near-identical strings.
+  // How one scanned combination reads in the picker: **the two axes it is
+  // being chosen between, and nothing after them** (decision 49). The west
+  // qualifier used to close every line and the apps followed it, which made
+  // a list of `nrf54l15dk@0.9.0/nrf54l15/cpuapp/ns` differing from its
+  // neighbour in one character — the string the picker exists to spare a
+  // human — and repeated an app list that this dialog decides nothing about.
+  // The qualifier is on the option's tooltip, where a value you check once
+  // belongs, the way a dev-bench board type keeps its own.
   function comboLabel(combo) {
     const bits = [];
     bits.push(combo.revision ? "rev " + combo.revision : "no revision");
     bits.push(combo.variant ? "variant " + combo.variant : "no variant");
-    let label = bits.join(" · ") + " — " + combo.qualifier;
-    if (combo.apps && combo.apps.length) label += "  (" + combo.apps.join(", ") + ")";
-    return label;
+    return bits.join(" · ");
   }
 
   // The combinations offered for whatever board type is selected right now.
@@ -6452,7 +6452,8 @@
     const picked = (rolePickers[role] || []).find((o) => o.board === board) || {};
     select.innerHTML = combos
       .map(function (c, i) {
-        return '<option value="' + i + '">' + escapeHtml(comboLabel(c)) + "</option>";
+        return '<option value="' + i + '" title="' + escapeHtml(c.qualifier) + '">' +
+          escapeHtml(comboLabel(c)) + "</option>";
       })
       .join("");
     // Opens on what `embarch/boards.toml` already pins for this board, so
@@ -6462,11 +6463,12 @@
     });
     select.value = String(current >= 0 ? current : 0);
     field.style.display = "";
-    note.textContent = combos.length === 1
-      ? "The one combination this repo builds this board for."
-      : combos.length + " combinations in this repo's scan. What you pick is recorded on the " +
-        "board in embarch/boards.toml, and is what a run for this role builds.";
-    note.style.display = "";
+    // **Only the two states that are a refusal keep a note.** Saying "3
+    // combinations in this repo's scan" beside a list of three is the list
+    // read aloud; what could not be scanned, and what the scan does not
+    // have, are the two a human cannot see from the select itself.
+    note.textContent = "";
+    note.style.display = "none";
   }
 
   function openBoardPicker(role) {

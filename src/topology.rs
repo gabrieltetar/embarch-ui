@@ -192,10 +192,6 @@ pub struct BoardCombo {
     /// `west build -b` takes, assembled once here so nothing downstream
     /// re-derives it from the parts.
     pub qualifier: String,
-    /// The apps this combination is buildable for. Kept per combination
-    /// rather than per board because a board can be in the tree for one app
-    /// and not another.
-    pub apps: Vec<String>,
 }
 
 /// What a catalog row can be built as, summarised for the list and enumerated
@@ -204,7 +200,6 @@ pub struct BoardCombo {
 pub struct BoardBuilds {
     pub revisions: Vec<String>,
     pub variants: Vec<String>,
-    pub apps: Vec<String>,
     pub combos: Vec<BoardCombo>,
 }
 
@@ -266,12 +261,14 @@ async fn scan_by_west_board(
 
     let mut by_board: std::collections::BTreeMap<String, BoardBuilds> =
         std::collections::BTreeMap::new();
-    // Keyed by the combination itself, so two apps sharing one target land in
-    // one row with two apps rather than in two rows that read as two targets.
-    let mut combos: std::collections::BTreeMap<
-        (String, BoardCombo),
-        std::collections::BTreeSet<String>,
-    > = std::collections::BTreeMap::new();
+    // A set keyed by the combination itself, so two apps sharing one target
+    // land in one entry rather than in two that read as two targets. **Which
+    // apps those were is not kept** (decision 49): a board type's list of
+    // apps was a column in the catalog and a suffix on every line of the
+    // combination picker, and it is neither a thing a bench list is read for
+    // nor a thing that picker chooses between — a study names its own app.
+    let mut combos: std::collections::BTreeSet<(String, BoardCombo)> =
+        std::collections::BTreeSet::new();
     for row in &rows {
         let board = field(row, "board");
         if board.is_empty() {
@@ -298,23 +295,11 @@ async fn scan_by_west_board(
             qualifier.push('/');
             qualifier.push_str(&variant);
         }
-        let combo = BoardCombo {
-            revision,
-            variant,
-            soc,
-            cpucluster,
-            qualifier,
-            apps: Vec::new(),
-        };
-        let app = field(row, "app");
-        let entry = combos.entry((board, combo)).or_default();
-        if !app.is_empty() {
-            entry.insert(app);
-        }
+        let combo = BoardCombo { revision, variant, soc, cpucluster, qualifier };
+        combos.insert((board, combo));
     }
 
-    for ((board, mut combo), apps) in combos {
-        combo.apps = apps.into_iter().collect();
+    for (board, combo) in combos {
         let builds = by_board.entry(board).or_default();
         if !combo.revision.is_empty() && !builds.revisions.contains(&combo.revision) {
             builds.revisions.push(combo.revision.clone());
@@ -322,42 +307,137 @@ async fn scan_by_west_board(
         if !combo.variant.is_empty() && !builds.variants.contains(&combo.variant) {
             builds.variants.push(combo.variant.clone());
         }
-        for app in &combo.apps {
-            if !builds.apps.contains(app) {
-                builds.apps.push(app.clone());
-            }
-        }
         builds.combos.push(combo);
     }
     for builds in by_board.values_mut() {
         builds.revisions.sort();
         builds.variants.sort();
-        builds.apps.sort();
     }
     (Some(by_board), None)
 }
 
-/// The same thing keyed by **catalog name**, which is what every surface
-/// that renders a catalog row already holds. Keying the served object by the
-/// west board instead would hand the browser this file's `scan_key` rule to
+/// The scan keyed by **catalog name**, which is what every surface that
+/// renders a catalog row already holds. Keying the served object by the west
+/// board instead would hand the browser this file's `scan_key` rule to
 /// re-implement, and a second implementation of a matching rule is how a row
 /// comes to render as unbuildable in one place and buildable in another.
+///
+/// Kept typed rather than handed straight to `json!`, because the scan
+/// answers a second question too: the SoC a row builds for, which is what
+/// [`chips_from_scan`] turns into the probe-rs chip a row that names none
+/// still attaches as (decision 48). Serving the JSON and then re-reading it
+/// to find that out would be this crate parsing its own output.
+struct CatalogBuilds {
+    /// Empty when the repo could not be scanned at all, and empty when the
+    /// scan simply found none of these rows — [`CatalogBuilds::available`]
+    /// is what tells those two apart.
+    by_board: std::collections::BTreeMap<String, BoardBuilds>,
+    available: bool,
+    reason: Option<String>,
+}
+
+impl CatalogBuilds {
+    /// The shape `app.js` reads (`builds.available`, `builds.by_board`).
+    fn to_json(&self) -> serde_json::Value {
+        json!({
+            "available": self.available,
+            "reason": self.reason,
+            "by_board": self.by_board,
+        })
+    }
+}
+
 async fn builds_by_catalog_name(
     state: &AppState,
     repo: &Path,
     boards: &[Board],
-) -> serde_json::Value {
+) -> CatalogBuilds {
     let (by_west_board, reason) = scan_by_west_board(state, repo).await;
     let Some(by_west_board) = by_west_board else {
-        return json!({ "available": false, "reason": reason, "by_board": {} });
+        return CatalogBuilds { by_board: Default::default(), available: false, reason };
     };
-    let mut by_board = serde_json::Map::new();
+    let mut by_board = std::collections::BTreeMap::new();
     for board in boards {
         if let Some(builds) = by_west_board.get(&scan_key(board)) {
-            by_board.insert(board.name.clone(), json!(builds));
+            by_board.insert(board.name.clone(), builds.clone());
         }
     }
-    json!({ "available": true, "reason": serde_json::Value::Null, "by_board": by_board })
+    CatalogBuilds { by_board, available: true, reason: None }
+}
+
+/// The probe-rs chip each catalog row attaches as, **for the rows that do
+/// not state one** — keyed by catalog name, and absent for every row this
+/// cannot answer for.
+///
+/// **A chip is not a second thing to type.** A row seeded by Rescan has an
+/// empty `chip`, because the scan reports west targets; but it also reports
+/// each target's *SoC*, and the SoC → probe-rs target table is already
+/// Core's, compiled in and checked against probe-rs's own registry
+/// ([`embarch-core` decision 8](../../embarch-doc/embarch-core/decisions.md),
+/// `POST /resolve-chip`) — the same lookup a build for that target does on
+/// its way to `/flash`. So the chip *is* known here, and a human retyping it
+/// was only ever a chance to get it wrong. Decision 48.
+///
+/// **A hand-typed chip always wins**: a row that states one is not asked
+/// about, so a corrected spelling is never overwritten by a derived one.
+/// **Two SoCs under one board type abstain** rather than picking the first —
+/// a board whose combinations do not agree about its silicon is exactly the
+/// case where a guess attaches to the wrong target — and so does a Core that
+/// cannot answer. Both come back absent, which the caller renders as the
+/// unset field it already was.
+async fn chips_from_scan(
+    state: &AppState,
+    boards: &[Board],
+    builds: &CatalogBuilds,
+) -> std::collections::BTreeMap<String, String> {
+    let mut soc_by_row: std::collections::BTreeMap<String, String> = Default::default();
+    for board in boards {
+        if !board.chip.trim().is_empty() {
+            continue;
+        }
+        let Some(scanned) = builds.by_board.get(&board.name) else { continue };
+        let socs: std::collections::BTreeSet<&str> = scanned
+            .combos
+            .iter()
+            .map(|c| c.soc.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if socs.len() == 1 {
+            soc_by_row.insert(board.name.clone(), socs.into_iter().next().unwrap().to_string());
+        }
+    }
+
+    // One round trip per distinct SoC, not per row: four board types on one
+    // family is one question, and this runs on every load of the picker.
+    let mut chip_by_soc: std::collections::BTreeMap<String, String> = Default::default();
+    for soc in soc_by_row.values().cloned().collect::<std::collections::BTreeSet<String>>() {
+        if let Ok(chip) = state.core.resolve_chip(&soc).await {
+            chip_by_soc.insert(soc, chip);
+        }
+    }
+
+    soc_by_row
+        .into_iter()
+        .filter_map(|(name, soc)| chip_by_soc.get(&soc).map(|chip| (name, chip.clone())))
+        .collect()
+}
+
+/// The chip a board type attaches as, for a caller that holds only its name:
+/// what the catalog states, else what the scan's SoC resolves to.
+///
+/// The slow path on purpose — it re-runs the target scan — because it exists
+/// for a request that arrived *without* a chip, which is a human pressing a
+/// button, not a poll.
+pub async fn chip_for_board(state: &AppState, board: &str) -> Option<String> {
+    let repo = state.study_designer.repo_path()?;
+    let catalog = load_catalog(&repo).ok()?;
+    if let Some(row) = catalog.boards.iter().find(|b| b.name == board) {
+        if !row.chip.trim().is_empty() {
+            return Some(row.chip.trim().to_string());
+        }
+    }
+    let builds = builds_by_catalog_name(state, &repo, &catalog.boards).await;
+    chips_from_scan(state, &catalog.boards, &builds).await.remove(board)
 }
 
 // ---- a saved topology profile -----------------------------------------------
@@ -582,7 +662,7 @@ pub async fn api_boards(State(state): State<AppState>) -> Response {
             Json(json!({
                 "path": boards_path(&repo).to_string_lossy(),
                 "boards": catalog.boards,
-                "builds": builds,
+                "builds": builds.to_json(),
             }))
             .into_response()
         }
@@ -757,6 +837,11 @@ pub struct SetRoleBoardRequest {
     /// what the picker's entry carries rather than deriving it, because the
     /// two lists that fill that picker (the project catalog and the
     /// supported-bench list) are both served from here.
+    ///
+    /// **Empty is answered here rather than relayed** (decision 48): the
+    /// chip is looked up the same way the picker's entry got one, and only
+    /// a board type nothing can answer for is refused.
+    #[serde(default)]
     pub chip: String,
     /// The combination picked alongside the board type, when the picker
     /// offered one: a `(revision, variant)` pair the repo's own scan
@@ -783,7 +868,35 @@ pub async fn api_set_role_board(
     axum::extract::Path(role): axum::extract::Path<String>,
     Json(req): Json<SetRoleBoardRequest>,
 ) -> Response {
-    match state.core.set_role_board(&role, &req.board, &req.chip).await {
+    // **A chip nobody typed is looked up, not relayed as a refusal**
+    // (decision 48). Core needs one — it is what every later attach on this
+    // role opens as — and a request that arrives without one used to reach
+    // it and come back as `502 … 400 Bad Request: a role's board needs both
+    // a board type and the chip it attaches as`, which names the missing
+    // field and not the one thing a human could do about it. The chip is
+    // derivable from the SoC this repo's own scan reports, so it is derived;
+    // what survives that is a genuinely unanswerable board type, refused
+    // here as a `400` that says where to put the answer.
+    let chip = match req.chip.trim() {
+        "" => match chip_for_board(&state, &req.board).await {
+            Some(chip) => chip,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "'{}' has no chip: it states none in embarch/boards.toml, and this \
+                         repo's target scan does not report one SoC for it. Set the chip on \
+                         the row in Board types below — Core attaches every probe bound to \
+                         this role as it.",
+                        req.board
+                    ),
+                )
+                    .into_response()
+            }
+        },
+        stated => stated.to_string(),
+    };
+    match state.core.set_role_board(&role, &req.board, &chip).await {
         Ok(row) => {
             // **Core's write first, the project file second, and only ever
             // in that order.** Which board type is in a role is Core's fact;
@@ -839,15 +952,38 @@ pub async fn api_pickers(State(state): State<AppState>) -> Response {
     let dut: Vec<serde_json::Value> = match state.study_designer.repo_path() {
         Some(repo) => match load_catalog(&repo) {
             Ok(catalog) => {
-                builds = builds_by_catalog_name(&state, &repo, &catalog.boards).await;
+                let scanned = builds_by_catalog_name(&state, &repo, &catalog.boards).await;
+                // The chip a row does not state, derived from the SoC the
+                // scan reports (decision 48) — served here rather than in
+                // each surface, because *both* of the dialogs that attach a
+                // role to silicon read their chip out of this one list: the
+                // board-type picker and the enroll dialog's read-only chip
+                // field. A row with no chip used to make one of them refuse
+                // in the browser and the other fail at Core.
+                let derived = chips_from_scan(&state, &catalog.boards, &scanned).await;
+                builds = scanned.to_json();
                 catalog
                     .boards
                     .iter()
                     .map(|b| {
+                        let stated = b.chip.trim();
+                        let (chip, source) = if !stated.is_empty() {
+                            (stated.to_string(), "catalog")
+                        } else {
+                            match derived.get(&b.name) {
+                                Some(chip) => (chip.clone(), "scan"),
+                                None => (String::new(), "none"),
+                            }
+                        };
                         json!({
                             "board": b.name,
                             "label": b.name,
-                            "chip": b.chip,
+                            "chip": chip,
+                            // Where that chip came from, so a surface can
+                            // say "from this repo's scan" instead of
+                            // presenting a derived value as something a
+                            // human typed.
+                            "chip_source": source,
                             // What this row is *currently* pinned to in
                             // `boards.toml`, so the picker opens on the
                             // combination a build would use today rather
@@ -864,7 +1000,9 @@ pub async fn api_pickers(State(state): State<AppState>) -> Response {
     };
     let dev_bench: Vec<serde_json::Value> = SUPPORTED_DEV_BENCH_BOARDS
         .iter()
-        .map(|(board, label, chip)| json!({ "board": board, "label": label, "chip": chip }))
+        .map(|(board, label, chip)| {
+            json!({ "board": board, "label": label, "chip": chip, "chip_source": "suite" })
+        })
         .collect();
     Json(json!({ "dut": dut, "dev-bench": dev_bench, "builds": builds })).into_response()
 }
