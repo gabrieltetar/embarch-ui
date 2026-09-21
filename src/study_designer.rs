@@ -34,7 +34,8 @@ use embarch_study_designer::eap_repo::RepoProtocols;
 use embarch_study_designer::{DevBenchLogLevel, ProtocolDef, RecordCheck, RecordFraming};
 use embarch_study_designer::{
     build_study, merge_actions, requirement_satisfied, validate_taps, Action, ActionRegistry,
-    BuildSpec, BuiltInActionKind, ZephyrBleDefExtractor, GattConfigExtractor, GattName,
+    BuildSpec, BuiltInActionKind, ConditionalProperties, ZephyrBleDefExtractor,
+    GattConfigExtractor, GattName,
     GattNameBook, GattServiceInfo, OutpostModeRequirement, Provenance, RegisteredAction,
     Requirements, RoleChoice, RowAction, Step,
     StreamEncoding, StreamScope, Outcome, StreamSource, StreamTap, StructLayout, StructRegistry,
@@ -287,6 +288,7 @@ fn run_static_extraction(project: &StudyDesignerConfig) -> Result<StaticGatt, St
             services: extracted.services.iter().cloned().collect(),
             symbols: extracted.characteristic_symbols().collect(),
             service_symbols: extracted.service_symbols().collect(),
+            conditional_properties: extracted.scan.conditional_properties.clone(),
         })
         .map_err(|e| e.to_string())
 }
@@ -304,6 +306,10 @@ const STATIC_EXTRACTOR_NAME: &str = "zephyr-ble-def";
 struct StaticGatt {
     services: Vec<GattServiceInfo>,
     symbols: Vec<(Uuid, String)>,
+    /// Properties aliases the source declares under a `#if`, which the
+    /// extraction read as the union of their branches. Carried to the
+    /// browser because a union nobody can see is a silent merge.
+    conditional_properties: Vec<ConditionalProperties>,
     /// The identifiers the *services* were declared under
     /// (`embarch-study-designer` decision 57) — what the
     /// selective-monitor picker's group headers read
@@ -4495,6 +4501,7 @@ mod tests {
                 services: Vec::new(),
                 symbols: Vec::new(),
                 service_symbols: Vec::new(),
+                conditional_properties: Vec::new(),
             }));
         assert!(sd.live_gatt().is_some());
 
@@ -4606,6 +4613,7 @@ mod tests {
             services: Vec::new(),
             symbols: vec![(Uuid([0u8; 16]), "stale_symbol".to_string())],
             service_symbols: Vec::new(),
+            conditional_properties: Vec::new(),
         }));
         assert!(sd.static_extraction().is_some(), "the lazy path serves the cache");
         assert!(sd.force_static_extraction().is_err(), "the forced path re-runs");
@@ -5933,6 +5941,11 @@ pub struct StaticAnalysisResponse {
     error: Option<String>,
     services: Vec<StaticService>,
     characteristic_count: usize,
+    /// Properties the source declares under a `#if`, read as the union of
+    /// the branches. Said out loud rather than folded into the properties
+    /// byte alone, because **a properties byte no build actually compiles is
+    /// exactly the kind of answer that has to carry how it was arrived at.**
+    conditional_properties: Vec<ConditionalProperties>,
 }
 
 /// Runs the firmware repo's static GATT extractor on demand and reports what
@@ -5984,6 +5997,10 @@ pub async fn api_static_analysis(
     Json(StaticAnalysisResponse {
         extractor: STATIC_EXTRACTOR_NAME,
         error,
+        conditional_properties: extraction
+            .as_ref()
+            .map(|e| e.conditional_properties.clone())
+            .unwrap_or_default(),
         characteristic_count: services.iter().map(|s| s.characteristics.len()).sum(),
         services,
     })
