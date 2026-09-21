@@ -1233,6 +1233,19 @@ pub struct SubscribableCharacteristic {
     /// static-only characteristic behind a disabled Kconfig is exactly the
     /// gap `gatt_extract`'s own doc comment records.
     live: bool,
+    /// Whether `embarch_study_designer::vendor::ALL` (decision 41) names
+    /// it — a vendor
+    /// service's UUIDs and declared properties are a silicon/stack-vendor
+    /// fact, not an observation, so a characteristic like NUS's TX can be
+    /// legitimately targetable without either discovery source ever having
+    /// seen it: `gatt_extract` cannot find it (its source lives in the
+    /// Zephyr module, outside the scanned firmware repo, never under any
+    /// snippet combination), and live discovery only saw it if a DUT
+    /// running the right build happened to be connected at the moment this
+    /// list was served. Without this, a saved `GattMonitorSelectedStart`
+    /// step naming NUS falsely read as "not in the current discovery and
+    /// will be dropped" the instant it wasn't.
+    vendor: bool,
 }
 
 /// Resolves a display name for every characteristic either discovery source
@@ -1275,8 +1288,8 @@ fn service_names(
         .collect()
 }
 
-/// Flattens discovery results into the subscribable list, live entries first
-/// and de-duplicated by characteristic.
+/// Flattens discovery results into the subscribable list, live entries
+/// first, then the vendor table, de-duplicated by characteristic.
 fn subscribable_from(
     live: Option<&[GattServiceInfo]>,
     static_gatt: Option<&[GattServiceInfo]>,
@@ -1298,7 +1311,26 @@ fn subscribable_from(
                     characteristic_uuid,
                     properties: chrc.properties,
                     live: is_live,
+                    vendor: false,
                 });
+            }
+        }
+    }
+    for service in embarch_study_designer::vendor::ALL {
+        for chrc in service.characteristics {
+            if chrc.properties & NOTIFY_OR_INDICATE == 0 {
+                continue;
+            }
+            let characteristic_uuid = chrc.uuid.to_hyphenated().to_string();
+            match out.iter_mut().find(|c| c.characteristic_uuid == characteristic_uuid) {
+                Some(existing) => existing.vendor = true,
+                None => out.push(SubscribableCharacteristic {
+                    service_uuid: service.uuid.to_hyphenated().to_string(),
+                    characteristic_uuid,
+                    properties: chrc.properties,
+                    live: false,
+                    vendor: true,
+                }),
             }
         }
     }
