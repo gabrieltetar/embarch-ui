@@ -1211,6 +1211,15 @@ pub struct StructLayoutSummary {
     name: String,
     header: Vec<StructFieldSummary>,
     repeat: Vec<StructFieldSummary>,
+    /// The one `header`/`repeat` field (by name) this layout charts live
+    /// while a study runs — `embarch-study-designer` decision 52's
+    /// `chart_field`. `None` is the ordinary case: no live chart for this
+    /// layout. Carried through so the layout editor can show and change the
+    /// current choice without a second round trip, and so the live-study
+    /// view can tell which struct taps have a live chart to draw without
+    /// re-deriving it from field names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chart_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1447,6 +1456,7 @@ fn struct_layout_summary(
         name: def.name,
         header: def.header.into_iter().map(field).collect(),
         repeat: def.repeat.into_iter().map(field).collect(),
+        chart_field: def.chart_field,
     }
 }
 

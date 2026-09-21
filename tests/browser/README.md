@@ -62,7 +62,25 @@ survive without throwing.
 python3 tests/browser/drive_payload_mode.py
 ```
 
-`drive_fonts.py` is the seventh, and the only one that is about every page
+`drive_chart_field.py` is the eighth: the payload-layout editor's live-chart
+field picker (`embarch-study-designer` decision 52's author-time half). It
+needs an open project — a scratch firmware repo with nothing in it yet is
+enough, since `study-structs.toml` not existing is the ordinary starting
+state — but no stub, no study and no hardware. It authors a layout, picks a
+`chart_field` from the field it just typed (proving the picker is live, not a
+snapshot of what the layout had when the dialog opened), saves, and checks the
+choice round-trips into the layout chip, into `study-structs.toml` itself, and
+back into the picker on reopen — and that clearing it back to "none" is saved
+as cleared rather than left stale.
+
+```sh
+mkdir -p /tmp/scratch-fw/embarch
+printf '[study_designer]\nfirmware_repo_path = "/tmp/scratch-fw"\n' > /tmp/ui.toml
+EMBARCH_UI_CONFIG=/tmp/ui.toml EMBARCH_UI_PORT=4899 ./target/release/embarch-ui &
+python3 tests/browser/drive_chart_field.py
+```
+
+`drive_fonts.py` is the ninth, and the only one that is about every page
 rather than one tab: IBM Plex is served out of this binary (`embarch-ui`
 decision 42), and this checks in a real browser that the faces actually load,
 that no request went to a font CDN, and that the shipped Plex Mono's advance
@@ -88,6 +106,13 @@ an invariant attached to it — an interrupted study is never rendered as
 completed or failed, an unreadable one never as empty, `lagged` is never
 swallowed, a partial line is never padded into a whole one, and a study with no
 data gets no empty card. The stub exists so those five are tested at all.
+
+A sixth: the running study's `bds-status` tap and the `StructChartValue` frame
+it pushes — `embarch-study-designer` decision 52's live half. A real bench
+would need a `Struct`-decoded tap whose layout declares a `chart_field` and a
+DUT actually producing that payload; the stub fakes one point instead, which
+is enough to prove the frame reaches `Series`, gets labelled "stream · field"
+rather than a bare tap name, and lands in its own data card.
 
 It is **not** a second implementation of embarch-core and must not grow into
 one: it serves fixed JSON, and every route it answers is one the Live Study tab

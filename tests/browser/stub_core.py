@@ -25,7 +25,8 @@ STUDIES = {
          "started_utc_ms": 1700000000000,
          "steps": {"total": 1, "passed": 1, "failed": 0, "timed_out": 0, "unknown": 0},
          "taps": [{"name": "dev-bench", "encoding": "Text", "rendered": False},
-                  {"name": "rail", "encoding": {"Samples": {"layout": "U16Le", "unit": "Milliamps", "channel_id": 0}}, "rendered": True}]},
+                  {"name": "rail", "encoding": {"Samples": {"layout": "U16Le", "unit": "Milliamps", "channel_id": 0}}, "rendered": True},
+                  {"name": "bds-status", "encoding": {"Struct": {"decoder": 0}}, "rendered": True}]},
         {"study_id": DONE, "study_name": "nightly", "status": "completed",
          "started_utc_ms": 1700000000000, "ended_utc_ms": 1700000045000,
          "steps": {"total": 2, "passed": 1, "failed": 1, "timed_out": 0, "unknown": 0},
@@ -72,6 +73,7 @@ STREAMS = {
     RUNNING: {"streams": [
         {"id": 0, "name": "dev-bench", "encoding": "Text", "rendered": False},
         {"id": 1, "name": "rail", "encoding": {"Samples": {"layout": "U16Le", "unit": "Milliamps", "channel_id": 0}}, "rendered": True},
+        {"id": 2, "name": "bds-status", "encoding": {"Struct": {"decoder": 0}}, "rendered": True},
     ]},
 }
 
@@ -184,6 +186,14 @@ class Handler(BaseHTTPRequestHandler):
                                                  "value": 1.5 + (i % 5) * 0.2,
                                                  "unit": "Milliamps", "channel_id": 0}
                                                 for i in range(20)]}))
+            # A `chart_field` value (`embarch-study-designer` decision 52's
+            # live half) — one per declared field, exercising the same "samples"
+            # frame shape `SampleBatch` above already drives, labelled with its
+            # own field name.
+            self.wfile.write(frame({"kind": "StructChartValue", "study_id": sid,
+                                    "stream_id": 2, "stream_name": "bds-status",
+                                    "field_name": "offset", "value": 42.5,
+                                    "core_rx_utc_ms": 1700000000050}))
             self.wfile.write(frame({"kind": "StepCompleted", "study_id": sid, "step_index": 0,
                                     "result": {"step_name": "ble-connect", "outcome": "Pass",
                                                "captured_data": None}}))

@@ -3531,6 +3531,32 @@
     box.innerHTML = (fields || []).map(layoutFieldHtml).join("");
   }
 
+  /* The live-chart field picker (`embarch-study-designer` decision 52:
+   * one field per layout, or none — the ordinary case). Rebuilt from the
+   * header/repeat inputs currently in the dialog, not from the layout this
+   * dialog opened with, so adding, renaming or removing a field updates
+   * what can be picked without a save round trip — the same "served
+   * vocabulary, not a guess" posture as `layoutFieldHtml`'s type dropdown,
+   * just sourced from this dialog's own fields instead of the server. */
+  function refreshLayoutChartFieldOptions() {
+    var select = sdEl("sd-layout-chart-field");
+    if (!select) return;
+    var previous = select.value;
+    var names = [];
+    readLayoutGroup("sd-layout-header").concat(readLayoutGroup("sd-layout-repeat"))
+      .forEach(function (f) {
+        if (f.name && names.indexOf(f.name) < 0) names.push(f.name);
+      });
+    select.innerHTML =
+      '<option value="">(none — no live chart)</option>' +
+      names
+        .map(function (n) {
+          return '<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + "</option>";
+        })
+        .join("");
+    select.value = names.indexOf(previous) >= 0 ? previous : "";
+  }
+
   function readLayoutGroup(id) {
     var out = [];
     sdEl(id).querySelectorAll(".sd-reg-value").forEach(function (node) {
@@ -3551,6 +3577,8 @@
     sdEl("sd-layout-name").value = layout ? layout.name : "";
     renderLayoutGroup("sd-layout-header", layout ? layout.header : []);
     renderLayoutGroup("sd-layout-repeat", layout ? layout.repeat : []);
+    refreshLayoutChartFieldOptions();
+    sdEl("sd-layout-chart-field").value = (layout && layout.chart_field) || "";
     sdEl("sd-layout-result").style.display = "none";
     sdEl("sd-layout-refusal").style.display = "none";
     sdEl("sd-layout-refusal").innerHTML = "";
@@ -3590,6 +3618,7 @@
         );
       }
     }
+    var chartField = sdEl("sd-layout-chart-field").value || null;
     sdEl("sd-layout-refusal").style.display = "none";
     var resp = await fetch("/api/study-designer/structs", {
       method: "POST",
@@ -3599,6 +3628,7 @@
         name: name,
         header: header,
         repeat: repeat,
+        chart_field: chartField,
       }),
     });
     var text = await resp.text();
@@ -3971,7 +4001,11 @@
       chip.innerHTML =
         '<div class="mono" style="font-size:12px;">' + escapeHtml(layout.name) + "</div>" +
         '<div style="font-size:11px; color:var(--text-tertiary);">' +
-        header + " header · " + repeat + " repeat</div>";
+        header + " header · " + repeat + " repeat" +
+        (layout.chart_field
+          ? " · chart: " + escapeHtml(layout.chart_field)
+          : "") +
+        "</div>";
       chip.addEventListener("click", function () {
         openLayoutDialog(layout.name);
       });
@@ -5579,15 +5613,23 @@
     sdEl("sd-layout-delete").addEventListener("click", deleteLayout);
     sdEl("sd-layout-add-header").addEventListener("click", function () {
       sdEl("sd-layout-header").insertAdjacentHTML("beforeend", layoutFieldHtml(null));
+      refreshLayoutChartFieldOptions();
     });
     sdEl("sd-layout-add-repeat").addEventListener("click", function () {
       sdEl("sd-layout-repeat").insertAdjacentHTML("beforeend", layoutFieldHtml(null));
+      refreshLayoutChartFieldOptions();
     });
     sdEl("sd-layout-dialog").addEventListener("click", function (ev) {
       var btn = ev.target.closest('[data-layout="remove"]');
       if (!btn) return;
       ev.preventDefault();
       btn.closest(".sd-reg-value").remove();
+      refreshLayoutChartFieldOptions();
+    });
+    // A field's name is what the chart-field picker offers, so it has to
+    // stay live as one is typed — not just on add/remove.
+    sdEl("sd-layout-dialog").addEventListener("input", function (ev) {
+      if (ev.target.matches('[data-layout="name"]')) refreshLayoutChartFieldOptions();
     });
 
     // --- the .eap editor
@@ -7277,7 +7319,12 @@
       lsApplyConsole({ tap: c.tap, lines: c.lines, partial: c.partial, dropped: c.dropped, total: c.total, replace: true });
     });
     (frame.series || []).forEach(function (sr) {
-      lsLiveSeries[sr.tap] = { points: sr.points || [], stride: sr.stride || 1, total: sr.total || 0 };
+      lsLiveSeries[sr.tap] = {
+        points: sr.points || [],
+        stride: sr.stride || 1,
+        total: sr.total || 0,
+        field_name: sr.field_name || null,
+      };
       lsDrawLiveSeries(sr.tap);
     });
     if (frame.provenance) renderProvenance(lsEl("ls-provenance"), frame.provenance);
@@ -7782,7 +7829,7 @@
   function lsApplySamples(frame) {
     var series = lsLiveSeries[frame.tap];
     if (!series) {
-      series = { points: [], stride: 1, total: 0 };
+      series = { points: [], stride: 1, total: 0, field_name: null };
       lsLiveSeries[frame.tap] = series;
     }
     (frame.points || []).forEach(function (p) {
@@ -7790,6 +7837,11 @@
     });
     series.stride = frame.stride || 1;
     series.total = frame.total || series.total;
+    // Present only on a `StructChartValue`-fed series (a `chart_field` point,
+    // `embarch-study-designer` decision 52's live half) — an ordinary
+    // `SampleBatch` frame carries none, so this leaves `field_name` as
+    // whatever it already was (usually `null`).
+    if (frame.field_name) series.field_name = frame.field_name;
     lsDrawLiveSeries(frame.tap);
     if (frame.row) lsAppendFeed(frame.row);
   }
@@ -7813,8 +7865,15 @@
     });
     host.innerHTML =
       '<p class="placeholder-note" style="margin:0 0 6px;">' +
+      // A `chart_field` series names itself — "stream · field" — so two
+      // struct taps with a live chart cannot be mistaken for one another;
+      // an ordinary sample tap keeps the plain count it always had.
+      (series.field_name
+        ? '<span class="mono">' + escapeHtml(tap) + " · " + escapeHtml(series.field_name) +
+          "</span> — "
+        : "") +
       escapeHtml(
-        series.total + " sample(s)" +
+        series.total + " " + (series.field_name ? "value(s)" : "sample(s)") +
         (series.stride > 1
           ? " — plotting one in " + series.stride + ", this series is decimated"
           : "")
