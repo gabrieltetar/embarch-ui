@@ -1636,6 +1636,39 @@
     });
   }
 
+  /* `parseBytes`'s inverse for "hex" mode: the same "0xNN 0xNN …" shape the
+   * saved-study load path already renders a byte array as (see the `vendor`
+   * and `raw` branches of `sdApplyStudy`), reused here rather than
+   * reinvented so the toggle and a reload agree on what bytes look like. */
+  function bytesToHexTokens(bytes) {
+    return bytes.map(function (b) {
+      return "0x" + ("0" + (b & 0xff).toString(16)).slice(-2);
+    }).join(" ");
+  }
+
+  /* `parseBytes`'s inverse for "text" mode. Decodes the bytes as UTF-8 —
+   * lossily, via `TextDecoder`'s default non-fatal mode, so a byte sequence
+   * that isn't valid UTF-8 comes back with U+FFFD standing in for whatever
+   * didn't decode rather than throwing — then re-escapes exactly the
+   * characters `parseBytes("text")` treats specially, so feeding this
+   * string back through it reproduces the same bytes. */
+  function bytesToEscapedText(bytes) {
+    var text = new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+    var out = "";
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      var code = text.charCodeAt(i);
+      if (ch === "\\") out += "\\\\";
+      else if (code === 0x0a) out += "\\n";
+      else if (code === 0x0d) out += "\\r";
+      else if (code === 0x09) out += "\\t";
+      else if (code === 0x00) out += "\\0";
+      else if (code < 0x20 || code === 0x7f) out += "\\x" + ("0" + code.toString(16)).slice(-2);
+      else out += ch;
+    }
+    return out;
+  }
+
   /* Takes the two lists that are about *capture* rather than about writing
    * an action: the notify/indicate-capable characteristics a selective
    * monitor row and a GATT tap both pick from (`embarch-study-designer` decision 53), and the payload
@@ -2367,7 +2400,23 @@
       return;
     }
     if (field === "rawMode") {
-      row.rawMode = ev.target.value;
+      var newMode = ev.target.value;
+      if (newMode !== row.rawMode) {
+        // Convert what's actually in the box, not just the mode label over
+        // it — switching modes used to leave the old mode's text sitting
+        // under the new one, which is either stale bytes or a payload that
+        // silently stopped meaning what it looked like it meant. If the
+        // current text doesn't even parse under the mode it's still in,
+        // there's nothing honest to convert, so it's left as-is rather than
+        // guessed at or cleared.
+        try {
+          var bytes = parseBytes(row.rawPayload, row.rawMode);
+          row.rawPayload = newMode === "text" ? bytesToEscapedText(bytes) : bytesToHexTokens(bytes);
+        } catch (e) {
+          sdShowBuildError("payload didn't convert to " + newMode + " (left as-is): " + e.message);
+        }
+      }
+      row.rawMode = newMode;
       renderSdRows();
       return;
     }
