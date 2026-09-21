@@ -3103,7 +3103,7 @@
               '<span class="sd-targets-name">' + escapeHtml(charLabel(c.characteristic_uuid)) +
               "</span>" +
               '<span class="placeholder-note">' + escapeHtml(propsLabel(c.properties)) + " · " +
-              (c.live ? "live" : "from source") + "</span></label>"
+              (c.live ? "live" : c.vendor ? "vendor" : "from source") + "</span></label>"
             );
           })
           .join("");
