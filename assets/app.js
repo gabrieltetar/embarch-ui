@@ -2152,7 +2152,8 @@
         '<option value="peripheral"' + (row.role === "peripheral" ? " selected" : "") + ">Peripheral</option>" +
         "</select></label>" +
         '<label class="sd-param" style="flex:1 1 220px;"><span>Device name' +
-        (row.targetName.trim() ? "" : " — any device!") + "</span>" +
+        '<span class="sd-target-name-hint">' + (row.targetName.trim() ? "" : " — any device!") +
+        "</span></span>" +
         '<input type="text" data-field="targetName" spellcheck="false" ' +
         'placeholder="e.g. the client S11" value="' + escapeHtml(row.targetName) + '" ' +
         'title="advertised local name to connect to; leave blank to take whichever peripheral advertises first" />' +
@@ -2384,11 +2385,13 @@
     if (field === "role") { row.role = ev.target.value; return; }
     if (field === "securityLevel") { row.securityLevel = ev.target.value; return; }
     if (field === "targetName") {
-      var wasBlank = !row.targetName.trim();
       row.targetName = ev.target.value;
-      // Only re-render when the "— any device!" warning appears or clears,
-      // so typing doesn't lose focus on every keystroke.
-      if (wasBlank !== !row.targetName.trim()) renderSdRows();
+      // Patched in place, same reasoning as `updateSdDelayHints` — a full
+      // re-render here blew away focus and the caret after the very first
+      // keystroke into an empty box (the blank -> non-blank transition that
+      // used to gate a `renderSdRows()` call).
+      var hint = tr.querySelector(".sd-target-name-hint");
+      if (hint) hint.textContent = row.targetName.trim() ? "" : " — any device!";
       return;
     }
     if (field === "rawService") { row.rawService = ev.target.value; return; }
