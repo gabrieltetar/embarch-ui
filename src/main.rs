@@ -589,6 +589,11 @@ async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<
 #[derive(Debug, Deserialize)]
 struct EnrollRequest {
     role: String,
+    /// What the probe attaches as. **Empty is looked up, not refused**
+    /// (decision 48): it is a read-out of the board type's chip in the
+    /// dialog, and a board type whose catalog row states none still has one
+    /// — the SoC its scanned targets declare, resolved through Core.
+    #[serde(default)]
     chip: String,
     #[serde(default)]
     probe_serial: Option<String>,
@@ -615,9 +620,20 @@ struct EnrollRequest {
 /// Its caller is the Topology tab; the Enroll tab that used to own it was
 /// folded into Topology (decision 43) without the route changing at all.
 async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> impl IntoResponse {
+    // The same lookup `PUT .../board` does, for the same reason and against
+    // the same catalog (decision 48) — an enrolment attaches, so it needs a
+    // chip, and the two dialogs that produce one must not disagree about
+    // where it comes from.
+    let chip = match req.chip.trim() {
+        "" => match req.name.as_deref() {
+            Some(board) => crate::topology::chip_for_board(&state, board).await.unwrap_or_default(),
+            None => String::new(),
+        },
+        stated => stated.to_string(),
+    };
     match state
         .core
-        .enroll_probe(&req.role, &req.chip, req.probe_serial.as_deref(), req.name.as_deref())
+        .enroll_probe(&req.role, &chip, req.probe_serial.as_deref(), req.name.as_deref())
         .await
     {
         Ok(resp) => {

@@ -24,7 +24,7 @@ path is real), one enrolled under a role outside the canonical pair, and a
     geckodriver --port 4444 &
     python3 tests/browser/drive_topology.py
 """
-import json, os, subprocess, sys, threading, time, urllib.request
+import json, os, subprocess, sys, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -70,6 +70,9 @@ SERIAL_PORTS = [
 POSTED = []
 DELETED = []
 LINKED = []
+# Every SoC the UI asked Core to resolve — the fact that a chip nobody typed
+# came from Core's table rather than from a string in `app.js` (decision 48).
+RESOLVED = []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -157,6 +160,17 @@ class Handler(BaseHTTPRequestHandler):
                                "live_hardware_id": "99:88",
                                "reason": "hardware_id changed under role",
                                "fix_it_url": "http://127.0.0.1:8765/#topology"}, 409)
+        if path == "/resolve-chip":
+            # Core's own SoC → probe-rs target table (its decision 8),
+            # stubbed down to the one SoC this fixture's tree declares. An
+            # unknown SoC answers `404`, exactly as Core's does, which is
+            # what makes the refusal below a real path rather than a mocked
+            # one.
+            chip = {"nrf54l15": "nRF54L15"}.get((body.get("soc") or "").lower())
+            if chip is None:
+                return self._text("no known probe-rs chip mapping", 404)
+            RESOLVED.append(body.get("soc"))
+            return self._json({"chip": chip})
         if path == "/signals":
             return self._text("", 204)
         if path == "/dev-bench/link":
@@ -295,6 +309,14 @@ def ui_post(path, body):
         headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.read().decode()
+
+
+def ui_post_status(path, body):
+    """The same POST, for the refusals — status and body rather than a raise."""
+    try:
+        return 200, ui_post(path, body)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
 
 
 ui_post("/api/study-designer/project", {"path": REPO})
@@ -444,8 +466,8 @@ try:
           row and row[1].replace(" ", "") == "12", row)
     check("its variants are listed beside them",
           row and row[2] == "ns", row)
-    check("and the apps it is in the tree for",
-          row and row[3] == "blinky", row)
+    check("the apps it is in the tree for are not a column (decision 49)",
+          row and len(row) == 5 and "blinky" not in row, row)
     check("the chip and the west target are off the list, not out of the row",
           "nRF52840_xxAA" not in script("return document.getElementById('board-catalog-body')"
                                         ".textContent;"))
@@ -458,12 +480,23 @@ try:
            "document.getElementById('role-board-select')"
            ".dispatchEvent(new Event('change'));")
     time.sleep(0.4)
+    # The catalog row states no chip — Rescan seeds none, because the scan
+    # reports west targets. It reports each target's SoC too, and that is
+    # Core's table's input (decision 48), so the picker has a chip anyway.
+    check("a board type whose row states no chip is still offered with one",
+          script("return document.getElementById('role-board-select')"
+                 ".selectedOptions[0].textContent;") == "plank — nRF54L15")
+    check("and it came from Core's SoC table, not from a string in the browser",
+          "nrf54l15" in RESOLVED, RESOLVED)
     combos = script("return Array.from(document.getElementById('role-board-combo').options)"
                     ".map(function(o){return o.textContent});")
     check("the picker offers the combinations the scan found, not revisions × variants",
           len(combos) == 3, combos)
-    check("each one names its revision and its variant, and carries the west qualifier",
-          combos and combos[0].startswith("rev 1 · no variant — plank@1/nrf54l15/cpuapp"), combos)
+    check("each one names its revision and its variant, and stops there (decision 49)",
+          combos and combos[0] == "rev 1 · no variant", combos)
+    check("the west qualifier is on the option's tooltip, not in the line",
+          script("return document.getElementById('role-board-combo').options[0].title;")
+          == "plank@1/nrf54l15/cpuapp")
     check("the combination Zephyr does not back is not offered",
           not any("rev 1 · variant ns" in c for c in combos), combos)
     script("document.getElementById('role-board-combo').value='2';"
@@ -474,7 +507,8 @@ try:
     # combination of it this repo builds is the project's and lands in the
     # project's own file. Core is never told about a revision.
     check("Core is told the board type and nothing about the combination",
-          BOARD_WRITES[-1] == {"role": "dut", "board": "plank", "chip": ""}, BOARD_WRITES[-1])
+          BOARD_WRITES[-1] == {"role": "dut", "board": "plank", "chip": "nRF54L15"},
+          BOARD_WRITES[-1])
     with open(REPO + "/embarch/boards.toml") as f:
         catalog = f.read()
     plank = catalog.split('name = "plank"')[-1]
@@ -482,6 +516,13 @@ try:
           'revision = "2"' in plank and 'variant = "ns"' in plank, plank)
     check("the list marks the combination a build would use now",
           script("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');"))
+    # The other end of decision 48: a board type nothing can answer for is
+    # refused *here*, with the one thing a human can do about it, rather than
+    # reaching Core and coming back as a relayed `502 … 400 Bad Request`.
+    status, text = ui_post_status("/api/topology/roles/dut/board",
+                                  {"board": "nothing-here", "chip": ""})
+    check("a board type with no chip anywhere is refused here, not by Core",
+          status == 400 and "Board types" in text, (status, text))
 
     # --- click-to-assign, onto the label rather than the rect --------------
     script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();")

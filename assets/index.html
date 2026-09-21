@@ -159,7 +159,7 @@
               <button id="topo-validate" class="btn btn-primary">Validate topology</button>
             </div>
           </div>
-          <p class="placeholder-note" style="margin:8px 0 0;">A saved topology lives in this project&rsquo;s <span class="mono">embarch/topologies/</span>, beside its studies, and holds which named board played which role, on which probe, plus every declared signal. <strong>Loading one never touches hardware</strong>: the signals and the dev-bench link are re-declared straight away, and each enrolment comes back as a proposal to confirm, because binding a role to a probe means reading that chip&rsquo;s live hardware ID and a file on disk cannot stand in for it.</p>
+          <p class="placeholder-note" style="margin:8px 0 0;"><span class="mono">embarch/topologies/</span></p>
           <div id="topo-profile-error" class="sd-error" style="display:none; margin-top:10px;"></div>
           <div id="topo-apply-report" style="display:none; margin-top:12px;"></div>
           <div id="topo-validate-report" style="display:none; margin-top:12px;"></div>
@@ -170,7 +170,6 @@
           <div class="topo-enroll-strip">
             <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the Dev bench or DUT box above, or click a probe then a box</div>
             <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
-            <p class="placeholder-note" style="margin-top:10px;">A probe and a board are separate things: this says <em>which probe serves which role</em>, and the board name on each box says <em>which board type is in it</em>. Only two probes are ever identified — the DUT's and the dev bench's — and the same probe can serve a different board tomorrow. Dropping onto a box that already holds a probe re-binds it, reading that board's identity again; that is the migration path, not a mistake.</p>
           </div>
         </div>
         <div class="card" style="margin-bottom:16px;">
@@ -180,7 +179,6 @@
               <button id="sig-declare" class="btn btn-icon" title="Declare a signal's route">+</button>
             </div>
           </div>
-          <p class="placeholder-note" style="margin:8px 0 12px;">A wire between two headers is invisible to software, so a signal's route can only ever be <em>stated</em>. Declaring is idempotent by name — re-declaring is how a route moves, and no saved study has to change, because a study names the signal and never the carrier. This tab is the only place a signal route can be declared; there is deliberately no CLI for it.</p>
           <div id="signals-error" class="sd-error" style="display:none;"></div>
           <div class="table-scroll">
             <table class="data-table">
@@ -215,8 +213,8 @@
           <p id="board-catalog-path" class="placeholder-note" style="margin:8px 0 12px;">reading…</p>
           <div id="board-catalog-error" class="sd-error" style="display:none; margin-bottom:10px;"></div>
           <table class="data-table">
-            <thead><tr><th style="width:190px;">Board type</th><th style="width:150px;">Revisions</th><th style="width:170px;">Variants</th><th>Apps</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
-            <tbody id="board-catalog-body"><tr><td colspan="6" class="placeholder-note">reading…</td></tr></tbody>
+            <thead><tr><th style="width:190px;">Board type</th><th style="width:150px;">Revisions</th><th style="width:170px;">Variants</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
+            <tbody id="board-catalog-body"><tr><td colspan="5" class="placeholder-note">reading…</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -735,7 +733,7 @@
       <div id="board-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="board-dialog" class="dialog" style="display:none;">
         <div class="card-title">A board type in this project</div>
-        <p class="placeholder-note">A board <em>type</em> is a shape this repo builds for &mdash; what Zephyr means by a board &mdash; not an individual piece of hardware. Saved to <span class="mono">embarch/boards.toml</span>, so the bench is described where the studies that run on it live. <strong>Rescan</strong> adds the targets the repo builds for; nothing it finds overwrites what you typed. Re-saving the same name edits that type.</p>
+        <p class="placeholder-note"><span class="mono">embarch/boards.toml</span></p>
         <div class="sd-form-grid">
           <label class="sd-field"><span>Name</span><input id="board-name" type="text" class="sd-input mono" spellcheck="false" placeholder="nrf54l15dk" /></label>
           <label class="sd-field"><span>Chip &mdash; the probe-rs target</span><input id="board-chip" list="chip-suggestions" type="text" class="sd-input mono" spellcheck="false" placeholder="nRF54L15" /></label>
@@ -744,7 +742,6 @@
           <label class="sd-field"><span>Revision</span><input id="board-revision" type="text" class="sd-input mono" spellcheck="false" /></label>
           <label class="sd-field" style="grid-column:1 / -1;"><span>Notes</span><input id="board-notes" type="text" class="sd-input" spellcheck="false" placeholder="which drawer, which cable, what is wrong with it" /></label>
         </div>
-        <p class="placeholder-note" style="margin-top:10px;">&ldquo;Builds as&rdquo; is the <em>west</em> board target, a different thing from the physical board this record is &mdash; it is what the Study Designer&rsquo;s Build card wants.</p>
         <p id="board-result" class="sd-error" style="display:none;"></p>
         <div class="sd-row-actions" style="margin-top:16px;">
           <span style="flex:1;"></span>
@@ -756,7 +753,6 @@
       <div id="role-board-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="role-board-dialog" class="dialog card" style="display:none; top:30%; width:420px;">
         <div class="card-title" id="role-board-title">Board type in this role</div>
-        <p class="placeholder-note" style="margin:0 0 10px;">Which <em>shape</em> of board is in this role &mdash; what a run builds for. It is not a probe and not a specific unit: the probe that serves this role is bound by dragging one onto the box, and which physical board is on that probe is answered by its hardware ID when you press <strong>Validate topology</strong>. Picking a board type opens nothing and touches no hardware.</p>
         <label class="sd-field"><span>Board type</span>
           <select id="role-board-select" class="sd-input mono"></select>
         </label>
@@ -782,7 +778,7 @@
       <div id="topo-save-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="topo-save-dialog" class="dialog card" style="display:none; top:30%; width:420px;">
         <div class="card-title">Save this bench</div>
-        <p class="placeholder-note" style="margin:0 0 10px;">Writes both roles as they are enrolled right now &mdash; board name, chip, probe serial, and dev-bench&rsquo;s declared link &mdash; plus every declared signal, to <span class="mono">embarch/topologies/</span>. Saving the same name overwrites that file.</p>
+        <p class="placeholder-note" style="margin:0 0 10px;"><span class="mono">embarch/topologies/&lt;name&gt;.toml</span></p>
         <label class="sd-field"><span>Name</span><input id="topo-save-name" type="text" class="sd-input mono" spellcheck="false" placeholder="bench-a" /></label>
         <p id="topo-save-result" class="sd-error" style="display:none; margin-top:10px;"></p>
         <div class="sd-row-actions" style="margin-top:16px;">
