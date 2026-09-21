@@ -1258,15 +1258,26 @@ fn characteristic_names(
     live: Option<&[GattServiceInfo]>,
     static_gatt: Option<&[GattServiceInfo]>,
 ) -> BTreeMap<String, GattName> {
-    [live, static_gatt]
+    let discovered = [live, static_gatt]
         .into_iter()
         .flatten()
         .flatten()
         .flat_map(|service| service.characteristics.iter())
         .filter_map(|chrc| {
             names.get(chrc.uuid).map(|name| (chrc.uuid.to_hyphenated().to_string(), name))
+        });
+    // A vendor characteristic's own name is a silicon/stack-vendor fact
+    // (`GattNameBook::get` already checks `vendor::find_by_uuid` first), not
+    // something either discovery source has to have found — same gap
+    // `SubscribableCharacteristic::vendor` closes one map over. Without
+    // this, NUS reads as its raw UUID until a build that has it happens to
+    // be live-connected.
+    let vendor = embarch_study_designer::vendor::ALL.iter().flat_map(|service| {
+        service.characteristics.iter().filter_map(|chrc| {
+            names.get(chrc.uuid).map(|name| (chrc.uuid.to_hyphenated().to_string(), name))
         })
-        .collect()
+    });
+    discovered.chain(vendor).collect()
 }
 
 /// The same, for services (`embarch-study-designer` decision
@@ -1278,14 +1289,15 @@ fn service_names(
     live: Option<&[GattServiceInfo]>,
     static_gatt: Option<&[GattServiceInfo]>,
 ) -> BTreeMap<String, GattName> {
-    [live, static_gatt]
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|service| {
-            names.service(service.uuid).map(|name| (service.uuid.to_hyphenated().to_string(), name))
-        })
-        .collect()
+    let discovered = [live, static_gatt].into_iter().flatten().flatten().filter_map(|service| {
+        names.service(service.uuid).map(|name| (service.uuid.to_hyphenated().to_string(), name))
+    });
+    // Same reasoning as `characteristic_names`: a vendor service's name
+    // doesn't wait on discovery having found it.
+    let vendor = embarch_study_designer::vendor::ALL.iter().filter_map(|service| {
+        names.service(service.uuid).map(|name| (service.uuid.to_hyphenated().to_string(), name))
+    });
+    discovered.chain(vendor).collect()
 }
 
 /// Flattens discovery results into the subscribable list, live entries
@@ -4300,8 +4312,9 @@ mod tests {
 
     /// `embarch-study-designer` decision 56: the response names
     /// every characteristic either source found and that anything can name,
-    /// from both name sources at once — a vendor characteristic on the live
-    /// table and a custom one the firmware source declared.
+    /// plus the whole vendor table regardless of discovery — a vendor
+    /// characteristic neither source saw (RX), one the live table did see
+    /// (TX), and a custom one the firmware source declared.
     #[test]
     fn the_response_names_characteristics_from_both_sources() {
         let live = [service(
@@ -4324,8 +4337,12 @@ mod tests {
             "NUS TX",
             "a vendor characteristic is named without any extraction at all"
         );
+        assert_eq!(
+            resolved["6e400002-b5a3-f393-e0a9-e50e24dcca9e"].label,
+            "NUS RX",
+            "a vendor characteristic neither discovery source saw is still named"
+        );
         assert_eq!(resolved["00000002-853f-4a00-8000-e58100000000"].label, "sds_hrm_rrm");
-        assert_eq!(resolved.len(), 2);
     }
 
     /// `embarch-study-designer` decision 57: the same, one
@@ -4369,8 +4386,14 @@ mod tests {
             uuid("00000021-853f-4a00-8000-e58100000000"),
             "bds_data_char_uuid".to_string(),
         )]);
-        assert!(service_names(&names, None, Some(&static_gatt)).is_empty());
-        assert_eq!(characteristic_names(&names, None, Some(&static_gatt)).len(), 1);
+        assert!(!service_names(&names, None, Some(&static_gatt))
+            .contains_key("00000020-853f-4a00-8000-e58100000000"));
+        assert_eq!(
+            characteristic_names(&names, None, Some(&static_gatt))
+                ["00000021-853f-4a00-8000-e58100000000"]
+                .label,
+            "bds_data"
+        );
     }
 
     /// A characteristic nothing names is **absent**, not present with an
@@ -4382,7 +4405,8 @@ mod tests {
             "00000001-853f-4a00-8000-e58100000000",
             &["0000dead-853f-4a00-8000-e58100000000"],
         )];
-        assert!(characteristic_names(&GattNameBook::new(), Some(&live), None).is_empty());
+        assert!(!characteristic_names(&GattNameBook::new(), Some(&live), None)
+            .contains_key("0000dead-853f-4a00-8000-e58100000000"));
     }
 
     /// The two sources overlapping is the ordinary case — the same
@@ -4400,7 +4424,6 @@ mod tests {
             "sds_hrm_rrm_char_uuid".to_string(),
         )]);
         let resolved = characteristic_names(&names, Some(&both), Some(&both));
-        assert_eq!(resolved.len(), 1);
         assert_eq!(resolved["00000002-853f-4a00-8000-e58100000000"].label, "sds_hrm_rrm");
     }
 
