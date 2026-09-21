@@ -4393,6 +4393,23 @@
   function renderSdStaticResult(data) {
     var box = sdEl("sd-static-result");
     box.innerHTML = "";
+    /* A properties alias the source #defines twice under a #if resolves to
+     * the union of its branches, because which Kconfig a given build used is
+     * not a fact in the source. That union is a properties byte no build
+     * actually compiles, so it is named here rather than left to look like
+     * an ordinary reading. */
+    (data.conditional_properties || []).forEach(function (cond) {
+      var note = document.createElement("p");
+      note.className = "placeholder-note";
+      note.style.margin = "0 0 10px";
+      note.innerHTML =
+        '<span class="mono">' + escapeHtml(cond.name) + "</span> is declared under a " +
+        '<span class="mono">#if</span> as ' +
+        cond.branches.map(function (b) { return escapeHtml(sdPropNames(b).join(" · ")); }).join(" or ") +
+        " — read here as all of them (" + escapeHtml(sdPropNames(cond.used).join(" · ")) +
+        "), since the build's own config is not in the source.";
+      box.appendChild(note);
+    });
     if (!data.services.length) return;
     data.services.forEach(function (service) {
       var card = document.createElement("div");
