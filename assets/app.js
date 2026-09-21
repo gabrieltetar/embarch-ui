@@ -4426,14 +4426,9 @@
     btn.textContent = "Reading source…";
     sdStaticNote("reading the firmware repo's source…", false);
     try {
-      var resp = await fetch("/api/study-designer/static-analysis", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // Sent every time, so the field on this panel is the extractor that
-        // runs — including when it has just been cleared, which is how you
-        // turn static extraction off.
-        body: JSON.stringify({ static_extractor: sdEl("sd-project-extractor").value }),
-      });
+      // No body: there is one extractor and it runs against whatever repo is
+      // open. This button re-reads the source, nothing more.
+      var resp = await fetch("/api/study-designer/static-analysis", { method: "POST" });
       var text = await resp.text();
       if (!resp.ok) {
         sdEl("sd-static-result").innerHTML = "";
@@ -4443,15 +4438,6 @@
       renderSdStaticResult(data);
       if (data.error) {
         sdStaticNote(data.extractor + " failed: " + data.error, true);
-      } else if (!data.configured) {
-        // Not an error, and deliberately not phrased as one: a repo nobody
-        // has pointed an extractor at is the ordinary starting state, and
-        // "found nothing" must not mean both "there is nothing" and "nobody
-        // looked".
-        sdStaticNote(
-          "no extractor configured — nothing was read. zephyr-ble-def is the one this build ships.",
-          false
-        );
       } else {
         sdStaticNote(
           data.extractor + " read " + data.services.length +
@@ -5194,7 +5180,6 @@
       bits.push(s.has_action_registry ? "action registry present" : "no action registry yet");
     }
     if (!s.is_git_repo) bits.push("not a git checkout");
-    if (state.static_extractor) bits.push("static extractor: " + state.static_extractor);
     return state.path + " — " + bits.join(" · ");
   }
 
@@ -5268,24 +5253,14 @@
       (state.recents || []).forEach(function (r) {
         var opt = document.createElement("option");
         opt.value = r.path;
-        opt.textContent = r.path + (r.static_extractor ? " (" + r.static_extractor + ")" : "");
-        opt.dataset.extractor = r.static_extractor || "";
+        opt.textContent = r.path;
         select.appendChild(opt);
       });
     }
 
-    // The static-analysis submenu opens itself when nothing is open, because
-    // the extractor a project is opened with is picked in there and a fresh
-    // machine has never seen it.
-    if (!state.path && sdEl("sd-static")) sdEl("sd-static").open = true;
     if (state.path) {
       var field = document.getElementById("project-path");
       if (field && !field.value) field.value = state.path;
-      var extractor = document.getElementById("project-extractor");
-      if (extractor && !extractor.value) extractor.value = state.static_extractor || "";
-      if (sdEl("sd-project-extractor") && !sdEl("sd-project-extractor").value) {
-        sdEl("sd-project-extractor").value = state.static_extractor || "";
-      }
     }
   }
 
@@ -5323,14 +5298,11 @@
     }
   }
 
-  async function sdOpenProject(path, extractor) {
+  async function sdOpenProject(path) {
     var err = document.getElementById("project-error");
     err.style.display = "none";
     var body = {
       path: path !== undefined ? path : document.getElementById("project-path").value,
-      static_extractor:
-        (extractor !== undefined ? extractor : document.getElementById("project-extractor").value) ||
-        null,
     };
     var btn = document.getElementById("project-open");
     btn.disabled = true;
@@ -10074,10 +10046,9 @@
         const opt = ev.target.selectedOptions[0];
         if (!opt || !opt.value) return;
         document.getElementById("project-path").value = opt.value;
-        document.getElementById("project-extractor").value = opt.dataset.extractor || "";
         // Picking a recent project opens it: an extra click on Open would be
         // asking twice for the same decision.
-        sdOpenProject(opt.value, opt.dataset.extractor || "");
+        sdOpenProject(opt.value);
       });
     }
   }

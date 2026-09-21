@@ -43,17 +43,13 @@ pub struct BuildConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StudyDesignerConfig {
     /// The checked-out firmware repo whose `embarch/study-actions.toml`
-    /// (registry) this tab reads/writes, and whose source tree a
-    /// configured `static_extractor` runs against.
+    /// (registry) this tab reads/writes, and whose source tree the static
+    /// GATT extractor reads (`embarch-study-designer` decision 33).
+    ///
+    /// The extractor itself is **not** configured: the build ships exactly
+    /// one and it runs against whatever repo is open. A `static_extractor`
+    /// key left over in an older config file is ignored rather than refused.
     pub firmware_repo_path: PathBuf,
-    /// Name of a registered `GattConfigExtractor` to run for static GATT
-    /// discovery (`embarch-study-designer` decision 33) — e.g.
-    /// `"zephyr-ble-def"`. Absent, static extraction is simply skipped (the
-    /// merged action list still works from live discovery + the registry
-    /// alone), matching `study-designer-ui`'s own opt-in `--static-extractor`
-    /// precedent rather than guessing at an unrelated firmware's conventions.
-    #[serde(default)]
-    pub static_extractor: Option<String>,
 }
 
 /// Zero-config default: `base_url = "auto"`, the same zero-config ethos

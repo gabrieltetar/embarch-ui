@@ -94,8 +94,8 @@ base_url = "auto"            # both are the same embarch_core_client::CoreConfig
 # token_env = "EMBARCH_TOKEN"
 
 [study_designer]             # optional: the zero-click default for a single-repo bench.
-firmware_repo_path = "/path/to/firmware"   # its embarch/study-actions.toml is the registry
-# static_extractor = "zephyr-ble-def"      # absent, static GATT extraction is skipped
+firmware_repo_path = "/path/to/firmware"   # its embarch/study-actions.toml is the registry;
+                                           # the static GATT extractor reads its source too
 ```
 
 Omitting `[study_designer]` does not disable the tab — "Open project" can pick a firmware repo at runtime.

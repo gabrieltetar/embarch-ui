@@ -245,10 +245,6 @@
             <summary>Static firmware analysis</summary>
             <div class="sd-submenu-body">
               <div class="sd-toolbar" style="align-items:flex-end;">
-                <label class="sd-field" style="flex:0 1 230px;">
-                  <span>Static GATT extractor</span>
-                  <input id="sd-project-extractor" type="text" class="sd-input mono" spellcheck="false" placeholder="(none)" title="zephyr-ble-def is the one extractor this build ships; leave blank to skip static extraction" />
-                </label>
                 <div class="sd-toolbar-actions">
                   <button id="sd-static-run" class="btn" title="Re-read the repo's source now, discarding what was cached">Run GATT extractor</button>
                   <button id="sd-discover" class="btn" title="Live GattDiscover against the DUT — needs the dev-bench and the board">Discover GATT (live)</button>
@@ -693,10 +689,6 @@
           <label class="sd-field" style="flex:1 1 260px;">
             <span>Recent projects</span>
             <select id="project-recents" class="sd-input"><option value="">Recent projects…</option></select>
-          </label>
-          <label class="sd-field" style="flex:1 1 220px;">
-            <span>Static GATT extractor</span>
-            <input id="project-extractor" type="text" class="sd-input mono" spellcheck="false" placeholder="(none)" title="zephyr-ble-def is the one extractor this build ships; leave blank to skip static extraction" />
           </label>
         </div>
         <p id="project-summary" class="placeholder-note mono" style="margin-top:12px;">reading…</p>
