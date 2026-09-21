@@ -52,7 +52,17 @@ release build. The drop target is an SVG `<g>` rebuilt on every snapshot, so
 python3 tests/browser/drive_topology.py
 ```
 
-`drive_fonts.py` is the fifth, and the only one that is about every page
+`drive_payload_mode.py` is the sixth: the Study Designer row editor's
+"Payload as" toggle, which also needs neither the stub nor a project — one
+`raw` row is enough. It drives a payload through both directions of the
+bytes/text round trip and the non-UTF8 edge case going bytes -> text has to
+survive without throwing.
+
+```sh
+python3 tests/browser/drive_payload_mode.py
+```
+
+`drive_fonts.py` is the seventh, and the only one that is about every page
 rather than one tab: IBM Plex is served out of this binary (`embarch-ui`
 decision 42), and this checks in a real browser that the faces actually load,
 that no request went to a font CDN, and that the shipped Plex Mono's advance
