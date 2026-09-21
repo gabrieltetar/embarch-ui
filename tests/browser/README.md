@@ -80,7 +80,20 @@ EMBARCH_UI_CONFIG=/tmp/ui.toml EMBARCH_UI_PORT=4899 ./target/release/embarch-ui 
 python3 tests/browser/drive_chart_field.py
 ```
 
-`drive_fonts.py` is the ninth, and the only one that is about every page
+`drive_target_name.py` is the tenth: a `ble_connect` row's "Device name" box,
+which needs neither the stub nor a project — one row is enough. It types a
+name one character at a time and checks focus survives every keystroke,
+including the first — the bug was `onSdRowInput`'s `targetName` branch
+re-rendering the whole table on the blank/non-blank transition, which fires
+exactly on character one into an empty box, dropping focus and the caret.
+Also checks the "— any device!" hint clears and reappears with the box,
+patched in place the same way `updateSdDelayHints` already was.
+
+```sh
+python3 tests/browser/drive_target_name.py
+```
+
+`drive_fonts.py` is the eleventh, and the only one that is about every page
 rather than one tab: IBM Plex is served out of this binary (`embarch-ui`
 decision 42), and this checks in a real browser that the faces actually load,
 that no request went to a font CDN, and that the shipped Plex Mono's advance
