@@ -115,6 +115,13 @@ def main():
                      "return t.indexOf('uart:~$ half a line')>=0"))
         check("the live sample plot is labelled a preview",
               script("return document.querySelector('#ls-data').innerText.indexOf('live preview')>=0"))
+        # --- StudyEvent::StructChartValue's live half (decision 52) --------
+        check("a Struct tap with a chart_field gets its own data card",
+              script("return document.querySelectorAll('#ls-data > .card').length") == 2)
+        check("its live chart is labelled stream · field, not a bare tap name",
+              script("return document.getElementById('ls-data').innerText.indexOf('bds-status · offset')>=0"))
+        check("the struct-chart point is plotted, not just counted",
+              script("return document.getElementById('ls-data').innerText.indexOf('1 value(s)')>=0"))
         check("a terminal status lands and names the failing step",
               script("var b=document.getElementById('ls-status-badge');"
                      "return b.innerText.indexOf('failed')>=0"))

@@ -214,6 +214,11 @@ struct Series {
     skipped: u32,
     /// Every sample this tap has produced, kept or not.
     total: u64,
+    /// Set only for a series fed by `StudyEvent::StructChartValue` — the
+    /// layout's declared `chart_field`, so the browser can label the plot
+    /// "stream · field" instead of a bare tap name. `None` for an ordinary
+    /// `SampleBatch` series, which has no field to name.
+    field_name: Option<String>,
 }
 
 impl Series {
@@ -254,6 +259,7 @@ impl Series {
             "unit": self.unit,
             "stride": self.stride.max(1),
             "total": self.total,
+            "field_name": self.field_name,
         })
     }
 }
@@ -1202,6 +1208,43 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
                 "samples",
                 json!({
                     "tap": stream_name,
+                    "points": added,
+                    "stride": stride,
+                    "total": total,
+                    "row": feed,
+                }),
+            ))
+        }
+        // `chart_field`'s live half (`embarch-study-designer` decision 52) —
+        // one point per declared field, reusing the exact `Series`/`samples`
+        // frame `SampleBatch` above already feeds the browser's live SVG
+        // plot. The only new thing is `field_name`, threaded through so the
+        // plot can be labelled "stream · field" instead of a bare tap name —
+        // see `Series::field_name`.
+        FollowItem::Event(StudyEvent::StructChartValue {
+            stream_name,
+            field_name,
+            value,
+            core_rx_utc_ms,
+            ..
+        }) => {
+            let series = state.series.entry(stream_name.clone()).or_default();
+            if series.field_name.is_none() {
+                series.field_name = Some(field_name.clone());
+            }
+            let added: Vec<[f64; 2]> =
+                if series.push(core_rx_utc_ms, value, None) { vec![[core_rx_utc_ms as f64, value]] } else { Vec::new() };
+            let stride = series.stride.max(1);
+            let total = series.total;
+            let feed = state.push_feed(
+                "struct_chart",
+                format!("{stream_name}: {field_name} = {value}"),
+            );
+            Some(frame(
+                "samples",
+                json!({
+                    "tap": stream_name,
+                    "field_name": field_name,
                     "points": added,
                     "stride": stride,
                     "total": total,
