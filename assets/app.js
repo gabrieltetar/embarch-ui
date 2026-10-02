@@ -5311,7 +5311,12 @@
   }
 
   function renderProject(state) {
+    var before = projectState ? projectState.path : undefined;
     projectState = state || { path: null, recents: [] };
+    // The Atlas tab (atlas.js) reads files in the open project and reloads on a switch.
+    if (before !== projectState.path) {
+      document.dispatchEvent(new CustomEvent("embarch:project", { detail: { path: projectState.path } }));
+    }
 
     var button = document.getElementById("project-button");
     var name = document.getElementById("project-current-name");
