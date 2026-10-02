@@ -391,9 +391,17 @@
   }
 
   // ---------------------------------------------------------------- camera
+  // The map's size, read once per resize rather than per frame: reading it after the last
+  // frame's DOM writes forces a synchronous layout of every element on the map.
+  var view = { w: 0, h: 0 };
+  function measure() {
+    var r = wrap.getBoundingClientRect();
+    view.w = r.width; view.h = r.height;
+  }
   function render() {
     if (!G) return;
-    var r = wrap.getBoundingClientRect(), z = cam.z;
+    if (!view.w) measure();
+    var r = { width: view.w, height: view.h }, z = cam.z;
     root.setAttribute("transform", "translate(" + fx(r.width / 2) + "," + fx(r.height / 2) + ") scale(" + z.toFixed(5) + ") translate(" + fx(-cam.x) + "," + fx(-cam.y) + ")");
     if (z !== lastZ) {
       lastZ = z;
@@ -456,7 +464,8 @@
       });
     }
     if (!xs.length) return;
-    var r = wrap.getBoundingClientRect();
+    measure();
+    var r = { width: view.w, height: view.h };
     var minx = Math.min.apply(null, xs) - 20, maxx = Math.max.apply(null, xs) + 20;
     var miny = Math.min.apply(null, ys) - 50, maxy = Math.max.apply(null, ys) + 30;
     var z = Math.min((r.width || 800) / (maxx - minx), (r.height || 600) / (maxy - miny));
@@ -1123,13 +1132,14 @@
     else if (e.key === "t") animateTilt(T > 0.5 ? 0 : 1);
     else if (e.key === "Escape") select(null);
   });
-  window.addEventListener("resize", function () { if (panel.classList.contains("active")) schedule(); });
+  window.addEventListener("resize", function () { if (panel.classList.contains("active")) { measure(); schedule(); } });
 
   // ---------------------------------------------------------------- the tab's life
   // Loaded the first time the tab is shown, and again after the open project changes.
   function onShown() {
     var active = panel.classList.contains("active");
     if (content) content.classList.toggle("atlas-on", active);
+    if (active) measure();
     if (active && stale) loadIndex();
     else if (active && G) schedule();
   }
