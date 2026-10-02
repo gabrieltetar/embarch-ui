@@ -63,6 +63,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h3.2l1.6-6 2 10 2.2-8 1.6 4H21"/></svg>
         <span class="nav-label">Live Study</span>
       </button>
+      <button class="nav-item" data-tab="atlas">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 21 7.5 12 12 3 7.5Z"/><path d="M3 12l9 4.5 9-4.5"/><path d="M3 16.5 12 21l9-4.5"/></svg>
+        <span class="nav-label">Atlas</span>
+      </button>
       <button class="nav-item" data-tab="debug">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
         <span class="nav-label">Debug</span>
@@ -1011,6 +1015,45 @@
         </div>
       </section>
 
+      <!-- The Atlas tab: the open project's embarch-atlas as one map. Everything in
+           it is drawn by atlas.js from the atlas's graph.json; this is the frame. -->
+      <section class="tab-panel" data-tab="atlas">
+        <div class="atlas">
+          <div class="atlas-map-pane">
+            <div class="atlas-toolbar">
+              <select id="atlas-pick" class="mono" title="An atlas is one board and one firmware commit"></select>
+              <span class="atlas-state" id="atlas-state"></span>
+              <div class="atlas-search-wrap">
+                <input type="search" id="atlas-search" placeholder="Pin, net, part, module, function   /" autocomplete="off">
+                <div class="atlas-search-results" id="atlas-search-results"></div>
+              </div>
+              <span class="atlas-spacer"></span>
+              <button class="btn" type="button" id="atlas-fit" title="Fit (f)">Fit</button>
+            </div>
+            <div class="atlas-toolbar atlas-view-row">
+              <span class="lbl">View</span><span class="end">flat</span>
+              <input type="range" id="atlas-tilt" min="0" max="100" value="0" title="Tilt (t)"><span class="end">3D</span>
+              <span class="lbl">Layers</span><span id="atlas-layer-chips" class="atlas-chips"></span>
+              <span class="atlas-spacer"></span><span class="atlas-state" id="atlas-zoom"></span>
+            </div>
+            <div class="atlas-map-wrap" id="atlas-wrap">
+              <svg id="atlas-map"></svg>
+              <div class="atlas-overlay atlas-ov-problems">
+                <span class="badge badge-danger" id="atlas-n-mis"></span>
+                <span class="badge badge-warning" id="atlas-n-unv"></span>
+                <button type="button" class="atlas-count" id="atlas-p-count" title="List (click)"></button>
+                <button class="btn" type="button" id="atlas-p-prev" title="Previous problem (p)">‹</button>
+                <button class="btn" type="button" id="atlas-p-next" title="Next problem (n)">›</button>
+              </div>
+              <div class="atlas-overlay atlas-problem-pop" id="atlas-problem-pop"></div>
+              <div class="atlas-overlay atlas-ov-legend" id="atlas-legend"></div>
+              <div class="atlas-empty" id="atlas-empty" style="display:none"></div>
+            </div>
+          </div>
+          <div class="atlas-inspector" id="atlas-inspector"></div>
+        </div>
+      </section>
+
       <section class="tab-panel" data-tab="debug">
         <!-- No <h1> here, or on any other tab: the topbar already names the
              tab, taking the text from the nav item itself, so a heading in
@@ -1056,5 +1099,6 @@
 </div>
 
 <script src="/app.js"></script>
+<script src="/atlas.js"></script>
 </body>
 </html>

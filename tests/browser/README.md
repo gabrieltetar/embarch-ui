@@ -131,3 +131,20 @@ It is **not** a second implementation of embarch-core and must not grow into
 one: it serves fixed JSON, and every route it answers is one the Live Study tab
 actually calls. Where a behaviour depends on what embarch-core really does, the
 bench is the test.
+
+`drive_atlas.py` drives the Atlas tab. It brings its own project: a throwaway
+git repo, an `embarch/atlas/` holding one atlas pinned to that repo's commit,
+whose `graph.json` is `tests/fixtures/atlas/graph.json` — the synthetic
+two-board product from `embarch-atlas`'s own tests, never a real one — and a
+hand-written one-page PDF for every source document. It starts its own
+release binary (no Core: the tab makes no Core call) and checks that every
+part is drawn as a symbol, a box shows pin names rather than numbers, a pin's
+label carries the net and the firmware's name for it, selecting a part draws
+its wires, and a net, a problem, a code citation and a page render open in
+the inspector.
+
+```sh
+cargo build --release
+geckodriver --port 4444 &
+python3 tests/browser/drive_atlas.py
+```

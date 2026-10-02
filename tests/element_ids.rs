@@ -46,6 +46,8 @@ use std::collections::{HashMap, HashSet};
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_JS: &str = include_str!("../assets/app.js");
+/// The Atlas tab's map, served beside `app.js` and held to the same two rules.
+const ATLAS_JS: &str = include_str!("../assets/atlas.js");
 
 /// Every `id="..."` attribute value in `src`, in source order — used
 /// against both `index.html` (real HTML) and `app.js` (the markup it
@@ -106,7 +108,11 @@ fn literal_calls(src: &str, fn_name: &str) -> Vec<String> {
 #[test]
 fn no_element_id_is_declared_twice() {
     let mut counts: HashMap<String, u32> = HashMap::new();
-    for id in declared_ids(INDEX_HTML).into_iter().chain(declared_ids(APP_JS)) {
+    for id in declared_ids(INDEX_HTML)
+        .into_iter()
+        .chain(declared_ids(APP_JS))
+        .chain(declared_ids(ATLAS_JS))
+    {
         *counts.entry(id).or_insert(0) += 1;
     }
     // Canary: if this stops matching anything (e.g. the markup moves to
@@ -136,6 +142,7 @@ fn every_looked_up_element_id_is_declared_somewhere() {
     let declared: HashSet<String> = declared_ids(INDEX_HTML)
         .into_iter()
         .chain(declared_ids(APP_JS))
+        .chain(declared_ids(ATLAS_JS))
         .collect();
 
     let mut lookups: Vec<(String, &'static str)> = Vec::new();
@@ -143,6 +150,9 @@ fn every_looked_up_element_id_is_declared_somewhere() {
         for id in literal_calls(APP_JS, fn_name) {
             lookups.push((id, fn_name));
         }
+    }
+    for id in literal_calls(ATLAS_JS, "getElementById") {
+        lookups.push((id, "getElementById"));
     }
     // Canary, same reasoning as above: app.js has well over 100 literal
     // lookup call sites today across the four call forms.

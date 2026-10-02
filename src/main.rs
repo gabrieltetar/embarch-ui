@@ -10,6 +10,7 @@
 //! `embarch-doc/embarch-ui/spec.md` and `embarch-doc/embarch-ui/decisions/`
 //! for the full architecture.
 
+mod atlas;
 mod config;
 mod firmware_build;
 mod live_study;
@@ -75,6 +76,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const STYLE_CSS: &str = include_str!("../assets/style.css");
 const APP_JS: &str = include_str!("../assets/app.js");
+/// The Atlas tab's map, a file of its own: `app.js` is already the shell plus
+/// five tabs, and the map is the one view that is mostly drawing code.
+const ATLAS_JS: &str = include_str!("../assets/atlas.js");
 /// The EmbArch mark, served as the browser tab icon. 64 px: a tab renders it
 /// at 16 CSS px, which is 32 physical on a 2x display, and 64 covers 4x. The
 /// GIMP master and the full-size export live beside it in `assets/brand/`.
@@ -251,6 +255,7 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/", get(index))
         .route("/style.css", get(style_css))
         .route("/app.js", get(app_js))
+        .route("/atlas.js", get(atlas_js))
         .route("/favicon.png", get(favicon_png))
         .route("/favicon.svg", get(favicon_svg))
         .route("/fonts/{file}", get(font))
@@ -393,6 +398,12 @@ async fn async_main() -> anyhow::Result<()> {
                 .put(study_designer::api_protocol_write)
                 .delete(study_designer::api_protocol_delete),
         )
+        .route("/api/atlas", get(atlas::api_index))
+        .route("/api/atlas/code", get(atlas::api_code))
+        .route("/api/atlas/doc/{doc}/{*file}", get(atlas::api_doc_file))
+        .route("/api/atlas/{id}/graph", get(atlas::api_graph))
+        .route("/api/atlas/{id}/page/{doc}/{page}", get(atlas::api_page))
+        .route("/api/atlas/{id}/pdf/{doc}", get(atlas::api_pdf))
         .route("/api/logs/recent", get(api_logs_recent))
         .route("/api/logs/events", get(api_logs_events))
         .route("/api/build/survey", get(firmware_build::api_build_survey))
@@ -504,6 +515,10 @@ async fn style_css(headers: header::HeaderMap) -> Response {
 
 async fn app_js(headers: header::HeaderMap) -> Response {
     revalidating_asset(&headers, "text/javascript; charset=utf-8", APP_JS.as_bytes())
+}
+
+async fn atlas_js(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/javascript; charset=utf-8", ATLAS_JS.as_bytes())
 }
 
 async fn favicon_svg() -> impl IntoResponse {

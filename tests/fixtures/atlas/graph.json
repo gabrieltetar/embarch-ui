@@ -1,0 +1,2965 @@
+{
+ "app": "app",
+ "atlas": "demo@f3c14ccf4b86",
+ "board": "demo_board",
+ "checks": [
+  {
+   "candidates": 0,
+   "check": "DT node has a binding",
+   "passed": 7,
+   "ran": 7,
+   "sources": "edt raw cells"
+  },
+  {
+   "candidates": 0,
+   "check": "DT pin reaches the board",
+   "passed": 6,
+   "ran": 6,
+   "sources": "DT, netlist"
+  },
+  {
+   "candidates": 0,
+   "check": "DT pull vs board pull",
+   "passed": 2,
+   "ran": 2,
+   "sources": "DT flags/bias, netlist + BOM values"
+  },
+  {
+   "candidates": 0,
+   "check": "GPIO polarity vs net name",
+   "passed": 4,
+   "ran": 4,
+   "sources": "DT flags, netlist, LED structure"
+  },
+  {
+   "candidates": 0,
+   "check": "I2C device identity by address strap",
+   "passed": 2,
+   "ran": 2,
+   "sources": "netlist, strap records, DT reg"
+  },
+  {
+   "candidates": 0,
+   "check": "I2C device signals land on the DT pins",
+   "passed": 2,
+   "ran": 2,
+   "sources": "netlist (connectors, series R, FET stages), DT GPIOs"
+  },
+  {
+   "candidates": 0,
+   "check": "I2C parts per family on the bus vs DT nodes",
+   "passed": 1,
+   "ran": 1,
+   "sources": "netlist, compatible->MPN, DT"
+  },
+  {
+   "candidates": 0,
+   "check": "I2C strap addresses vs DT reg",
+   "passed": 1,
+   "ran": 1,
+   "sources": "netlist, BOM values, strap records, DT reg"
+  },
+  {
+   "candidates": 0,
+   "check": "open-drain far end has a pull",
+   "passed": 2,
+   "ran": 2,
+   "sources": "datasheet pin records, netlist, DT flags"
+  },
+  {
+   "candidates": 0,
+   "check": "pinctrl function vs net name",
+   "passed": 2,
+   "ran": 2,
+   "sources": "DT pinctrl, netlist"
+  },
+  {
+   "candidates": 0,
+   "check": "pull rail vs MCU I/O supply",
+   "passed": 4,
+   "ran": 4,
+   "sources": "netlist + BOM values, MCU supply pins"
+  },
+  {
+   "candidates": 1,
+   "check": "DNI parts on MCU paths",
+   "passed": 0,
+   "ran": 1,
+   "sources": "netlist/BOM DNI flags"
+  },
+  {
+   "candidates": 1,
+   "check": "DT comment net names vs netlist",
+   "passed": 2,
+   "ran": 3,
+   "sources": "fw DTS sources, netlist"
+  },
+  {
+   "candidates": 1,
+   "check": "DT node has a driver in the build",
+   "passed": 6,
+   "ran": 7,
+   "sources": "edt, ELF device ordinals, compile_commands"
+  },
+  {
+   "candidates": 1,
+   "check": "DT resistor values vs BOM",
+   "passed": 1,
+   "ran": 2,
+   "sources": "DT, netlist + BOM values"
+  },
+  {
+   "candidates": 1,
+   "check": "connected pin has a DT use",
+   "passed": 7,
+   "ran": 8,
+   "sources": "netlist, DT"
+  },
+  {
+   "candidates": 1,
+   "check": "net name agrees across a board connector",
+   "passed": 5,
+   "ran": 6,
+   "sources": "two netlists + mating rule"
+  },
+  {
+   "candidates": 1,
+   "check": "one DT owner per pin",
+   "passed": 5,
+   "ran": 6,
+   "sources": "edt"
+  },
+  {
+   "candidates": 1,
+   "check": "one armed port per EXTI line",
+   "passed": 0,
+   "ran": 1,
+   "sources": "edt, driver sources (regex), RM EXTICR rule"
+  }
+ ],
+ "clusters": [
+  {
+   "id": "c0",
+   "ix": 0,
+   "kind": "hub",
+   "label": "MCU · interconnect",
+   "size": 10,
+   "w": 470,
+   "x": 0.0
+  },
+  {
+   "id": "c1",
+   "ix": 1,
+   "kind": "cluster",
+   "label": "SNS701QR",
+   "size": 7,
+   "w": 368,
+   "x": 510.0
+  },
+  {
+   "id": "c2",
+   "ix": 2,
+   "kind": "cluster",
+   "label": "sns7xx_alert",
+   "size": 6,
+   "w": 250,
+   "x": 918.0
+  },
+  {
+   "id": "c3",
+   "ix": 3,
+   "kind": "cluster",
+   "label": "SWD-HDR",
+   "size": 4,
+   "w": 200,
+   "x": 1208.0
+  },
+  {
+   "id": "c4",
+   "ix": 4,
+   "kind": "cluster",
+   "label": "BTN-HDR",
+   "size": 3,
+   "w": 200,
+   "x": 1448.0
+  },
+  {
+   "id": "c5",
+   "ix": 5,
+   "kind": "cluster",
+   "label": "LOGIC-INV1",
+   "size": 2,
+   "w": 200,
+   "x": 1688.0
+  },
+  {
+   "id": "c6",
+   "ix": 6,
+   "kind": "rest",
+   "label": "unclustered",
+   "size": 8,
+   "w": 239,
+   "x": 1928.0
+  }
+ ],
+ "code_note": null,
+ "commit": "f3c14ccf4b86459b317a5b3625245dd4820927f4",
+ "counts": {
+  "edges": 41,
+  "ext": 2,
+  "mismatches": 4,
+  "module": 5,
+  "nets": 23,
+  "nodes": 40,
+  "part": 19,
+  "periph": 4,
+  "pin": 10,
+  "unverified": 0
+ },
+ "created": "2026-01-01T00:00:00Z",
+ "docs": {
+  "sch:M": {
+   "card": false,
+   "file": "M.pdf",
+   "kind": "schematic",
+   "pages": 1,
+   "part": null,
+   "pdf": null,
+   "sheets": {
+    "S1": 1
+   },
+   "title": "board M schematic"
+  },
+  "sch:S": {
+   "card": false,
+   "file": "S.pdf",
+   "kind": "schematic",
+   "pages": 1,
+   "part": null,
+   "pdf": null,
+   "sheets": {
+    "S1": 1
+   },
+   "title": "board S schematic"
+  },
+  "sns701@a": {
+   "card": false,
+   "file": "sns701.pdf",
+   "kind": "datasheet",
+   "pages": 30,
+   "part": "SNS701",
+   "pdf": null,
+   "title": null
+  }
+ },
+ "edges": [
+  {
+   "a": "code:fw:drivers",
+   "b": "hw:M:U3",
+   "kind": "bind",
+   "label": "mon-a@44",
+   "node": "/soc/i2c@40005400/mon-a@44",
+   "prov": "strap",
+   "status": "ok"
+  },
+  {
+   "a": "code:fw:drivers",
+   "b": "hw:S:U1",
+   "kind": "bind",
+   "label": "mon-b@45",
+   "node": "/soc/i2c@40005400/mon-b@45",
+   "prov": "strap",
+   "status": "mis"
+  },
+  {
+   "a": "code:fw:drivers",
+   "b": "periph:I2C1",
+   "kind": "bus",
+   "label": "i2c1",
+   "status": "ok"
+  },
+  {
+   "a": "code:fw:app",
+   "b": "code:fw:lib/led",
+   "kind": "call",
+   "status": "ok",
+   "weight": 1
+  },
+  {
+   "a": "code:fw:app",
+   "b": "code:zephyr:subsys/logging",
+   "kind": "call",
+   "status": "ok",
+   "weight": 1
+  },
+  {
+   "a": "code:fw:drivers",
+   "b": "code:zephyr:drivers/i2c/i2c_ll_stm32",
+   "kind": "call",
+   "status": "ok",
+   "weight": 1
+  },
+  {
+   "a": "code:fw:lib/led",
+   "b": "code:fw:drivers",
+   "kind": "call",
+   "status": "ok",
+   "weight": 1
+  },
+  {
+   "a": "code:fw:app",
+   "b": "code:fw:drivers",
+   "kind": "device",
+   "label": "mon_a",
+   "node": "/soc/i2c@40005400/mon-a@44",
+   "status": "ok"
+  },
+  {
+   "a": "code:fw:drivers",
+   "b": "code:zephyr:drivers/i2c/i2c_ll_stm32",
+   "kind": "device",
+   "label": "i2c1",
+   "node": "/soc/i2c@40005400",
+   "status": "ok"
+  },
+  {
+   "a": "ext:M:J2",
+   "b": "hw:M:J2",
+   "kind": "ext",
+   "status": "ok"
+  },
+  {
+   "a": "ext:M:J3",
+   "b": "hw:M:J3",
+   "kind": "ext",
+   "status": "ok"
+  },
+  {
+   "a": "code:fw:drivers",
+   "b": "pin:PA1",
+   "dt": "mon_a",
+   "kind": "gpio",
+   "label": "alert-gpios, ACTIVE_LOW",
+   "node": "/soc/i2c@40005400/mon-a@44",
+   "status": "ok"
+  },
+  {
+   "a": "hw:M:J1",
+   "b": "hw:S:J1",
+   "kind": "mate",
+   "label": "mirror · 5/6 names",
+   "prov": "inferred (join fallback)",
+   "status": "unv"
+  },
+  {
+   "a": "pin:PA1",
+   "b": "hw:M:J1",
+   "kind": "net",
+   "label": "nMON_ALERT",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA1",
+   "b": "hw:M:U3",
+   "kind": "net",
+   "label": "nMON_ALERT",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA1",
+   "b": "hw:S:U1",
+   "kind": "net",
+   "label": "MON_ALERT",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA13",
+   "b": "hw:M:J3",
+   "kind": "net",
+   "label": "SWDIO",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA2",
+   "b": "hw:M:U2",
+   "kind": "net",
+   "label": "AUX_OUT",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA5",
+   "b": "hw:M:D1",
+   "kind": "net",
+   "label": "LED_STATUS",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB1",
+   "b": "hw:M:J2",
+   "kind": "net",
+   "label": "nKEY0",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB6",
+   "b": "hw:M:J1",
+   "kind": "net",
+   "label": "BUS0_SCL",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB6",
+   "b": "hw:M:U3",
+   "kind": "net",
+   "label": "BUS0_SCL",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB6",
+   "b": "hw:S:U1",
+   "kind": "net",
+   "label": "BUS0_SCL",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB7",
+   "b": "hw:M:J1",
+   "kind": "net",
+   "label": "BUS0_SDA",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB7",
+   "b": "hw:M:U3",
+   "kind": "net",
+   "label": "BUS0_SDA",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB7",
+   "b": "hw:S:U1",
+   "kind": "net",
+   "label": "BUS0_SDA",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PF2",
+   "b": "hw:M:J3",
+   "kind": "net",
+   "label": "nRST_LINE",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA0",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "10",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA1",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "4",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA13",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "7",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA2",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "8",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PA5",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "3",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB1",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "11",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB6",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "1",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PB7",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "2",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PC6",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "9",
+   "status": "ok"
+  },
+  {
+   "a": "pin:PF2",
+   "b": "hw:M:U1",
+   "kind": "pad",
+   "label": "12",
+   "status": "ok"
+  },
+  {
+   "a": "code:zephyr:drivers/i2c/i2c_ll_stm32",
+   "b": "periph:I2C1",
+   "kind": "periph",
+   "label": "i2c1",
+   "status": "ok"
+  },
+  {
+   "a": "periph:ADC",
+   "af": "ANALOG",
+   "b": "pin:PA0",
+   "kind": "pinctrl",
+   "label": "adc1_in0",
+   "status": "ok"
+  },
+  {
+   "a": "periph:I2C1",
+   "af": "AF6",
+   "b": "pin:PB6",
+   "kind": "pinctrl",
+   "label": "i2c1_scl",
+   "status": "ok"
+  },
+  {
+   "a": "periph:I2C1",
+   "af": "AF6",
+   "b": "pin:PB7",
+   "kind": "pinctrl",
+   "label": "i2c1_sda",
+   "status": "ok"
+  }
+ ],
+ "fw": null,
+ "info": {
+  "connected-no-dt": [
+   {
+    "cls": "connected-no-dt",
+    "key": "PA2",
+    "nodes": [
+     "pin:PA2",
+     "hw:M:U2"
+    ],
+    "rows": [
+     {
+      "cite": {
+       "box": null,
+       "doc": "sch:M",
+       "p": 1,
+       "sec": null,
+       "t": "doc"
+      },
+      "says": "M:U1-8 M:AUX_OUT -> ['M:U2-2 A']",
+      "src": "Schematic"
+     }
+    ],
+    "settle": "not yet in firmware, or a missing DT property",
+    "sev": "info",
+    "title": "PA2 net M:AUX_OUT reaches 1 part pin(s) but no DT property references it"
+   }
+  ],
+  "dni-on-path": [
+   {
+    "cls": "dni-on-path",
+    "key": "PA0",
+    "nodes": [
+     "pin:PA0",
+     "hw:M:R7"
+    ],
+    "rows": [
+     {
+      "cite": {
+       "box": null,
+       "doc": "sch:M",
+       "p": 1,
+       "sec": null,
+       "t": "doc"
+      },
+      "says": "M:R7 DNI",
+      "src": "Schematic"
+     }
+    ],
+    "settle": "the fitted BOM or rework notes: the path through a not-fitted part is open",
+    "sev": "info",
+    "title": "PA0 net M:BOARD_REV: M:R7 is not fitted (DNI), so the path through it is open"
+   }
+  ],
+  "exti-line-shared": [
+   {
+    "cls": "exti-line-shared",
+    "key": "EXTI1",
+    "nodes": [
+     "pin:PA1",
+     "pin:PB1"
+    ],
+    "rows": [
+     {
+      "cite": {
+       "line": 31,
+       "path": "board.dts",
+       "root": "fw",
+       "t": "code"
+      },
+      "says": "PA1 mon_a.alert-gpios net M:nMON_ALERT",
+      "src": "Firmware"
+     },
+     {
+      "cite": {
+       "line": 41,
+       "path": "board.dts",
+       "root": "fw",
+       "t": "code"
+      },
+      "says": "PA1 mon_b.alert-gpios net M:nMON_ALERT",
+      "src": "Firmware"
+     },
+     {
+      "cite": {
+       "line": 20,
+       "path": "board.dts",
+       "root": "fw",
+       "t": "code"
+      },
+      "says": "PB1 btn0.gpios net M:nKEY0",
+      "src": "Firmware"
+     },
+     {
+      "cite": null,
+      "says": "interrupt arming from the driver sources (regex over gpio_pin_interrupt_configure_dt)",
+      "src": "Build"
+     }
+    ],
+    "settle": "only one port per EXTI line can interrupt (EXTICR selects one): check which one is armed at run time",
+    "sev": "info",
+    "title": "EXTI1 is wanted by 2 ports: ['PA1', 'PB1']"
+   }
+  ],
+  "pin-shared-in-dt": [
+   {
+    "cls": "pin-shared-in-dt",
+    "key": "PA1",
+    "nodes": [
+     "pin:PA1",
+     "code:fw:app",
+     "code:fw:drivers"
+    ],
+    "rows": [
+     {
+      "cite": {
+       "line": 31,
+       "path": "board.dts",
+       "root": "fw",
+       "t": "code"
+      },
+      "says": "/soc/i2c@40005400/mon-a@44 alert-gpios ACTIVE_LOW",
+      "src": "Firmware"
+     },
+     {
+      "cite": {
+       "line": 41,
+       "path": "board.dts",
+       "root": "fw",
+       "t": "code"
+      },
+      "says": "/soc/i2c@40005400/mon-b@45 alert-gpios ACTIVE_LOW",
+      "src": "Firmware"
+     }
+    ],
+    "settle": "is the far end a wired-OR (open-drain) line? then sharing is by design",
+    "sev": "info",
+    "title": "PA1 is referenced by 2 DT nodes (far end open-drain per datasheet: wired-OR)"
+   }
+  ]
+ },
+ "layout": {
+  "bands": [
+   {
+    "board": "M",
+    "name": "board M",
+    "y0": 0.0,
+    "y1": 401.0
+   },
+   {
+    "board": "S",
+    "name": "board S",
+    "y0": 419.0,
+    "y1": 643.2
+   }
+  ],
+  "depth": {
+   "app": 110.0,
+   "drv": 110.0,
+   "ext": 110.0,
+   "hw": 651.2,
+   "mw": 110.0,
+   "soc": 110.0
+  },
+  "font": 6.5,
+  "pitch": 10.0,
+  "scene_w": 2167.0,
+  "stub": 8.0
+ },
+ "nets": {
+  "M:3V3": {
+   "board": "M",
+   "ground": false,
+   "mates": [
+    "S:3V3"
+   ],
+   "name": "3V3",
+   "pins": [
+    "J1-5",
+    "R1-2",
+    "R2-2",
+    "R3-2",
+    "R4-2",
+    "R6-2",
+    "U1-5",
+    "U2-5",
+    "U3-C1"
+   ],
+   "rail": true
+  },
+  "M:AUX_OUT": {
+   "board": "M",
+   "fw": {
+    "dt": [],
+    "port": [
+     "PA2"
+    ],
+    "text": "PA2",
+    "uses": []
+   },
+   "ground": false,
+   "name": "AUX_OUT",
+   "pins": [
+    "U1-8",
+    "U2-2"
+   ],
+   "rail": false
+  },
+  "M:BOARD_REV": {
+   "board": "M",
+   "fw": {
+    "dt": [
+     "adc1"
+    ],
+    "port": [
+     "PA0"
+    ],
+    "text": "PA0 · adc1_in0",
+    "uses": [
+     "adc1_in0"
+    ]
+   },
+   "ground": false,
+   "name": "BOARD_REV",
+   "pins": [
+    "R6-1",
+    "R7-1",
+    "U1-10"
+   ],
+   "rail": false
+  },
+  "M:BUS0_SCL": {
+   "board": "M",
+   "fw": {
+    "dt": [
+     "i2c1"
+    ],
+    "port": [
+     "PB6"
+    ],
+    "text": "PB6 · i2c1_scl",
+    "uses": [
+     "i2c1_scl"
+    ]
+   },
+   "ground": false,
+   "mates": [
+    "S:BUS0_SCL"
+   ],
+   "name": "BUS0_SCL",
+   "pins": [
+    "J1-1",
+    "R1-1",
+    "U1-1",
+    "U3-C3"
+   ],
+   "rail": false
+  },
+  "M:BUS0_SDA": {
+   "board": "M",
+   "fw": {
+    "dt": [
+     "i2c1"
+    ],
+    "port": [
+     "PB7"
+    ],
+    "text": "PB7 · i2c1_sda",
+    "uses": [
+     "i2c1_sda"
+    ]
+   },
+   "ground": false,
+   "mates": [
+    "S:BUS0_SDA"
+   ],
+   "name": "BUS0_SDA",
+   "pins": [
+    "J1-2",
+    "R2-1",
+    "U1-2",
+    "U3-B3"
+   ],
+   "rail": false
+  },
+  "M:GND": {
+   "board": "M",
+   "ground": true,
+   "mates": [
+    "S:GND"
+   ],
+   "name": "GND",
+   "pins": [
+    "J1-4",
+    "J1-6",
+    "J2-2",
+    "J3-3",
+    "R7-2",
+    "U1-6",
+    "U2-3",
+    "U3-B1",
+    "U3-B2"
+   ],
+   "rail": true
+  },
+  "M:INV_OUT": {
+   "board": "M",
+   "ground": false,
+   "name": "INV_OUT",
+   "pins": [
+    "U2-4"
+   ],
+   "rail": false
+  },
+  "M:LED_STATUS": {
+   "board": "M",
+   "fw": {
+    "dt": [
+     "status_led"
+    ],
+    "port": [
+     "PA5"
+    ],
+    "text": "PA5 · gpios",
+    "uses": [
+     "gpios"
+    ]
+   },
+   "ground": false,
+   "name": "LED_STATUS",
+   "pins": [
+    "D1-2",
+    "U1-3"
+   ],
+   "rail": false
+  },
+  "M:NetD1_1": {
+   "board": "M",
+   "ground": false,
+   "name": "NetD1_1",
+   "pins": [
+    "D1-1",
+    "R4-1"
+   ],
+   "rail": false
+  },
+  "M:PC6": {
+   "board": "M",
+   "fw": {
+    "dt": [],
+    "port": [
+     "PC6"
+    ],
+    "text": "PC6",
+    "uses": []
+   },
+   "ground": false,
+   "name": "PC6",
+   "pins": [
+    "TP1-1",
+    "U1-9"
+   ],
+   "rail": false
+  },
+  "M:SENSE_N": {
+   "board": "M",
+   "ground": false,
+   "name": "SENSE_N",
+   "pins": [
+    "R5-2",
+    "U3-A1"
+   ],
+   "rail": false
+  },
+  "M:SENSE_P": {
+   "board": "M",
+   "ground": false,
+   "name": "SENSE_P",
+   "pins": [
+    "R5-1",
+    "U3-A3"
+   ],
+   "rail": false
+  },
+  "M:SWDIO": {
+   "board": "M",
+   "fw": {
+    "dt": [],
+    "port": [
+     "PA13"
+    ],
+    "text": "PA13",
+    "uses": []
+   },
+   "ground": false,
+   "name": "SWDIO",
+   "pins": [
+    "J3-1",
+    "U1-7"
+   ],
+   "rail": false
+  },
+  "M:nKEY0": {
+   "board": "M",
+   "fw": {
+    "dt": [
+     "btn0"
+    ],
+    "port": [
+     "PB1"
+    ],
+    "text": "PB1 · gpios",
+    "uses": [
+     "gpios"
+    ]
+   },
+   "ground": false,
+   "name": "nKEY0",
+   "pins": [
+    "J2-1",
+    "U1-11"
+   ],
+   "rail": false
+  },
+  "M:nMON_ALERT": {
+   "board": "M",
+   "fw": {
+    "dt": [
+     "mon_a",
+     "mon_b"
+    ],
+    "port": [
+     "PA1"
+    ],
+    "text": "PA1 · alert-gpios",
+    "uses": [
+     "alert-gpios"
+    ]
+   },
+   "ground": false,
+   "mates": [
+    "S:MON_ALERT"
+   ],
+   "name": "nMON_ALERT",
+   "pins": [
+    "J1-3",
+    "R3-1",
+    "U1-4",
+    "U3-C2"
+   ],
+   "rail": false
+  },
+  "M:nRST_LINE": {
+   "board": "M",
+   "fw": {
+    "dt": [],
+    "port": [
+     "PF2"
+    ],
+    "text": "PF2",
+    "uses": []
+   },
+   "ground": false,
+   "name": "nRST_LINE",
+   "pins": [
+    "J3-2",
+    "U1-12"
+   ],
+   "rail": false
+  },
+  "S:3V3": {
+   "board": "S",
+   "ground": false,
+   "mates": [
+    "M:3V3"
+   ],
+   "name": "3V3",
+   "pins": [
+    "C1-1",
+    "J1-2",
+    "U1-B2",
+    "U1-C1"
+   ],
+   "rail": true
+  },
+  "S:BUS0_SCL": {
+   "board": "S",
+   "fw": {
+    "dt": [
+     "i2c1"
+    ],
+    "port": [
+     "PB6"
+    ],
+    "text": "PB6 · i2c1_scl",
+    "uses": [
+     "i2c1_scl"
+    ]
+   },
+   "ground": false,
+   "mates": [
+    "M:BUS0_SCL"
+   ],
+   "name": "BUS0_SCL",
+   "pins": [
+    "J1-6",
+    "U1-C3"
+   ],
+   "rail": false
+  },
+  "S:BUS0_SDA": {
+   "board": "S",
+   "fw": {
+    "dt": [
+     "i2c1"
+    ],
+    "port": [
+     "PB7"
+    ],
+    "text": "PB7 · i2c1_sda",
+    "uses": [
+     "i2c1_sda"
+    ]
+   },
+   "ground": false,
+   "mates": [
+    "M:BUS0_SDA"
+   ],
+   "name": "BUS0_SDA",
+   "pins": [
+    "J1-5",
+    "U1-B3"
+   ],
+   "rail": false
+  },
+  "S:GND": {
+   "board": "S",
+   "ground": true,
+   "mates": [
+    "M:GND"
+   ],
+   "name": "GND",
+   "pins": [
+    "C1-2",
+    "J1-1",
+    "J1-3",
+    "U1-B1"
+   ],
+   "rail": true
+  },
+  "S:LOAD_N": {
+   "board": "S",
+   "ground": false,
+   "name": "LOAD_N",
+   "pins": [
+    "R1-2",
+    "U1-A1"
+   ],
+   "rail": false
+  },
+  "S:LOAD_P": {
+   "board": "S",
+   "ground": false,
+   "name": "LOAD_P",
+   "pins": [
+    "R1-1",
+    "U1-A3"
+   ],
+   "rail": false
+  },
+  "S:MON_ALERT": {
+   "board": "S",
+   "fw": {
+    "dt": [
+     "mon_a",
+     "mon_b"
+    ],
+    "port": [
+     "PA1"
+    ],
+    "text": "PA1 · alert-gpios",
+    "uses": [
+     "alert-gpios"
+    ]
+   },
+   "ground": false,
+   "mates": [
+    "M:nMON_ALERT"
+   ],
+   "name": "MON_ALERT",
+   "pins": [
+    "J1-4",
+    "U1-C2"
+   ],
+   "rail": false
+  }
+ },
+ "nodes": [
+  {
+   "cluster": "c4",
+   "id": "ext:M:J2",
+   "kind": "ext",
+   "label": "M:J2",
+   "layer": "ext",
+   "status": "ok",
+   "sub": "BTN-HDR",
+   "x": 1488.0,
+   "y": 30.0
+  },
+  {
+   "cluster": "c3",
+   "id": "ext:M:J3",
+   "kind": "ext",
+   "label": "M:J3",
+   "layer": "ext",
+   "status": "ok",
+   "sub": "SWD-HDR",
+   "x": 1248.0,
+   "y": 30.0
+  },
+  {
+   "cluster": "c2",
+   "files": [
+    "app/src/main.c"
+   ],
+   "functions": [
+    {
+     "line": 10,
+     "name": "main",
+     "path": "app/src/main.c",
+     "public": true
+    },
+    {
+     "line": 30,
+     "name": "helper",
+     "path": "app/src/main.c",
+     "public": false
+    }
+   ],
+   "id": "code:fw:app",
+   "kind": "module",
+   "label": "app",
+   "layer": "mw",
+   "n_functions": 2,
+   "n_public": 1,
+   "path": "app/",
+   "root": "fw",
+   "status": "info",
+   "x": 958.0,
+   "y": 25.0,
+   "zephyr": false
+  },
+  {
+   "cluster": "c2",
+   "files": [
+    "lib/led/led.c"
+   ],
+   "functions": [
+    {
+     "line": 20,
+     "name": "led_set",
+     "path": "lib/led/led.c",
+     "public": true
+    },
+    {
+     "line": 5,
+     "name": "helper",
+     "path": "lib/led/led.c",
+     "public": false
+    }
+   ],
+   "id": "code:fw:lib/led",
+   "kind": "module",
+   "label": "lib/led",
+   "layer": "mw",
+   "n_functions": 2,
+   "n_public": 1,
+   "path": "lib/led/",
+   "root": "fw",
+   "status": "ok",
+   "x": 1032.0,
+   "y": 25.0,
+   "zephyr": false
+  },
+  {
+   "cluster": "c2",
+   "files": [
+    "subsys/logging/log_core.c"
+   ],
+   "functions": [
+    {
+     "line": 50,
+     "name": "log_msg",
+     "path": "subsys/logging/log_core.c",
+     "public": true
+    }
+   ],
+   "id": "code:zephyr:subsys/logging",
+   "kind": "module",
+   "label": "logging",
+   "layer": "mw",
+   "n_functions": 1,
+   "n_public": 1,
+   "path": "subsys/logging/",
+   "root": "zephyr",
+   "status": "ok",
+   "x": 1110.1,
+   "y": 25.0,
+   "zephyr": true
+  },
+  {
+   "cluster": "c2",
+   "files": [
+    "drivers/sns.c"
+   ],
+   "functions": [
+    {
+     "line": 80,
+     "name": "sns_fetch",
+     "path": "drivers/sns.c",
+     "public": true
+    },
+    {
+     "line": 40,
+     "name": "sns_init",
+     "path": "drivers/sns.c",
+     "public": false
+    }
+   ],
+   "id": "code:fw:drivers",
+   "kind": "module",
+   "label": "sns7xx_alert",
+   "layer": "drv",
+   "n_functions": 2,
+   "n_public": 1,
+   "path": "drivers/",
+   "root": "fw",
+   "status": "mis",
+   "x": 1087.4,
+   "y": 25.0,
+   "zephyr": false
+  },
+  {
+   "cluster": "c2",
+   "files": [
+    "drivers/i2c/i2c_ll_stm32.c"
+   ],
+   "functions": [
+    {
+     "line": 200,
+     "name": "i2c_xfer",
+     "path": "drivers/i2c/i2c_ll_stm32.c",
+     "public": false
+    }
+   ],
+   "id": "code:zephyr:drivers/i2c/i2c_ll_stm32",
+   "kind": "module",
+   "label": "i2c_ll_stm32",
+   "layer": "drv",
+   "n_functions": 1,
+   "n_public": 0,
+   "path": "drivers/i2c/i2c_ll_stm32.c",
+   "root": "zephyr",
+   "status": "ok",
+   "x": 977.8,
+   "y": 25.0,
+   "zephyr": true
+  },
+  {
+   "cluster": "c6",
+   "compat": "st,stm32-adc",
+   "dt_okay": true,
+   "id": "periph:ADC",
+   "instantiated": false,
+   "kind": "periph",
+   "label": "ADC",
+   "layer": "soc",
+   "node": "/soc/adc@40012400",
+   "status": "ok",
+   "sub": "DT okay, no device",
+   "touched_by_code": false,
+   "x": 1968.0,
+   "y": 30.0
+  },
+  {
+   "cluster": "c6",
+   "compat": "st,stm32-gpio",
+   "dt_okay": true,
+   "id": "periph:GPIOA",
+   "instantiated": true,
+   "kind": "periph",
+   "label": "GPIOA",
+   "layer": "soc",
+   "node": "/soc/pin-controller@50000000/gpio@50000000",
+   "status": "ok",
+   "sub": "instantiated",
+   "touched_by_code": true,
+   "x": 2038.0,
+   "y": 30.0
+  },
+  {
+   "cluster": "c2",
+   "compat": "st,stm32-i2c-v2",
+   "dt_okay": true,
+   "id": "periph:I2C1",
+   "instantiated": true,
+   "kind": "periph",
+   "label": "I2C1",
+   "layer": "soc",
+   "node": "/soc/i2c@40005400",
+   "status": "ok",
+   "sub": "instantiated",
+   "touched_by_code": true,
+   "x": 958.0,
+   "y": 30.0
+  },
+  {
+   "cluster": "c6",
+   "dt_okay": false,
+   "id": "periph:SYSCFG",
+   "instantiated": false,
+   "kind": "periph",
+   "label": "SYSCFG",
+   "layer": "soc",
+   "status": "ok",
+   "sub": "touched by code",
+   "touched_by_code": true,
+   "x": 2108.9,
+   "y": 30.0
+  },
+  {
+   "cluster": "c6",
+   "id": "pin:PA0",
+   "key": "M:U1-10",
+   "kind": "pin",
+   "label": "PA0",
+   "layer": "soc",
+   "net": "M:BOARD_REV",
+   "num": "10",
+   "rail": false,
+   "status": "mis",
+   "sub": "adc1_in0",
+   "uses": [
+    {
+     "af": "ANALOG",
+     "compat": "st,stm32-adc",
+     "flags": null,
+     "func": "adc1_in0_pa0",
+     "kind": "pinctrl",
+     "label": "adc1",
+     "loc": "fw:board.dts:1",
+     "node": "/soc/adc@40012400",
+     "prop": "pinctrl-0"
+    }
+   ],
+   "x": 1951.0,
+   "y": 71.0
+  },
+  {
+   "cluster": "c1",
+   "id": "pin:PA1",
+   "key": "M:U1-4",
+   "kind": "pin",
+   "label": "PA1",
+   "layer": "soc",
+   "net": "M:nMON_ALERT",
+   "num": "4",
+   "rail": false,
+   "status": "info",
+   "sub": "alert-gpios, alert-gpios",
+   "uses": [
+    {
+     "af": null,
+     "compat": "acme,sns7xx-alert",
+     "flags": "ACTIVE_LOW",
+     "func": null,
+     "kind": "gpio",
+     "label": "mon_a",
+     "loc": "fw:board.dts:31",
+     "node": "/soc/i2c@40005400/mon-a@44",
+     "prop": "alert-gpios"
+    },
+    {
+     "af": null,
+     "compat": "acme,sns7xx-alert",
+     "flags": "ACTIVE_LOW",
+     "func": null,
+     "kind": "gpio",
+     "label": "mon_b",
+     "loc": "fw:board.dts:41",
+     "node": "/soc/i2c@40005400/mon-b@45",
+     "prop": "alert-gpios"
+    }
+   ],
+   "x": 533.0,
+   "y": 25.0
+  },
+  {
+   "cluster": "c3",
+   "id": "pin:PA13",
+   "key": "M:U1-7",
+   "kind": "pin",
+   "label": "PA13",
+   "layer": "soc",
+   "net": "M:SWDIO",
+   "num": "7",
+   "rail": false,
+   "status": "ok",
+   "uses": [],
+   "x": 1231.0,
+   "y": 25.0
+  },
+  {
+   "cluster": "c5",
+   "id": "pin:PA2",
+   "key": "M:U1-8",
+   "kind": "pin",
+   "label": "PA2",
+   "layer": "soc",
+   "net": "M:AUX_OUT",
+   "num": "8",
+   "rail": false,
+   "status": "info",
+   "uses": [],
+   "x": 1711.0,
+   "y": 25.0
+  },
+  {
+   "cluster": "c6",
+   "id": "pin:PA5",
+   "key": "M:U1-3",
+   "kind": "pin",
+   "label": "PA5",
+   "layer": "soc",
+   "net": "M:LED_STATUS",
+   "num": "3",
+   "rail": false,
+   "status": "mis",
+   "sub": "gpios",
+   "uses": [
+    {
+     "af": null,
+     "compat": "gpio-leds",
+     "flags": "ACTIVE_LOW",
+     "func": null,
+     "kind": "gpio",
+     "label": "status_led",
+     "loc": "fw:board.dts:12",
+     "node": "/leds/led_0",
+     "prop": "gpios"
+    }
+   ],
+   "x": 1987.0,
+   "y": 71.0
+  },
+  {
+   "cluster": "c4",
+   "id": "pin:PB1",
+   "key": "M:U1-11",
+   "kind": "pin",
+   "label": "PB1",
+   "layer": "soc",
+   "net": "M:nKEY0",
+   "num": "11",
+   "rail": false,
+   "status": "info",
+   "sub": "gpios",
+   "uses": [
+    {
+     "af": null,
+     "compat": "gpio-keys",
+     "flags": "ACTIVE_LOW|PULL_UP",
+     "func": null,
+     "kind": "gpio",
+     "label": "btn0",
+     "loc": "fw:board.dts:20",
+     "node": "/buttons/btn_0",
+     "prop": "gpios"
+    }
+   ],
+   "x": 1471.0,
+   "y": 25.0
+  },
+  {
+   "cluster": "c1",
+   "id": "pin:PB6",
+   "key": "M:U1-1",
+   "kind": "pin",
+   "label": "PB6",
+   "layer": "soc",
+   "net": "M:BUS0_SCL",
+   "num": "1",
+   "rail": false,
+   "status": "ok",
+   "sub": "i2c1_scl",
+   "uses": [
+    {
+     "af": "AF6",
+     "compat": "st,stm32-i2c-v2",
+     "flags": "bias-pull-up",
+     "func": "i2c1_scl_pb6",
+     "kind": "pinctrl",
+     "label": "i2c1",
+     "loc": "fw:board.dts:1",
+     "node": "/soc/i2c@40005400",
+     "prop": "pinctrl-0"
+    }
+   ],
+   "x": 569.0,
+   "y": 25.0
+  },
+  {
+   "cluster": "c1",
+   "id": "pin:PB7",
+   "key": "M:U1-2",
+   "kind": "pin",
+   "label": "PB7",
+   "layer": "soc",
+   "net": "M:BUS0_SDA",
+   "num": "2",
+   "rail": false,
+   "status": "ok",
+   "sub": "i2c1_sda",
+   "uses": [
+    {
+     "af": "AF6",
+     "compat": "st,stm32-i2c-v2",
+     "flags": "bias-pull-up",
+     "func": "i2c1_sda_pb7",
+     "kind": "pinctrl",
+     "label": "i2c1",
+     "loc": "fw:board.dts:1",
+     "node": "/soc/i2c@40005400",
+     "prop": "pinctrl-0"
+    }
+   ],
+   "x": 605.0,
+   "y": 25.0
+  },
+  {
+   "cluster": "c6",
+   "id": "pin:PC6",
+   "key": "M:U1-9",
+   "kind": "pin",
+   "label": "PC6",
+   "layer": "soc",
+   "net": "M:PC6",
+   "num": "9",
+   "rail": false,
+   "status": "ok",
+   "uses": [],
+   "x": 2023.0,
+   "y": 71.0
+  },
+  {
+   "cluster": "c3",
+   "id": "pin:PF2",
+   "key": "M:U1-12",
+   "kind": "pin",
+   "label": "PF2",
+   "layer": "soc",
+   "net": "M:nRST_LINE",
+   "num": "12",
+   "rail": false,
+   "status": "ok",
+   "uses": [],
+   "x": 1267.0,
+   "y": 25.0
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:D1",
+   "kind": "part",
+   "label": "M:D1",
+   "layer": "hw",
+   "mpn": "LED-RED-0603",
+   "of": "hw:M:U1",
+   "pages": [
+    1
+   ],
+   "ref": "D1",
+   "status": "ok",
+   "sub": "LED-RED-0603",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "D1\nLED-RED-0603",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:NetD1_1",
+      "nm": "A",
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:LED_STATUS",
+      "nm": "K",
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "diode",
+   "x": 290.1,
+   "y": 182.8
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:J1",
+   "kind": "part",
+   "label": "M:J1",
+   "layer": "hw",
+   "mpn": "CONN-6",
+   "pages": [
+    1
+   ],
+   "ref": "J1",
+   "status": "mis",
+   "sub": "CONN-6",
+   "sym": {
+    "h": 70.0,
+    "lab": {
+     "a": "middle",
+     "t": "J1\nCONN-6",
+     "x": 0.0,
+     "y": -45.8
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:BUS0_SCL",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -25.0
+     },
+     {
+      "n": "2",
+      "net": "M:BUS0_SDA",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -15.0
+     },
+     {
+      "n": "3",
+      "net": "M:nMON_ALERT",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -5.0
+     },
+     {
+      "n": "4",
+      "net": "M:GND",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 5.0
+     },
+     {
+      "n": "5",
+      "net": "M:3V3",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 15.0
+     },
+     {
+      "n": "6",
+      "net": "M:GND",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 25.0
+     }
+    ],
+    "w": 40.0
+   },
+   "sym_kind": "connector",
+   "x": 33.0,
+   "y": 285.5
+  },
+  {
+   "board": "M",
+   "cluster": "c4",
+   "dni": false,
+   "id": "hw:M:J2",
+   "kind": "part",
+   "label": "M:J2",
+   "layer": "hw",
+   "mpn": "BTN-HDR",
+   "pages": [
+    1
+   ],
+   "ref": "J2",
+   "status": "ok",
+   "sub": "BTN-HDR",
+   "sym": {
+    "h": 30.0,
+    "lab": {
+     "a": "middle",
+     "t": "J2\nBTN-HDR",
+     "x": 0.0,
+     "y": -25.8
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:nKEY0",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -5.0
+     },
+     {
+      "n": "2",
+      "net": "M:GND",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 5.0
+     }
+    ],
+    "w": 40.0
+   },
+   "sym_kind": "connector",
+   "x": 1481.0,
+   "y": 53.3
+  },
+  {
+   "board": "M",
+   "cluster": "c3",
+   "dni": false,
+   "id": "hw:M:J3",
+   "kind": "part",
+   "label": "M:J3",
+   "layer": "hw",
+   "mpn": "SWD-HDR",
+   "pages": [
+    1
+   ],
+   "ref": "J3",
+   "status": "ok",
+   "sub": "SWD-HDR",
+   "sym": {
+    "h": 40.0,
+    "lab": {
+     "a": "middle",
+     "t": "J3\nSWD-HDR",
+     "x": 0.0,
+     "y": -30.8
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:SWDIO",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -10.0
+     },
+     {
+      "n": "2",
+      "net": "M:nRST_LINE",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 0.0
+     },
+     {
+      "n": "3",
+      "net": "M:GND",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 10.0
+     }
+    ],
+    "w": 40.0
+   },
+   "sym_kind": "connector",
+   "x": 1241.0,
+   "y": 58.3
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:R1",
+   "kind": "part",
+   "label": "M:R1",
+   "layer": "hw",
+   "of": "hw:M:J1",
+   "pages": [
+    1
+   ],
+   "ref": "R1",
+   "status": "ok",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R1\n2.2kΩ",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:BUS0_SCL",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:3V3",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "2.2kΩ",
+   "x": 63.2,
+   "y": 359.6
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:R2",
+   "kind": "part",
+   "label": "M:R2",
+   "layer": "hw",
+   "of": "hw:M:J1",
+   "pages": [
+    1
+   ],
+   "ref": "R2",
+   "status": "ok",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R2\n2.2kΩ",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:BUS0_SDA",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:3V3",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "2.2kΩ",
+   "x": 173.8,
+   "y": 359.6
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:R3",
+   "kind": "part",
+   "label": "M:R3",
+   "layer": "hw",
+   "of": "hw:M:J1",
+   "pages": [
+    1
+   ],
+   "ref": "R3",
+   "status": "ok",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R3\n10kΩ",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:nMON_ALERT",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:3V3",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "10kΩ",
+   "x": 294.0,
+   "y": 359.6
+  },
+  {
+   "board": "M",
+   "cluster": "c6",
+   "dni": false,
+   "id": "hw:M:R4",
+   "kind": "part",
+   "label": "M:R4",
+   "layer": "hw",
+   "pages": [
+    1
+   ],
+   "ref": "R4",
+   "status": "ok",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R4\n680Ω",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:NetD1_1",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:3V3",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "680Ω",
+   "x": 1956.2,
+   "y": 48.1
+  },
+  {
+   "board": "M",
+   "cluster": "c1",
+   "dni": false,
+   "id": "hw:M:R5",
+   "kind": "part",
+   "label": "M:R5",
+   "layer": "hw",
+   "of": "hw:M:U3",
+   "pages": [
+    1
+   ],
+   "ref": "R5",
+   "status": "ok",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R5\n0.005 Ω",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:SENSE_P",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:SENSE_N",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "0.005 Ω",
+   "x": 538.1,
+   "y": 182.8
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:R6",
+   "kind": "part",
+   "label": "M:R6",
+   "layer": "hw",
+   "of": "hw:M:U1",
+   "pages": [
+    1
+   ],
+   "ref": "R6",
+   "status": "ok",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R6\n10kΩ",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:BOARD_REV",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:3V3",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "10kΩ",
+   "x": 65.2,
+   "y": 182.8
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": true,
+   "id": "hw:M:R7",
+   "kind": "part",
+   "label": "M:R7",
+   "layer": "hw",
+   "of": "hw:M:U1",
+   "pages": [
+    1
+   ],
+   "ref": "R7",
+   "status": "info",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R7\n10kΩ",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:BOARD_REV",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "M:GND",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "10kΩ",
+   "x": 179.6,
+   "y": 182.8
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:TP1",
+   "kind": "part",
+   "label": "M:TP1",
+   "layer": "hw",
+   "of": "hw:M:U1",
+   "pages": [
+    1
+   ],
+   "ref": "TP1",
+   "status": "ok",
+   "sym": {
+    "h": 8,
+    "lab": {
+     "a": "start",
+     "t": "TP1",
+     "x": 7.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "M:PC6",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 12.0
+     }
+    ],
+    "w": 8
+   },
+   "sym_kind": "testpoint",
+   "x": 373.9,
+   "y": 159.7
+  },
+  {
+   "board": "M",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:M:U1",
+   "kind": "part",
+   "label": "M:U1",
+   "layer": "hw",
+   "mcu": true,
+   "mpn": "MCU0-QFP32",
+   "pages": [
+    1
+   ],
+   "ref": "U1",
+   "status": "ok",
+   "sub": "MCU0-QFP32",
+   "sym": {
+    "h": 60.0,
+    "lab": {
+     "a": "middle",
+     "t": "U1\nMCU0-QFP32",
+     "x": 0.0,
+     "y": -63.5
+    },
+    "pins": [
+     {
+      "n": "10",
+      "net": "M:BOARD_REV",
+      "nm": "PA0",
+      "s": "l",
+      "x": -48.0,
+      "y": -20.0
+     },
+     {
+      "n": "4",
+      "net": "M:nMON_ALERT",
+      "nm": "PA1",
+      "s": "l",
+      "x": -48.0,
+      "y": -10.0
+     },
+     {
+      "n": "8",
+      "net": "M:AUX_OUT",
+      "nm": "PA2",
+      "s": "l",
+      "x": -48.0,
+      "y": 0.0
+     },
+     {
+      "n": "3",
+      "net": "M:LED_STATUS",
+      "nm": "PA5",
+      "s": "l",
+      "x": -48.0,
+      "y": 10.0
+     },
+     {
+      "n": "7",
+      "net": "M:SWDIO",
+      "nm": "PA13",
+      "s": "l",
+      "x": -48.0,
+      "y": 20.0
+     },
+     {
+      "n": "11",
+      "net": "M:nKEY0",
+      "nm": "PB1",
+      "s": "r",
+      "x": 48.0,
+      "y": -20.0
+     },
+     {
+      "n": "1",
+      "net": "M:BUS0_SCL",
+      "nm": "PB6",
+      "s": "r",
+      "x": 48.0,
+      "y": -10.0
+     },
+     {
+      "n": "2",
+      "net": "M:BUS0_SDA",
+      "nm": "PB7",
+      "s": "r",
+      "x": 48.0,
+      "y": 0.0
+     },
+     {
+      "n": "9",
+      "net": "M:PC6",
+      "nm": "PC6",
+      "s": "r",
+      "x": 48.0,
+      "y": 10.0
+     },
+     {
+      "n": "12",
+      "net": "M:nRST_LINE",
+      "nm": "PF2-NRST",
+      "s": "r",
+      "x": 48.0,
+      "y": 20.0
+     },
+     {
+      "n": "5",
+      "net": "M:3V3",
+      "nm": "VDD",
+      "s": "t",
+      "x": 0.0,
+      "y": -38.0
+     },
+     {
+      "n": "6",
+      "net": "M:GND",
+      "nm": "VSS",
+      "s": "b",
+      "x": 0.0,
+      "y": 38.0
+     }
+    ],
+    "w": 80.0
+   },
+   "sym_kind": "ic",
+   "x": 181.0,
+   "y": 91.0
+  },
+  {
+   "board": "M",
+   "cluster": "c5",
+   "dni": false,
+   "id": "hw:M:U2",
+   "kind": "part",
+   "label": "M:U2",
+   "layer": "hw",
+   "mpn": "LOGIC-INV1",
+   "pages": [
+    1
+   ],
+   "ref": "U2",
+   "status": "info",
+   "sub": "LOGIC-INV1",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "middle",
+     "t": "U2\nLOGIC-INV1",
+     "x": 0.0,
+     "y": -43.5
+    },
+    "pins": [
+     {
+      "n": "2",
+      "net": "M:AUX_OUT",
+      "nm": "A",
+      "s": "l",
+      "x": -28.0,
+      "y": 0.0
+     },
+     {
+      "n": "4",
+      "net": "M:INV_OUT",
+      "nm": "Y",
+      "s": "r",
+      "x": 28.0,
+      "y": 0.0
+     },
+     {
+      "n": "5",
+      "net": "M:3V3",
+      "nm": "VCC",
+      "s": "t",
+      "x": 0.0,
+      "y": -18.0
+     },
+     {
+      "n": "3",
+      "net": "M:GND",
+      "nm": "GND",
+      "s": "b",
+      "x": 0.0,
+      "y": 18.0
+     }
+    ],
+    "w": 40.0
+   },
+   "sym_kind": "ic",
+   "x": 1782.7,
+   "y": 71.0
+  },
+  {
+   "board": "M",
+   "cluster": "c1",
+   "dni": false,
+   "docs": [
+    "sns701@a"
+   ],
+   "id": "hw:M:U3",
+   "kind": "part",
+   "label": "M:U3",
+   "layer": "hw",
+   "mpn": "SNS701QR",
+   "pages": [
+    1
+   ],
+   "ref": "U3",
+   "status": "ok",
+   "sub": "SNS701QR",
+   "sym": {
+    "h": 60.0,
+    "lab": {
+     "a": "middle",
+     "t": "U3\nSNS701QR",
+     "x": 0.0,
+     "y": -63.5
+    },
+    "pins": [
+     {
+      "n": "A1",
+      "net": "M:SENSE_N",
+      "nm": "IN-",
+      "s": "l",
+      "x": -38.0,
+      "y": -20.0
+     },
+     {
+      "n": "A3",
+      "net": "M:SENSE_P",
+      "nm": "IN+",
+      "s": "l",
+      "x": -38.0,
+      "y": -10.0
+     },
+     {
+      "n": "B2",
+      "net": "M:GND",
+      "nm": "A0",
+      "s": "l",
+      "x": -38.0,
+      "y": 0.0
+     },
+     {
+      "n": "B3",
+      "net": "M:BUS0_SDA",
+      "nm": "SDA",
+      "s": "l",
+      "x": -38.0,
+      "y": 10.0
+     },
+     {
+      "n": "C3",
+      "net": "M:BUS0_SCL",
+      "nm": "SCL",
+      "s": "l",
+      "x": -38.0,
+      "y": 20.0
+     },
+     {
+      "n": "C2",
+      "net": "M:nMON_ALERT",
+      "nm": "ALERT",
+      "s": "r",
+      "x": 38.0,
+      "y": -20.0
+     },
+     {
+      "n": "C1",
+      "net": "M:3V3",
+      "nm": "VS",
+      "s": "t",
+      "x": 0.0,
+      "y": -38.0
+     },
+     {
+      "n": "B1",
+      "net": "M:GND",
+      "nm": "GND",
+      "s": "b",
+      "x": 0.0,
+      "y": 38.0
+     }
+    ],
+    "w": 60.0
+   },
+   "sym_kind": "ic",
+   "x": 661.5,
+   "y": 91.0
+  },
+  {
+   "board": "S",
+   "cluster": "c6",
+   "dni": false,
+   "id": "hw:S:C1",
+   "kind": "part",
+   "label": "S:C1",
+   "layer": "hw",
+   "pages": [
+    1
+   ],
+   "ref": "C1",
+   "status": "ok",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "C1\n100nF",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "S:3V3",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "S:GND",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "capacitor",
+   "value": "100nF",
+   "x": 1948.3,
+   "y": 467.1
+  },
+  {
+   "board": "S",
+   "cluster": "c0",
+   "dni": false,
+   "id": "hw:S:J1",
+   "kind": "part",
+   "label": "S:J1",
+   "layer": "hw",
+   "mpn": "CONN-6",
+   "pages": [
+    1
+   ],
+   "ref": "J1",
+   "status": "mis",
+   "sub": "CONN-6",
+   "sym": {
+    "h": 70.0,
+    "lab": {
+     "a": "middle",
+     "t": "J1\nCONN-6",
+     "x": 0.0,
+     "y": -45.8
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "S:GND",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -25.0
+     },
+     {
+      "n": "2",
+      "net": "S:3V3",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -15.0
+     },
+     {
+      "n": "3",
+      "net": "S:GND",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": -5.0
+     },
+     {
+      "n": "4",
+      "net": "S:MON_ALERT",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 5.0
+     },
+     {
+      "n": "5",
+      "net": "S:BUS0_SDA",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 15.0
+     },
+     {
+      "n": "6",
+      "net": "S:BUS0_SCL",
+      "nm": null,
+      "s": "r",
+      "x": 28.0,
+      "y": 25.0
+     }
+    ],
+    "w": 40.0
+   },
+   "sym_kind": "connector",
+   "x": 33.0,
+   "y": 492.3
+  },
+  {
+   "board": "S",
+   "cluster": "c1",
+   "dni": false,
+   "id": "hw:S:R1",
+   "kind": "part",
+   "label": "S:R1",
+   "layer": "hw",
+   "of": "hw:S:U1",
+   "pages": [
+    1
+   ],
+   "ref": "R1",
+   "status": "mis",
+   "sym": {
+    "h": 20.0,
+    "lab": {
+     "a": "start",
+     "t": "R1\n0.005 Ω",
+     "x": 8.0,
+     "y": -1.95
+    },
+    "pins": [
+     {
+      "n": "1",
+      "net": "S:LOAD_P",
+      "nm": null,
+      "s": "t",
+      "x": 0,
+      "y": -18.0
+     },
+     {
+      "n": "2",
+      "net": "S:LOAD_N",
+      "nm": null,
+      "s": "b",
+      "x": 0,
+      "y": 18.0
+     }
+    ],
+    "w": 10
+   },
+   "sym_kind": "resistor",
+   "value": "0.005 Ω",
+   "x": 536.2,
+   "y": 601.8
+  },
+  {
+   "board": "S",
+   "cluster": "c1",
+   "dni": false,
+   "docs": [
+    "sns701@a"
+   ],
+   "id": "hw:S:U1",
+   "kind": "part",
+   "label": "S:U1",
+   "layer": "hw",
+   "mpn": "SNS701QR",
+   "pages": [
+    1
+   ],
+   "ref": "U1",
+   "status": "mis",
+   "sub": "SNS701QR",
+   "sym": {
+    "h": 60.0,
+    "lab": {
+     "a": "middle",
+     "t": "U1\nSNS701QR",
+     "x": 0.0,
+     "y": -63.5
+    },
+    "pins": [
+     {
+      "n": "A1",
+      "net": "S:LOAD_N",
+      "nm": "IN-",
+      "s": "l",
+      "x": -38.0,
+      "y": -20.0
+     },
+     {
+      "n": "A3",
+      "net": "S:LOAD_P",
+      "nm": "IN+",
+      "s": "l",
+      "x": -38.0,
+      "y": -10.0
+     },
+     {
+      "n": "B2",
+      "net": "S:3V3",
+      "nm": "A0",
+      "s": "l",
+      "x": -38.0,
+      "y": 0.0
+     },
+     {
+      "n": "B3",
+      "net": "S:BUS0_SDA",
+      "nm": "SDA",
+      "s": "l",
+      "x": -38.0,
+      "y": 10.0
+     },
+     {
+      "n": "C3",
+      "net": "S:BUS0_SCL",
+      "nm": "SCL",
+      "s": "l",
+      "x": -38.0,
+      "y": 20.0
+     },
+     {
+      "n": "C2",
+      "net": "S:MON_ALERT",
+      "nm": "ALERT",
+      "s": "r",
+      "x": 38.0,
+      "y": -20.0
+     },
+     {
+      "n": "C1",
+      "net": "S:3V3",
+      "nm": "VS",
+      "s": "t",
+      "x": 0.0,
+      "y": -38.0
+     },
+     {
+      "n": "B1",
+      "net": "S:GND",
+      "nm": "GND",
+      "s": "b",
+      "x": 0.0,
+      "y": 38.0
+     }
+    ],
+    "w": 60.0
+   },
+   "sym_kind": "ic",
+   "x": 661.5,
+   "y": 510.0
+  }
+ ],
+ "problems": [
+  {
+   "cls": "cross-board-net-name",
+   "id": "M1",
+   "key": "M:J1-3",
+   "nodes": [
+    "hw:M:J1",
+    "hw:S:J1"
+   ],
+   "rows": [
+    {
+     "cite": null,
+     "says": "mating rule mirror (inferred (join fallback), 5/6 names agree)",
+     "src": "Schematic"
+    }
+   ],
+   "settle": "the engineer confirms the connector mating rule and which spelling is right",
+   "sev": "mis",
+   "title": "M net nMON_ALERT meets S net MON_ALERT at M:J1-3 / S:J1-4"
+  },
+  {
+   "cls": "dt-comment-vs-net",
+   "id": "M2",
+   "key": "PA5",
+   "nodes": [
+    "pin:PA5"
+   ],
+   "rows": [
+    {
+     "cite": {
+      "line": 2,
+      "path": "board.dts",
+      "root": "fw",
+      "t": "code"
+     },
+     "says": "fw:board.dts:2",
+     "src": "Firmware"
+    },
+    {
+     "cite": null,
+     "says": "PA5 net M:LED_STATUS",
+     "src": "Schematic"
+    }
+   ],
+   "settle": "fix the comment or the pin: the netlist is the schematic's own compile",
+   "sev": "mis",
+   "title": "fw:board.dts:2 names LED_WRONG but PA5 is on net M:LED_STATUS"
+  },
+  {
+   "cls": "dt-no-driver",
+   "id": "M3",
+   "key": "PA0",
+   "nodes": [
+    "pin:PA0"
+   ],
+   "rows": [
+    {
+     "cite": {
+      "line": 1,
+      "path": "board.dts",
+      "root": "fw",
+      "t": "code"
+     },
+     "says": "DT pinctrl-0",
+     "src": "Firmware"
+    },
+    {
+     "cite": null,
+     "says": "ELF: no __device_dts_ord for the node",
+     "src": "Build"
+    },
+    {
+     "cite": null,
+     "says": "compile_commands.json: no TU with DT_DRV_COMPAT st_stm32_adc",
+     "src": "Build"
+    }
+   ],
+   "settle": "enable the driver (Kconfig) or disable the node: its pinctrl is never applied",
+   "sev": "mis",
+   "title": "/soc/adc@40012400 (st,stm32-adc) claims PA0 but no device for it is in the ELF and no driver TU is compiled"
+  },
+  {
+   "cls": "dt-value-vs-bom",
+   "id": "M4",
+   "key": "/soc/i2c@40005400/mon-b@45",
+   "nodes": [
+    "hw:S:U1",
+    "hw:S:R1",
+    "code:fw:drivers"
+   ],
+   "rows": [
+    {
+     "cite": {
+      "line": 40,
+      "path": "board.dts",
+      "root": "fw",
+      "t": "code"
+     },
+     "says": "DT",
+     "src": "Firmware"
+    },
+    {
+     "cite": null,
+     "says": "values from the schematic BOM",
+     "src": "Atlas"
+    }
+   ],
+   "settle": "the fitted resistor (BOM, rework) against the DT property",
+   "sev": "mis",
+   "title": "/soc/i2c@40005400/mon-b@45 sense-resistor-milliohm = 0.01 ohm; resistors near S:U1: ['S:R1 0.005 Ω']"
+  }
+ ],
+ "schema": 1,
+ "summary": "19 checks, 59/67 items passed; 8 candidates in 8 classes; 6 expected items folded",
+ "target": "demo",
+ "vocab": {
+  "edges": {
+   "bind": "drives the part",
+   "bus": "on the bus",
+   "call": "calls",
+   "device": "uses the device",
+   "ext": "plugged into",
+   "gpio": "DT gpio property",
+   "mate": "mated connectors",
+   "net": "net from the MCU pin",
+   "pad": "the MCU's package pin",
+   "periph": "driver of the peripheral",
+   "pinctrl": "DT pinctrl function"
+  },
+  "kinds": {
+   "ext": "External system",
+   "module": "Module",
+   "part": "Part",
+   "periph": "Peripheral",
+   "pin": "MCU pin"
+  },
+  "layers": [
+   {
+    "id": "ext",
+    "name": "External"
+   },
+   {
+    "id": "app",
+    "name": "App"
+   },
+   {
+    "id": "mw",
+    "name": "Middleware"
+   },
+   {
+    "id": "drv",
+    "name": "Drivers"
+   },
+   {
+    "id": "soc",
+    "name": "SoC peripherals + pins"
+   },
+   {
+    "id": "hw",
+    "name": "Components + signals"
+   }
+  ],
+  "status": {
+   "info": "expected or informational finding",
+   "mis": "mismatch",
+   "ok": "no finding",
+   "unv": "unverified"
+  },
+  "symbols": {
+   "capacitor": "Capacitor",
+   "connector": "Connector",
+   "crystal": "Crystal",
+   "diode": "Diode",
+   "ferrite": "Ferrite bead",
+   "fuse": "Fuse",
+   "ic": "IC",
+   "inductor": "Inductor",
+   "led": "LED",
+   "nettie": "Net tie",
+   "resistor": "Resistor",
+   "switch": "Switch",
+   "testpoint": "Test point",
+   "transistor": "Transistor",
+   "tvs": "TVS / Zener diode"
+  }
+ },
+ "zephyr": null
+}
