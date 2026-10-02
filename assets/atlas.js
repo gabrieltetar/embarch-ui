@@ -368,7 +368,7 @@
     }
     var hwL = LAYERS.map(function (l) { return l.id; }).indexOf("hw");
     bandEls.forEach(function (be) {
-      be.at = proj(-GUT + 10, be.b.y0 + 40, hwL);
+      be.at = proj(-GUT + 10, (be.b.y0 + be.b.y1) / 2, hwL);
       var a = proj(-GUT, be.b.y0, hwL), b = proj(sceneW + 20, be.b.y0, hwL);
       be.line.setAttribute("x1", fx(a[0])); be.line.setAttribute("y1", fx(a[1]));
       be.line.setAttribute("x2", fx(b[0])); be.line.setAttribute("y2", fx(b[1]));

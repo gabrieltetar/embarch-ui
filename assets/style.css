@@ -1860,7 +1860,7 @@ table.data-table {
 .at-ref2 { font-family: var(--font-mono) !important; font-size: 6.5px; fill: var(--text-tertiary) !important; }
 .at-pn { font-family: var(--font-mono) !important; font-size: 6.5px; fill: var(--text-secondary) !important; }
 .at-nl { font-family: var(--font-mono) !important; font-size: 6.5px; fill: var(--at-net) !important; pointer-events: all !important; cursor: pointer; paint-order: stroke; stroke: var(--bg-canvas); stroke-width: 1.6px; stroke-linejoin: round; }
-.lod-near .at-e:not(.on) { stroke-opacity: .1; }
+.lod-mid .at-e:not(.on), .lod-near .at-e:not(.on) { stroke-opacity: .1; }
 .at-nl.rail { fill: var(--text-tertiary) !important; }
 .at-nl .at-fw { fill: var(--accent-strong) !important; }
 .at-nl.net-on { fill: var(--accent-strong) !important; font-weight: 700; }
