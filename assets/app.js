@@ -137,6 +137,9 @@
   // two differ, and they differ because "dut" rendered in a table reads as
   // a name someone typed rather than as the fixed slot it is.
   function roleLabel(role) {
+    // A bench board holds no role (decision 55): enrolled and flashed by
+    // its probe serial, never addressed by a slot.
+    if (role === "") return "Bench board";
     const found = ROLES.find((r) => r.role === role);
     return found ? found.label : role;
   }
@@ -242,7 +245,7 @@
     const enrolledCount = (snapshot.enrolled || []).length;
     document.getElementById("stat-enrolled-count").textContent = String(enrolledCount);
     document.getElementById("stat-enrolled-sub").textContent =
-      enrolledCount > 0 ? (snapshot.enrolled.map((b) => b.role).join(" · ")) : "none enrolled yet";
+      enrolledCount > 0 ? (snapshot.enrolled.map((b) => b.role || b.name).join(" · ")) : "none enrolled yet";
 
     const probeCount = (snapshot.probes || []).length;
     document.getElementById("stat-probes-count").textContent = String(probeCount);

@@ -1204,8 +1204,27 @@ pub async fn api_validate(State(state): State<AppState>) -> Response {
         }
     }
 
+    // ---- bench boards: enrolled, holding no role (decision 55) ----
+    for board in snapshot.enrolled.iter().filter(|b| b.role.is_empty()) {
+        checks.push(Check::new(
+            &format!("bench:{}", board.probe_serial.as_deref().unwrap_or("")),
+            format!("Bench board '{}'", board.name),
+            "pass",
+            format!(
+                "enrolled on probe {} (chip {}), holding no role: a project flashes it by that \
+                 probe serial, and the flash checks its identity",
+                board.probe_serial.as_deref().unwrap_or("(none)"),
+                board.chip
+            ),
+        ));
+    }
+
     // ---- anything enrolled outside the pair ----
-    for board in snapshot.enrolled.iter().filter(|b| !ROLES.contains(&b.role.as_str())) {
+    for board in snapshot
+        .enrolled
+        .iter()
+        .filter(|b| !b.role.is_empty() && !ROLES.contains(&b.role.as_str()))
+    {
         checks.push(Check::new(
             &format!("foreign:{}", board.role),
             format!("Leftover role '{}'", board.role),
