@@ -259,6 +259,7 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/app.js", get(app_js))
         .route("/atlas.js", get(atlas_js))
         .route("/desk.js", get(desk_js))
+        .route("/api/desk-events", get(desk::events))
         .route("/api/desk/{*rest}", axum::routing::any(desk::proxy))
         .route("/favicon.png", get(favicon_png))
         .route("/favicon.svg", get(favicon_svg))

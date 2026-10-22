@@ -140,6 +140,16 @@ def main():
             settle()
             check("✕ discards the tile and it leaves the card", js("return document.querySelectorAll('.desk-tile').length") == 0)
 
+            desk("POST", "/items", {"title": "Pushed card"}, token)
+            pushed = False
+            for _ in range(70):
+                if "Pushed card" in js("return document.getElementById('desk-cards').textContent"):
+                    pushed = True
+                    break
+                time.sleep(0.2)
+            check("a card made elsewhere arrives by SSE, no click and no client polling", pushed)
+            check("desk.js holds no interval", "setInterval" not in (REPO / "assets" / "desk.js").read_text())
+
             js("document.getElementById('desk-settings-toggle').click(); return true")
             settle()
             check("the Connectors panel opens with its add form", js("return !!document.getElementById('desk-conn-token')"))

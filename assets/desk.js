@@ -24,7 +24,6 @@
   var states = {};           // item id -> [{id, name, type}], loaded on first open of the dropdown
   var targets = null;        // Harvest projects/tasks, loaded when a tile opens
   var openTileId = null;
-  var POLL_MS = 15000;
 
   // ---------------------------------------------------------------- helpers
 
@@ -50,10 +49,6 @@
         return j;
       });
     });
-  }
-
-  function isActive() {
-    return panel.classList.contains("active");
   }
 
   function hours(h) {
@@ -557,12 +552,23 @@
   backdropEl.addEventListener("click", closeDialog);
   document.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && openTileId) closeDialog(); });
 
-  // Poll only while the tab is on screen; a re-render never runs under an open
-  // editor — the dialog and reply boxes keep what the user is typing.
-  function tick() {
-    if (isActive() && !dialogEl.contains(document.activeElement) && !slackEl.contains(document.activeElement) && !settingsEl.contains(document.activeElement)) load();
+  // Live by SSE, like every other tab (decision 6): the server asks the desk
+  // for its view and pushes it. A pushed view never re-renders under an open
+  // editor — the dialog, a reply box and the connector form keep what the user
+  // is typing until they finish.
+  function editing() {
+    return dialogEl.contains(document.activeElement) || slackEl.contains(document.activeElement) ||
+      settingsEl.contains(document.activeElement);
   }
-  setInterval(tick, POLL_MS);
+  if (window.EventSource) {
+    var source = new EventSource("/api/desk-events");
+    source.addEventListener("view", function (ev) {
+      try { view = JSON.parse(ev.data); } catch (_) { return; }
+      showError(null);
+      if (!editing()) render();
+    });
+    source.addEventListener("desk-error", function (ev) { showError(ev.data); });
+  }
   document.querySelectorAll('.nav-item[data-tab="desk"]').forEach(function (el) { el.addEventListener("click", load); });
   load();
 })();
