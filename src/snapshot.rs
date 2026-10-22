@@ -1,4 +1,4 @@
-//! The one data shape both the Dashboard and Topology tabs render from —
+//! The one data shape the Topology tab renders from —
 //! fetched entirely through `embarch-core-client` (decision 5's amendment:
 //! no in-process hardware access at all). A
 //! background task (`main.rs`) polls Core on an interval and publishes a

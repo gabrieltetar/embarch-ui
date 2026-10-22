@@ -12,6 +12,7 @@
 
 mod atlas;
 mod config;
+mod desk;
 mod firmware_build;
 mod live_study;
 mod logs;
@@ -79,6 +80,7 @@ const APP_JS: &str = include_str!("../assets/app.js");
 /// The Atlas tab's map, a file of its own: `app.js` is already the shell plus
 /// five tabs, and the map is the one view that is mostly drawing code.
 const ATLAS_JS: &str = include_str!("../assets/atlas.js");
+const DESK_JS: &str = include_str!("../assets/desk.js");
 /// The EmbArch mark, served as the browser tab icon. 64 px: a tab renders it
 /// at 16 CSS px, which is 32 physical on a 2x display, and 64 covers 4x. The
 /// GIMP master and the full-size export live beside it in `assets/brand/`.
@@ -256,6 +258,8 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/style.css", get(style_css))
         .route("/app.js", get(app_js))
         .route("/atlas.js", get(atlas_js))
+        .route("/desk.js", get(desk_js))
+        .route("/api/desk/{*rest}", axum::routing::any(desk::proxy))
         .route("/favicon.png", get(favicon_png))
         .route("/favicon.svg", get(favicon_svg))
         .route("/fonts/{file}", get(font))
@@ -515,6 +519,10 @@ async fn style_css(headers: header::HeaderMap) -> Response {
 
 async fn app_js(headers: header::HeaderMap) -> Response {
     revalidating_asset(&headers, "text/javascript; charset=utf-8", APP_JS.as_bytes())
+}
+
+async fn desk_js(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/javascript; charset=utf-8", DESK_JS.as_bytes())
 }
 
 async fn atlas_js(headers: header::HeaderMap) -> Response {

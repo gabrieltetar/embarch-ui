@@ -1,0 +1,568 @@
+// embarch-ui Desk tab: one card per work item with recent activity, its time
+// tile inside it (embarch-desk-proposal.md). Everything comes from
+// embarch-desk through this server's /api/desk proxy; nothing is computed here
+// that the desk already knows. Zero-build (decision 2): plain JS, no library.
+//
+// Two kinds of write, and the tab keeps them apart: a status move (an issue's
+// state, a tile's ✓, ✕) happens on the click; anything carrying prose (a
+// tile's note, a Slack reply) is shown in an editable box first and is sent
+// only as the user left it.
+
+(function () {
+  "use strict";
+
+  var panel = document.querySelector('.tab-panel[data-tab="desk"]');
+  if (!panel) return;
+  var cardsEl = document.getElementById("desk-cards");
+  var errorEl = document.getElementById("desk-error");
+  var slackEl = document.getElementById("desk-slack");
+  var settingsEl = document.getElementById("desk-settings");
+  var dialogEl = document.getElementById("desk-dialog");
+  var backdropEl = document.getElementById("desk-dialog-backdrop");
+
+  var view = null;
+  var states = {};           // item id -> [{id, name, type}], loaded on first open of the dropdown
+  var targets = null;        // Harvest projects/tasks, loaded when a tile opens
+  var openTileId = null;
+  var POLL_MS = 15000;
+
+  // ---------------------------------------------------------------- helpers
+
+  function esc(v) {
+    return String(v == null ? "" : v).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+
+  function api(method, path, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch("/api/desk" + path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) {
+          var e = new Error(j.error || ("HTTP " + r.status));
+          e.status = r.status;
+          throw e;
+        }
+        return j;
+      });
+    });
+  }
+
+  function isActive() {
+    return panel.classList.contains("active");
+  }
+
+  function hours(h) {
+    var n = Number(h) || 0;
+    var hh = Math.floor(n);
+    var mm = Math.round((n - hh) * 60);
+    if (mm === 60) { hh += 1; mm = 0; }
+    return hh + "h" + (mm < 10 ? "0" : "") + mm;
+  }
+
+  function dayLabel(date) {
+    if (view && date === view.today) return "Today";
+    var d = new Date(date + "T12:00:00");
+    return isNaN(d) ? date : d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  function ago(ms) {
+    var s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 90) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    return Math.round(s / 86400) + " d ago";
+  }
+
+  function showError(msg) {
+    if (!msg) { errorEl.hidden = true; return; }
+    errorEl.hidden = false;
+    errorEl.innerHTML = '<div class="card-title" style="color:var(--danger);">Desk</div><p class="placeholder-note">' + esc(msg) + "</p>";
+  }
+
+  function flash(msg) {
+    showError(msg);
+    setTimeout(function () { if (errorEl.textContent.indexOf(msg) >= 0) showError(null); }, 8000);
+  }
+
+  // ---------------------------------------------------------------- render
+
+  function ciBadge(ci) {
+    var cls = { success: "badge-success", failure: "badge-danger", pending: "badge-warning" }[ci] || "badge-neutral";
+    var label = { success: "CI passed", failure: "CI failed", pending: "CI running" }[ci] || "no CI";
+    return '<span class="badge ' + cls + '">' + label + "</span>";
+  }
+
+  function prsHtml(prs) {
+    if (!prs || !prs.length) return "";
+    return '<div class="desk-prs">' + prs.map(function (p) {
+      var st = p.state === "merged" ? "merged" : (p.draft ? "draft" : p.state);
+      return '<div class="desk-pr"><a href="' + esc(p.url) + '" target="_blank" rel="noopener">' +
+        esc(p.repo.split("/").pop()) + "#" + esc(p.number) + "</a> " +
+        '<span class="desk-pr-title">' + esc(p.title) + "</span> " +
+        '<span class="badge badge-neutral">' + esc(st) + "</span> " + ciBadge(p.ci) + "</div>";
+    }).join("") + "</div>";
+  }
+
+  function benchHtml(bench) {
+    if (!bench || !bench.length) return "";
+    return bench.map(function (b) {
+      return esc(b.tool.replace(/_/g, " ")) + " ×" + b.count + (b.failed ? ' <span style="color:var(--danger);">(' + b.failed + " failed)</span>" : "");
+    }).join(" · ");
+  }
+
+  function tileHtml(t) {
+    var lines = (t.lines || []).length;
+    var ready = t.harvest && t.note;
+    return '<div class="desk-tile' + (t.date === view.today ? " today" : "") + '" data-tile="' + esc(t.id) + '">' +
+      '<button class="desk-tile-body" type="button" data-open-tile="' + esc(t.id) + '" title="Open: lines, note, Harvest project">' +
+      '<span class="desk-tile-date">' + esc(dayLabel(t.date)) + "</span>" +
+      '<span class="desk-tile-hours">' + hours(t.hours) + "</span>" +
+      '<span class="desk-tile-sub">' + lines + " line" + (lines === 1 ? "" : "s") + (ready ? " · ready" : "") + "</span>" +
+      "</button>" +
+      '<div class="desk-tile-actions">' +
+      '<button class="desk-ok" type="button" data-approve="' + esc(t.id) + '" title="Add to Harvest">✓</button>' +
+      '<button class="desk-no" type="button" data-discard="' + esc(t.id) + '" title="Discard">✕</button>' +
+      "</div></div>";
+  }
+
+  function cardHtml(c) {
+    var issue = c.issue;
+    var head = issue
+      ? '<a class="desk-key" href="' + esc(issue.url) + '" target="_blank" rel="noopener">' + esc(issue.key) + "</a>" +
+        '<span class="chip desk-account" title="Linear connector">' + esc(issue.account) + "</span>"
+      : '<span class="desk-key desk-key-none">no issue</span>';
+    var status = issue
+      ? '<select class="desk-status" data-status="' + esc(c.id) + '" title="Move the issue">' +
+        (states[c.id] || [{ id: issue.state_id, name: issue.state_name }]).map(function (s) {
+          return '<option value="' + esc(s.id) + '"' + (s.id === issue.state_id ? " selected" : "") + ">" + esc(s.name) + "</option>";
+        }).join("") + "</select>"
+      : "";
+    var s = c.sessions || {};
+    var meta = [];
+    if (s.total) meta.push(s.total + " session" + (s.total === 1 ? "" : "s") + (s.live ? " (" + s.live + " live)" : ""));
+    var bench = benchHtml(c.bench);
+    if (bench) meta.push(bench);
+    meta.push("active " + ago(c.last_activity_ms));
+    var tiles = (c.tiles || []).map(tileHtml).join("") ||
+      '<div class="desk-tile-empty">No time yet today. Open it in VS Code and the session\'s time lands here.</div>';
+    return '<div class="card desk-card' + (c.pinned ? " pinned" : "") + '" data-card="' + esc(c.id) + '">' +
+      '<div class="desk-card-head"><div class="desk-card-id">' + head + "</div>" + status + "</div>" +
+      '<div class="desk-card-title">' + esc(c.title) + "</div>" +
+      prsHtml(c.prs) +
+      '<div class="desk-card-meta">' + meta.join(" · ") + "</div>" +
+      '<div class="desk-tiles">' + tiles + "</div>" +
+      '<div class="desk-card-actions">' +
+      '<button class="btn btn-tiny" type="button" data-launch="' + esc(c.id) + '" title="' + esc(c.repo_path || "pick the repo folder first") + '">Open in VS Code</button>' +
+      (issue ? "" : '<button class="btn btn-tiny" type="button" data-link="' + esc(c.id) + '">Link issue</button>') +
+      '<button class="btn btn-tiny" type="button" data-folder="' + esc(c.id) + '">' + (c.repo_path ? "Repo…" : "Pick repo…") + "</button>" +
+      '<button class="btn btn-tiny" type="button" data-pin="' + esc(c.id) + '" data-value="' + (!c.pinned) + '">' + (c.pinned ? "Unpin" : "Pin") + "</button>" +
+      '<button class="btn btn-tiny" type="button" data-archive="' + esc(c.id) + '">Archive</button>' +
+      "</div></div>";
+  }
+
+  function renderSlackBar() {
+    var sl = view.slack || {};
+    var parts = [];
+    parts.push((sl.mentions || 0) + " mention" + (sl.mentions === 1 ? "" : "s"));
+    parts.push((sl.dms || 0) + " DM" + (sl.dms === 1 ? "" : "s"));
+    if (sl.unread) parts.push(sl.unread + " unread");
+    document.getElementById("desk-slack-counts").textContent = "Slack · " + parts.join(" · ");
+    var w = document.getElementById("desk-waiting");
+    if (view.sessions_waiting) {
+      w.hidden = false;
+      w.textContent = view.sessions_waiting + " session" + (view.sessions_waiting === 1 ? "" : "s") + " waiting for a work item";
+    } else {
+      w.hidden = true;
+    }
+  }
+
+  function renderSlack() {
+    if (slackEl.hidden) return;
+    var sl = view.slack || {};
+    var items = sl.items || [];
+    var errs = (sl.errors || []).map(function (e) { return '<p class="placeholder-note" style="color:var(--danger);">' + esc(e) + "</p>"; }).join("");
+    if (!items.length) {
+      slackEl.innerHTML = '<div class="card-title">Slack</div>' + errs +
+        '<p class="placeholder-note">' + ((view.connectors || []).some(function (c) { return c.kind === "slack"; }) ? "Nothing in the last three days." : "No Slack workspace connected — add one under Connectors.") + "</p>";
+      return;
+    }
+    slackEl.innerHTML = '<div class="card-title">Slack — mentions and DMs, last three days</div>' + errs +
+      items.map(function (m, i) {
+        var when = new Date(parseFloat(m.ts) * 1000);
+        return '<div class="desk-msg' + (m.unread ? " unread" : "") + '">' +
+          '<div class="desk-msg-head"><span class="desk-msg-from">' + esc(m.user_name) + "</span>" +
+          '<span class="desk-msg-where">' + (m.kind === "dm" ? "DM" : "#" + esc(m.channel_name)) + " · " + esc(m.account) + " · " + esc(when.toLocaleString()) + "</span>" +
+          '<span class="desk-msg-acts"><a href="' + esc(m.permalink) + '" target="_blank" rel="noopener">Open</a> ' +
+          '<button class="btn btn-tiny" type="button" data-draft="' + i + '">Draft reply</button></span></div>' +
+          '<div class="desk-msg-text">' + esc(m.text) + "</div>" +
+          '<div class="desk-reply" data-reply-box="' + i + '" hidden></div></div>';
+      }).join("");
+  }
+
+  function renderSettings() {
+    if (settingsEl.hidden) return;
+    var rows = (view.connectors || []).map(function (c) {
+      return '<tr><td>' + esc(c.kind) + "</td><td class=\"mono\">" + esc(c.label) + "</td><td>" +
+        (c.ok ? '<span class="badge badge-success">ok</span> ' : '<span class="badge badge-danger">failing</span> ') +
+        '<span class="desk-detail">' + esc(c.detail) + "</span></td><td>" +
+        (c.label === "gh login" ? '<span class="desk-detail">your gh login</span>' :
+          '<button class="btn-icon-danger btn" type="button" data-disconnect="' + esc(c.kind) + "/" + esc(c.label) + '">Remove</button>') +
+        "</td></tr>";
+    }).join("") || '<tr><td colspan="4" class="placeholder-note">No connectors yet.</td></tr>';
+    settingsEl.innerHTML =
+      '<div class="card-title">Connectors</div>' +
+      '<table class="data-table"><thead><tr><th>Service</th><th>Account</th><th>Status</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>" +
+      '<div class="desk-form">' +
+      '<select id="desk-conn-kind" class="desk-input"><option value="linear">Linear</option><option value="harvest">Harvest</option><option value="github">GitHub</option><option value="slack">Slack</option></select>' +
+      '<input id="desk-conn-label" class="desk-input" type="text" placeholder="Name, e.g. the workspace" />' +
+      '<input id="desk-conn-token" class="desk-input" type="password" placeholder="Token" autocomplete="off" />' +
+      '<button class="btn btn-primary" id="desk-conn-add" type="button">Connect</button></div>' +
+      '<p class="desk-help">Linear: Settings → Security &amp; access → Personal API keys, one per workspace. ' +
+      "Harvest: id.getharvest.com/developers → Create new personal access token. " +
+      "GitHub: nothing to do if you are logged in to <span class=\"mono\">gh</span>. " +
+      "Slack: create an app in your workspace from embarch-desk's <span class=\"mono\">slack-manifest.json</span>, install it, and paste its User OAuth Token (<span class=\"mono\">xoxp-…</span>). " +
+      "Tokens stay in <span class=\"mono\">~/.config/embarch-desk/connectors.toml</span>, owner-only.</p>" +
+      '<div class="card-title" style="margin-top:18px;">Never tracked</div>' +
+      '<p class="desk-help">Sessions under these folders make no time and are never asked for a work item — open-source work, the agent fleet.</p>' +
+      '<textarea id="desk-ignore" class="desk-input desk-textarea" rows="3" spellcheck="false">' + esc((view.ignore || []).join("\n")) + "</textarea>" +
+      '<div><button class="btn" id="desk-ignore-save" type="button">Save</button></div>';
+  }
+
+  function render() {
+    if (!view) return;
+    renderSlackBar();
+    var cards = view.cards || [];
+    cardsEl.innerHTML = cards.length ? cards.map(cardHtml).join("") :
+      '<div class="card desk-empty"><div class="card-title">No work items yet</div>' +
+      '<p class="placeholder-note">Add a card from a Linear issue key above, or start a Claude Code session with the embarch-desk plugin and answer which work item it is. ' +
+      "Connect Linear, Harvest and Slack under Connectors.</p></div>";
+    renderSlack();
+    renderSettings();
+    if (openTileId) renderDialog();
+  }
+
+  function load() {
+    return api("GET", "/view").then(function (v) {
+      view = v;
+      showError(null);
+      render();
+    }).catch(function (e) {
+      showError(e.status === 503 ? e.message : "Could not reach embarch-desk: " + e.message);
+    });
+  }
+
+  // ---------------------------------------------------------------- the tile dialog
+
+  function findTile(id) {
+    var out = null;
+    (view.cards || []).forEach(function (c) {
+      (c.tiles || []).forEach(function (t) { if (t.id === id) out = { card: c, tile: t }; });
+    });
+    return out;
+  }
+
+  function targetLabel(t) {
+    return (t.client_name ? t.client_name + " / " : "") + t.project_name + " / " + t.task_name;
+  }
+
+  function renderDialog() {
+    var found = findTile(openTileId);
+    if (!found) { closeDialog(); return; }
+    var t = found.tile, c = found.card;
+    var h = t.harvest;
+    var options = '<option value="">— pick, or Polish to have Claude guess —</option>';
+    if (targets) {
+      options += targets.map(function (x) {
+        var v = x.account_id + ":" + x.project_id + ":" + x.task_id;
+        var sel = h && h.account_id === x.account_id && h.project_id === x.project_id && h.task_id === x.task_id;
+        return '<option value="' + v + '"' + (sel ? " selected" : "") + ">" + esc(targetLabel(x)) + "</option>";
+      }).join("");
+    } else if (h) {
+      options += '<option value="' + h.account_id + ":" + h.project_id + ":" + h.task_id + '" selected>' + esc(h.label) + "</option>";
+    }
+    dialogEl.innerHTML =
+      '<div class="card-title"><span>' + esc(c.issue ? c.issue.key + " · " : "") + esc(c.title) + " — " + esc(dayLabel(t.date)) + '</span>' +
+      '<button class="btn btn-tiny" type="button" id="desk-dialog-close">Close</button></div>' +
+      '<div class="desk-dialog-grid">' +
+      "<div><div class=\"desk-label\">Lines</div><ul class=\"desk-lines\">" +
+      ((t.lines || []).map(function (l) {
+        return '<li><span class="desk-line-src">' + esc(l.source) + "</span> " + esc(l.text) + "</li>";
+      }).join("") || '<li class="placeholder-note">No lines yet. Commits land here by themselves; sessions add milestones.</li>') +
+      '</ul><div class="desk-form"><input id="desk-line" class="desk-input" type="text" placeholder="Add a line yourself" />' +
+      '<button class="btn btn-tiny" type="button" id="desk-line-add">Add</button></div></div>' +
+      "<div>" +
+      '<div class="desk-label">Hours <span class="desk-detail">(captured ' + hours(t.computed_hours) + ")</span></div>" +
+      '<input id="desk-hours" class="desk-input" type="number" min="0" max="24" step="0.25" value="' + esc(t.hours) + '" />' +
+      '<div class="desk-label">Harvest project and task</div>' +
+      '<select id="desk-target" class="desk-input">' + options + "</select>" +
+      '<div class="desk-label">Note</div>' +
+      '<textarea id="desk-note" class="desk-input desk-textarea" rows="4" placeholder="Polish drafts this from the lines">' + esc(t.note || "") + "</textarea>" +
+      "</div></div>" +
+      '<div class="desk-dialog-actions">' +
+      '<button class="btn" type="button" id="desk-polish">Polish with Claude</button>' +
+      '<span class="desk-detail" id="desk-dialog-status"></span>' +
+      '<span style="flex:1"></span>' +
+      '<button class="btn" type="button" id="desk-save">Save</button>' +
+      '<button class="btn desk-no-big" type="button" id="desk-discard-big">✕ Discard</button>' +
+      '<button class="btn btn-primary" type="button" id="desk-approve-big">✓ Add to Harvest</button>' +
+      "</div>";
+  }
+
+  function openDialog(id) {
+    openTileId = id;
+    dialogEl.hidden = false;
+    backdropEl.hidden = false;
+    renderDialog();
+    if (!targets) {
+      api("GET", "/harvest/targets").then(function (r) {
+        targets = r.targets || [];
+        if (openTileId === id) renderDialog();
+      }).catch(function (e) { setDialogStatus(e.message); });
+    }
+  }
+
+  function closeDialog() {
+    openTileId = null;
+    dialogEl.hidden = true;
+    backdropEl.hidden = true;
+  }
+
+  function setDialogStatus(msg) {
+    var el = document.getElementById("desk-dialog-status");
+    if (el) el.textContent = msg || "";
+  }
+
+  function dialogPatch() {
+    var body = {};
+    var note = document.getElementById("desk-note");
+    var hoursEl = document.getElementById("desk-hours");
+    var target = document.getElementById("desk-target");
+    if (note) body.note = note.value;
+    if (hoursEl && hoursEl.value !== "") body.hours = Number(hoursEl.value);
+    if (target && target.value) {
+      var p = target.value.split(":").map(Number);
+      var opt = target.options[target.selectedIndex];
+      body.harvest = { account_id: p[0], project_id: p[1], task_id: p[2], label: opt ? opt.textContent : "" };
+    }
+    return api("PATCH", "/tiles/" + encodeURIComponent(openTileId), body);
+  }
+
+  // ---------------------------------------------------------------- actions
+
+  function approve(id, fromDialog) {
+    var found = findTile(id);
+    if (!found) return;
+    // A tile nobody has looked at has no note and no project: open it rather
+    // than send a guess the user never saw.
+    if (!fromDialog && !(found.tile.harvest && found.tile.note)) { openDialog(id); return; }
+    var step = fromDialog ? dialogPatch() : Promise.resolve();
+    step.then(function () {
+      return api("POST", "/tiles/" + encodeURIComponent(id) + "/approve");
+    }).then(function (r) {
+      closeDialog();
+      flash("Added to Harvest: " + hours(r.hours) + ".");
+      return load();
+    }).catch(function (e) {
+      if (fromDialog) setDialogStatus(e.message); else flash(e.message);
+    });
+  }
+
+  function discard(id) {
+    if (!window.confirm("Discard this tile? Its time will not reach Harvest.")) return;
+    api("POST", "/tiles/" + encodeURIComponent(id) + "/discard").then(function () {
+      closeDialog();
+      return load();
+    }).catch(function (e) { flash(e.message); });
+  }
+
+  function pickFolder(itemId) {
+    var c = (view.cards || []).filter(function (x) { return x.id === itemId; })[0];
+    var p = window.prompt("The work item's repo folder on this machine (absolute path):", (c && c.repo_path) || "");
+    if (!p) return Promise.reject(new Error("no folder picked"));
+    return api("POST", "/items/" + encodeURIComponent(itemId) + "/link", { repo_path: p.trim() });
+  }
+
+  function launch(itemId) {
+    api("POST", "/items/" + encodeURIComponent(itemId) + "/launch").catch(function (e) {
+      if (e.status !== 409) throw e;
+      return pickFolder(itemId).then(function () {
+        return api("POST", "/items/" + encodeURIComponent(itemId) + "/launch");
+      });
+    }).then(function (r) {
+      // The folder first; the Claude panel opens in whichever window has
+      // focus, so give the new window time to take it.
+      window.location.href = r.folder_uri;
+      setTimeout(function () { window.location.href = r.claude_uri; }, 4000);
+      flash("Opening " + r.repo + " — the first Claude Code session there in the next 10 minutes lands on this card.");
+      load();
+    }).catch(function (e) { if (e.message !== "no folder picked") flash(e.message); });
+  }
+
+  panel.addEventListener("click", function (ev) {
+    var t = ev.target.closest("button, a");
+    if (!t || !panel.contains(t)) return;
+    var d = t.dataset;
+    if (d.openTile) { openDialog(d.openTile); return; }
+    if (d.approve) { approve(d.approve, false); return; }
+    if (d.discard) { discard(d.discard); return; }
+    if (d.launch) { launch(d.launch); return; }
+    if (d.folder) { pickFolder(d.folder).then(load).catch(function (e) { if (e.message !== "no folder picked") flash(e.message); }); return; }
+    if (d.pin) {
+      api("POST", "/items/" + encodeURIComponent(d.pin) + "/pin", { value: d.value === "true" }).then(load).catch(function (e) { flash(e.message); });
+      return;
+    }
+    if (d.archive) {
+      if (!window.confirm("Archive this card? It leaves the desk; open tiles on it stay unsent.")) return;
+      api("POST", "/items/" + encodeURIComponent(d.archive) + "/archive", { value: true }).then(load).catch(function (e) { flash(e.message); });
+      return;
+    }
+    if (d.link) {
+      var key = window.prompt("Linear issue key for this card (e.g. ABC-123):");
+      if (!key) return;
+      api("POST", "/items/" + encodeURIComponent(d.link) + "/link", { issue_key: key.trim() }).then(load).catch(function (e) { flash(e.message); });
+      return;
+    }
+    if (d.disconnect) {
+      var parts = d.disconnect.split("/");
+      if (!window.confirm("Remove the " + parts[0] + " connector " + parts.slice(1).join("/") + "?")) return;
+      api("DELETE", "/connectors/" + encodeURIComponent(parts[0]) + "/" + encodeURIComponent(parts.slice(1).join("/"))).then(load).catch(function (e) { flash(e.message); });
+      return;
+    }
+    if (d.draft !== undefined) {
+      var m = view.slack.items[Number(d.draft)];
+      var box = slackEl.querySelector('[data-reply-box="' + d.draft + '"]');
+      box.hidden = false;
+      box.innerHTML = '<p class="placeholder-note">Claude is drafting…</p>';
+      api("POST", "/slack/draft", { account: m.account, channel: m.channel, ts: m.ts }).then(function (r) {
+        box.innerHTML = '<textarea class="desk-input desk-textarea" rows="3">' + esc(r.draft) + "</textarea>" +
+          '<div class="desk-form"><button class="btn btn-primary btn-tiny" type="button" data-send="' + d.draft + '" data-thread="' + esc(r.thread_ts) + '">Send as me</button>' +
+          '<button class="btn btn-tiny" type="button" data-cancel-reply="' + d.draft + '">Cancel</button></div>';
+      }).catch(function (e) { box.innerHTML = '<p class="placeholder-note" style="color:var(--danger);">' + esc(e.message) + "</p>"; });
+      return;
+    }
+    if (d.send !== undefined) {
+      var msg = view.slack.items[Number(d.send)];
+      var b2 = slackEl.querySelector('[data-reply-box="' + d.send + '"]');
+      var text = b2.querySelector("textarea").value;
+      api("POST", "/slack/reply", { account: msg.account, channel: msg.channel, thread_ts: d.thread || null, text: text }).then(function () {
+        b2.innerHTML = '<p class="placeholder-note" style="color:var(--success);">Sent.</p>';
+      }).catch(function (e) { flash(e.message); });
+      return;
+    }
+    if (d.cancelReply !== undefined) {
+      var b3 = slackEl.querySelector('[data-reply-box="' + d.cancelReply + '"]');
+      b3.hidden = true;
+      b3.innerHTML = "";
+      return;
+    }
+    switch (t.id) {
+      case "desk-slack-toggle":
+        slackEl.hidden = !slackEl.hidden;
+        t.setAttribute("aria-expanded", String(!slackEl.hidden));
+        t.querySelector(".desk-caret").textContent = slackEl.hidden ? "▸" : "▾";
+        renderSlack();
+        break;
+      case "desk-settings-toggle":
+        settingsEl.hidden = !settingsEl.hidden;
+        renderSettings();
+        break;
+      case "desk-refresh":
+        t.disabled = true;
+        api("POST", "/sync").then(load).catch(function (e) { flash(e.message); }).then(function () { t.disabled = false; });
+        break;
+      case "desk-add": {
+        var input = document.getElementById("desk-new");
+        var v = input.value.trim();
+        if (!v) break;
+        var body = /^[A-Za-z]{1,10}-\d+$/.test(v) ? { issue_key: v } : { title: v };
+        api("POST", "/items", body).then(function () { input.value = ""; return load(); }).catch(function (e) { flash(e.message); });
+        break;
+      }
+      case "desk-conn-add": {
+        var kind = document.getElementById("desk-conn-kind").value;
+        var label = document.getElementById("desk-conn-label").value.trim();
+        var token = document.getElementById("desk-conn-token").value.trim();
+        if (!label || !token) { flash("A connector needs a name and a token."); break; }
+        t.disabled = true;
+        api("POST", "/connectors", { kind: kind, label: label, token: token }).then(function (r) {
+          flash("Connected " + kind + " / " + label + ": " + (r.detail || "ok"));
+          return api("POST", "/sync");
+        }).then(load).catch(function (e) { flash(e.message); }).then(function () { t.disabled = false; });
+        break;
+      }
+      case "desk-ignore-save": {
+        var paths = document.getElementById("desk-ignore").value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+        api("PUT", "/ignore", { paths: paths }).then(load).catch(function (e) { flash(e.message); });
+        break;
+      }
+    }
+  });
+
+  panel.addEventListener("focusin", function (ev) {
+    var sel = ev.target.closest("select[data-status]");
+    if (!sel || states[sel.dataset.status]) return;
+    var id = sel.dataset.status;
+    api("GET", "/items/" + encodeURIComponent(id) + "/states").then(function (r) {
+      states[id] = r.states || [];
+      var cur = sel.value;
+      sel.innerHTML = states[id].map(function (s) {
+        return '<option value="' + esc(s.id) + '"' + (s.id === cur ? " selected" : "") + ">" + esc(s.name) + "</option>";
+      }).join("");
+    }).catch(function (e) { flash(e.message); });
+  });
+
+  panel.addEventListener("change", function (ev) {
+    var sel = ev.target.closest("select[data-status]");
+    if (!sel) return;
+    api("POST", "/items/" + encodeURIComponent(sel.dataset.status) + "/status", { state_id: sel.value })
+      .then(load).catch(function (e) { flash(e.message); load(); });
+  });
+
+  dialogEl.addEventListener("click", function (ev) {
+    var t = ev.target.closest("button");
+    if (!t) return;
+    var id = openTileId;
+    switch (t.id) {
+      case "desk-dialog-close": closeDialog(); break;
+      case "desk-save":
+        dialogPatch().then(function () { setDialogStatus("Saved."); return load(); }).catch(function (e) { setDialogStatus(e.message); });
+        break;
+      case "desk-polish":
+        t.disabled = true;
+        setDialogStatus("Claude is drafting the note and picking a project…");
+        dialogPatch().then(function () {
+          return api("POST", "/tiles/" + encodeURIComponent(id) + "/polish");
+        }).then(function () { return load(); }).then(function () { setDialogStatus("Drafted — edit it before you send."); })
+          .catch(function (e) { setDialogStatus(e.message); }).then(function () { t.disabled = false; });
+        break;
+      case "desk-line-add": {
+        var inp = document.getElementById("desk-line");
+        if (!inp.value.trim()) break;
+        var text = inp.value.trim();
+        dialogPatch().then(function () {
+          return api("POST", "/tiles/" + encodeURIComponent(id) + "/line", { text: text });
+        }).then(load).catch(function (e) { setDialogStatus(e.message); });
+        break;
+      }
+      case "desk-approve-big": approve(id, true); break;
+      case "desk-discard-big": discard(id); break;
+    }
+  });
+
+  backdropEl.addEventListener("click", closeDialog);
+  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && openTileId) closeDialog(); });
+
+  // Poll only while the tab is on screen; a re-render never runs under an open
+  // editor — the dialog and reply boxes keep what the user is typing.
+  function tick() {
+    if (isActive() && !dialogEl.contains(document.activeElement) && !slackEl.contains(document.activeElement) && !settingsEl.contains(document.activeElement)) load();
+  }
+  setInterval(tick, POLL_MS);
+  document.querySelectorAll('.nav-item[data-tab="desk"]').forEach(function (el) { el.addEventListener("click", load); });
+  load();
+})();

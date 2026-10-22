@@ -1950,3 +1950,75 @@ table.data-table {
 .at-fn-list { display: flex; flex-wrap: wrap; gap: 4px; }
 .at-fn { font-family: var(--font-mono); font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg-surface-2); color: var(--text-primary); cursor: pointer; }
 .at-fn.static { color: var(--text-tertiary); }
+
+/* ---------------------------------------------------------------- Desk
+   One card per work item, its day tiles inside it (embarch-desk-proposal.md).
+   A tile is a small square with ✓ and ✕ along its bottom edge: the owner's
+   own picture of it, kept literally. */
+.desk-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.desk-bar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.desk-slack-bar { display: inline-flex; align-items: center; gap: 8px; font: 600 12.5px var(--font-ui); color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.desk-slack-bar:hover { border-color: var(--accent); }
+.desk-caret { color: var(--text-tertiary); }
+.desk-input { font: 12.5px var(--font-ui); color: var(--text-primary); background: var(--bg-surface-2); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.desk-input:focus { outline: none; border-color: var(--accent); }
+#desk-new { width: 290px; }
+.desk-textarea { width: 100%; box-sizing: border-box; resize: vertical; font-family: var(--font-ui); line-height: 1.45; }
+.desk-error, .desk-panel { margin-bottom: 16px; }
+.desk-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; align-items: start; }
+.desk-card { display: flex; flex-direction: column; gap: 10px; }
+.desk-card.pinned { border-color: var(--accent); }
+.desk-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.desk-card-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.desk-key { font: 600 12.5px var(--font-mono); color: var(--accent-strong, var(--accent)); text-decoration: none; }
+.desk-key:hover { text-decoration: underline; }
+.desk-key-none { color: var(--text-tertiary); font-weight: 500; }
+.desk-account { font-size: 10.5px; padding: 2px 7px; cursor: default; }
+.desk-status { font: 600 11.5px var(--font-ui); color: var(--text-primary); background: var(--bg-surface-2); border: 1px solid var(--border-strong); border-radius: 7px; padding: 4px 6px; max-width: 160px; }
+.desk-card-title { font-size: 14px; font-weight: 600; color: var(--text-primary); line-height: 1.35; }
+.desk-card-meta { font-size: 11.5px; color: var(--text-tertiary); }
+.desk-prs { display: flex; flex-direction: column; gap: 5px; }
+.desk-pr { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; }
+.desk-pr a { font-family: var(--font-mono); color: var(--accent-strong, var(--accent)); text-decoration: none; white-space: nowrap; }
+.desk-pr-title { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.desk-tiles { display: flex; flex-wrap: wrap; gap: 10px; }
+.desk-tile { width: 112px; height: 112px; display: flex; flex-direction: column; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--bg-surface-2); overflow: hidden; }
+.desk-tile.today { border-color: var(--accent); }
+.desk-tile-body { flex: 1; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px; padding: 8px 10px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.desk-tile-body:hover { background: var(--bg-surface); }
+.desk-tile-date { font-size: 10.5px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
+.desk-tile-hours { font: 600 22px var(--font-mono); color: var(--text-primary); }
+.desk-tile-sub { font-size: 10.5px; color: var(--text-tertiary); }
+.desk-tile-actions { display: flex; border-top: 1px solid var(--border); }
+.desk-tile-actions button { flex: 1; border: 0; background: none; font-size: 15px; font-weight: 700; padding: 5px 0; cursor: pointer; }
+.desk-ok { color: var(--success); }
+.desk-ok:hover { background: var(--success-soft-bg); }
+.desk-no { color: var(--danger); border-left: 1px solid var(--border) !important; }
+.desk-no:hover { background: var(--danger-soft-bg); }
+.desk-no-big { color: var(--danger); }
+.desk-tile-empty { font-size: 12px; color: var(--text-tertiary); padding: 6px 0; }
+.desk-card-actions { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
+.desk-empty { grid-column: 1 / -1; }
+.desk-msg { padding: 9px 0; border-bottom: 1px solid var(--border); }
+.desk-msg.unread .desk-msg-from::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 7px; vertical-align: middle; }
+.desk-msg-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.desk-msg-from { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.desk-msg-where { font-size: 11px; color: var(--text-tertiary); }
+.desk-msg-acts { margin-left: auto; display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.desk-msg-acts a { color: var(--accent-strong, var(--accent)); }
+.desk-msg-text { font-size: 12.5px; color: var(--text-secondary); margin-top: 4px; white-space: pre-wrap; word-break: break-word; max-height: 7.5em; overflow: hidden; }
+.desk-reply { margin-top: 8px; }
+.desk-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.desk-help { font-size: 11.5px; color: var(--text-tertiary); line-height: 1.5; margin: 10px 0 6px; }
+.desk-detail { font-size: 11px; color: var(--text-tertiary); }
+.desk-backdrop { position: fixed; inset: 0; background: oklch(0% 0 0 / 0.45); z-index: 40; }
+.desk-dialog { position: fixed; top: 8vh; left: 50%; transform: translateX(-50%); width: min(860px, calc(100vw - 32px)); max-height: 84vh; overflow: auto; z-index: 41; }
+.desk-dialog-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 720px) { .desk-dialog-grid { grid-template-columns: 1fr; } #desk-new { width: 100%; } }
+.desk-dialog-grid .desk-input { width: 100%; box-sizing: border-box; }
+.desk-label { font-size: 10.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); margin: 10px 0 6px; }
+.desk-lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--text-secondary); }
+.desk-line-src { font: 600 10px var(--font-mono); text-transform: uppercase; color: var(--text-tertiary); margin-right: 4px; }
+.desk-dialog-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.tab-panel[data-tab="desk"] [hidden] { display: none !important; }
+#desk-dialog-status { flex-basis: 100%; order: 10; }

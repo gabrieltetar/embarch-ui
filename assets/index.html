@@ -47,9 +47,9 @@
       </div>
     </div>
     <div class="sidebar-nav">
-      <button class="nav-item" data-tab="dashboard">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.3"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.3"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.3"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.3"/></svg>
-        <span class="nav-label">Dashboard</span>
+      <button class="nav-item" data-tab="desk">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="11" rx="1.6"/><path d="M8.5 19.5h7M12 15v4.5"/><path d="M7 9.5l2 2 3.5-4"/></svg>
+        <span class="nav-label">Desk</span>
       </button>
       <button class="nav-item" data-tab="topology">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M8.1 7.2 10 16M15.9 7.2 14 16M8.4 6h7.2"/></svg>
@@ -91,7 +91,7 @@
 
   <div class="main">
     <div class="topbar">
-      <div class="topbar-title">Dashboard</div>
+      <div class="topbar-title">Desk</div>
       <div class="status-pill">
         <div class="status-chip">
           <span class="dot" style="background:var(--text-tertiary)"></span>
@@ -105,38 +105,30 @@
     </div>
 
     <div class="content">
-      <section class="tab-panel" data-tab="dashboard">
-        <div id="dashboard-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
-        <div style="display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:16px; margin-bottom:16px;">
-          <div class="card">
-            <div class="card-title"><span style="font-size:10.5px; font-weight:650; letter-spacing:0.06em; text-transform:uppercase; color:var(--text-tertiary);">Boards enrolled</span></div>
-            <div class="stat-value" id="stat-enrolled-count">–</div>
-            <div class="stat-sub" id="stat-enrolled-sub">waiting for embarch-core…</div>
-          </div>
-          <div class="card">
-            <div class="card-title"><span style="font-size:10.5px; font-weight:650; letter-spacing:0.06em; text-transform:uppercase; color:var(--text-tertiary);">Attached probes</span></div>
-            <div class="stat-value" id="stat-probes-count">–</div>
-            <div class="stat-sub" id="stat-probes-sub">waiting for embarch-core…</div>
-          </div>
-          <div class="card">
-            <div class="card-title"><span style="font-size:10.5px; font-weight:650; letter-spacing:0.06em; text-transform:uppercase; color:var(--text-tertiary);">Open alerts</span></div>
-            <div class="stat-value" id="stat-alerts-count">–</div>
-            <div class="stat-sub" id="stat-alerts-sub">waiting for embarch-core…</div>
-          </div>
-        </div>
-        <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap:16px;">
-          <div class="card">
-            <div class="card-title">Enrolled boards</div>
-            <table class="data-table">
-              <thead><tr><th>Role</th><th>Board type</th><th>Probe</th><th>Enrolled</th></tr></thead>
-              <tbody id="enrolled-table-body"><tr><td colspan="4" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
-            </table>
-          </div>
-          <div class="card">
-            <div class="card-title">Recent alerts</div>
-            <div id="dashboard-alerts-list"><p class="placeholder-note">waiting for embarch-core…</p></div>
+      <!-- The Desk (embarch-desk-proposal.md): one card per work item, its
+           time tile inside it. Everything here comes from embarch-desk through
+           this server's /api/desk proxy; desk.js renders it. -->
+      <section class="tab-panel" data-tab="desk">
+        <div class="desk-bar">
+          <button class="desk-slack-bar" id="desk-slack-toggle" type="button" aria-expanded="false">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10H9l-5 4Z"/></svg>
+            <span id="desk-slack-counts">Slack</span>
+            <span class="desk-caret">▸</span>
+          </button>
+          <span id="desk-waiting" class="badge badge-warning" hidden></span>
+          <div class="desk-bar-actions">
+            <input id="desk-new" class="desk-input" type="text" placeholder="Issue key, or a title for a standalone card" />
+            <button class="btn" id="desk-add" type="button">Add card</button>
+            <button class="btn" id="desk-refresh" type="button" title="Refresh issues, PRs and Slack now">Refresh</button>
+            <button class="btn" id="desk-settings-toggle" type="button">Connectors</button>
           </div>
         </div>
+        <div id="desk-error" class="card desk-error" hidden></div>
+        <div id="desk-slack" class="card desk-panel" hidden></div>
+        <div id="desk-settings" class="card desk-panel" hidden></div>
+        <div id="desk-cards" class="desk-cards"><p class="placeholder-note">waiting for embarch-desk…</p></div>
+        <div id="desk-dialog-backdrop" class="desk-backdrop" hidden></div>
+        <div id="desk-dialog" class="card desk-dialog" role="dialog" aria-modal="true" hidden></div>
       </section>
 
       <section class="tab-panel" data-tab="topology">
@@ -1100,5 +1092,6 @@
 
 <script src="/app.js"></script>
 <script src="/atlas.js"></script>
+<script src="/desk.js"></script>
 </body>
 </html>

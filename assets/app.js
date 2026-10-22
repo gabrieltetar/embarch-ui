@@ -56,7 +56,7 @@
   // human at — and the Enroll tab's whole surface is on `#topology` now.
   // Falling through to the stored tab instead would land that link on
   // whichever tab that browser happened to have open last.
-  const RETIRED_FRAGMENTS = { enroll: "topology" };
+  const RETIRED_FRAGMENTS = { enroll: "topology", dashboard: "desk" };
 
   function tabFromHash() {
     const raw = (location.hash || "").replace(/^#/, "").split("?")[0];
@@ -68,10 +68,10 @@
     document.querySelectorAll(".nav-item").forEach((el) => {
       el.addEventListener("click", () => showTab(el.dataset.tab));
     });
-    let initial = "dashboard";
+    let initial = "desk";
     try {
       const stored = localStorage.getItem("embarch-ui.tab");
-      if (stored) initial = stored;
+      if (stored) initial = RETIRED_FRAGMENTS[stored] || stored;
     } catch (_) {
       /* best effort */
     }
@@ -189,78 +189,6 @@
     el.innerHTML =
       '<div class="card-title" style="color:var(--danger);">embarch-core unreachable</div>' +
       '<p class="placeholder-note">' + escapeHtml(snapshot.error) + "</p>";
-  }
-
-  // Role/board/probe/confirmed-timestamp rows — the Dashboard's "Enrolled
-  // boards" table, and its only caller since the Topology tab's own roles
-  // table folded into the diagram (decision 45). It lists every enrolled
-  // entry, whatever its role happens to be named.
-  //
-  // The last column is labeled "Enrolled" (never "Validated"/"Confirmed"/
-  // "Verified"): `confirmed_at_utc_ms` is enrolment time, unmoving until
-  // someone re-enrolls, so a header implying a live check would answer a
-  // question this field cannot answer. `embarch-core` decision 57
-  // (decisions/enrollment.md) declined to persist a real last-validation
-  // instant next to it; showing real freshness needs `POST /validate` and
-  // that response's own `validated_at_utc_ms`, a live, hardware-touching
-  // call this snapshot poll never makes.
-  function enrolledTableRows(snapshot) {
-    const enrolled = snapshot.enrolled || [];
-    if (enrolled.length === 0) {
-      return '<tr><td colspan="4" class="placeholder-note">none enrolled yet</td></tr>';
-    }
-    return enrolled.map((b) => (
-      "<tr><td>" + escapeHtml(roleLabel(b.role)) + '</td><td class="mono" title="' +
-      escapeHtml(b.name || "") + '">' +
-      escapeHtml(boardTypeLabel(b.role, b.name) || b.chip || "—") +
-      // A role can hold a board type and no probe (decision 45); both
-      // cells say so rather than rendering an empty string that reads as a
-      // value.
-      '</td><td class="mono">' + escapeHtml(b.probe_serial || "no probe") + "</td><td>" +
-      (b.confirmed_at_utc_ms ? formatTimestamp(b.confirmed_at_utc_ms) : "never") + "</td></tr>"
-    )).join("");
-  }
-
-  function alertsListHtml(alerts) {
-    if (!alerts || alerts.length === 0) {
-      return (
-        '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:34px 10px; text-align:center;">' +
-        '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>' +
-        '<div style="font-size:13px; font-weight:600; color:var(--text-primary);">No mismatches</div>' +
-        '<div style="font-size:12px; color:var(--text-tertiary);">Topology matches expected state</div></div>'
-      );
-    }
-    return alerts.slice(0, 10).map((a) => (
-      '<div style="display:flex; gap:12px; align-items:flex-start; padding:8px 0; border-bottom:1px solid var(--border);">' +
-      '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0; margin-top:2px;"><path d="M12 4 3 20h18Z"/><path d="M12 10v4M12 17h.01"/></svg>' +
-      '<div><div style="font-size:13px; color:var(--text-primary);">' + escapeHtml(a.reason) + "</div>" +
-      '<div class="mono" style="font-size:11px; color:var(--text-tertiary); margin-top:2px;">' +
-      escapeHtml(a.role) + " · " + formatTimestamp(a.occurred_at_utc_ms) + "</div></div></div>"
-    )).join("");
-  }
-
-  function renderDashboard(snapshot) {
-    renderErrorBanner("dashboard-error", snapshot);
-
-    const enrolledCount = (snapshot.enrolled || []).length;
-    document.getElementById("stat-enrolled-count").textContent = String(enrolledCount);
-    document.getElementById("stat-enrolled-sub").textContent =
-      enrolledCount > 0 ? (snapshot.enrolled.map((b) => b.role || b.name).join(" · ")) : "none enrolled yet";
-
-    const probeCount = (snapshot.probes || []).length;
-    document.getElementById("stat-probes-count").textContent = String(probeCount);
-    document.getElementById("stat-probes-sub").textContent =
-      probeCount > 0 ? snapshot.probes.map((p) => p.identifier).join(" · ") : "none currently attached";
-
-    const alertCount = (snapshot.alerts || []).length;
-    const alertStat = document.getElementById("stat-alerts-count");
-    alertStat.textContent = String(alertCount);
-    alertStat.style.color = alertCount > 0 ? "var(--warning)" : "var(--success)";
-    document.getElementById("stat-alerts-sub").textContent =
-      alertCount > 0 ? alertCount + " mismatch(es) recorded" : "topology matches expected";
-
-    document.getElementById("enrolled-table-body").innerHTML = enrolledTableRows(snapshot);
-    document.getElementById("dashboard-alerts-list").innerHTML = alertsListHtml(snapshot.alerts);
   }
 
   // Every declared signal gets its own lane **below** the three nodes, and the
@@ -730,13 +658,12 @@
   function renderSnapshot(snapshot) {
     latestSnapshot = snapshot;
     renderStatusChip(snapshot);
-    renderDashboard(snapshot);
     renderTopology(snapshot);
   }
 
   // Suite-wide SSE convergence (decision 6): one
   // `/events` stream, not per-tab polling — a single "snapshot" event
-  // carries everything Dashboard and Topology need, pushed by the server's
+  // carries everything Topology needs, pushed by the server's
   // own background poll of embarch-core (main.rs), never fetched on a
   // client-side timer.
   function initEvents() {

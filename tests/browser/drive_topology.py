@@ -380,8 +380,9 @@ try:
           script("return !document.getElementById('topology-table-body');"))
     check("the Topology tab no longer carries an alert list",
           script("return !document.getElementById('topology-alerts-list');"))
-    check("the Dashboard keeps its own alert cards",
-          script("return !!document.getElementById('dashboard-alerts-list');"))
+    check("the Dashboard and its alert cards are gone; the Desk replaced them",
+          script("return !document.getElementById('dashboard-alerts-list') && "
+                 "!!document.querySelector('.tab-panel[data-tab=desk]');"))
 
     # --- the boxes: role title, board line, no chip, no status yet ---------
     labels = script("return Array.from(document.querySelectorAll('#topology-diagram "

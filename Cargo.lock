@@ -310,6 +310,7 @@ dependencies = [
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -348,6 +349,7 @@ dependencies = [
  "embarch-study-designer",
  "futures-util",
  "heapless",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
