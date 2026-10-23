@@ -10,9 +10,12 @@ sending, the dialog shows the lines, ✕ discards, the Dashboard is gone. The
 chat's part (embarch-chat-desk-proposal.md): a session's row before the chat
 ships and its one line after, Open chat through the mailbox (an ended chat
 too), the card's notes from memory files written in a scratch Claude folder,
-read again only when a note moves, the chat setting from the desk's view,
-Start work with and without a prompt link, and a proxy that answers only the
-UI's own page.
+read again only when a note moves (a held line landing on assignment too),
+the chat setting from the desk's view, saved on a click or Space without
+touching what is typed in the panel or moving focus, Start work with and
+without a prompt link, a proxy that answers only the UI's own page — a
+bodyless POST from another origin included — and a page no other site can
+frame.
 
 No connector is configured, so nothing reaches Linear, Harvest or Slack;
 GitHub falls back to the machine's `gh` login for a read-only identity check.
@@ -135,6 +138,22 @@ def main():
                 el = wd("POST", S + "/element", {"using": "css selector", "value": css})
                 wd("POST", S + "/element/" + list(el.values())[0] + "/click", {})
 
+            def type_into(css, text):
+                el = wd("POST", S + "/element", {"using": "css selector", "value": css})
+                wd("POST", S + "/element/" + list(el.values())[0] + "/value", {"text": text})
+
+            def press(key):
+                wd("POST", S + "/actions", {"actions": [{"type": "key", "id": "kbd", "actions": [
+                    {"type": "keyDown", "value": key}, {"type": "keyUp", "value": key}]}]})
+                wd("DELETE", S + "/actions")
+
+            def setting_becomes(value, secs=6):
+                for _ in range(secs * 5):
+                    if desk("GET", "/settings", token=token).get("chat_panel") is value:
+                        return True
+                    time.sleep(0.2)
+                return False
+
             def stub_fetch(pattern, status, error):
                 # Answer one route with an error, once per call, until unstub_fetch().
                 js("var re = new RegExp(arguments[0]), st = arguments[1], msg = arguments[2];"
@@ -190,21 +209,37 @@ def main():
             desk("PUT", "/settings", {"chat_panel": False}, token)
             reload_view()
             until("return !document.getElementById('desk-chat-panel').checked")
-            # A real click focuses the box; that must not hold every pushed view back.
+            # What is typed in the panel and not saved yet survives a click on
+            # the setting, and the box keeps focus (desk review r2, finding 2);
+            # a box with focus must not hold every pushed view back (r1, 2).
+            typed = ["Bench workspace", "xoxp-not-a-token", "/w/never-tracked"]
+            for css, text in zip(("#desk-conn-label", "#desk-conn-token", "#desk-ignore"), typed):
+                type_into(css, text)
+            typed_js = ("return [document.getElementById('desk-conn-label').value, document.getElementById('desk-conn-token').value,"
+                        " document.getElementById('desk-ignore').value.split('\\n').pop()]")
             real_click("#desk-chat-panel")
-            on = False
-            for _ in range(30):
-                if desk("GET", "/settings", token=token).get("chat_panel") is True:
-                    on = True
-                    break
-                time.sleep(0.2)
-            check("turning the setting on with a click reaches the desk", on)
-            check("and leaves no focus in the panel", until("return !document.getElementById('desk-settings').contains(document.activeElement)", 5) is True,
-                  js("return document.activeElement && document.activeElement.id"))
+            check("turning the setting on with a click reaches the desk", setting_becomes(True))
+            settle()
+            check("and leaves what was typed in the panel as it was", js(typed_js) == typed, js(typed_js))
+            focus_js = "return document.activeElement && document.activeElement.id"
+            check("and keeps focus on the box", js(focus_js) == "desk-chat-panel", js(focus_js))
             pushed_id = desk("POST", "/items", {"title": "Pushed after the toggle"}, token)["id"]
             check("a card made elsewhere after the click still arrives by SSE",
                   until("return document.getElementById('desk-cards').textContent.indexOf('Pushed after the toggle') >= 0", 25) is True)
+            check("and the pushed view leaves the typed text and the focus where they were",
+                  js(typed_js) == typed and js(focus_js) == "desk-chat-panel", [js(typed_js), js(focus_js)])
             desk("POST", "/items/%s/archive" % pushed_id, {"value": True}, token)   # out of the way of the tile checks
+            # The keyboard: Space toggles the focused box, and focus stays on it.
+            if js(focus_js) != "desk-chat-panel":
+                js("document.getElementById('desk-chat-panel').focus(); return true")
+            press(" ")
+            check("Space on the focused box turns the setting off at the desk", setting_becomes(False))
+            settle()
+            check("and leaves focus on the box", js(focus_js) == "desk-chat-panel", js(focus_js))
+            if js(focus_js) != "desk-chat-panel":
+                js("document.getElementById('desk-chat-panel').focus(); return true")
+            press(" ")
+            check("Space again turns it back on", setting_becomes(True))
 
             # With it on, a session is one line — state, what it waits for, age
             # — with Jump; Answer and the last reply have left it (chat decision 32).
@@ -234,7 +269,17 @@ def main():
             def mailbox():
                 return desk("GET", "/mailbox?folder=" + urllib.parse.quote(str(chat_dir)), token=token)["entries"]
 
-            js("document.querySelector('[data-open-chat]').click(); return true")
+            # The button carries the desk's link for the chat's folder. A
+            # vscode:// link leaves no trace a headless browser can see, so the
+            # same button is pointed at a page on this origin, and the tab
+            # must follow it once the focus request is in (desk review r2, 4d).
+            chat_uri = [r.get("folder_uri") for c in desk("GET", "/view", token=token)["cards"]
+                        for r in c.get("live_sessions", []) if r.get("session_id") == "c1"]
+            shown_uri = js("return document.querySelector('[data-open-chat]').getAttribute('data-chat-uri')")
+            check("Open chat carries the desk's link for the chat's folder",
+                  bool(chat_uri) and chat_uri[0] and chat_uri[0].startswith("vscode://") and shown_uri == chat_uri[0], [shown_uri, chat_uri])
+            follow = UI + "/?chat-link-followed#desk"
+            js("var b = document.querySelector('[data-open-chat]'); b.setAttribute('data-chat-uri', arguments[0]); b.click(); return true", follow)
             mail = []
             for _ in range(30):
                 mail = mailbox()
@@ -243,8 +288,12 @@ def main():
                 time.sleep(0.2)
             check("Open chat leaves a focus request for the chat's folder in the desk's mailbox",
                   [(m["kind"], m["session_id"]) for m in mail] == [("focus", "c1")], mail)
+            followed = until("return location.href === %s && document.readyState === 'complete' && location.href" % json.dumps(follow))
+            check("and then follows the chat folder's link", followed == follow, followed or wd("GET", S + "/url"))
             for m in mail:
                 desk("POST", "/mailbox/%s/take" % m["id"], {}, token)
+            wd("POST", S + "/url", {"url": UI + "/#desk"})
+            until("return location.search === '' && !!document.querySelector('[data-open-chat]')")
 
             # A mailbox that refuses: the error shows and no link is followed.
             stub_fetch("/api/desk/mailbox$", 500, "the mailbox refused it")
@@ -384,6 +433,20 @@ def main():
             check("a failed read is made again on the next view",
                   until("return document.querySelector('.desk-notes').textContent.indexOf('Read again after a failed read') >= 0") is True,
                   js("return window.__reads"))
+            # A line written before its session has an item is held, and lands
+            # on the item with its own, older time when the session gets one.
+            # The card reads its notes again then (desk review r2, finding 1).
+            hook({"hook_event_name": "SessionStart", "session_id": "s2", "cwd": str(repo)})
+            desk("POST", "/sessions/s2/line", {"text": "Held until its session has an item", "kind": "decision"}, token)
+            time.sleep(0.05)
+            desk("POST", "/sessions/s1/line", {"text": "Written after the held line", "kind": "finding"}, token)
+            reload_view()
+            until("return document.querySelector('.desk-notes').textContent.indexOf('Written after the held line') >= 0")
+            desk("POST", "/sessions/s2/assign", {"item_id": item}, token)
+            reload_view()
+            check("a held line that lands when its session gets the item shows on the card",
+                  until("return document.querySelector('.desk-notes').textContent.indexOf('Held until its session has an item') >= 0", 10) is True,
+                  js("return document.querySelector('.desk-notes').textContent"))
             check("the pick-up list says why it is empty with no Linear connected",
                   "Linear" in js("return document.getElementById('desk-pickup-body').textContent"))
             if SHOT:
@@ -559,6 +622,15 @@ def main():
             check("a plain-text body reaches the desk as text, and its JSON route refuses it",
                   got == 415 and mailbox_for(evil) == [], got)
             # From another origin (localhost is not 127.0.0.1), with no-cors.
+            probe = desk("POST", "/items", {"title": "Cross-site probe", "desk": "Bench client"}, token)["id"]
+            probe_tile = desk("PATCH", "/tiles/%s@%s" % (probe, today), {"hours": 0.25}, token)["id"]
+
+            def tile_open(tid):
+                try:
+                    desk("PATCH", "/tiles/" + urllib.parse.quote(tid), {}, token)
+                    return True
+                except urllib.error.HTTPError as e:
+                    return e.code
             wd("POST", S + "/url", {"url": "http://localhost:" + UI_PORT + "/"})
             wd("POST", S + "/execute/async", {"args": [UI, evil], "script": """
               var done = arguments[2];
@@ -567,6 +639,24 @@ def main():
                     body: JSON.stringify({kind: 'focus', session_id: 'x1', folder: arguments[1]})})
                 .then(function () { done(true); }, function () { done(true); });"""})
             check("a page on another origin cannot reach the desk through the proxy", mailbox_for(evil) == [])
+            # A POST with no body has no Content-Type for the desk to refuse:
+            # only the proxy's origin rule stops it (desk review r2, finding 4a).
+            wd("POST", S + "/execute/async", {"args": [UI, probe_tile], "script": """
+              var done = arguments[2];
+              fetch(arguments[0] + '/api/desk/tiles/' + encodeURIComponent(arguments[1]) + '/discard', {method: 'POST', mode: 'no-cors'})
+                .then(function () { done(true); }, function () { done(true); });"""})
+            time.sleep(0.5)
+            check("a bodyless POST from another origin cannot discard a tile through the proxy", tile_open(probe_tile) is True, tile_open(probe_tile))
+            # Nor can it frame the UI's own page, whose requests would all be
+            # same-origin (desk review r2, finding 3).
+            loaded = wd("POST", S + "/execute/async", {"args": [UI + "/#desk"], "script": """
+              var done = arguments[1], f = document.createElement('iframe');
+              f.id = 'framed'; f.src = arguments[0]; f.onload = function () { done(true); };
+              document.body.appendChild(f); setTimeout(function () { done(false); }, 8000);"""})
+            wd("POST", S + "/frame", {"id": wd("POST", S + "/element", {"using": "css selector", "value": "#framed"})})
+            framed = js("return {url: document.URL, desk: !!document.querySelector('.nav-item[data-tab=desk]')}")
+            wd("POST", S + "/frame/parent", {})
+            check("a page on another origin cannot frame the UI", loaded and not framed["desk"] and not framed["url"].startswith(UI), framed)
         finally:
             wd("DELETE", S)
         req = urllib.request.Request(UI + "/api/desk/mailbox", data=b'{"kind":"focus","session_id":"x1","folder":"/w/x"}', method="POST",

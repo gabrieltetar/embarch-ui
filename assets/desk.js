@@ -192,8 +192,8 @@
   // file a session saved, its versions kept, and every line with its kind,
   // read per card from the desk. A card shows each note's newest state; a
   // click opens the whole list. A card reads its notes again only when its
-  // `notes_ms`, the newest note's time, moves (a desk older than that field:
-  // its activity), and never while it has none.
+  // `notes_ms`, when the item's notes last changed, moves (a desk older than
+  // that field: its activity), and never while it has none.
   var notes = {};            // item id -> {ms: the card's notes_ms when read, list: newest first}
   var MEMORY_ROWS = 3;       // memory files shown on a card, newest first; the rest are counted
   var notesItem = null;      // the item whose full list is open
@@ -391,10 +391,38 @@
       }).join("");
   }
 
+  // The panel's form is built once each time the panel opens. A view after
+  // that updates only what it owns, in place: the connectors table and the
+  // chat setting. A name, a token or an ignore list being typed survives every
+  // pushed view and a click on the chat setting, and focus stays where it was.
+  var settingsBuilt = false;
+
   function renderSettings() {
-    if (settingsEl.hidden) return;
-    var chat = view.settings;   // the chat setting (chat decision 4): off until EmbArch's chat ships
-    var rows = (view.connectors || []).map(function (c) {
+    if (settingsEl.hidden || !view) { settingsBuilt = false; return; }
+    if (!settingsBuilt) {
+      settingsEl.innerHTML =
+        '<div class="card-title">Connectors</div>' +
+        '<table class="data-table"><thead><tr><th>Service</th><th>Account</th><th>Status</th><th></th></tr></thead><tbody id="desk-conn-rows"></tbody></table>' +
+        '<div class="desk-form">' +
+        '<select id="desk-conn-kind" class="desk-input"><option value="linear">Linear</option><option value="harvest">Harvest</option><option value="github">GitHub</option><option value="slack">Slack</option></select>' +
+        '<input id="desk-conn-label" class="desk-input" type="text" placeholder="Name, e.g. the workspace" />' +
+        '<input id="desk-conn-token" class="desk-input" type="password" placeholder="Token" autocomplete="off" />' +
+        '<button class="btn btn-primary" id="desk-conn-add" type="button">Connect</button></div>' +
+        '<p class="desk-help">Linear: Settings → Security &amp; access → Personal API keys, one per workspace. ' +
+        "Harvest: id.getharvest.com/developers → Create new personal access token. " +
+        "GitHub: nothing to do if you are logged in to <span class=\"mono\">gh</span>. " +
+        "Slack: create an app in your workspace from embarch-desk's <span class=\"mono\">slack-manifest.json</span>, install it, and paste its User OAuth Token (<span class=\"mono\">xoxp-…</span>). " +
+        "Tokens stay in <span class=\"mono\">~/.config/embarch-desk/connectors.toml</span>, owner-only.</p>" +
+        '<div class="card-title" style="margin-top:18px;">Never tracked</div>' +
+        '<p class="desk-help">Sessions under these folders make no time and are never asked for a work item — open-source work, the agent fleet.</p>' +
+        '<textarea id="desk-ignore" class="desk-input desk-textarea" rows="3" spellcheck="false">' + esc((view.ignore || []).join("\n")) + "</textarea>" +
+        '<div><button class="btn" id="desk-ignore-save" type="button">Save</button></div>' +
+        '<div class="card-title" style="margin-top:18px;">Chat</div>' +
+        '<label class="desk-check"><input id="desk-chat-panel" type="checkbox" /> Start work opens EmbArch\'s chat</label>' +
+        '<p class="desk-help" id="desk-chat-help"></p>';
+      settingsBuilt = true;
+    }
+    document.getElementById("desk-conn-rows").innerHTML = (view.connectors || []).map(function (c) {
       return '<tr><td>' + esc(c.kind) + "</td><td class=\"mono\">" + esc(c.label) + "</td><td>" +
         (c.ok ? '<span class="badge badge-success">ok</span> ' : '<span class="badge badge-danger">failing</span> ') +
         '<span class="desk-detail">' + esc(c.detail) + "</span></td><td>" +
@@ -402,30 +430,21 @@
           '<button class="btn-icon-danger btn" type="button" data-disconnect="' + esc(c.kind) + "/" + esc(c.label) + '">Remove</button>') +
         "</td></tr>";
     }).join("") || '<tr><td colspan="4" class="placeholder-note">No connectors yet.</td></tr>';
-    settingsEl.innerHTML =
-      '<div class="card-title">Connectors</div>' +
-      '<table class="data-table"><thead><tr><th>Service</th><th>Account</th><th>Status</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>" +
-      '<div class="desk-form">' +
-      '<select id="desk-conn-kind" class="desk-input"><option value="linear">Linear</option><option value="harvest">Harvest</option><option value="github">GitHub</option><option value="slack">Slack</option></select>' +
-      '<input id="desk-conn-label" class="desk-input" type="text" placeholder="Name, e.g. the workspace" />' +
-      '<input id="desk-conn-token" class="desk-input" type="password" placeholder="Token" autocomplete="off" />' +
-      '<button class="btn btn-primary" id="desk-conn-add" type="button">Connect</button></div>' +
-      '<p class="desk-help">Linear: Settings → Security &amp; access → Personal API keys, one per workspace. ' +
-      "Harvest: id.getharvest.com/developers → Create new personal access token. " +
-      "GitHub: nothing to do if you are logged in to <span class=\"mono\">gh</span>. " +
-      "Slack: create an app in your workspace from embarch-desk's <span class=\"mono\">slack-manifest.json</span>, install it, and paste its User OAuth Token (<span class=\"mono\">xoxp-…</span>). " +
-      "Tokens stay in <span class=\"mono\">~/.config/embarch-desk/connectors.toml</span>, owner-only.</p>" +
-      '<div class="card-title" style="margin-top:18px;">Never tracked</div>' +
-      '<p class="desk-help">Sessions under these folders make no time and are never asked for a work item — open-source work, the agent fleet.</p>' +
-      '<textarea id="desk-ignore" class="desk-input desk-textarea" rows="3" spellcheck="false">' + esc((view.ignore || []).join("\n")) + "</textarea>" +
-      '<div><button class="btn" id="desk-ignore-save" type="button">Save</button></div>' +
-      '<div class="card-title" style="margin-top:18px;">Chat</div>' +
-      '<label class="desk-check"><input id="desk-chat-panel" type="checkbox"' + (chat && chat.chat_panel ? " checked" : "") + (chat ? "" : " disabled") + " />" +
-      " Start work opens EmbArch\'s chat</label>" +
-      '<p class="desk-help">' + (chat
-        ? "Off: Start work opens Claude Code\'s panel with the first prompt typed in, and each session keeps Answer and its last reply. " +
-          "On: the worktree\'s window starts an EmbArch chat with it, and each session is one line with Open chat or Jump."
-        : "This desk has no chat setting — update embarch-desk.") + "</p>";
+    renderChatSetting();
+  }
+
+  // The chat setting (chat decision 4), off until EmbArch's chat ships: the
+  // box and its help, from the desk's view, on the element already there.
+  function renderChatSetting() {
+    var box = document.getElementById("desk-chat-panel");
+    if (!box || !view) return;
+    var chat = view.settings;
+    box.checked = !!(chat && chat.chat_panel);
+    box.disabled = !chat;
+    document.getElementById("desk-chat-help").textContent = chat
+      ? "Off: Start work opens Claude Code's panel with the first prompt typed in, and each session keeps Answer and its last reply. " +
+        "On: the worktree's window starts an EmbArch chat with it, and each session is one line with Open chat or Jump."
+      : "This desk has no chat setting — update embarch-desk.";
   }
 
   function renderTimer() {
@@ -708,6 +727,16 @@
     }).then(function () { return load(); }).catch(function (e) { status.textContent = e.message; });
   }
 
+  function renderCards() {
+    var cards = view.cards || [];
+    cardsEl.innerHTML = cards.length ? cards.map(cardHtml).join("") :
+      '<div class="card desk-empty"><div class="card-title">No work items yet</div>' +
+      '<p class="placeholder-note">' + (view.open_desk
+        ? "Add a card from a Linear issue key above, or start a Claude Code session in this desk's repos and answer which work item it is."
+        : "Open a desk with Switch…, or make one with New desk.") + "</p></div>";
+    readNotes(cards);
+  }
+
   function render() {
     if (!view) return;
     renderSlackBar();
@@ -722,13 +751,7 @@
     }
     renderTimer();
     renderDrafts();
-    var cards = view.cards || [];
-    cardsEl.innerHTML = cards.length ? cards.map(cardHtml).join("") :
-      '<div class="card desk-empty"><div class="card-title">No work items yet</div>' +
-      '<p class="placeholder-note">' + (view.open_desk
-        ? "Add a card from a Linear issue key above, or start a Claude Code session in this desk's repos and answer which work item it is."
-        : "Open a desk with Switch…, or make one with New desk.") + "</p></div>";
-    readNotes(cards);
+    renderCards();
     renderSlack();
     renderSettings();
     if (openTileId) renderDialog();
@@ -1070,6 +1093,9 @@
         if (!label || !token) { flash("A connector needs a name and a token."); break; }
         t.disabled = true;
         api("POST", "/connectors", { kind: kind, label: label, token: token }).then(function (r) {
+          // The form outlives the views now, so a connected token is cleared here.
+          document.getElementById("desk-conn-label").value = "";
+          document.getElementById("desk-conn-token").value = "";
           flash("Connected " + kind + " / " + label + ": " + (r.detail || "ok"));
           return api("POST", "/sync");
         }).then(load).catch(function (e) { flash(e.message); }).then(function () { t.disabled = false; });
@@ -1098,13 +1124,14 @@
 
   panel.addEventListener("change", function (ev) {
     if (ev.target.id === "desk-chat-panel") {
-      // Saved on the click. Rendering again shows the desk's answer — the
-      // session rows follow the setting — and takes focus off the box, which
-      // would otherwise hold every pushed view back (`editing`).
+      // Saved on the click. The cards are what the setting changes — each
+      // session's row follows it — so they render again, and the box shows
+      // the desk's answer. The rest of the panel, and focus on the box, stay
+      // as they are: a box with focus holds no pushed view back (`editing`).
       var on = ev.target.checked;
       api("PUT", "/settings", { chat_panel: on }).then(function (r) {
         view.settings = r && typeof r.chat_panel === "boolean" ? r : { chat_panel: on };
-      }, function (e) { flash(e.message); }).then(render);
+      }, function (e) { flash(e.message); }).then(function () { renderCards(); renderChatSetting(); });
       return;
     }
     var sel = ev.target.closest("select[data-status]");
@@ -1161,11 +1188,19 @@
   // Live by SSE, like every other tab (decision 6): the server asks the desk
   // for its view and pushes it. A pushed view never re-renders under an open
   // editor — the dialog, a reply box and the connector form keep what the user
-  // is typing until they finish.
+  // is typing until they finish. In the settings panel only text entry
+  // counts: a view leaves its form alone, and focus on the chat setting's box
+  // must not hold every pushed view back.
+  function typing(el) {
+    var tag = el && el.tagName;
+    if (tag === "TEXTAREA" || tag === "SELECT") return true;
+    return tag === "INPUT" && !/^(checkbox|radio|button|submit|reset|image|file|range|color)$/i.test(el.type);
+  }
+
   function editing() {
-    return dialogEl.contains(document.activeElement) || slackEl.contains(document.activeElement) ||
-      settingsEl.contains(document.activeElement) || draftsEl.contains(document.activeElement) ||
-      formEl.contains(document.activeElement) || dayBody.contains(document.activeElement);
+    var a = document.activeElement;
+    return dialogEl.contains(a) || slackEl.contains(a) || (settingsEl.contains(a) && typing(a)) ||
+      draftsEl.contains(a) || formEl.contains(a) || dayBody.contains(a);
   }
   if (window.EventSource) {
     var source = new EventSource("/api/desk-events");

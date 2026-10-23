@@ -253,7 +253,18 @@ async fn async_main() -> anyhow::Result<()> {
         build_config_path,
     };
 
-    let app = Router::new()
+    let app = app(state);
+
+    let addr = bind_address();
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!("embarch-ui listening on http://{addr}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Every route this server answers, and what every answer carries.
+fn app(state: AppState) -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/style.css", get(style_css))
         .route("/app.js", get(app_js))
@@ -417,13 +428,25 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/api/build/logs/{id}", get(firmware_build::api_build_log))
         .route("/api/api-logs/recent", get(api_api_logs_recent))
         .route("/api/api-logs/events", get(api_api_logs_events))
-        .with_state(state);
+        .with_state(state)
+        .layer(axum::middleware::map_response(deny_framing))
+}
 
-    let addr = bind_address();
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("embarch-ui listening on http://{addr}");
-    axum::serve(listener, app).await?;
-    Ok(())
+/// **No other site may frame this UI** (desk review r2, finding 3). The Desk
+/// tab's proxy answers only this UI's own page (`desk::same_origin`), and a
+/// page framed by another site *is* this UI's own page: every request the
+/// frame makes is same-origin. What is left is click-jacking: the owner,
+/// lured into clicking on cue, presses an invisible Send on an agent's draft,
+/// Discard, Open chat or Start work. So every response says it may not be
+/// framed: `frame-ancestors` for browsers that read CSP, `X-Frame-Options`
+/// for any that do not. `'none'` rather than `'self'`: no page of this UI
+/// frames another (the Atlas tab opens a PDF in a new window), and the
+/// launcher opens the UI in the system browser, not in a VS Code webview.
+async fn deny_framing(mut resp: Response) -> Response {
+    let headers = resp.headers_mut();
+    headers.append(header::CONTENT_SECURITY_POLICY, header::HeaderValue::from_static("frame-ancestors 'none'"));
+    headers.insert(header::X_FRAME_OPTIONS, header::HeaderValue::from_static("DENY"));
+    resp
 }
 
 /// Runs for the lifetime of the process, publishing a fresh `Snapshot`
@@ -1074,4 +1097,77 @@ fn sse_lines(rx: watch::Receiver<Vec<String>>) -> Sse<impl Stream<Item = Result<
         Some((Ok::<_, Infallible>(event), rx))
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real router over a Core nobody answers on, served on a free port.
+    async fn serve_app() -> String {
+        let core_config: embarch_core_client::CoreConfig =
+            toml::from_str("base_url = \"http://127.0.0.1:1\"\ntoken = \"x\"\n").unwrap();
+        let core = Arc::new(CoreClient::new(&core_config).unwrap());
+        let (_snapshot_tx, snapshot_rx) = watch::channel(Snapshot::pending());
+        let (_logs_tx, logs_rx) = watch::channel(Vec::new());
+        let (_api_logs_tx, api_logs_rx) = watch::channel(Vec::new());
+        let state = AppState {
+            snapshot_rx,
+            core: core.clone(),
+            poke: Arc::new(Notify::new()),
+            study_designer: StudyDesigner::new(None, core.clone()),
+            logs_rx,
+            api_logs_rx,
+            trace_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            table_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            time_chart_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            live: live_study::LiveStudies::new(core),
+            build_locks: Arc::new(embarch_firmware_build::build::BuildLocks::new()),
+            build_runs: firmware_build::BuildRuns::new(),
+            build_config_path: None,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn says_never_frame_me(resp: &reqwest::Response, what: &str) {
+        let get = |k: header::HeaderName| resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
+        assert_eq!(get(header::CONTENT_SECURITY_POLICY).as_deref(), Some("frame-ancestors 'none'"), "{what}: {}", resp.status());
+        assert_eq!(get(header::X_FRAME_OPTIONS).as_deref(), Some("DENY"), "{what}: {}", resp.status());
+    }
+
+    /// Desk review r2, finding 3: another site framing the page would make
+    /// every request the frame sends a same-origin one.
+    #[tokio::test]
+    async fn no_answer_from_this_server_may_be_framed_by_another_site() {
+        let base = serve_app().await;
+        let http = reqwest::Client::new();
+        let page = http.get(format!("{base}/")).send().await.unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        says_never_frame_me(&page, "the page");
+        let etag = page.headers().get(header::ETAG).unwrap().clone();
+        let again = http.get(format!("{base}/")).header(header::IF_NONE_MATCH, etag).send().await.unwrap();
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        says_never_frame_me(&again, "the page, unchanged");
+        for (what, path) in [
+            ("a script", "/desk.js"),
+            ("the icon", "/favicon.svg"),
+            ("an API read", "/api/snapshot"),
+            ("a handler's 404", "/fonts/none.woff2"),
+            ("a route nobody serves", "/no/such/route"),
+        ] {
+            says_never_frame_me(&http.get(format!("{base}{path}")).send().await.unwrap(), what);
+        }
+        // Refused before it could reach any desk.
+        let refused = http
+            .post(format!("{base}/api/desk/mailbox"))
+            .header("sec-fetch-site", "cross-site")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        says_never_frame_me(&refused, "the proxy's refusal");
+    }
 }
