@@ -40,7 +40,6 @@
   var view = null;
   var states = {};           // item id -> [{id, name, type}], loaded on first open of the dropdown
   var targets = null;        // Harvest projects/tasks, loaded when a tile opens
-  var settings = null;       // the desk's own settings, read when the panel opens
   var openTileId = null;
 
   // ---------------------------------------------------------------- helpers
@@ -137,29 +136,54 @@
       "</div></div>";
   }
 
-  // One line per session (chat decision 32): its state, what it waits for,
-  // how long ago it last did anything. A chat EmbArch's panel runs gets Open
-  // chat — a focus request left in the desk's mailbox for the window whose
-  // folder it is, then that folder's link to bring the window up; any other
-  // session gets Jump.
+  // A card's sessions. While the chat setting is off (chat decision 4), each
+  // keeps its row from before the chat: its name and state, Answer on
+  // claude.ai (Remote Control), Jump, and its last reply. Once it is on, each
+  // is one line (chat decision 32): its state, what it waits for, how long
+  // ago it last did anything. A chat EmbArch's panel runs gets Open chat — a
+  // focus request left in the desk's mailbox for the window whose folder it
+  // is, then that folder's link to bring the window up, resuming the chat
+  // there if it has ended; any other session gets Jump.
+  function chatOn() {
+    return !!(view.settings && view.settings.chat_panel);
+  }
+
   function sessionsHtml(c) {
-    var rows = c.live_sessions || [];
+    var on = chatOn();
+    // The desk keeps ended panel chats on their card for Open chat; with the
+    // setting off there is no Open chat, so they stay out as before.
+    var rows = (c.live_sessions || []).filter(function (r) { return on || !(r.client === "embarch-chat" && r.state === "ended"); });
     if (!rows.length) return "";
-    return '<div class="desk-sessions">' + rows.map(function (r) {
-      var act = "";
-      if (r.client === "embarch-chat" && r.cwd && r.folder_uri) {
-        act = '<button class="btn btn-tiny" type="button" data-open-chat="' + esc(r.session_id) + '" data-chat-folder="' + esc(r.cwd) +
-          '" data-chat-uri="' + esc(r.folder_uri) + '" title="Bring up ' + esc(r.cwd) + ' with this chat open">Open chat</button>';
-      } else if (r.folder_uri) {
-        act = '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) +
-          '" title="Open ' + esc(r.cwd) + ' in VS Code, then this session">Jump</button>';
-      }
-      return '<div class="desk-session ' + esc(r.state) + '"><span class="desk-dot"></span>' +
-        '<span class="desk-session-state">' + esc(r.state) + "</span>" +
-        (r.state === "waiting" ? '<span class="desk-session-for">for ' + esc(r.waiting_for || "you") + "</span>" : "") +
-        (r.last_ms ? '<span class="desk-detail">' + esc(ago(r.last_ms)) + "</span>" : "") +
-        '<span class="desk-session-acts">' + act + "</span></div>";
-    }).join("") + "</div>";
+    return '<div class="desk-sessions">' + rows.map(on ? sessionLine : sessionRow).join("") + "</div>";
+  }
+
+  function sessionRow(r) {
+    var state = r.status === "waiting" ? "waiting for " + (r.waiting_for || "you") : r.status;
+    return '<div class="desk-session ' + esc(r.status) + '">' +
+      '<div class="desk-session-head"><span class="desk-dot"></span><b>' + esc(r.name) + "</b> " +
+      '<span class="desk-detail">' + esc(state) + "</span>" +
+      '<span class="desk-session-acts"><a class="btn btn-tiny" href="' + esc(r.answer_url) + '" target="_blank" rel="noopener" title="Answer it on claude.ai (Remote Control)">Answer</a>' +
+      (r.folder_uri ? '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) + '" title="Open this chat in VS Code">Jump</button>' : "") +
+      "</span></div>" +
+      (r.last_reply ? '<div class="desk-session-reply">' + esc(r.last_reply) + "</div>" : "") +
+      "</div>";
+  }
+
+  function sessionLine(r) {
+    var act = "";
+    if (r.client === "embarch-chat" && r.cwd && r.folder_uri) {
+      act = '<button class="btn btn-tiny" type="button" data-open-chat="' + esc(r.session_id) + '" data-chat-folder="' + esc(r.cwd) +
+        '" data-chat-uri="' + esc(r.folder_uri) + '" title="Bring up ' + esc(r.cwd) + (r.state === "ended" ? " and resume this chat" : " with this chat open") +
+        '">Open chat</button>';
+    } else if (r.folder_uri) {
+      act = '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) +
+        '" title="Open ' + esc(r.cwd) + ' in VS Code, then this session">Jump</button>';
+    }
+    return '<div class="desk-session desk-session-line ' + esc(r.state) + '"><span class="desk-dot"></span>' +
+      '<span class="desk-session-state">' + esc(r.state) + "</span>" +
+      (r.state === "waiting" ? '<span class="desk-session-for">for ' + esc(r.waiting_for || "you") + "</span>" : "") +
+      (r.last_ms ? '<span class="desk-detail">' + esc(ago(r.last_ms)) + "</span>" : "") +
+      '<span class="desk-session-acts">' + act + "</span></div>";
   }
 
   // ---------------------------------------------------------------- notes
@@ -167,9 +191,11 @@
   // What the chats write about the work (chat decisions 42–46): every memory
   // file a session saved, its versions kept, and every line with its kind,
   // read per card from the desk. A card shows each note's newest state; a
-  // click opens the whole list. Every hook moves a card's activity, so a card
-  // reads its notes again only when that has moved.
-  var notes = {};            // item id -> {ms: the card's last_activity_ms when read, list: newest first}
+  // click opens the whole list. A card reads its notes again only when its
+  // `notes_ms`, the newest note's time, moves (a desk older than that field:
+  // its activity), and never while it has none.
+  var notes = {};            // item id -> {ms: the card's notes_ms when read, list: newest first}
+  var MEMORY_ROWS = 3;       // memory files shown on a card, newest first; the rest are counted
   var notesItem = null;      // the item whose full list is open
 
   function memoryName(path) {
@@ -181,19 +207,34 @@
   function memoryParts(text) {
     var m = /^---\r?\n([\s\S]*?)\r?\n---[^\n]*\n?/.exec(text || "");
     if (!m) return { summary: "", body: String(text || "").trim() };
-    var d = /^description:\s*(.*)$/m.exec(m[1]);
-    var summary = d ? d[1].trim().replace(/^(["'])(.*)\1$/, "$2") : "";
-    return { summary: summary, body: text.slice(m[0].length).trim() };
+    var d = /^description:[ \t]*(.*)$/m.exec(m[1]);
+    return { summary: d ? yamlScalar(d[1].trim(), m[1].slice(d.index + d[0].length)) : "", body: text.slice(m[0].length).trim() };
+  }
+
+  // The one YAML value the card shows, as its writer meant it: quotes off and
+  // their escapes undone, and a folded or literal block (`>-`, `|`) read from
+  // the indented lines under it.
+  function yamlScalar(v, after) {
+    if (/^"[\s\S]*"$/.test(v)) {
+      return v.slice(1, -1).replace(/\\(.)/g, function (_, ch) { return ch === "n" || ch === "t" ? " " : ch; });
+    }
+    if (/^'[\s\S]*'$/.test(v)) return v.slice(1, -1).replace(/''/g, "'");
+    if (/^[>|][-+0-9]*$/.test(v)) {
+      var block = /^(?:\r?\n[ \t]+[^\n]*|\r?\n[ \t]*(?=\r?\n))+/.exec(after);
+      return block ? block[0].split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean).join(" ") : "";
+    }
+    return v;
   }
 
   function cardNotesHtml(itemId) {
     var list = (notes[itemId] && notes[itemId].list) || [];
     if (!list.length) return "";
-    var seen = {}, rows = [], lines = 0;
+    var seen = {}, rows = [], lines = 0, files = 0;
     list.forEach(function (n) {
       if (n.kind === "memory") {
         if (seen[n.source_path]) return;
         seen[n.source_path] = true;
+        if (++files > MEMORY_ROWS) return;
         var p = memoryParts(n.text);
         rows.push('<span class="desk-note"><span class="desk-line-src desk-note-file">' + esc(memoryName(n.source_path)) + "</span> " + esc(p.summary || p.body) + "</span>");
       } else if (lines < 3) {
@@ -201,20 +242,29 @@
         rows.push('<span class="desk-note"><span class="desk-line-src">' + esc(n.kind) + "</span> " + esc(n.text) + "</span>");
       }
     });
-    return '<button class="desk-notes" type="button" data-notes="' + esc(itemId) + '" title="Every note, newest first">' +
-      '<span class="desk-label">Notes · ' + list.length + "</span>" + rows.join("") + "</button>";
+    var more = files - MEMORY_ROWS;
+    return '<button class="desk-notes" type="button" data-notes="' + esc(itemId) + '" title="Every note, newest first"' +
+      ' aria-label="Notes, ' + list.length + ' — open every note">' +
+      '<span class="desk-label">Notes · ' + list.length + (more > 0 ? " · " + more + " more file" + (more === 1 ? "" : "s") : "") + "</span>" +
+      rows.join("") + "</button>";
   }
 
   function readNotes(cards) {
     cards.forEach(function (c) {
+      var ms = "notes_ms" in c ? c.notes_ms : c.last_activity_ms;
       var had = notes[c.id];
-      if (had && had.ms === c.last_activity_ms) return;
-      notes[c.id] = { ms: c.last_activity_ms, list: had ? had.list : null };
+      if (had && had.ms === ms) return;
+      if (!ms) { notes[c.id] = { ms: ms, list: [] }; return; }   // no notes yet: nothing to read
+      notes[c.id] = { ms: ms, list: had ? had.list : null };
       api("GET", "/items/" + encodeURIComponent(c.id) + "/notes").then(function (r) {
+        if (notes[c.id].ms !== ms) return;   // a newer read is on its way
         notes[c.id].list = r.notes || [];
         var slot = cardsEl.querySelector('[data-notes-slot="' + CSS.escape(c.id) + '"]');
         if (slot) slot.innerHTML = cardNotesHtml(c.id);
-      }).catch(function () {});   // read again when the card's activity moves
+      }).catch(function () {
+        // Read again on the next view, not only when a note moves notes_ms.
+        if (notes[c.id].ms === ms) notes[c.id].ms = had ? had.ms : undefined;
+      });
     });
   }
 
@@ -231,26 +281,32 @@
       '<div class="desk-notes-text">' + esc(text) + "</div></li>";
   }
 
+  // The dialog is named by its title (index.html's aria-labelledby), takes
+  // focus on Close, and gives it back to the card's notes when it closes.
   function openNotes(itemId) {
     var c = (view.cards || []).filter(function (x) { return x.id === itemId; })[0];
-    var head = '<div class="card-title"><span>Notes — ' + esc(c && c.issue ? c.issue.key + " · " : "") + esc(c ? c.title : itemId) + "</span>" +
-      '<button class="btn btn-tiny" type="button" id="desk-notes-close">Close</button></div>';
     notesItem = itemId;
     notesEl.hidden = false;
     notesBackdrop.hidden = false;
-    notesEl.innerHTML = head + '<p class="placeholder-note">reading the notes…</p>';
+    notesEl.innerHTML = '<div class="card-title"><span id="desk-notes-title">Notes — ' + esc(c && c.issue ? c.issue.key + " · " : "") + esc(c ? c.title : itemId) + "</span>" +
+      '<button class="btn btn-tiny" type="button" id="desk-notes-close">Close</button></div>' +
+      '<div id="desk-notes-body"><p class="placeholder-note">reading the notes…</p></div>';
+    document.getElementById("desk-notes-close").focus();
+    var body = document.getElementById("desk-notes-body");
     api("GET", "/items/" + encodeURIComponent(itemId) + "/notes").then(function (r) {
       if (notesItem !== itemId) return;
       var list = r.notes || [];
-      notesEl.innerHTML = head + (list.length ? '<ul class="desk-notes-list">' + list.map(noteRow).join("") + "</ul>"
-        : '<p class="placeholder-note">No notes yet. Sessions on this item write them as they work.</p>');
-    }).catch(function (e) { if (notesItem === itemId) notesEl.innerHTML = head + '<p class="placeholder-note">' + esc(e.message) + "</p>"; });
+      body.innerHTML = list.length ? '<ul class="desk-notes-list">' + list.map(noteRow).join("") + "</ul>"
+        : '<p class="placeholder-note">No notes yet. Sessions on this item write them as they work.</p>';
+    }).catch(function (e) { if (notesItem === itemId) body.innerHTML = '<p class="placeholder-note">' + esc(e.message) + "</p>"; });
   }
 
   function closeNotes() {
+    var back = notesItem && cardsEl.querySelector('[data-notes="' + CSS.escape(notesItem) + '"]');
     notesItem = null;
     notesEl.hidden = true;
     notesBackdrop.hidden = true;
+    if (back) back.focus();
   }
 
   function cardHtml(c) {
@@ -337,6 +393,7 @@
 
   function renderSettings() {
     if (settingsEl.hidden) return;
+    var chat = view.settings;   // the chat setting (chat decision 4): off until EmbArch's chat ships
     var rows = (view.connectors || []).map(function (c) {
       return '<tr><td>' + esc(c.kind) + "</td><td class=\"mono\">" + esc(c.label) + "</td><td>" +
         (c.ok ? '<span class="badge badge-success">ok</span> ' : '<span class="badge badge-danger">failing</span> ') +
@@ -363,16 +420,12 @@
       '<textarea id="desk-ignore" class="desk-input desk-textarea" rows="3" spellcheck="false">' + esc((view.ignore || []).join("\n")) + "</textarea>" +
       '<div><button class="btn" id="desk-ignore-save" type="button">Save</button></div>' +
       '<div class="card-title" style="margin-top:18px;">Chat</div>' +
-      '<label class="desk-check"><input id="desk-chat-panel" type="checkbox"' + (settings && settings.chat_panel ? " checked" : "") + (settings ? "" : " disabled") + " />" +
+      '<label class="desk-check"><input id="desk-chat-panel" type="checkbox"' + (chat && chat.chat_panel ? " checked" : "") + (chat ? "" : " disabled") + " />" +
       " Start work opens EmbArch\'s chat</label>" +
-      '<p class="desk-help">' + (settings
-        ? "Off: Start work opens Claude Code\'s panel with the first prompt typed in. On: the worktree\'s window starts an EmbArch chat with it."
-        : "reading the desk\'s settings…") + "</p>";
-  }
-
-  // The chat setting (chat decision 4): off until EmbArch's chat ships.
-  function loadSettings() {
-    return api("GET", "/settings").then(function (r) { settings = r; renderSettings(); }).catch(function (e) { flash(e.message); });
+      '<p class="desk-help">' + (chat
+        ? "Off: Start work opens Claude Code\'s panel with the first prompt typed in, and each session keeps Answer and its last reply. " +
+          "On: the worktree\'s window starts an EmbArch chat with it, and each session is one line with Open chat or Jump."
+        : "This desk has no chat setting — update embarch-desk.") + "</p>";
   }
 
   function renderTimer() {
@@ -993,7 +1046,6 @@
       case "desk-settings-toggle":
         settingsEl.hidden = !settingsEl.hidden;
         renderSettings();
-        if (!settingsEl.hidden) loadSettings();
         break;
       case "desk-refresh":
         t.disabled = true;
@@ -1046,10 +1098,13 @@
 
   panel.addEventListener("change", function (ev) {
     if (ev.target.id === "desk-chat-panel") {
+      // Saved on the click. Rendering again shows the desk's answer — the
+      // session rows follow the setting — and takes focus off the box, which
+      // would otherwise hold every pushed view back (`editing`).
       var on = ev.target.checked;
       api("PUT", "/settings", { chat_panel: on }).then(function (r) {
-        settings = r && typeof r.chat_panel === "boolean" ? r : { chat_panel: on };
-      }).catch(function (e) { flash(e.message); ev.target.checked = !on; });
+        view.settings = r && typeof r.chat_panel === "boolean" ? r : { chat_panel: on };
+      }, function (e) { flash(e.message); }).then(render);
       return;
     }
     var sel = ev.target.closest("select[data-status]");
