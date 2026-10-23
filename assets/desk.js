@@ -18,6 +18,15 @@
   var slackEl = document.getElementById("desk-slack");
   var settingsEl = document.getElementById("desk-settings");
   var draftsEl = document.getElementById("desk-drafts");
+  var elsewhereEl = document.getElementById("desk-elsewhere");
+  var dayBody = document.getElementById("desk-day-body");
+  var dayDate = document.getElementById("desk-day-date");
+  var dayTotal = document.getElementById("desk-day-total");
+  var formEl = document.getElementById("desk-form");
+  var formBackdrop = document.getElementById("desk-form-backdrop");
+  var newDeskSel = document.getElementById("desk-new-desk");
+  var pickedDay = null;    // a date the user picked; null follows today
+  var lastOpenId;          // the open desk the last pushed view named
   var timerEl = document.getElementById("desk-timer");
   var dialogEl = document.getElementById("desk-dialog");
   var backdropEl = document.getElementById("desk-dialog-backdrop");
@@ -262,9 +271,180 @@
       }).join("");
   }
 
+  function renderHead() {
+    var d = view.open_desk;
+    document.getElementById("desk-head-name").textContent = d ? d.name : "no desk";
+    document.getElementById("desk-edit").hidden = !d;
+    var desks = view.desks || [];
+    var keep = newDeskSel.value;
+    newDeskSel.hidden = !desks.length;
+    newDeskSel.innerHTML = '<option value="">desk for a standalone card…</option>' +
+      desks.map(function (k) { return '<option value="' + esc(k.id) + '">' + esc(k.name) + "</option>"; }).join("") +
+      '<option value="none">no desk</option>';
+    newDeskSel.value = keep || (d ? d.id : "");
+  }
+
+  function renderElsewhere() {
+    var tiles = view.elsewhere || [];
+    if (!tiles.length) { elsewhereEl.hidden = true; elsewhereEl.innerHTML = ""; return; }
+    elsewhereEl.hidden = false;
+    elsewhereEl.innerHTML = "<span>Unsent on other desks:</span>" + tiles.map(function (t) {
+      return '<button class="desk-mini" type="button" data-open-tile="' + esc(t.id) + '" title="Open the tile">' +
+        esc(t.desk || "no desk") + " · " + esc(t.item_title) + " · " + esc(dayLabel(t.date)) + " · <b>" + hours(t.hours) + "</b></button>";
+    }).join("");
+  }
+
+  // "Today's work": every work item with time, a line, bench activity or a
+  // session that day, grouped by desk, the open one first — links out, what
+  // was done, status and sessions. A picked date is fetched; today is pushed.
+  function renderDay(day) {
+    if (!day) return;
+    dayTotal.textContent = (day.groups || []).length ? "total " + hours(day.total_hours) : "";
+    if (!pickedDay) dayDate.value = view.today;
+    var groups = day.groups || [];
+    if (!groups.length) {
+      dayBody.innerHTML = '<p class="placeholder-note">Nothing recorded on ' + esc(dayLabel(day.date)) + ".</p>";
+      return;
+    }
+    dayBody.innerHTML = groups.map(function (g) {
+      return '<div class="desk-day-group"><div class="desk-day-desk">' + esc(g.name) + "</div>" + g.items.map(function (r) {
+        var issue = r.issue;
+        var title = issue
+          ? '<a href="' + esc(issue.url) + '" target="_blank" rel="noopener" title="Open in Linear">' + esc(issue.key) + " · " + esc(r.title) + "</a>"
+          : esc(r.title);
+        var meta = [];
+        if (issue && issue.state_name) meta.push('<span class="badge badge-neutral">' + esc(issue.state_name) + "</span>");
+        (r.prs || []).forEach(function (pr) {
+          meta.push('<a href="' + esc(pr.url) + '" target="_blank" rel="noopener" title="' + esc(pr.title) + '">' +
+            esc(pr.repo.split("/").pop()) + "#" + esc(pr.number) + "</a> " + ciBadge(pr.ci));
+        });
+        if (r.sessions) meta.push(r.sessions + " session" + (r.sessions === 1 ? "" : "s") + (r.live ? " (" + r.live + " live)" : ""));
+        if (r.bench) meta.push(r.bench + " bench call" + (r.bench === 1 ? "" : "s") + (r.bench_failed ? ', <span style="color:var(--danger);">' + r.bench_failed + " failed</span>" : ""));
+        meta.push(r.status === "approved" ? '<span class="badge badge-success">in Harvest</span>' :
+                  r.status === "discarded" ? '<span class="badge badge-neutral">discarded</span>' : '<span class="badge badge-warning">unsent</span>');
+        var lines = (r.lines || []).map(function (l) { return "<li>" + esc(l.text) + "</li>"; }).join("");
+        return '<div class="desk-day-row"><div class="desk-day-title">' + title + "</div>" +
+          '<div class="desk-day-hours">' + hours(r.hours) + "</div>" +
+          '<div class="desk-day-meta">' + meta.join(" ") + "</div>" +
+          (lines ? '<ul class="desk-day-lines">' + lines + "</ul>" : "") +
+          (r.note ? '<div class="desk-day-note">' + esc(r.note) + "</div>" : "") + "</div>";
+      }).join("") + "</div>";
+    }).join("");
+  }
+
+  function loadDay(date) {
+    pickedDay = date && date !== (view && view.today) ? date : null;
+    if (!pickedDay) { renderDay(view && view.day); return; }
+    api("GET", "/day/" + encodeURIComponent(pickedDay)).then(renderDay).catch(function (e) { flash(e.message); });
+  }
+
+  // ---------------------------------------------------------------- the desk form
+  var formData = { projects: null, targets: null, repos: null };
+
+  function loadFormData() {
+    var jobs = [];
+    if (!formData.projects) jobs.push(api("GET", "/linear/projects").then(function (r) { formData.projects = r.projects || []; }).catch(function () { formData.projects = []; }));
+    if (!formData.targets) jobs.push(api("GET", "/harvest/targets").then(function (r) { formData.targets = r.targets || []; }).catch(function () { formData.targets = []; }));
+    if (!formData.repos) jobs.push(api("GET", "/github/repos").then(function (r) { formData.repos = r.repos || []; }).catch(function () { formData.repos = []; }));
+    return Promise.all(jobs);
+  }
+
+  function linearOptions(cur) {
+    // A desk binds one Linear project, or a whole team when the client's work
+    // spans several of its projects.
+    var opts = ['<option value="">— no Linear —</option>'];
+    var teams = {};
+    (formData.projects || []).forEach(function (p) {
+      (p.teams || []).forEach(function (t) { teams[p.account + "|" + t.id] = { account: p.account, team: t }; });
+    });
+    Object.keys(teams).sort().forEach(function (k) {
+      var x = teams[k];
+      var v = JSON.stringify({ account: x.account, project_id: "", project_name: "", team_id: x.team.id, team_key: x.team.key });
+      var sel = cur && !cur.project_id && cur.team_id === x.team.id;
+      opts.push('<option value="' + esc(v) + '"' + (sel ? " selected" : "") + ">Whole team " + esc(x.team.key) + " · " + esc(x.team.name) + " (" + esc(x.account) + ")</option>");
+    });
+    (formData.projects || []).forEach(function (p) {
+      var t = (p.teams || [])[0] || {};
+      var v = JSON.stringify({ account: p.account, project_id: p.id, project_name: p.name, team_id: t.id || "", team_key: t.key || "" });
+      var sel = cur && cur.project_id === p.id;
+      opts.push('<option value="' + esc(v) + '"' + (sel ? " selected" : "") + ">" + esc(t.key || "?") + " · " + esc(p.name) + " — " + esc(p.state || "") + " (" + esc(p.account) + ")</option>");
+    });
+    return opts.join("");
+  }
+
+  function harvestOptions(cur) {
+    return '<option value="">— no Harvest default —</option>' + (formData.targets || []).map(function (x) {
+      var v = JSON.stringify({ account_id: x.account_id, project_id: x.project_id, task_id: x.task_id, label: targetLabel(x) });
+      var sel = cur && cur.project_id === x.project_id && cur.task_id === x.task_id;
+      return '<option value="' + esc(v) + '"' + (sel ? " selected" : "") + ">" + esc(targetLabel(x)) + "</option>";
+    }).join("");
+  }
+
+  function openForm(id) {
+    var d = id ? (view.desks || []).filter(function (k) { return k.id === id; })[0] : null;
+    formEl.hidden = false;
+    formBackdrop.hidden = false;
+    formEl.innerHTML = '<div class="card-title">' + (d ? "Edit the desk " + esc(d.name) : "New desk") + '</div><p class="placeholder-note">reading Linear, Harvest and GitHub…</p>';
+    loadFormData().then(function () {
+      formEl.innerHTML =
+        '<div class="card-title"><span>' + (d ? "Edit the desk " + esc(d.name) : "New desk — one per project") + '</span>' +
+        '<button class="btn btn-tiny" type="button" data-form-close="1">Close</button></div>' +
+        '<div class="desk-form-grid">' +
+        '<div><div class="desk-label">Name</div><input id="df-name" class="desk-input" type="text" value="' + esc(d ? d.name : "") + '" placeholder="The client or project" /></div>' +
+        '<div><div class="desk-label">Linear — one project, or the whole team</div><select id="df-linear" class="desk-input">' + linearOptions(d && d.linear) + "</select></div>" +
+        '<div><div class="desk-label">Harvest project and task (Intercreate)</div><select id="df-harvest" class="desk-input">' + harvestOptions(d && d.harvest) + "</select></div>" +
+        '<div><div class="desk-label">Firmware repo folder</div><input id="df-repo" class="desk-input mono" type="text" value="' + esc(d ? (d.firmware_repos || [])[0] || "" : (view.open_desk ? "" : "")) + '" placeholder="/home/you/src/client-fw" /></div>' +
+        '<div><div class="desk-label">GitHub repos (owner/repo, one per line)</div><textarea id="df-github" class="desk-input desk-textarea" rows="3" list="df-github-list" spellcheck="false">' + esc(d ? (d.github_repos || []).join("\n") : "") + "</textarea>" +
+        '<div class="desk-detail">yours, most recently pushed: ' + esc((formData.repos || []).slice(0, 8).join(", ")) + "</div></div>" +
+        '<div><div class="desk-label">Saved bench (Topology) — optional</div><input id="df-bench" class="desk-input" type="text" value="' + esc(d && d.bench ? d.bench : "") + '" placeholder="the saved bench\'s name in that repo" /></div>' +
+        "</div>" +
+        '<div class="desk-dialog-actions"><span class="desk-detail" id="df-status"></span><span style="flex:1"></span>' +
+        (d ? '<button class="btn desk-no-big" type="button" data-form-delete="' + esc(d.id) + '">Delete desk</button>' : "") +
+        '<button class="btn btn-primary" type="button" data-form-save="' + esc(d ? d.id : "") + '">' + (d ? "Save" : "Create and open") + "</button></div>";
+    });
+  }
+
+  function closeForm() {
+    formEl.hidden = true;
+    formBackdrop.hidden = true;
+  }
+
+  function saveForm(id) {
+    var status = document.getElementById("df-status");
+    var parse = function (sel) { var v = document.getElementById(sel).value; return v ? JSON.parse(v) : null; };
+    var repo = document.getElementById("df-repo").value.trim();
+    var body = {
+      id: id || null,
+      name: document.getElementById("df-name").value.trim(),
+      linear: parse("df-linear"),
+      harvest: parse("df-harvest"),
+      firmware_repos: repo ? [repo] : [],
+      github_repos: document.getElementById("df-github").value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean),
+      bench: document.getElementById("df-bench").value.trim() || null,
+    };
+    status.textContent = "saving…";
+    api("POST", "/desks", body).then(function (r) {
+      closeForm();
+      if (!id) {
+        // A new desk opens: that is what making one is for.
+        return api("POST", "/open", { desk: r.id }).then(function () {
+          document.dispatchEvent(new CustomEvent("embarch:desk-switched"));
+        });
+      }
+    }).then(function () { return load(); }).catch(function (e) { status.textContent = e.message; });
+  }
+
   function render() {
     if (!view) return;
     renderSlackBar();
+    renderHead();
+    renderElsewhere();
+    if (!pickedDay) renderDay(view.day);
+    var openId = view.open_desk ? view.open_desk.id : null;
+    if (openId !== lastOpenId || lastOpenId === undefined) {
+      lastOpenId = openId;
+      document.dispatchEvent(new CustomEvent("embarch:desk", { detail: { desk: view.open_desk } }));
+    }
     renderTimer();
     renderDrafts();
     var cards = view.cards || [];
@@ -510,7 +690,23 @@
       b3.innerHTML = "";
       return;
     }
+    if (d.formClose) { closeForm(); return; }
+    if (d.formSave !== undefined) { saveForm(d.formSave); return; }
+    if (d.formDelete) {
+      if (!window.confirm("Delete this desk? Its work items keep their time and become deskless.")) return;
+      api("DELETE", "/desks/" + encodeURIComponent(d.formDelete)).then(function () { closeForm(); return load(); }).catch(function (e) { flash(e.message); });
+      return;
+    }
     switch (t.id) {
+      case "desk-switch":
+        document.getElementById("project-button").click();
+        break;
+      case "desk-create":
+        openForm(null);
+        break;
+      case "desk-edit":
+        if (view.open_desk) openForm(view.open_desk.id);
+        break;
       case "desk-slack-toggle":
         slackEl.hidden = !slackEl.hidden;
         t.setAttribute("aria-expanded", String(!slackEl.hidden));
@@ -530,6 +726,10 @@
         var v = input.value.trim();
         if (!v) break;
         var body = /^[A-Za-z]{1,10}-\d+$/.test(v) ? { issue_key: v } : { title: v };
+        if (!body.issue_key) {
+          if ((view.desks || []).length && !newDeskSel.value) { flash("Pick the standalone card's desk first."); break; }
+          body.desk = newDeskSel.value || undefined;
+        }
         api("POST", "/items", body).then(function () { input.value = ""; return load(); }).catch(function (e) { flash(e.message); });
         break;
       }
@@ -605,6 +805,11 @@
   });
 
   backdropEl.addEventListener("click", closeDialog);
+  formBackdrop.addEventListener("click", closeForm);
+  dayDate.addEventListener("change", function () { loadDay(dayDate.value); });
+  document.addEventListener("embarch:desk-form", function (ev) { openForm(ev.detail ? ev.detail.id : null); });
+  // A switch made from the shell: refresh at once rather than on the next push.
+  document.addEventListener("embarch:desk-switched", function () { lastOpenId = undefined; load(); });
   document.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && openTileId) closeDialog(); });
 
   // Live by SSE, like every other tab (decision 6): the server asks the desk
@@ -613,7 +818,8 @@
   // is typing until they finish.
   function editing() {
     return dialogEl.contains(document.activeElement) || slackEl.contains(document.activeElement) ||
-      settingsEl.contains(document.activeElement) || draftsEl.contains(document.activeElement);
+      settingsEl.contains(document.activeElement) || draftsEl.contains(document.activeElement) ||
+      formEl.contains(document.activeElement);
   }
   if (window.EventSource) {
     var source = new EventSource("/api/desk-events");

@@ -78,10 +78,10 @@
          be a card on the Study Designer, which made "which repo am I looking
          at?" a question you answered by leaving the tab you were on. -->
     <button id="project-button" class="sidebar-project" type="button"
-            title="The firmware repo every tab on this page reads and writes">
-      <span class="sidebar-project-label">Project</span>
-      <span class="sidebar-project-name" id="project-current-name">none open</span>
-      <span class="sidebar-project-path mono" id="project-current-path">pick a firmware repo</span>
+            title="The open desk — its firmware repo is what every tab reads and writes">
+      <span class="sidebar-project-label">Desk</span>
+      <span class="sidebar-project-name" id="project-current-name">no desk</span>
+      <span class="sidebar-project-path mono" id="project-current-path">pick a desk or a repo</span>
     </button>
     <div class="sidebar-footer">
       <span>embarch-ui v0.1.0</span>
@@ -105,10 +105,17 @@
     </div>
 
     <div class="content">
+      <div id="desk-bench-banner" class="desk-bench-banner" hidden></div>
       <!-- The Desk (embarch-desk-proposal.md): one card per work item, its
            time tile inside it. Everything here comes from embarch-desk through
            this server's /api/desk proxy; desk.js renders it. -->
       <section class="tab-panel" data-tab="desk">
+        <div class="desk-head">
+          <div><div class="desk-label" style="margin:0;">Open desk</div><div class="desk-head-name" id="desk-head-name">no desk</div></div>
+          <button class="btn btn-tiny" id="desk-switch" type="button">Switch…</button>
+          <button class="btn btn-tiny" id="desk-edit" type="button">Edit desk</button>
+          <button class="btn btn-tiny" id="desk-create" type="button">New desk</button>
+        </div>
         <div class="desk-bar">
           <button class="desk-slack-bar" id="desk-slack-toggle" type="button" aria-expanded="false">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10H9l-5 4Z"/></svg>
@@ -118,6 +125,7 @@
           <span id="desk-waiting" class="badge badge-warning" hidden></span>
           <div class="desk-bar-actions">
             <input id="desk-new" class="desk-input" type="text" placeholder="Issue key, or a title for a standalone card" />
+            <select id="desk-new-desk" class="desk-input" title="A standalone card's desk"></select>
             <button class="btn" id="desk-add" type="button">Add card</button>
             <button class="btn" id="desk-refresh" type="button" title="Refresh issues, PRs and Slack now">Refresh</button>
             <button class="btn" id="desk-settings-toggle" type="button">Connectors</button>
@@ -129,6 +137,15 @@
         <div id="desk-slack" class="card desk-panel" hidden></div>
         <div id="desk-settings" class="card desk-panel" hidden></div>
         <div id="desk-cards" class="desk-cards"><p class="placeholder-note">waiting for embarch-desk…</p></div>
+        <div id="desk-elsewhere" class="desk-elsewhere" hidden></div>
+        <div class="card desk-day">
+          <div class="card-title"><span>Today's work</span>
+            <span class="desk-day-ctl"><span class="desk-detail" id="desk-day-total"></span>
+            <input id="desk-day-date" class="desk-input" type="date" /></span></div>
+          <div id="desk-day-body"><p class="placeholder-note">waiting for embarch-desk…</p></div>
+        </div>
+        <div id="desk-form-backdrop" class="desk-backdrop" hidden></div>
+        <div id="desk-form" class="card desk-dialog" role="dialog" aria-modal="true" hidden></div>
         <div id="desk-dialog-backdrop" class="desk-backdrop" hidden></div>
         <div id="desk-dialog" class="card desk-dialog" role="dialog" aria-modal="true" hidden></div>
       </section>
@@ -683,8 +700,10 @@
            explicit human pick is the way in when it is absent. -->
       <div id="project-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="project-dialog" class="dialog" style="display:none; width:min(640px,92vw);">
-        <div class="card-title">Project — the firmware repo this page reads and writes</div>
-        <label class="sd-field" style="margin-top:12px;">
+        <div class="card-title">Open a desk — the whole suite follows it</div>
+        <div id="desk-switch-list" class="desk-switch-list"><p class="placeholder-note">reading the desks…</p></div>
+        <div class="desk-label" style="margin-top:16px;">No desk — a bare firmware repo, nothing tracked or scoped</div>
+        <label class="sd-field" style="margin-top:6px;">
           <span>Firmware repo path</span>
           <input id="project-path" type="text" class="sd-input mono" spellcheck="false" placeholder="/home/you/src/your-firmware" />
         </label>
@@ -698,8 +717,9 @@
         <p id="project-error" class="sd-error" style="display:none;"></p>
         <div class="sd-row-actions" style="margin-top:16px;">
           <span style="flex:1;"></span>
+          <button id="project-new-desk" class="btn" type="button">New desk…</button>
           <button id="project-cancel" class="btn">Cancel</button>
-          <button id="project-open" class="btn btn-primary">Open</button>
+          <button id="project-open" class="btn btn-primary">Open repo, no desk</button>
         </div>
       </div>
 

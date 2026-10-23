@@ -40,8 +40,11 @@ def check(name, cond, extra=""):
 def wd(method, url, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode())["value"]
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode())["value"]
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("webdriver: " + e.read().decode()[:600]) from None
 
 
 def desk(method, path, body=None, token=None):
@@ -174,6 +177,60 @@ def main():
             js("document.querySelector('#desk-timer [data-timer-stop]').click(); return true")
             settle()
             check("Stop ends it", js("return document.getElementById('desk-timer').hidden"))
+
+            # --- desks: one per project, one open suite-wide -------------------
+            (repo / "CMakeLists.txt").write_text("project(fw)\n")
+            js("document.getElementById('desk-create').click(); return true")
+            for _ in range(150):  # the form waits on Linear, Harvest and GitHub
+                if js("return !!document.getElementById('df-name')"):
+                    break
+                time.sleep(0.2)
+            js("document.getElementById('df-name').value = 'Bench client';"
+               "document.getElementById('df-repo').value = arguments[0];"
+               "document.querySelector('[data-form-save]').click(); return true", str(repo))
+            opened = False
+            for _ in range(60):
+                if js("return document.getElementById('project-current-name').textContent") == "Bench client":
+                    opened = True
+                    break
+                time.sleep(0.2)
+            check("a desk made from the form opens, and the sidebar names it", opened,
+                  js("return document.getElementById('project-current-name').textContent"))
+            check("the Desk tab names the open desk", js("return document.getElementById('desk-head-name').textContent") == "Bench client")
+            check("the first desk adopts the cards that came before it",
+                  "Client sync call" in js("return document.getElementById('desk-cards').textContent"))
+            day = js("return document.getElementById('desk-day-body').textContent")
+            check("Today's work groups by desk and shows what was done",
+                  "Bench client" in day and "Client sync call" in day and "Agreed the bootload test plan" in day, day[:200])
+            js("document.getElementById('desk-new').value = 'Weekly call';"
+               "document.getElementById('desk-add').click(); return true")
+            settle()
+            check("a standalone card lands on the desk picked for it (the open one by default)",
+                  "Weekly call" in js("return document.getElementById('desk-cards').textContent"))
+
+            # A switch made elsewhere (an agent, the CLI) reaches the page by itself.
+            desk("POST", "/open", {"desk": "none"}, token)
+            followed = False
+            for _ in range(70):
+                if js("return document.getElementById('project-current-path').textContent").startswith("no desk"):
+                    followed = True
+                    break
+                time.sleep(0.2)
+            check("closing the desk from outside the page reaches the sidebar", followed,
+                  js("return document.getElementById('project-current-path').textContent"))
+            ks = desk("GET", "/desks", token=token)["desks"]
+            k = [d for d in ks if d["name"] == "Bench client"][0]
+            desk("POST", "/desks", {"id": k["id"], "name": "Bench client", "firmware_repos": [str(repo)], "bench": "two-boards"}, token)
+            desk("POST", "/open", {"desk": "Bench client"}, token)
+            banner = False
+            for _ in range(70):
+                if "two-boards" in js("return document.getElementById('desk-bench-banner').textContent"):
+                    banner = True
+                    break
+                time.sleep(0.2)
+            check("opening a desk proposes its saved bench and touches nothing", banner and
+                  js("return !!document.getElementById('desk-bench-review')"))
+            js("document.getElementById('desk-bench-later').click(); return true")
 
             js("document.getElementById('desk-settings-toggle').click(); return true")
             settle()

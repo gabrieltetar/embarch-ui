@@ -5248,17 +5248,7 @@
       document.dispatchEvent(new CustomEvent("embarch:project", { detail: { path: projectState.path } }));
     }
 
-    var button = document.getElementById("project-button");
-    var name = document.getElementById("project-current-name");
-    var path = document.getElementById("project-current-path");
-    if (button && name && path) {
-      name.textContent = projectShortName(state.path);
-      path.textContent = projectPathDisplay(state.path);
-      button.classList.toggle("is-empty", !state.path);
-      button.title = state.path
-        ? state.path + " — the firmware repo every tab on this page reads and writes"
-        : "No project open. Pick a firmware repo — every tab on this page is relative to it.";
-    }
+    renderShellDesk();
 
     var current = sdEl("sd-project-current");
     if (current) {
@@ -5289,9 +5279,156 @@
     }
   }
 
+  // ---------------------------------------------------------------- the open desk
+  //
+  // The sidebar control names the open desk, not a repo
+  // (embarch-open-desk-proposal.md): one desk per project, open suite-wide.
+  // Its firmware repo is what every tab reads, so following a desk opens its
+  // repo through the same path a typed repo takes. "No desk" is a bare repo.
+  // A switch made anywhere else — an agent, the CLI, a session's question —
+  // reaches this page through desk.js's pushed view as an `embarch:desk` event.
+  var shellDesk;           // undefined until the desk has answered; null = no desk
+  var shellDeskKnown = false;
+
+  function renderShellDesk() {
+    var button = document.getElementById("project-button");
+    var name = document.getElementById("project-current-name");
+    var path = document.getElementById("project-current-path");
+    if (!button || !name || !path) return;
+    var repo = projectState ? projectState.path : null;
+    if (shellDesk) {
+      name.textContent = shellDesk.name;
+      path.textContent = repo ? projectShortName(repo) + "  " + projectPathDisplay(repo) : "no firmware repo";
+      button.classList.remove("is-empty");
+      button.title = shellDesk.name + (repo ? " — " + repo : "") + ". Click to switch desks.";
+    } else {
+      name.textContent = repo ? projectShortName(repo) : "no desk";
+      path.textContent = repo ? "no desk · " + projectPathDisplay(repo) : "pick a desk or a repo";
+      button.classList.toggle("is-empty", !repo);
+      button.title = repo ? repo + " — no desk open" : "No desk open. Pick a desk, or a bare firmware repo.";
+    }
+  }
+
+  async function followDesk(desk, proposeBench) {
+    var changed = (desk ? desk.id : null) !== (shellDesk ? shellDesk.id : null);
+    shellDesk = desk || null;
+    renderShellDesk();
+    var repo = desk && desk.firmware_repos && desk.firmware_repos[0];
+    if (repo && (!projectState || projectState.path !== repo)) {
+      await sdOpenProject(repo, true);
+    }
+    if (changed && proposeBench && desk && desk.bench) showBenchBanner(desk);
+    if (changed && !desk) hideBenchBanner();
+  }
+
+  document.addEventListener("embarch:desk", function (ev) {
+    var desk = ev.detail ? ev.detail.desk : null;
+    var first = !shellDeskKnown;
+    shellDeskKnown = true;
+    var same = (desk ? desk.id : null) === (shellDesk ? shellDesk.id : null);
+    if (same && !first) {
+      shellDesk = desk || null;
+      renderShellDesk();
+      return;
+    }
+    // On page load the open desk is not a switch: no bench proposal.
+    followDesk(desk, !first);
+  });
+
+  async function openDesk(id) {
+    var err = document.getElementById("project-error");
+    try {
+      var resp = await fetch("/api/desk/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ desk: id }),
+      });
+      var body = await resp.json();
+      if (!resp.ok) throw new Error(body.error || resp.status);
+      closeProjectDialog();
+      shellDeskKnown = true;
+      await followDesk(body.desk, true);
+      document.dispatchEvent(new CustomEvent("embarch:desk-switched"));
+    } catch (e) {
+      if (err) { err.textContent = String(e.message || e); err.style.display = "block"; }
+    }
+  }
+
+  async function renderDeskSwitchList() {
+    var list = document.getElementById("desk-switch-list");
+    if (!list) return;
+    try {
+      var resp = await fetch("/api/desk/desks");
+      var body = await resp.json();
+      if (!resp.ok) throw new Error(body.error || resp.status);
+      var desks = body.desks || [];
+      if (!desks.length) {
+        list.innerHTML = '<p class="placeholder-note">No desks yet — make one with New desk.</p>';
+        return;
+      }
+      list.innerHTML = desks.map(function (d) {
+        var sub = [d.linear ? (d.linear.project_name || ("team " + d.linear.team_key)) : null,
+                   d.harvest ? d.harvest.label : null,
+                   (d.firmware_repos || [])[0] || null].filter(Boolean).join(" · ");
+        return '<button type="button" class="desk-switch-item' + (body.open === d.id ? " current" : "") +
+          '" data-open-desk="' + escapeHtml(d.id) + '"><span><b>' + escapeHtml(d.name) + "</b><br>" +
+          '<span class="desk-switch-sub">' + escapeHtml(sub) + "</span></span>" +
+          (body.open === d.id ? '<span class="badge badge-success">open</span>' : '<span class="badge badge-neutral">open it</span>') +
+          "</button>";
+      }).join("") +
+      (body.open ? '<button type="button" class="desk-switch-item" data-open-desk="none"><span>Close the desk <span class="desk-switch-sub">— keep the repo, nothing scoped</span></span></button>' : "");
+    } catch (e) {
+      list.innerHTML = '<p class="sd-error">embarch-desk: ' + escapeHtml(String(e.message || e)) + "</p>";
+    }
+  }
+
+  function hideBenchBanner() {
+    var b = document.getElementById("desk-bench-banner");
+    if (b) { b.hidden = true; b.innerHTML = ""; }
+  }
+
+  // Opening a desk proposes its saved bench; nothing touches hardware until the
+  // user says so, and a running study is named before they do.
+  function showBenchBanner(desk) {
+    var b = document.getElementById("desk-bench-banner");
+    if (!b) return;
+    b.hidden = false;
+    b.innerHTML = "<span>The desk <b>" + escapeHtml(desk.name) + "</b> uses the saved bench <b>" +
+      escapeHtml(desk.bench) + "</b>.</span>" +
+      '<button class="btn btn-tiny btn-primary" type="button" id="desk-bench-review">Review it on Topology</button>' +
+      '<button class="btn btn-tiny" type="button" id="desk-bench-later">Not now</button>';
+    document.getElementById("desk-bench-later").addEventListener("click", hideBenchBanner);
+    document.getElementById("desk-bench-review").addEventListener("click", async function () {
+      try {
+        var running = [];
+        var resp = await fetch("/api/studies");
+        if (resp.ok) {
+          running = ((await resp.json()).studies || []).filter(function (x) { return x.status === "running"; });
+        }
+        if (running.length && !window.confirm(
+          "A study is running on the bench: " + running.map(function (x) { return x.study_name || x.study_id; }).join(", ") +
+          ".\n(A flash or bootload in progress is not reported here.)\nLoad the desk's bench anyway?")) return;
+        showTab("topology");
+        await loadProfiles();
+        var picker = topoEl("topo-profile-picker");
+        var has = picker && Array.prototype.some.call(picker.options, function (o) { return o.value === desk.bench; });
+        if (!has) {
+          showError(topoEl("topo-profile-error"), "the desk names the saved bench '" + desk.bench + "', which this repo does not have");
+          return;
+        }
+        picker.value = desk.bench;
+        hideBenchBanner();
+        await applyTopology();
+      } catch (e) {
+        showError(topoEl("topo-profile-error"), String(e));
+      }
+    });
+  }
+
   function openProjectDialog() {
     var dialog = document.getElementById("project-dialog");
     if (!dialog) return;
+    renderDeskSwitchList();
     showError(document.getElementById("project-error"), null);
     var field = document.getElementById("project-path");
     if (field && !field.value && projectState.path) field.value = projectState.path;
@@ -5323,7 +5460,7 @@
     }
   }
 
-  async function sdOpenProject(path) {
+  async function sdOpenProject(path, forDesk) {
     var err = document.getElementById("project-error");
     err.style.display = "none";
     var body = {
@@ -5344,6 +5481,16 @@
         return;
       }
       var state = JSON.parse(text);
+      if (!forDesk && shellDesk) {
+        // A repo picked by hand is "no desk" (decision 6 of the proposal).
+        await fetch("/api/desk/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ desk: "none" }),
+        }).catch(function () {});
+        shellDesk = null;
+        hideBenchBanner();
+      }
       renderProject(state);
       closeProjectDialog();
       // Everything the previous project put on screen is about the previous
@@ -10084,6 +10231,21 @@
     if (backdrop) backdrop.addEventListener("click", closeProjectDialog);
     const open = document.getElementById("project-open");
     if (open) open.addEventListener("click", function () { sdOpenProject(); });
+    const deskList = document.getElementById("desk-switch-list");
+    if (deskList) {
+      deskList.addEventListener("click", function (ev) {
+        const b = ev.target.closest("[data-open-desk]");
+        if (b) openDesk(b.getAttribute("data-open-desk"));
+      });
+    }
+    const newDesk = document.getElementById("project-new-desk");
+    if (newDesk) {
+      newDesk.addEventListener("click", function () {
+        closeProjectDialog();
+        showTab("desk");
+        document.dispatchEvent(new CustomEvent("embarch:desk-form", { detail: { id: null } }));
+      });
+    }
     const path = document.getElementById("project-path");
     if (path) {
       path.addEventListener("keydown", function (ev) {
