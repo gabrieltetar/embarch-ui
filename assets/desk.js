@@ -450,8 +450,9 @@
     var cards = view.cards || [];
     cardsEl.innerHTML = cards.length ? cards.map(cardHtml).join("") :
       '<div class="card desk-empty"><div class="card-title">No work items yet</div>' +
-      '<p class="placeholder-note">Add a card from a Linear issue key above, or start a Claude Code session with the embarch-desk plugin and answer which work item it is. ' +
-      "Connect Linear, Harvest and Slack under Connectors.</p></div>";
+      '<p class="placeholder-note">' + (view.open_desk
+        ? "Add a card from a Linear issue key above, or start a Claude Code session in this desk's repos and answer which work item it is."
+        : "Open a desk with Switch…, or make one with New desk.") + "</p></div>";
     renderSlack();
     renderSettings();
     if (openTileId) renderDialog();
