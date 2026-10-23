@@ -128,7 +128,7 @@
       '<button class="desk-tile-body" type="button" data-open-tile="' + esc(t.id) + '" title="Open: lines, note, Harvest project">' +
       '<span class="desk-tile-date">' + esc(dayLabel(t.date)) + "</span>" +
       '<span class="desk-tile-hours">' + hours(t.hours) + "</span>" +
-      '<span class="desk-tile-sub">' + lines + " line" + (lines === 1 ? "" : "s") + (ready ? " · ready" : "") + "</span>" +
+      '<span class="desk-tile-sub">' + (t.logged_hours ? hours(t.logged_hours) + " already in Harvest" : lines + " line" + (lines === 1 ? "" : "s") + (ready ? " · ready" : "")) + "</span>" +
       "</button>" +
       '<div class="desk-tile-actions">' +
       '<button class="desk-ok" type="button" data-approve="' + esc(t.id) + '" title="Add to Harvest">✓</button>' +
@@ -155,7 +155,9 @@
     if (bench) meta.push(bench);
     meta.push("active " + ago(c.last_activity_ms));
     var tiles = (c.tiles || []).map(tileHtml).join("") ||
-      '<div class="desk-tile-empty">No time yet today. Open it in VS Code and the session\'s time lands here.</div>';
+      '<div class="desk-tile-empty">' + (c.logged_today
+        ? hours(c.logged_today) + " already in Harvest today. New session time lands here."
+        : "No time yet today. Open it in VS Code and the session\'s time lands here.") + "</div>";
     return '<div class="card desk-card' + (c.pinned ? " pinned" : "") + '" data-card="' + esc(c.id) + '">' +
       '<div class="desk-card-head"><div class="desk-card-id">' + head + "</div>" + status + "</div>" +
       '<div class="desk-card-title">' + esc(c.title) + "</div>" +
@@ -297,9 +299,33 @@
   // "Today's work": every work item with time, a line, bench activity or a
   // session that day, grouped by desk, the open one first — links out, what
   // was done, status and sessions. A picked date is fetched; today is pushed.
+  var lastDay = null;
+
+  function entryHtml(e) {
+    var key = e.account_id + "/" + e.id;
+    return '<li class="desk-entry" data-entry="' + esc(key) + '"><span class="desk-entry-hours">' + hours(e.hours) + "</span> " +
+      '<span class="desk-detail">' + esc(e.task) + (e.running ? " · running" : "") + "</span> " +
+      '<span class="desk-entry-notes">' + esc(e.notes) + "</span> " +
+      '<button class="btn btn-tiny" type="button" data-entry-edit="' + esc(key) + '">Edit</button>' +
+      '<button class="btn btn-tiny desk-no" type="button" data-entry-delete="' + esc(key) + '">Delete</button></li>';
+  }
+
+  function findEntry(key) {
+    var out = null;
+    ((lastDay && lastDay.groups) || []).forEach(function (g) {
+      g.items.forEach(function (r) {
+        (r.harvest_entries || []).forEach(function (e) { if (e.account_id + "/" + e.id === key) out = e; });
+      });
+    });
+    return out;
+  }
+
   function renderDay(day) {
     if (!day) return;
-    dayTotal.textContent = (day.groups || []).length ? "total " + hours(day.total_hours) : "";
+    lastDay = day;
+    dayTotal.textContent = (day.groups || []).length
+      ? "total " + hours(day.total_hours) + " · " + hours(day.logged_hours) + " in Harvest · " + hours(day.unsent_hours) + " unsent"
+      : "";
     if (!pickedDay) dayDate.value = view.today;
     var groups = day.groups || [];
     if (!groups.length) {
@@ -320,16 +346,30 @@
         });
         if (r.sessions) meta.push(r.sessions + " session" + (r.sessions === 1 ? "" : "s") + (r.live ? " (" + r.live + " live)" : ""));
         if (r.bench) meta.push(r.bench + " bench call" + (r.bench === 1 ? "" : "s") + (r.bench_failed ? ', <span style="color:var(--danger);">' + r.bench_failed + " failed</span>" : ""));
-        meta.push(r.status === "approved" ? '<span class="badge badge-success">in Harvest</span>' :
-                  r.status === "discarded" ? '<span class="badge badge-neutral">discarded</span>' : '<span class="badge badge-warning">unsent</span>');
+        if (r.logged_hours) meta.push('<span class="badge badge-success">' + hours(r.logged_hours) + " in Harvest</span>");
+        if (r.status === "open" && r.hours > 0) meta.push('<span class="badge badge-warning">' + hours(r.hours) + " unsent</span>");
+        if (r.status === "discarded") meta.push('<span class="badge badge-neutral">tile discarded</span>');
         var lines = (r.lines || []).map(function (l) { return "<li>" + esc(l.text) + "</li>"; }).join("");
+        var entries = (r.harvest_entries || []).map(entryHtml).join("");
+        var shown = (r.logged_hours || 0) + (r.status === "open" ? (r.hours || 0) : 0);
         return '<div class="desk-day-row"><div class="desk-day-title">' + title + "</div>" +
-          '<div class="desk-day-hours">' + hours(r.hours) + "</div>" +
+          '<div class="desk-day-hours">' + hours(shown) + "</div>" +
+          (entries ? '<ul class="desk-entries">' + entries + "</ul>" : "") +
           '<div class="desk-day-meta">' + meta.join(" ") + "</div>" +
           (lines ? '<ul class="desk-day-lines">' + lines + "</ul>" : "") +
           (r.note ? '<div class="desk-day-note">' + esc(r.note) + "</div>" : "") + "</div>";
       }).join("") + "</div>";
     }).join("");
+  }
+
+  // After an edit, read the day again from Harvest, and the cards with it.
+  function refreshDay() {
+    var date = pickedDay || (view && view.today);
+    return api("GET", "/day/" + encodeURIComponent(date)).then(function (d) {
+      if (!pickedDay && view) view.day = d;
+      renderDay(d);
+      return load();
+    });
   }
 
   function loadDay(date) {
@@ -691,6 +731,34 @@
       b3.innerHTML = "";
       return;
     }
+    if (d.entryEdit) {
+      var e = findEntry(d.entryEdit);
+      var li = t.closest(".desk-entry");
+      if (!e || !li) return;
+      li.innerHTML = '<input class="desk-input desk-entry-h" type="number" min="0" max="24" step="0.05" value="' + esc(e.hours) + '" />' +
+        '<textarea class="desk-input desk-textarea desk-entry-n" rows="2">' + esc(e.notes) + "</textarea>" +
+        '<button class="btn btn-tiny btn-primary" type="button" data-entry-save="' + esc(d.entryEdit) + '">Save to Harvest</button>' +
+        '<button class="btn btn-tiny" type="button" data-entry-cancel="1">Cancel</button>';
+      return;
+    }
+    if (d.entrySave) {
+      var row = t.closest(".desk-entry");
+      var parts = d.entrySave.split("/");
+      t.disabled = true;
+      api("PATCH", "/harvest/entry/" + parts[0] + "/" + parts[1], {
+        hours: Number(row.querySelector(".desk-entry-h").value),
+        notes: row.querySelector(".desk-entry-n").value,
+      }).then(function () { return refreshDay(); }).catch(function (err) { flash(err.message); t.disabled = false; });
+      return;
+    }
+    if (d.entryCancel) { renderDay(lastDay); return; }
+    if (d.entryDelete) {
+      var en = findEntry(d.entryDelete);
+      if (!window.confirm("Delete this entry from Harvest" + (en ? " (" + hours(en.hours) + ", " + en.notes.slice(0, 60) + ")" : "") + "?")) return;
+      var p2 = d.entryDelete.split("/");
+      api("DELETE", "/harvest/entry/" + p2[0] + "/" + p2[1]).then(function () { return refreshDay(); }).catch(function (err) { flash(err.message); });
+      return;
+    }
     if (d.formClose) { closeForm(); return; }
     if (d.formSave !== undefined) { saveForm(d.formSave); return; }
     if (d.formDelete) {
@@ -820,7 +888,7 @@
   function editing() {
     return dialogEl.contains(document.activeElement) || slackEl.contains(document.activeElement) ||
       settingsEl.contains(document.activeElement) || draftsEl.contains(document.activeElement) ||
-      formEl.contains(document.activeElement);
+      formEl.contains(document.activeElement) || dayBody.contains(document.activeElement);
   }
   if (window.EventSource) {
     var source = new EventSource("/api/desk-events");
