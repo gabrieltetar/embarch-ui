@@ -97,12 +97,6 @@
 
   // ---------------------------------------------------------------- render
 
-  function ciBadge(ci) {
-    var cls = { success: "badge-success", failure: "badge-danger", pending: "badge-warning" }[ci] || "badge-neutral";
-    var label = { success: "CI passed", failure: "CI failed", pending: "CI running" }[ci] || "no CI";
-    return '<span class="badge ' + cls + '">' + label + "</span>";
-  }
-
   function prsHtml(prs) {
     if (!prs || !prs.length) return "";
     return '<div class="desk-prs">' + prs.map(function (p) {
@@ -110,7 +104,7 @@
       return '<div class="desk-pr"><a href="' + esc(p.url) + '" target="_blank" rel="noopener">' +
         esc(p.repo.split("/").pop()) + "#" + esc(p.number) + "</a> " +
         '<span class="desk-pr-title">' + esc(p.title) + "</span> " +
-        '<span class="badge badge-neutral">' + esc(st) + "</span> " + ciBadge(p.ci) + "</div>";
+        '<span class="badge badge-neutral">' + esc(st) + "</span></div>";
     }).join("") + "</div>";
   }
 
@@ -342,7 +336,7 @@
         if (issue && issue.state_name) meta.push('<span class="badge badge-neutral">' + esc(issue.state_name) + "</span>");
         (r.prs || []).forEach(function (pr) {
           meta.push('<a href="' + esc(pr.url) + '" target="_blank" rel="noopener" title="' + esc(pr.title) + '">' +
-            esc(pr.repo.split("/").pop()) + "#" + esc(pr.number) + "</a> " + ciBadge(pr.ci));
+            esc(pr.repo.split("/").pop()) + "#" + esc(pr.number) + "</a>");
         });
         if (r.sessions) meta.push(r.sessions + " session" + (r.sessions === 1 ? "" : "s") + (r.live ? " (" + r.live + " live)" : ""));
         if (r.bench) meta.push(r.bench + " bench call" + (r.bench === 1 ? "" : "s") + (r.bench_failed ? ', <span style="color:var(--danger);">' + r.bench_failed + " failed</span>" : ""));
