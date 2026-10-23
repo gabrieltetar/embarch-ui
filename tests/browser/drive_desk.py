@@ -121,6 +121,21 @@ def main():
             check("its bench activity shows", "flash ×1" in js("return document.querySelector('.desk-card-meta').textContent"))
             tile = js("var t = document.querySelector('.desk-tile'); return t && {hours: t.querySelector('.desk-tile-hours').textContent, ok: !!t.querySelector('.desk-ok'), no: !!t.querySelector('.desk-no')}")
             check("today's tile is a square with its hours and ✓ ✕", tile and tile["hours"] == "1h30" and tile["ok"] and tile["no"], tile)
+            # A session's row: what it last said, Answer on claude.ai, Jump to VS Code.
+            stop = {"hook_event_name": "Stop", "session_id": "s1", "cwd": str(repo),
+                    "last_assistant_message": "Summary: the loader needs 432 KB."}
+            subprocess.run([DESK_BIN, "hook"], input=json.dumps(stop), env=env, capture_output=True, text=True)
+            row = None
+            for _ in range(70):
+                row = js("var r = document.querySelector('.desk-session'); return r && {text: r.textContent,"
+                         " answer: r.querySelector('a').getAttribute('href'), jump: !!r.querySelector('[data-jump-session]')}")
+                if row and "432 KB" in row["text"]:
+                    break
+                time.sleep(0.2)
+            check("a live session shows on its card with its last reply, Answer and Jump",
+                  bool(row) and "432 KB" in row["text"] and row["answer"] == "https://claude.ai/code/s1" and row["jump"], row)
+            check("the pick-up list says why it is empty with no Linear connected",
+                  "Linear" in js("return document.getElementById('desk-pickup-body').textContent"))
             if SHOT:
                 Path(SHOT).write_bytes(base64.b64decode(wd("GET", S + "/screenshot")))
 

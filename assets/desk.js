@@ -25,6 +25,10 @@
   var formEl = document.getElementById("desk-form");
   var formBackdrop = document.getElementById("desk-form-backdrop");
   var newDeskSel = document.getElementById("desk-new-desk");
+  var pickupBody = document.getElementById("desk-pickup-body");
+  var pickupTitle = document.getElementById("desk-pickup-title");
+  var pickupQ = document.getElementById("desk-pickup-q");
+  var pickupDesk;          // the open desk the list was read for
   var pickedDay = null;    // a date the user picked; null follows today
   var lastOpenId;          // the open desk the last pushed view named
   var timerEl = document.getElementById("desk-timer");
@@ -130,6 +134,22 @@
       "</div></div>";
   }
 
+  function sessionsHtml(c) {
+    var rows = c.live_sessions || [];
+    if (!rows.length) return "";
+    return '<div class="desk-sessions">' + rows.map(function (r) {
+      var state = r.status === "waiting" ? "waiting for " + (r.waiting_for || "you") : r.status;
+      return '<div class="desk-session ' + esc(r.status) + '">' +
+        '<div class="desk-session-head"><span class="desk-dot"></span><b>' + esc(r.name) + "</b> " +
+        '<span class="desk-detail">' + esc(state) + "</span>" +
+        '<span class="desk-session-acts"><a class="btn btn-tiny" href="' + esc(r.answer_url) + '" target="_blank" rel="noopener" title="Answer it on claude.ai (Remote Control)">Answer</a>' +
+        (r.folder_uri ? '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) + '" title="Open this chat in VS Code">Jump</button>' : "") +
+        "</span></div>" +
+        (r.last_reply ? '<div class="desk-session-reply">' + esc(r.last_reply) + "</div>" : "") +
+        "</div>";
+    }).join("") + "</div>";
+  }
+
   function cardHtml(c) {
     var issue = c.issue;
     var head = issue
@@ -157,8 +177,10 @@
       '<div class="desk-card-title">' + esc(c.title) + "</div>" +
       prsHtml(c.prs) +
       '<div class="desk-card-meta">' + meta.join(" · ") + "</div>" +
+      sessionsHtml(c) +
       '<div class="desk-tiles">' + tiles + "</div>" +
       '<div class="desk-card-actions">' +
+      (issue ? '<button class="btn btn-tiny btn-primary" type="button" data-start="' + esc(c.id) + '" title="Worktree on the issue\'s branch, issue to In Progress, VS Code with the first prompt typed in">Start work</button>' : "") +
       '<button class="btn btn-tiny" type="button" data-launch="' + esc(c.id) + '" title="' + esc(c.repo_path || "pick the repo folder first") + '">Open in VS Code</button>' +
       (view.timer && view.timer.item_id === c.id
         ? '<button class="btn btn-tiny desk-timer-on" type="button" data-timer-stop="1">Stop timer</button>'
@@ -372,6 +394,51 @@
     api("GET", "/day/" + encodeURIComponent(pickedDay)).then(renderDay).catch(function (e) { flash(e.message); });
   }
 
+  // ---------------------------------------------------------------- picking up an issue
+  //
+  // Start work prepares everything — the issue to In Progress, a worktree on
+  // its branch, auto mode — and opens VS Code with the first prompt typed in.
+  // The owner presses Enter: nothing documented submits a chat from outside.
+
+  function pickupRow(i) {
+    return '<div class="desk-pick"><a class="desk-key" href="' + esc(i.url) + '" target="_blank" rel="noopener">' + esc(i.key) + "</a>" +
+      '<span class="desk-pick-title">' + esc(i.title) + "</span>" +
+      '<span class="badge badge-neutral">' + esc(i.state || "") + "</span>" +
+      '<button class="btn btn-tiny btn-primary" type="button" data-pick-start="' + esc(i.key) + '">Start work</button>' +
+      '<button class="btn btn-tiny" type="button" data-pick-add="' + esc(i.key) + '">Add card</button></div>';
+  }
+
+  function loadPickup() {
+    var q = pickupQ.value.trim();
+    pickupBody.innerHTML = '<p class="placeholder-note">reading Linear…</p>';
+    var call = q ? api("POST", "/linear/search", { query: q }) : api("GET", "/pickup");
+    return call.then(function (r) {
+      pickupTitle.textContent = q ? "Search" + (r.scope ? " in " + r.scope : "") : "Pick up — your open issues" + (r.scope ? " in " + r.scope : "") + " with no card";
+      var rows = (r.issues || []).filter(function (i) { return i.key; });
+      pickupBody.innerHTML = rows.length ? rows.map(pickupRow).join("") : '<p class="placeholder-note">' + (q ? "Nothing matches." : "Every open issue of yours already has a card.") + "</p>";
+    }).catch(function (e) { pickupBody.innerHTML = '<p class="placeholder-note">' + esc(e.message) + "</p>"; });
+  }
+
+  function followLinks(folderUri, secondUri, delay) {
+    window.location.href = folderUri;
+    if (secondUri) setTimeout(function () { window.location.href = secondUri; }, delay);
+  }
+
+  function startWork(itemId, btn) {
+    if (btn) btn.disabled = true;
+    flash("Starting work: moving the issue, making the worktree…");
+    return api("POST", "/items/" + encodeURIComponent(itemId) + "/start").then(function (r) {
+      var msg = "Worktree " + r.worktree + " on " + r.branch + " (" + r.how + ")" + (r.moved_to ? "; issue moved to " + r.moved_to : "") +
+        ". VS Code opens with the first prompt typed in — press Enter there." + ((r.warnings || []).length ? " Note: " + r.warnings.join("; ") : "");
+      flash(msg);
+      // The worktree's window first; the Claude panel opens in whichever
+      // window has focus, so give the new one time to take it.
+      followLinks(r.folder_uri, r.claude_uri, 5000);
+      loadPickup();
+      return load();
+    }).catch(function (e) { flash(e.message); }).then(function () { if (btn) btn.disabled = false; });
+  }
+
   // ---------------------------------------------------------------- the desk form
   var formData = { projects: null, targets: null, repos: null };
 
@@ -475,6 +542,7 @@
     renderElsewhere();
     if (!pickedDay) renderDay(view.day);
     var openId = view.open_desk ? view.open_desk.id : null;
+    if (openId !== pickupDesk) { pickupDesk = openId; loadPickup(); }
     if (openId !== lastOpenId || lastOpenId === undefined) {
       lastOpenId = openId;
       document.dispatchEvent(new CustomEvent("embarch:desk", { detail: { desk: view.open_desk } }));
@@ -654,6 +722,18 @@
     if (!t || !panel.contains(t)) return;
     var d = t.dataset;
     if (d.openTile) { openDialog(d.openTile); return; }
+    if (d.start) { startWork(d.start, t); return; }
+    if (d.pickStart || d.pickAdd) {
+      var key = d.pickStart || d.pickAdd;
+      t.disabled = true;
+      api("POST", "/items", { issue_key: key }).then(function (r) {
+        if (d.pickStart) return startWork(r.id, null);
+        loadPickup();
+        return load();
+      }).catch(function (e) { flash(e.message); }).then(function () { t.disabled = false; });
+      return;
+    }
+    if (d.jumpFolder) { followLinks(d.jumpFolder, d.jumpSession, 3000); return; }
     if (d.timerStart) { api("POST", "/timer/start", { item_id: d.timerStart }).then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.timerStop) { api("POST", "/timer/stop").then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.draftSend || d.draftDiscard) {
@@ -761,6 +841,9 @@
       return;
     }
     switch (t.id) {
+      case "desk-pickup-refresh":
+        loadPickup();
+        break;
       case "desk-switch":
         document.getElementById("project-button").click();
         break;
@@ -870,6 +953,7 @@
   backdropEl.addEventListener("click", closeDialog);
   formBackdrop.addEventListener("click", closeForm);
   dayDate.addEventListener("change", function () { loadDay(dayDate.value); });
+  pickupQ.addEventListener("keydown", function (ev) { if (ev.key === "Enter") loadPickup(); });
   document.addEventListener("embarch:desk-form", function (ev) { openForm(ev.detail ? ev.detail.id : null); });
   // A switch made from the shell: refresh at once rather than on the next push.
   document.addEventListener("embarch:desk-switched", function () { lastOpenId = undefined; load(); });
