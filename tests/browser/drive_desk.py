@@ -150,6 +150,31 @@ def main():
             check("a card made elsewhere arrives by SSE, no click and no client polling", pushed)
             check("desk.js holds no interval", "setInterval" not in (REPO / "assets" / "desk.js").read_text())
 
+            # An agent's write is a draft on the tab, never sent on its own.
+            desk("POST", "/drafts", {"kind": "linear_comment", "issue_key": "ABC-1", "body": "Flashed and passed."}, token)
+            shown = False
+            for _ in range(70):
+                if "Comment on ABC-1" in js("return document.getElementById('desk-drafts').textContent"):
+                    shown = True
+                    break
+                time.sleep(0.2)
+            check("an agent's comment shows as a draft with Send and Discard", shown and
+                  js("return !!document.querySelector('[data-draft-send]') && !!document.querySelector('[data-draft-discard]')"))
+            js("document.querySelector('[data-draft-discard]').click(); return true")
+            settle()
+            check("Discard drops the draft and nothing is left to send", js("return document.getElementById('desk-drafts').hidden"))
+
+            js("Array.from(document.querySelectorAll('.desk-card')).find(function (c) {"
+               " return c.querySelector('.desk-card-title').textContent === 'Client sync call';"
+               "}).querySelector('[data-timer-start]').click(); return true")
+            settle()
+            check("Start timer shows a running timer on the card's item",
+                  "Client sync call" in js("return document.getElementById('desk-timer').textContent")
+                  and js("return !!document.querySelector('.desk-card [data-timer-stop]')"))
+            js("document.querySelector('#desk-timer [data-timer-stop]').click(); return true")
+            settle()
+            check("Stop ends it", js("return document.getElementById('desk-timer').hidden"))
+
             js("document.getElementById('desk-settings-toggle').click(); return true")
             settle()
             check("the Connectors panel opens with its add form", js("return !!document.getElementById('desk-conn-token')"))

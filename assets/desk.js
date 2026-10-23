@@ -17,6 +17,8 @@
   var errorEl = document.getElementById("desk-error");
   var slackEl = document.getElementById("desk-slack");
   var settingsEl = document.getElementById("desk-settings");
+  var draftsEl = document.getElementById("desk-drafts");
+  var timerEl = document.getElementById("desk-timer");
   var dialogEl = document.getElementById("desk-dialog");
   var backdropEl = document.getElementById("desk-dialog-backdrop");
 
@@ -153,6 +155,9 @@
       '<div class="desk-tiles">' + tiles + "</div>" +
       '<div class="desk-card-actions">' +
       '<button class="btn btn-tiny" type="button" data-launch="' + esc(c.id) + '" title="' + esc(c.repo_path || "pick the repo folder first") + '">Open in VS Code</button>' +
+      (view.timer && view.timer.item_id === c.id
+        ? '<button class="btn btn-tiny desk-timer-on" type="button" data-timer-stop="1">Stop timer</button>'
+        : '<button class="btn btn-tiny" type="button" data-timer-start="' + esc(c.id) + '" title="Time away from Claude Code: the bench, a call, a meeting">Start timer</button>') +
       (issue ? "" : '<button class="btn btn-tiny" type="button" data-link="' + esc(c.id) + '">Link issue</button>') +
       '<button class="btn btn-tiny" type="button" data-folder="' + esc(c.id) + '">' + (c.repo_path ? "Repo…" : "Pick repo…") + "</button>" +
       '<button class="btn btn-tiny" type="button" data-pin="' + esc(c.id) + '" data-value="' + (!c.pinned) + '">' + (c.pinned ? "Unpin" : "Pin") + "</button>" +
@@ -228,9 +233,40 @@
       '<div><button class="btn" id="desk-ignore-save" type="button">Save</button></div>';
   }
 
+  function renderTimer() {
+    var t = view.timer;
+    if (!t) { timerEl.hidden = true; return; }
+    timerEl.hidden = false;
+    timerEl.innerHTML = '<span class="desk-timer-dot"></span><span>Timer on <b>' + esc(t.title || t.item_id) + "</b> since " +
+      esc(new Date(t.started_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) + " · " + hours(t.seconds / 3600) + "</span>" +
+      '<button class="btn btn-tiny" type="button" data-timer-stop="1">Stop</button>';
+  }
+
+  // What agents asked to write. Nothing here has been sent: Send posts the
+  // text as it stands in the box, Discard drops it (decision 15).
+  function renderDrafts() {
+    var drafts = view.drafts || [];
+    if (!drafts.length) { draftsEl.hidden = true; draftsEl.innerHTML = ""; return; }
+    draftsEl.hidden = false;
+    draftsEl.innerHTML = '<div class="card-title">Drafts from agents — nothing is sent until you press Send</div>' +
+      drafts.map(function (d) {
+        var what = d.kind === "linear_issue"
+          ? "New Linear issue in <b>" + esc(d.team_key) + "</b>"
+          : "Comment on <b>" + esc(d.issue_key) + "</b>";
+        return '<div class="desk-draft" data-draft-id="' + esc(d.id) + '">' +
+          '<div class="desk-draft-head">' + what + ' <span class="desk-detail">' + esc(new Date(d.created_ms).toLocaleString()) + "</span></div>" +
+          (d.kind === "linear_issue" ? '<input class="desk-input desk-draft-title" type="text" value="' + esc(d.title || "") + '" />' : "") +
+          '<textarea class="desk-input desk-textarea desk-draft-body" rows="4">' + esc(d.body) + "</textarea>" +
+          '<div class="desk-form"><button class="btn btn-primary btn-tiny" type="button" data-draft-send="' + esc(d.id) + '">Send</button>' +
+          '<button class="btn btn-tiny" type="button" data-draft-discard="' + esc(d.id) + '">Discard</button></div></div>';
+      }).join("");
+  }
+
   function render() {
     if (!view) return;
     renderSlackBar();
+    renderTimer();
+    renderDrafts();
     var cards = view.cards || [];
     cardsEl.innerHTML = cards.length ? cards.map(cardHtml).join("") :
       '<div class="card desk-empty"><div class="card-title">No work items yet</div>' +
@@ -403,6 +439,25 @@
     if (!t || !panel.contains(t)) return;
     var d = t.dataset;
     if (d.openTile) { openDialog(d.openTile); return; }
+    if (d.timerStart) { api("POST", "/timer/start", { item_id: d.timerStart }).then(load).catch(function (e) { flash(e.message); }); return; }
+    if (d.timerStop) { api("POST", "/timer/stop").then(load).catch(function (e) { flash(e.message); }); return; }
+    if (d.draftSend || d.draftDiscard) {
+      var id = d.draftSend || d.draftDiscard;
+      var box = draftsEl.querySelector('[data-draft-id="' + CSS.escape(id) + '"]');
+      if (d.draftDiscard) {
+        api("POST", "/drafts/" + encodeURIComponent(id) + "/discard").then(load).catch(function (e) { flash(e.message); });
+        return;
+      }
+      var patch = { body: box.querySelector(".desk-draft-body").value };
+      var titleEl = box.querySelector(".desk-draft-title");
+      if (titleEl) patch.title = titleEl.value;
+      t.disabled = true;
+      api("PATCH", "/drafts/" + encodeURIComponent(id), patch).then(function () {
+        return api("POST", "/drafts/" + encodeURIComponent(id) + "/send");
+      }).then(function (r) { flash("Sent: " + (r.url || "done")); return load(); })
+        .catch(function (e) { flash(e.message); t.disabled = false; });
+      return;
+    }
     if (d.approve) { approve(d.approve, false); return; }
     if (d.discard) { discard(d.discard); return; }
     if (d.launch) { launch(d.launch); return; }
@@ -558,7 +613,7 @@
   // is typing until they finish.
   function editing() {
     return dialogEl.contains(document.activeElement) || slackEl.contains(document.activeElement) ||
-      settingsEl.contains(document.activeElement);
+      settingsEl.contains(document.activeElement) || draftsEl.contains(document.activeElement);
   }
   if (window.EventSource) {
     var source = new EventSource("/api/desk-events");

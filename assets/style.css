@@ -2022,3 +2022,10 @@ table.data-table {
 .desk-dialog-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .tab-panel[data-tab="desk"] [hidden] { display: none !important; }
 #desk-dialog-status { flex-basis: 100%; order: 10; }
+.desk-timer { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-primary); background: var(--accent-soft-bg); border: 1px solid var(--accent); border-radius: 9px; padding: 8px 12px; margin-bottom: 16px; }
+.desk-timer-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft-bg); }
+.desk-timer-on { border-color: var(--accent); color: var(--accent-strong); }
+.desk-draft { padding: 10px 0; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.desk-draft:last-child { border-bottom: 0; }
+.desk-draft-head { font-size: 12.5px; color: var(--text-secondary); display: flex; gap: 10px; align-items: baseline; }
+.desk-draft-title { width: 100%; box-sizing: border-box; font-weight: 600; }
