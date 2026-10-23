@@ -90,15 +90,22 @@
     return Math.round(s / 86400) + " d ago";
   }
 
+  // A flash stays its full time whatever view arrives meanwhile: a pushed
+  // view used to clear it within seconds, so a failed Start work vanished
+  // before it could be read. Only an unreachable desk is cleared by the
+  // next good view.
+  var unreachable = false;
+
   function showError(msg) {
+    unreachable = false;
     if (!msg) { errorEl.hidden = true; return; }
     errorEl.hidden = false;
     errorEl.innerHTML = '<div class="card-title" style="color:var(--danger);">Desk</div><p class="placeholder-note">' + esc(msg) + "</p>";
   }
 
-  function flash(msg) {
+  function flash(msg, ms) {
     showError(msg);
-    setTimeout(function () { if (errorEl.textContent.indexOf(msg) >= 0) showError(null); }, 8000);
+    setTimeout(function () { if (errorEl.textContent.indexOf(msg) >= 0) showError(null); }, ms || 8000);
   }
 
   // ---------------------------------------------------------------- render
@@ -628,7 +635,7 @@
       followLinks(r.folder_uri, r.claude_uri, 5000);
       loadPickup();
       return load();
-    }).catch(function (e) { flash(e.message); }).then(function () { if (btn) btn.disabled = false; });
+    }).catch(function (e) { flash("Start work failed: " + e.message, 30000); }).then(function () { if (btn) btn.disabled = false; });
   }
 
   // ---------------------------------------------------------------- the desk form
@@ -760,10 +767,11 @@
   function load() {
     return api("GET", "/view").then(function (v) {
       view = v;
-      showError(null);
+      if (unreachable) showError(null);
       render();
     }).catch(function (e) {
       showError(e.status === 503 ? e.message : "Could not reach embarch-desk: " + e.message);
+      unreachable = true;
     });
   }
 
