@@ -34,10 +34,13 @@
   var timerEl = document.getElementById("desk-timer");
   var dialogEl = document.getElementById("desk-dialog");
   var backdropEl = document.getElementById("desk-dialog-backdrop");
+  var notesEl = document.getElementById("desk-notes");
+  var notesBackdrop = document.getElementById("desk-notes-backdrop");
 
   var view = null;
   var states = {};           // item id -> [{id, name, type}], loaded on first open of the dropdown
   var targets = null;        // Harvest projects/tasks, loaded when a tile opens
+  var settings = null;       // the desk's own settings, read when the panel opens
   var openTileId = null;
 
   // ---------------------------------------------------------------- helpers
@@ -134,20 +137,120 @@
       "</div></div>";
   }
 
+  // One line per session (chat decision 32): its state, what it waits for,
+  // how long ago it last did anything. A chat EmbArch's panel runs gets Open
+  // chat — a focus request left in the desk's mailbox for the window whose
+  // folder it is, then that folder's link to bring the window up; any other
+  // session gets Jump.
   function sessionsHtml(c) {
     var rows = c.live_sessions || [];
     if (!rows.length) return "";
     return '<div class="desk-sessions">' + rows.map(function (r) {
-      var state = r.status === "waiting" ? "waiting for " + (r.waiting_for || "you") : r.status;
-      return '<div class="desk-session ' + esc(r.status) + '">' +
-        '<div class="desk-session-head"><span class="desk-dot"></span><b>' + esc(r.name) + "</b> " +
-        '<span class="desk-detail">' + esc(state) + "</span>" +
-        '<span class="desk-session-acts"><a class="btn btn-tiny" href="' + esc(r.answer_url) + '" target="_blank" rel="noopener" title="Answer it on claude.ai (Remote Control)">Answer</a>' +
-        (r.folder_uri ? '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) + '" title="Open this chat in VS Code">Jump</button>' : "") +
-        "</span></div>" +
-        (r.last_reply ? '<div class="desk-session-reply">' + esc(r.last_reply) + "</div>" : "") +
-        "</div>";
+      var act = "";
+      if (r.client === "embarch-chat" && r.cwd && r.folder_uri) {
+        act = '<button class="btn btn-tiny" type="button" data-open-chat="' + esc(r.session_id) + '" data-chat-folder="' + esc(r.cwd) +
+          '" data-chat-uri="' + esc(r.folder_uri) + '" title="Bring up ' + esc(r.cwd) + ' with this chat open">Open chat</button>';
+      } else if (r.folder_uri) {
+        act = '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) +
+          '" title="Open ' + esc(r.cwd) + ' in VS Code, then this session">Jump</button>';
+      }
+      return '<div class="desk-session ' + esc(r.state) + '"><span class="desk-dot"></span>' +
+        '<span class="desk-session-state">' + esc(r.state) + "</span>" +
+        (r.state === "waiting" ? '<span class="desk-session-for">for ' + esc(r.waiting_for || "you") + "</span>" : "") +
+        (r.last_ms ? '<span class="desk-detail">' + esc(ago(r.last_ms)) + "</span>" : "") +
+        '<span class="desk-session-acts">' + act + "</span></div>";
     }).join("") + "</div>";
+  }
+
+  // ---------------------------------------------------------------- notes
+  //
+  // What the chats write about the work (chat decisions 42–46): every memory
+  // file a session saved, its versions kept, and every line with its kind,
+  // read per card from the desk. A card shows each note's newest state; a
+  // click opens the whole list. Every hook moves a card's activity, so a card
+  // reads its notes again only when that has moved.
+  var notes = {};            // item id -> {ms: the card's last_activity_ms when read, list: newest first}
+  var notesItem = null;      // the item whose full list is open
+
+  function memoryName(path) {
+    return String(path || "").split("/").pop().replace(/\.md$/, "");
+  }
+
+  // A memory file opens with frontmatter whose description is the agent's
+  // own one-line state; the body follows it.
+  function memoryParts(text) {
+    var m = /^---\r?\n([\s\S]*?)\r?\n---[^\n]*\n?/.exec(text || "");
+    if (!m) return { summary: "", body: String(text || "").trim() };
+    var d = /^description:\s*(.*)$/m.exec(m[1]);
+    var summary = d ? d[1].trim().replace(/^(["'])(.*)\1$/, "$2") : "";
+    return { summary: summary, body: text.slice(m[0].length).trim() };
+  }
+
+  function cardNotesHtml(itemId) {
+    var list = (notes[itemId] && notes[itemId].list) || [];
+    if (!list.length) return "";
+    var seen = {}, rows = [], lines = 0;
+    list.forEach(function (n) {
+      if (n.kind === "memory") {
+        if (seen[n.source_path]) return;
+        seen[n.source_path] = true;
+        var p = memoryParts(n.text);
+        rows.push('<span class="desk-note"><span class="desk-line-src desk-note-file">' + esc(memoryName(n.source_path)) + "</span> " + esc(p.summary || p.body) + "</span>");
+      } else if (lines < 3) {
+        lines += 1;
+        rows.push('<span class="desk-note"><span class="desk-line-src">' + esc(n.kind) + "</span> " + esc(n.text) + "</span>");
+      }
+    });
+    return '<button class="desk-notes" type="button" data-notes="' + esc(itemId) + '" title="Every note, newest first">' +
+      '<span class="desk-label">Notes · ' + list.length + "</span>" + rows.join("") + "</button>";
+  }
+
+  function readNotes(cards) {
+    cards.forEach(function (c) {
+      var had = notes[c.id];
+      if (had && had.ms === c.last_activity_ms) return;
+      notes[c.id] = { ms: c.last_activity_ms, list: had ? had.list : null };
+      api("GET", "/items/" + encodeURIComponent(c.id) + "/notes").then(function (r) {
+        notes[c.id].list = r.notes || [];
+        var slot = cardsEl.querySelector('[data-notes-slot="' + CSS.escape(c.id) + '"]');
+        if (slot) slot.innerHTML = cardNotesHtml(c.id);
+      }).catch(function () {});   // read again when the card's activity moves
+    });
+  }
+
+  function noteRow(n) {
+    var text = n.text;
+    var what = esc(n.kind);
+    if (n.kind === "memory") {
+      var p = memoryParts(n.text);
+      text = (p.summary ? p.summary + "\n\n" : "") + p.body;
+      what += ' <span class="desk-note-file">' + esc(memoryName(n.source_path)) + "</span>";
+    }
+    return '<li class="desk-notes-row"><div class="desk-notes-meta"><span class="desk-line-src">' + what + "</span>" +
+      '<span class="desk-detail">' + esc(new Date(n.ts_ms).toLocaleString()) + "</span></div>" +
+      '<div class="desk-notes-text">' + esc(text) + "</div></li>";
+  }
+
+  function openNotes(itemId) {
+    var c = (view.cards || []).filter(function (x) { return x.id === itemId; })[0];
+    var head = '<div class="card-title"><span>Notes — ' + esc(c && c.issue ? c.issue.key + " · " : "") + esc(c ? c.title : itemId) + "</span>" +
+      '<button class="btn btn-tiny" type="button" id="desk-notes-close">Close</button></div>';
+    notesItem = itemId;
+    notesEl.hidden = false;
+    notesBackdrop.hidden = false;
+    notesEl.innerHTML = head + '<p class="placeholder-note">reading the notes…</p>';
+    api("GET", "/items/" + encodeURIComponent(itemId) + "/notes").then(function (r) {
+      if (notesItem !== itemId) return;
+      var list = r.notes || [];
+      notesEl.innerHTML = head + (list.length ? '<ul class="desk-notes-list">' + list.map(noteRow).join("") + "</ul>"
+        : '<p class="placeholder-note">No notes yet. Sessions on this item write them as they work.</p>');
+    }).catch(function (e) { if (notesItem === itemId) notesEl.innerHTML = head + '<p class="placeholder-note">' + esc(e.message) + "</p>"; });
+  }
+
+  function closeNotes() {
+    notesItem = null;
+    notesEl.hidden = true;
+    notesBackdrop.hidden = true;
   }
 
   function cardHtml(c) {
@@ -178,9 +281,10 @@
       prsHtml(c.prs) +
       '<div class="desk-card-meta">' + meta.join(" · ") + "</div>" +
       sessionsHtml(c) +
+      '<div class="desk-notes-slot" data-notes-slot="' + esc(c.id) + '">' + cardNotesHtml(c.id) + "</div>" +
       '<div class="desk-tiles">' + tiles + "</div>" +
       '<div class="desk-card-actions">' +
-      (issue ? '<button class="btn btn-tiny btn-primary" type="button" data-start="' + esc(c.id) + '" title="Worktree on the issue\'s branch, issue to In Progress, VS Code with the first prompt typed in">Start work</button>' : "") +
+      (issue ? '<button class="btn btn-tiny btn-primary" type="button" data-start="' + esc(c.id) + '" title="Worktree on the issue\'s branch, issue to In Progress, VS Code started on it">Start work</button>' : "") +
       '<button class="btn btn-tiny" type="button" data-launch="' + esc(c.id) + '" title="' + esc(c.repo_path || "pick the repo folder first") + '">Open in VS Code</button>' +
       (view.timer && view.timer.item_id === c.id
         ? '<button class="btn btn-tiny desk-timer-on" type="button" data-timer-stop="1">Stop timer</button>'
@@ -257,7 +361,18 @@
       '<div class="card-title" style="margin-top:18px;">Never tracked</div>' +
       '<p class="desk-help">Sessions under these folders make no time and are never asked for a work item — open-source work, the agent fleet.</p>' +
       '<textarea id="desk-ignore" class="desk-input desk-textarea" rows="3" spellcheck="false">' + esc((view.ignore || []).join("\n")) + "</textarea>" +
-      '<div><button class="btn" id="desk-ignore-save" type="button">Save</button></div>';
+      '<div><button class="btn" id="desk-ignore-save" type="button">Save</button></div>' +
+      '<div class="card-title" style="margin-top:18px;">Chat</div>' +
+      '<label class="desk-check"><input id="desk-chat-panel" type="checkbox"' + (settings && settings.chat_panel ? " checked" : "") + (settings ? "" : " disabled") + " />" +
+      " Start work opens EmbArch\'s chat</label>" +
+      '<p class="desk-help">' + (settings
+        ? "Off: Start work opens Claude Code\'s panel with the first prompt typed in. On: the worktree\'s window starts an EmbArch chat with it."
+        : "reading the desk\'s settings…") + "</p>";
+  }
+
+  // The chat setting (chat decision 4): off until EmbArch's chat ships.
+  function loadSettings() {
+    return api("GET", "/settings").then(function (r) { settings = r; renderSettings(); }).catch(function (e) { flash(e.message); });
   }
 
   function renderTimer() {
@@ -399,6 +514,9 @@
   // Start work prepares everything — the issue to In Progress, a worktree on
   // its branch, auto mode — and opens VS Code with the first prompt typed in.
   // The owner presses Enter: nothing documented submits a chat from outside.
+  // With the chat setting on, the desk leaves the start in its mailbox for
+  // the worktree's window instead and answers with no Claude Code prompt
+  // link; the window's own chat takes it (chat decisions 11, 33).
 
   function pickupRow(i) {
     return '<div class="desk-pick"><a class="desk-key" href="' + esc(i.url) + '" target="_blank" rel="noopener">' + esc(i.key) + "</a>" +
@@ -429,10 +547,12 @@
     flash("Starting work: moving the issue, making the worktree…");
     return api("POST", "/items/" + encodeURIComponent(itemId) + "/start").then(function (r) {
       var msg = "Worktree " + r.worktree + " on " + r.branch + " (" + r.how + ")" + (r.moved_to ? "; issue moved to " + r.moved_to : "") +
-        ". VS Code opens with the first prompt typed in — press Enter there." + ((r.warnings || []).length ? " Note: " + r.warnings.join("; ") : "");
+        (r.claude_uri ? ". VS Code opens with the first prompt typed in — press Enter there." : ". VS Code opens the worktree, and its chat starts there.") +
+        ((r.warnings || []).length ? " Note: " + r.warnings.join("; ") : "");
       flash(msg);
       // The worktree's window first; the Claude panel opens in whichever
-      // window has focus, so give the new one time to take it.
+      // window has focus, so give the new one time to take it. No prompt
+      // link: the folder is all there is to open.
       followLinks(r.folder_uri, r.claude_uri, 5000);
       loadPickup();
       return load();
@@ -555,6 +675,7 @@
       '<p class="placeholder-note">' + (view.open_desk
         ? "Add a card from a Linear issue key above, or start a Claude Code session in this desk's repos and answer which work item it is."
         : "Open a desk with Switch…, or make one with New desk.") + "</p></div>";
+    readNotes(cards);
     renderSlack();
     renderSettings();
     if (openTileId) renderDialog();
@@ -734,6 +855,13 @@
       return;
     }
     if (d.jumpFolder) { followLinks(d.jumpFolder, d.jumpSession, 3000); return; }
+    if (d.openChat) {
+      api("POST", "/mailbox", { kind: "focus", session_id: d.openChat, folder: d.chatFolder }).then(function () {
+        followLinks(d.chatUri);
+      }).catch(function (e) { flash(e.message); });
+      return;
+    }
+    if (d.notes) { openNotes(d.notes); return; }
     if (d.timerStart) { api("POST", "/timer/start", { item_id: d.timerStart }).then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.timerStop) { api("POST", "/timer/stop").then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.draftSend || d.draftDiscard) {
@@ -844,6 +972,9 @@
       case "desk-pickup-refresh":
         loadPickup();
         break;
+      case "desk-notes-close":
+        closeNotes();
+        break;
       case "desk-switch":
         document.getElementById("project-button").click();
         break;
@@ -862,6 +993,7 @@
       case "desk-settings-toggle":
         settingsEl.hidden = !settingsEl.hidden;
         renderSettings();
+        if (!settingsEl.hidden) loadSettings();
         break;
       case "desk-refresh":
         t.disabled = true;
@@ -913,6 +1045,13 @@
   });
 
   panel.addEventListener("change", function (ev) {
+    if (ev.target.id === "desk-chat-panel") {
+      var on = ev.target.checked;
+      api("PUT", "/settings", { chat_panel: on }).then(function (r) {
+        settings = r && typeof r.chat_panel === "boolean" ? r : { chat_panel: on };
+      }).catch(function (e) { flash(e.message); ev.target.checked = !on; });
+      return;
+    }
     var sel = ev.target.closest("select[data-status]");
     if (!sel) return;
     api("POST", "/items/" + encodeURIComponent(sel.dataset.status) + "/status", { state_id: sel.value })
@@ -951,13 +1090,18 @@
   });
 
   backdropEl.addEventListener("click", closeDialog);
+  notesBackdrop.addEventListener("click", closeNotes);
   formBackdrop.addEventListener("click", closeForm);
   dayDate.addEventListener("change", function () { loadDay(dayDate.value); });
   pickupQ.addEventListener("keydown", function (ev) { if (ev.key === "Enter") loadPickup(); });
   document.addEventListener("embarch:desk-form", function (ev) { openForm(ev.detail ? ev.detail.id : null); });
   // A switch made from the shell: refresh at once rather than on the next push.
   document.addEventListener("embarch:desk-switched", function () { lastOpenId = undefined; load(); });
-  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && openTileId) closeDialog(); });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    if (openTileId) closeDialog();
+    if (notesItem) closeNotes();
+  });
 
   // Live by SSE, like every other tab (decision 6): the server asks the desk
   // for its view and pushes it. A pushed view never re-renders under an open

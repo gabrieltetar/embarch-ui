@@ -6,16 +6,20 @@ seeds it through the desk's own HTTP surface — a standalone work item, a
 session that a hook puts on it, a commit-less line, a flash — then starts an
 embarch-ui pointed at that desk and a dead Core, and drives the tab: the card
 and its tile render, ✓ on a tile nobody has opened opens it instead of
-sending, the dialog shows the lines, ✕ discards, the Dashboard is gone.
+sending, the dialog shows the lines, ✕ discards, the Dashboard is gone. The
+chat's part (embarch-chat-desk-proposal.md): a session as one line, Open chat
+through the mailbox, the card's notes from memory files written in a scratch
+Claude folder, the chat setting, Start work with and without a prompt link.
 
 No connector is configured, so nothing reaches Linear, Harvest or Slack;
 GitHub falls back to the machine's `gh` login for a read-only identity check.
+Start work needs Linear, so its answer is stubbed in the page.
 
     cargo build && (cd ../embarch-desk && cargo build)
     geckodriver --port 4444 &
     python3 tests/browser/drive_desk.py
 """
-import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -25,7 +29,7 @@ UI_PORT = os.environ.get("DESK_UI_PORT", "4896")
 DESK_PORT = os.environ.get("DESK_PORT", "4998")
 UI = "http://127.0.0.1:" + UI_PORT
 DESK = "http://127.0.0.1:" + DESK_PORT
-BASE = "http://127.0.0.1:4444"
+BASE = os.environ.get("WEBDRIVER", "http://127.0.0.1:4444")
 SHOT = os.environ.get("DESK_SHOT")
 
 fails = []
@@ -67,8 +71,10 @@ def wait_for(url, secs=20):
 
 def main():
     scratch = Path(tempfile.mkdtemp(prefix="drive-desk-"))
+    # A scratch Claude folder too: the desk reads memory files from it, and
+    # never imports the machine's own.
     env = {**os.environ, "EMBARCH_DESK_CONFIG_DIR": str(scratch / "cfg"), "EMBARCH_DESK_DATA_DIR": str(scratch / "data"),
-           "EMBARCH_DESK_PORT": DESK_PORT}
+           "EMBARCH_DESK_PORT": DESK_PORT, "CLAUDE_CONFIG_DIR": str(scratch / "claude")}
     cfg = scratch / "ui.toml"
     cfg.write_text('[core]\nbase_url = "http://127.0.0.1:1"\ntoken = "x"\n')
     procs = []
@@ -121,19 +127,90 @@ def main():
             check("its bench activity shows", "flash ×1" in js("return document.querySelector('.desk-card-meta').textContent"))
             tile = js("var t = document.querySelector('.desk-tile'); return t && {hours: t.querySelector('.desk-tile-hours').textContent, ok: !!t.querySelector('.desk-ok'), no: !!t.querySelector('.desk-no')}")
             check("today's tile is a square with its hours and ✓ ✕", tile and tile["hours"] == "1h30" and tile["ok"] and tile["no"], tile)
-            # A session's row: what it last said, Answer on claude.ai, Jump to VS Code.
-            stop = {"hook_event_name": "Stop", "session_id": "s1", "cwd": str(repo),
-                    "last_assistant_message": "Summary: the loader needs 432 KB."}
-            subprocess.run([DESK_BIN, "hook"], input=json.dumps(stop), env=env, capture_output=True, text=True)
+            # A session is one line — state, what it waits for, age — with
+            # Jump; Answer and the last reply have left it (chat decision 32).
+            for ev in ({"hook_event_name": "Stop", "session_id": "s1", "cwd": str(repo),
+                        "last_assistant_message": "Summary: the loader needs 432 KB."},
+                       {"hook_event_name": "Notification", "session_id": "s1", "cwd": str(repo),
+                        "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"}):
+                subprocess.run([DESK_BIN, "hook"], input=json.dumps(ev), env=env, capture_output=True, text=True)
             row = None
-            for _ in range(70):
+            for _ in range(100):
                 row = js("var r = document.querySelector('.desk-session'); return r && {text: r.textContent,"
-                         " answer: r.querySelector('a').getAttribute('href'), jump: !!r.querySelector('[data-jump-session]')}")
-                if row and "432 KB" in row["text"]:
+                         " state: r.querySelector('.desk-session-state').textContent, dot: !!r.querySelector('.desk-dot'),"
+                         " jump: !!r.querySelector('[data-jump-session]'), chat: !!r.querySelector('[data-open-chat]'),"
+                         " links: r.querySelectorAll('a').length}")
+                if row and "permission prompt" in row["text"]:
                     break
                 time.sleep(0.2)
-            check("a live session shows on its card with its last reply, Answer and Jump",
-                  bool(row) and "432 KB" in row["text"] and row["answer"] == "https://claude.ai/code/s1" and row["jump"], row)
+            check("a terminal session is one line: its state, what it waits for, its age, and Jump",
+                  bool(row) and row["dot"] and row["state"] == "waiting" and "for permission prompt" in row["text"]
+                  and ("ago" in row["text"] or "just now" in row["text"]) and row["jump"] and not row["chat"], row)
+            check("Answer and the last reply have left the row", bool(row) and row["links"] == 0 and "432 KB" not in row["text"], row)
+
+            # A chat the panel runs gets Open chat: a focus request left in
+            # the desk's mailbox for its folder, then that folder's link.
+            chat_dir = scratch / "repo-ABC-1"
+            chat_dir.mkdir()
+            desk("POST", "/sessions/c1/assign", {"item_id": item, "client": "embarch-chat"}, token)
+            start = {"hook_event_name": "SessionStart", "session_id": "c1", "cwd": str(chat_dir)}
+            subprocess.run([DESK_BIN, "hook"], input=json.dumps(start), env=env, capture_output=True, text=True)
+            rows = None
+            for _ in range(100):
+                rows = js("return Array.from(document.querySelectorAll('.desk-session')).map(function (r) {"
+                          " return {chat: !!r.querySelector('[data-open-chat]'), jump: !!r.querySelector('[data-jump-session]')}; })")
+                if any(r["chat"] for r in rows):
+                    break
+                time.sleep(0.2)
+            check("a chat the panel runs gets Open chat, and only the other session Jump",
+                  sorted((r["chat"], r["jump"]) for r in rows) == [(False, True), (True, False)], rows)
+            js("document.querySelector('[data-open-chat]').click(); return true")
+            mail = []
+            for _ in range(30):
+                mail = desk("GET", "/mailbox?folder=" + urllib.parse.quote(str(chat_dir)), token=token)["entries"]
+                if mail:
+                    break
+                time.sleep(0.2)
+            check("Open chat leaves a focus request for the chat's folder in the desk's mailbox",
+                  [(m["kind"], m["session_id"]) for m in mail] == [("focus", "c1")], mail)
+
+            # Notes: each at its newest state on the card, every one behind a
+            # click (chat decision 46). A memory file written twice keeps both
+            # versions; the card shows the second.
+            mem = scratch / "claude" / "projects" / "-w-fw" / "memory"
+            mem.mkdir(parents=True)
+            state_md = mem / "abc-1-state.md"
+            for text, tool in (('---\nname: abc-1-state\ndescription: "ABC-1: branch made"\n---\n\nBranch abc-1-loader.\n', "Write"),
+                               ('---\nname: abc-1-state\ndescription: "ABC-1: PR open, flash pending"\n---\n\nBranch abc-1-loader, PR open.\n', "Edit")):
+                state_md.write_text(text)
+                ev = {"hook_event_name": "PostToolUse", "session_id": "s1", "cwd": str(repo), "tool_name": tool,
+                      "tool_input": {"file_path": str(state_md)}, "tool_response": {}}
+                subprocess.run([DESK_BIN, "hook"], input=json.dumps(ev), env=env, capture_output=True, text=True)
+            desk("POST", "/sessions/s1/line", {"text": "The loader needs 432 KB of RAM", "kind": "finding"}, token)
+            card = None
+            for _ in range(100):
+                card = js("var n = document.querySelector('.desk-notes'); return n && n.textContent")
+                if card and "432 KB of RAM" in card:
+                    break
+                time.sleep(0.2)
+            check("a card shows each note's newest state: the memory file's latest text, the latest lines with their kind",
+                  bool(card) and "abc-1-state" in card and "PR open, flash pending" in card and "branch made" not in card
+                  and "finding" in card and "Agreed the bootload test plan" in card, card)
+            js("document.querySelector('.desk-notes').click(); return true")
+            full = ""
+            for _ in range(30):
+                full = js("return document.getElementById('desk-notes').textContent")
+                if "branch made" in full:
+                    break
+                time.sleep(0.2)
+            check("a click opens every note, newest first, a memory file's earlier version too",
+                  js("return !document.getElementById('desk-notes').hidden")
+                  and full.find("432 KB of RAM") < full.find("PR open, flash pending") < full.find("branch made")
+                  and "Agreed the bootload test plan" in full, full[:300])
+            if SHOT:
+                Path(SHOT.replace(".png", "-notes.png")).write_bytes(base64.b64decode(wd("GET", S + "/screenshot")))
+            js("document.getElementById('desk-notes-close').click(); return true")
+            check("Close puts the list away", js("return document.getElementById('desk-notes').hidden"))
             check("the pick-up list says why it is empty with no Linear connected",
                   "Linear" in js("return document.getElementById('desk-pickup-body').textContent"))
             if SHOT:
@@ -250,6 +327,58 @@ def main():
             js("document.getElementById('desk-settings-toggle').click(); return true")
             settle()
             check("the Connectors panel opens with its add form", js("return !!document.getElementById('desk-conn-token')"))
+            # The chat setting sits with the desk's other settings, off by default.
+            toggle = None
+            for _ in range(50):
+                toggle = js("var c = document.getElementById('desk-chat-panel'); return c && !c.disabled && {on: c.checked}")
+                if toggle:
+                    break
+                time.sleep(0.2)
+            check("the chat setting shows in the panel, off by default", toggle == {"on": False}, toggle)
+            js("document.getElementById('desk-chat-panel').click(); return true")
+            on = False
+            for _ in range(30):
+                if desk("GET", "/settings", token=token).get("chat_panel") is True:
+                    on = True
+                    break
+                time.sleep(0.2)
+            check("turning it on reaches the desk", on)
+            js("document.getElementById('desk-chat-panel').click(); return true")
+            settle()
+            check("and off again", desk("GET", "/settings", token=token).get("chat_panel") is False)
+
+            # Start work needs Linear, so the desk's answer is stubbed in the
+            # page: with no Claude Code prompt link (the chat setting on) only
+            # the folder opens; with one, the prompt link follows 5 s later.
+            def start_with(answer):
+                return wd("POST", S + "/execute/async", {"args": [answer, item], "script": """
+                  var answer = arguments[0], item = arguments[1], done = arguments[2], delays = [];
+                  var realFetch = window.fetch, realTimeout = window.setTimeout;
+                  window.fetch = function (url) {
+                    if (/\\/api\\/desk\\/items$/.test(url)) return Promise.resolve(new Response(JSON.stringify({ id: item })));
+                    if (/\\/start$/.test(url)) return Promise.resolve(new Response(JSON.stringify(answer)));
+                    return realFetch.apply(window, arguments);
+                  };
+                  window.setTimeout = function (f, ms) { delays.push(ms); return realTimeout(f, ms); };
+                  document.getElementById('desk-error').innerHTML = '';
+                  document.getElementById('desk-pickup-body').innerHTML =
+                    '<div class="desk-pick"><button class="btn" type="button" data-pick-start="ABC-1">Start work</button></div>';
+                  document.querySelector('[data-pick-start]').click();
+                  (function wait(n) {
+                    var text = document.getElementById('desk-error').textContent;
+                    if (text.indexOf('Worktree') >= 0 || !n) {
+                      window.fetch = realFetch; window.setTimeout = realTimeout;
+                      done({ text: text, delays: delays });
+                    } else realTimeout(function () { wait(n - 1); }, 100);
+                  })(50);"""})
+            start = {"worktree": "/w/fw-ABC-1", "branch": "abc-1-loader", "how": "reused", "moved_to": None, "warnings": [],
+                     "folder_uri": "vscode://file/w/fw-ABC-1"}
+            got = start_with(start)
+            check("Start work with no prompt link opens only the folder, and says the chat starts there",
+                  5000 not in got["delays"] and "its chat starts there" in got["text"], got)
+            got = start_with({**start, "claude_uri": "vscode://anthropic.claude-code/open?prompt=x"})
+            check("with a prompt link it opens the folder, then the prompt, as before",
+                  5000 in got["delays"] and "press Enter there" in got["text"], got)
             js("document.getElementById('desk-slack-toggle').click(); return true")
             settle()
             check("the Slack bar expands to its feed and says nothing is connected",
