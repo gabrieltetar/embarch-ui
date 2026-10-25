@@ -148,3 +148,18 @@ cargo build --release
 geckodriver --port 4444 &
 python3 tests/browser/drive_atlas.py
 ```
+
+`drive_links.py` drives the links into the page that say what to show
+(`embarch-ui` decision 58): `#desk?item=…`, `#live-study?study=…` and
+`#topology?board=…`, each as the address a page is loaded with and as a
+`hashchange` while it is already open, plus a plain `#tab` and the retired
+ones, and a parameter that would be markup if anything put it there. It
+brings its own stub Core (`stub_core.py`'s studies, plus two enrolled roles),
+a scratch embarch-desk and a scratch firmware repo, and points the UI's
+recent-projects list and data directory at scratch too.
+
+```sh
+cargo build && (cd ../embarch-desk && cargo build)
+geckodriver --port 4444 &
+python3 tests/browser/drive_links.py
+```

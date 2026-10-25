@@ -742,6 +742,37 @@
         ? "Add a card from a Linear issue key above, or start a Claude Code session in this desk's repos and answer which work item it is."
         : "Open a desk with Switch…, or make one with New desk.") + "</p></div>";
     readNotes(cards);
+    markLinkedCard();
+  }
+
+  // `#desk?item=<work item id>` (embarch-ui decision 58): the chat panel's
+  // link to the card a step touched. The card is scrolled to once and marked
+  // until the reader clicks or types — marked again after every render in
+  // between, because a pushed view rebuilds every card. An id no card here
+  // carries (archived, or on another desk) leaves the tab as it is and says
+  // so in one line. The id is compared with each card's attribute, never put
+  // into a selector or into markup.
+  var linkItem = null;
+  var linkScrolled = false;
+
+  function markLinkedCard() {
+    var found = null;
+    Array.prototype.forEach.call(cardsEl.querySelectorAll(".desk-card[data-card]"), function (el) {
+      var on = linkItem != null && el.getAttribute("data-card") === linkItem;
+      el.classList.toggle("link-focus", on);
+      if (on) found = el;
+    });
+    if (linkItem == null || !view) return;
+    if (found) {
+      if (!linkScrolled) { linkScrolled = true; found.scrollIntoView({ block: "center" }); }
+      routeNote(null);
+    } else {
+      routeNote("No card for work item " + linkItem + " on this desk: it is archived, or on another desk.");
+    }
+  }
+
+  function routeNote(text) {
+    document.dispatchEvent(new CustomEvent("embarch:route-note", { detail: { text: text } }));
   }
 
   function render() {
@@ -1185,6 +1216,13 @@
   dayDate.addEventListener("change", function () { loadDay(dayDate.value); });
   pickupQ.addEventListener("keydown", function (ev) { if (ev.key === "Enter") loadPickup(); });
   document.addEventListener("embarch:desk-form", function (ev) { openForm(ev.detail ? ev.detail.id : null); });
+  document.addEventListener("embarch:route", function (ev) {
+    var d = ev.detail || {};
+    linkItem = d.tab === "desk" && d.params && d.params.item ? String(d.params.item) : null;
+    linkScrolled = false;
+    markLinkedCard();
+  });
+  document.addEventListener("embarch:route-done", function () { linkItem = null; markLinkedCard(); });
   // A switch made from the shell: refresh at once rather than on the next push.
   document.addEventListener("embarch:desk-switched", function () { lastOpenId = undefined; load(); });
   document.addEventListener("keydown", function (ev) {

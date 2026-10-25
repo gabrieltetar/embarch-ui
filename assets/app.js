@@ -46,10 +46,6 @@
   // relayed by embarch-api points a human at `#topology` rather than at
   // whichever tab that browser happened to have open last. Unknown or absent
   // fragment -> null, and the stored/default tab wins as before.
-  // Everything up to the first `?`: no fragment carries parameters of its
-  // own any more (the Trace tab's `#trace?study=…&tap=…` went with that tab),
-  // and splitting anyway costs nothing and keeps an old bookmark landing on a
-  // tab rather than nowhere.
   // A fragment naming a tab that has been folded into another one resolves
   // to its new home rather than to null: `#enroll` was a real address —
   // typed, bookmarked, and the destination an agent was told to point a
@@ -58,10 +54,86 @@
   // whichever tab that browser happened to have open last.
   const RETIRED_FRAGMENTS = { enroll: "topology", dashboard: "desk" };
 
+  // **A fragment may carry what the tab should show, `#<tab>?<query>`**
+  // (embarch-ui decision 58, amending 31's "a fragment names a tab and
+  // nothing else"): the chat panel links a step to the thing it touched —
+  // `#desk?item=<work item>`, `#live-study?study=<study id>`,
+  // `#topology?board=<role, board type or label>` — and a link that lands on
+  // the tab but not on the card is a link that makes the reader search.
+  // The query is parsed with `URLSearchParams`, so it is percent-decoded
+  // exactly once and every value is a plain string: a tab compares it, puts
+  // it in `textContent`, or hands it to `encodeURIComponent` — never into
+  // markup. The first value of a repeated key wins.
+  function routeFromHash() {
+    const raw = (location.hash || "").replace(/^#/, "");
+    const q = raw.indexOf("?");
+    const head = q < 0 ? raw : raw.slice(0, q);
+    const name = RETIRED_FRAGMENTS[head] || head;
+    if (!document.querySelector(`.nav-item[data-tab="${CSS.escape(name)}"]`)) return null;
+    const params = {};
+    if (q >= 0) {
+      new URLSearchParams(raw.slice(q + 1)).forEach((value, key) => {
+        if (!Object.prototype.hasOwnProperty.call(params, key)) params[key] = value;
+      });
+    }
+    return { tab: name, params: params };
+  }
+
   function tabFromHash() {
-    const raw = (location.hash || "").replace(/^#/, "").split("?")[0];
-    const name = RETIRED_FRAGMENTS[raw] || raw;
-    return document.querySelector(`.nav-item[data-tab="${CSS.escape(name)}"]`) ? name : null;
+    const route = routeFromHash();
+    return route ? route.tab : null;
+  }
+
+  // The one line a tab says when a link named something it does not show —
+  // an archived card, a study Core has never heard of, a board on no role.
+  // A notice, not an error: the tab is still the right one (decision 58).
+  // Text only, so a parameter carried here can never become markup.
+  function showRouteNote(text) {
+    const el = document.getElementById("route-note");
+    if (!el) return;
+    el.textContent = text || "";
+    el.hidden = !text;
+  }
+
+  // Hands the fragment's parameters to the tab that owns them, as an
+  // `embarch:route` event — `desk.js` is a separate file, and the tabs in
+  // this one listen the same way rather than through a second path.
+  //
+  // **Then the parameters are taken off the address** (`replaceState`,
+  // which fires no `hashchange`): following the *same* link a second time
+  // in a tab still showing it would otherwise change nothing, and
+  // `hashchange` — the only thing a link into an already-open page fires —
+  // would never come. The tab name stays, so a reload lands on the tab.
+  //
+  // What the link marked stays marked until the reader does something on
+  // the page — a click or a key — rather than for a fixed few seconds: the
+  // browser may come forward long after the link was followed, and a
+  // highlight that has already faded marks nothing.
+  //
+  // Every fragment followed is dispatched, a plain `#tab` too, so a mark
+  // left by an earlier link drops when a later one names something else.
+  let routeDoneArmed = false;
+  function followRouteParams(route) {
+    if (!route) return;
+    showRouteNote(null);
+    document.dispatchEvent(new CustomEvent("embarch:route", { detail: { tab: route.tab, params: route.params } }));
+    if (!Object.keys(route.params).length) return;
+    try {
+      history.replaceState(null, "", location.pathname + location.search + "#" + route.tab);
+    } catch (_) {
+      /* the address keeps its parameters; only a second identical link is lost */
+    }
+    if (routeDoneArmed) return;
+    routeDoneArmed = true;
+    const done = () => {
+      routeDoneArmed = false;
+      document.removeEventListener("pointerdown", done, true);
+      document.removeEventListener("keydown", done, true);
+      showRouteNote(null);
+      document.dispatchEvent(new CustomEvent("embarch:route-done"));
+    };
+    document.addEventListener("pointerdown", done, true);
+    document.addEventListener("keydown", done, true);
   }
 
   function initNav() {
@@ -76,14 +148,22 @@
       /* best effort */
     }
     // The fragment outranks the remembered tab — it was typed or clicked
-    // just now, the stored one is from some previous session.
+    // just now, the stored one is from some previous session. Its
+    // parameters wait for `followRouteParams` at the end of start-up, once
+    // every tab's listener is in place.
     showTab(tabFromHash() || initial);
     // Following the same link twice in one already-open tab changes only the
     // fragment, which fires no navigation — without this, the second click
     // does nothing at all.
     window.addEventListener("hashchange", () => {
-      const name = tabFromHash();
-      if (name) showTab(name);
+      const route = routeFromHash();
+      if (!route) return;
+      showTab(route.tab);
+      followRouteParams(route);
+    });
+    // A tab that cannot find what a link named says so here (decision 58).
+    document.addEventListener("embarch:route-note", (ev) => {
+      showRouteNote(ev.detail && ev.detail.text);
     });
   }
 
@@ -295,7 +375,96 @@
       const g = svg.querySelector('[data-enroll-role="' + CSS.escape(dragoverRole) + '"]');
       if (g) g.classList.add("dragover");
     }
+    // Same reason for a board a link named: the box it marked was rebuilt.
+    markLinkedBoard();
   }
+
+  // --- A link to one board: `#topology?board=<…>` (decision 58) ----------
+  //
+  // What a link calls a board is whatever its writer knew: a role's slot
+  // (`dut`, `dev-bench`) or how it is shown (`DUT`, `Dev bench`), the board
+  // type a role holds, or a board type in this project's catalog — the
+  // chat panel passes the role when the step named one and the board type
+  // otherwise. Each is matched case-insensitively, and only when nothing
+  // matches exactly is the board's own name — before a `/` qualifier or an
+  // `@` revision — compared, so `nrf54l15dk` finds a role holding
+  // `nrf54l15dk/nrf54l15/cpuapp`. Every match is marked, a role box on the
+  // diagram and a row in the catalog alike, and the first is scrolled to
+  // once. Nothing matching leaves the tab as it is and says so in one line.
+  let linkBoard = null;
+  let linkBoardScrolled = false;
+  // The catalog is read once at start-up whether a project is open or not;
+  // until it is, a board named only there must not be reported missing.
+  let boardCatalogRead = false;
+
+  function boardKey(value) {
+    return String(value == null ? "" : value).trim().toLowerCase();
+  }
+
+  function boardBase(value) {
+    return boardKey(value).split(/[/@]/)[0];
+  }
+
+  function linkedBoardMatches(snapshot) {
+    const want = boardKey(linkBoard);
+    const wantBase = boardBase(linkBoard);
+    const tier = (same, bySlot) => {
+      const roles = ROLES.map((r) => r.role).filter((role) => {
+        if (bySlot && (want === role || want === boardKey(roleLabel(role)) ||
+            want === role.replace("-", " ") || want === role.replace("-", "_"))) return true;
+        const b = findEnrolled(snapshot, role);
+        return !!(b && b.name) && (same(b.name) || same(boardTypeLabel(role, b.name)));
+      });
+      const rows = boardCatalog
+        .filter((b) => same(b.name) || (!!b.build_target && same(b.build_target)))
+        .map((b) => b.name);
+      return { roles: roles, rows: rows };
+    };
+    const exact = tier((v) => boardKey(v) === want, true);
+    if (exact.roles.length || exact.rows.length) return exact;
+    return wantBase ? tier((v) => boardBase(v) === wantBase, false) : exact;
+  }
+
+  function markLinkedBoard() {
+    const svg = document.getElementById("topology-diagram");
+    const body = document.getElementById("board-catalog-body");
+    if (!svg || !body) return;
+    const m = linkBoard != null && latestSnapshot ? linkedBoardMatches(latestSnapshot) : { roles: [], rows: [] };
+    let first = null;
+    svg.querySelectorAll("[data-enroll-role]").forEach((g) => {
+      const on = m.roles.indexOf(g.getAttribute("data-enroll-role")) >= 0;
+      g.classList.toggle("link-focus", on);
+      if (on && !first) first = g;
+    });
+    body.querySelectorAll("tr").forEach((tr) => {
+      const edit = tr.querySelector("[data-board-edit]");
+      const on = !!edit && m.rows.indexOf(edit.getAttribute("data-board-edit")) >= 0;
+      tr.classList.toggle("link-focus", on);
+      if (on && !first) first = tr;
+    });
+    // The roles come with the first snapshot; until then nothing is known.
+    if (linkBoard == null || !latestSnapshot) return;
+    if (first) {
+      if (!linkBoardScrolled) {
+        linkBoardScrolled = true;
+        first.scrollIntoView({ block: "center" });
+      }
+      showRouteNote(null);
+    } else if (boardCatalogRead) {
+      showRouteNote("No board " + linkBoard + " here: no role holds it and this project's board types do not list it.");
+    }
+  }
+
+  document.addEventListener("embarch:route", (ev) => {
+    const d = ev.detail || {};
+    linkBoard = d.tab === "topology" && d.params && d.params.board ? String(d.params.board) : null;
+    linkBoardScrolled = false;
+    markLinkedBoard();
+  });
+  document.addEventListener("embarch:route-done", () => {
+    linkBoard = null;
+    markLinkedBoard();
+  });
 
   function isDirect(sig) {
     return sig && sig.route && sig.route.kind === "direct";
@@ -6064,6 +6233,7 @@
   function renderBoardCatalog() {
     const body = topoEl("board-catalog-body");
     if (body) body.innerHTML = boardCatalogRows();
+    markLinkedBoard();
     if (typeof sdRenderRoleBoard === "function") sdRenderRoleBoard();
     // The pickers read the same catalog, so a board type added here is
     // offered on the diagram without a reload.
@@ -6099,6 +6269,11 @@
       renderBoardCatalog();
     } catch (e) {
       showError(err, String(e));
+    } finally {
+      // Read, or failed to be: either way a link's board can now be called
+      // missing from it (decision 58).
+      boardCatalogRead = true;
+      markLinkedBoard();
     }
   }
 
@@ -8019,6 +8194,32 @@
         return o.value;
       });
       lsLoadSeries(tap, columns, select.value, null);
+    });
+
+    // `#live-study?study=<id>` (decision 58): the chat panel's link to a
+    // study a step ran or read. **This tab is where every study is shown**
+    // — the one running, live off the server's rings, and a past one, read
+    // back off disk (31) — so the link opens it here whichever it is, through
+    // the same `lsOpenStudy` the id box and the studies list use, which
+    // decides live or disk from the study's own record. The id lands in the
+    // box too, so what is open says how it was asked for.
+    document.addEventListener("embarch:route", async function (ev) {
+      var d = ev.detail || {};
+      if (d.tab !== "live-study" || !d.params || !d.params.study) return;
+      var id = String(d.params.study).trim();
+      if (!id) return;
+      lsEl("ls-open-id").value = id;
+      var opened = lsOpenStudy(id, false);
+      // The status card is shown before the record is read; go to it now
+      // rather than after a capture of many megabytes has rendered.
+      lsEl("ls-body").scrollIntoView({ block: "start" });
+      await opened;
+      if (lsStudyId !== id || !lsRecord) return;
+      // Nothing under that id at all — no job, no steps, no streams — is
+      // a study embarch-core does not have, not one it could not read.
+      if (!lsRecord.job && !lsRecord.steps && !lsRecord.taps) {
+        showRouteNote("embarch-core has no study " + id + ": no job, no steps and no streams under that id.");
+      }
     });
 
     lsLoadStudies();
@@ -10279,5 +10480,7 @@
     initEvents();
     const toggle = document.querySelector(".theme-toggle");
     if (toggle) toggle.addEventListener("click", toggleTheme);
+    // Last, so every tab — these and `desk.js`'s — is listening (decision 58).
+    followRouteParams(routeFromHash());
   });
 })();
