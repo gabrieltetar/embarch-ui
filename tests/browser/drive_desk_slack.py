@@ -8,10 +8,11 @@ scratch port): it serves a view the script controls and records every
 connector or `claude -p`. A scratch config dir keeps the real desk's token out.
 
     cargo build
-    geckodriver --port 4444     geckodriver --port 4444 &      # or WEBDRIVER=http://127.0.0.1:<port>      # or any port, then EMBARCH_GECKO_PORT=<port>
+    geckodriver --port <gecko> &
+    EMBARCH_GECKO_PORT=<gecko> EMBARCH_UI_PORT=<ui> DESK_PORT=<desk>
     python3 tests/browser/drive_desk_slack.py
 """
-import json, os, shutil, subprocess, sys, tempfile, threading, time, urllib.request
+import json, os, shutil, subprocess, sys, tempfile, threading, time, urllib.request, urllib.error
 import addr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +24,10 @@ DESK_PORT = os.environ.get("DESK_PORT", "4997")
 UI = "http://127.0.0.1:" + UI_PORT
 BASE = addr.gecko_url()
 PUSH_WAIT = 13  # the server pushes a view every 10 s
+
+class SetupFail(Exception):
+    pass
+
 
 fails = []
 items = []
@@ -114,9 +119,16 @@ def main():
                 el = wd("POST", S + "/element", {"using": "css selector", "value": css})
                 wd("POST", S + "/element/" + list(el.values())[0] + "/click", {})
 
+            def poll(src):
+                """js(), but a script error (the page mid-reload) reads as false."""
+                try:
+                    return js(src)
+                except urllib.error.HTTPError:
+                    return False
+
             def until(src, secs=15):
                 for _ in range(secs * 5):
-                    if js(src):
+                    if poll(src):
                         return True
                     time.sleep(0.2)
                 return False
@@ -126,10 +138,27 @@ def main():
                 items[:] = initial
                 calls.clear()
                 wd("POST", S + "/url", {"url": UI + "/?r=%d#desk" % time.time()})
-                until("var c = document.getElementById('desk-slack-counts'); return c && /mention/.test(c.textContent)")
-                if not js("return document.getElementById('desk-slack').hidden === false"):
-                    click("#desk-slack-toggle")
-                until("return document.querySelectorAll('[data-draft]').length > 0")
+                if not until("var c = document.getElementById('desk-slack-counts'); return c && /mention/.test(c.textContent)"):
+                    raise SetupFail("the Slack mention count never appeared")
+                # the bar is open, or the toggle is laid out and a click on it lands
+                opened = False
+                for _ in range(75):
+                    if poll("return document.getElementById('desk-slack').hidden === false"):
+                        opened = True
+                        break
+                    if poll("var t = document.getElementById('desk-slack-toggle');"
+                          " return !!t && t.offsetParent !== null && t.getBoundingClientRect().width > 0"):
+                        try:
+                            click("#desk-slack-toggle")
+                        except urllib.error.HTTPError:
+                            pass  # not interactable yet; poll again
+                    time.sleep(0.2)
+                if not opened and not poll("return document.getElementById('desk-slack').hidden === false"):
+                    raise SetupFail("the Slack toggle never became clickable / the bar never opened")
+                if not until("return document.querySelectorAll('[data-draft]').length > 0"):
+                    raise SetupFail("no [data-draft] button appeared in the open bar: " + str(js(
+                        "var b = document.getElementById('desk-slack'); return [b.hidden, b.innerHTML.slice(0, 300),"
+                        " document.getElementById('desk-slack-counts').textContent]")))
 
             def draft_on(channel):
                 click('[data-draft][data-msg*=\'"%s"\']' % channel)
@@ -193,6 +222,8 @@ def main():
             time.sleep(0.5)
             check("and nothing is sent", replies() == [], replies())
             check("the typed draft is still there to copy", js("return document.querySelector('[data-reply-box] textarea').value") == "draft for CY")
+        except SetupFail as e:
+            check("scenario setup: " + str(e), False)
         finally:
             wd("DELETE", S)
     finally:
