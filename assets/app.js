@@ -736,9 +736,11 @@
     const result = document.getElementById("assign-result");
     const name = document.getElementById("assign-board").value;
     if (!name || !chip) {
-      result.innerHTML =
-        '<span style="color:var(--danger);">pick a board type for this role first — binding a ' +
-        "probe has to attach as some chip, and that is the board type's</span>";
+      result.innerHTML = name
+        ? '<span style="color:var(--danger);">' + escapeHtml("'" + name + "'") +
+          " has no chip — set the chip on its row in Board types below; a probe attaches as it</span>"
+        : '<span style="color:var(--danger);">pick a board type for this role first — binding a ' +
+          "probe has to attach as some chip, and that is the board type's</span>";
       return;
     }
     result.textContent = "enrolling…";
@@ -6474,9 +6476,15 @@
       if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
       const head =
         '<div class="topo-check-summary">' +
-        (body.ok
-          ? '<span class="badge badge-success">every check passed</span>'
-          : '<span class="badge badge-danger">' + body.failed + " failed</span>") +
+        // The server's own verdict, never `ok`, which is only "nothing failed":
+        // a guessed port or an empty bench must not read as a pass.
+        (body.verdict === "failed" || (!body.verdict && !body.ok)
+          ? '<span class="badge badge-danger">' + body.failed + " failed</span>"
+          : body.verdict === "empty"
+            ? '<span class="badge badge-neutral">nothing to check yet</span>'
+            : body.verdict === "warned"
+              ? '<span class="badge badge-warning">nothing failed, but not a pass</span>'
+              : '<span class="badge badge-success">every check passed</span>') +
         (body.warned ? ' <span class="badge badge-warning">' + body.warned + " to look at</span>" : "") +
         ' <span class="placeholder-note">' + formatTimestamp(body.checked_at_utc_ms) + "</span></div>";
       report.innerHTML = head + (body.checks || []).map(checkRowHtml).join("");

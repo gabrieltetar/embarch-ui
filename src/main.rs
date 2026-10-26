@@ -666,17 +666,14 @@ struct EnrollRequest {
 ///
 /// Its caller is the Topology tab; the Enroll tab that used to own it was
 /// folded into Topology (decision 43) without the route changing at all.
-async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> impl IntoResponse {
-    // The same lookup `PUT .../board` does, for the same reason and against
-    // the same catalog (decision 48) — an enrolment attaches, so it needs a
-    // chip, and the two dialogs that produce one must not disagree about
-    // where it comes from.
-    let chip = match req.chip.trim() {
-        "" => match req.name.as_deref() {
-            Some(board) => crate::topology::chip_for_board(&state, board).await.unwrap_or_default(),
-            None => String::new(),
-        },
-        stated => stated.to_string(),
+async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> Response {
+    // The same lookup and the same refusal `POST .../board` has (decision
+    // 48) — an enrolment attaches, so it needs a chip, and the paths that
+    // produce one must not disagree about where it comes from or what an
+    // unanswerable one says. No Core call is made on a refusal.
+    let chip = match crate::topology::resolve_chip_or_refuse(&state, req.name.as_deref().unwrap_or(""), &req.chip).await {
+        Ok(chip) => chip,
+        Err(refusal) => return refusal,
     };
     match state
         .core
@@ -1113,8 +1110,12 @@ mod tests {
 
     /// The real router over a Core nobody answers on, served on a free port.
     async fn serve_app() -> String {
+        serve_app_over("http://127.0.0.1:1").await
+    }
+
+    async fn serve_app_over(core_url: &str) -> String {
         let core_config: embarch_core_client::CoreConfig =
-            toml::from_str("base_url = \"http://127.0.0.1:1\"\ntoken = \"x\"\n").unwrap();
+            toml::from_str(&format!("base_url = \"{core_url}\"\ntoken = \"x\"\n")).unwrap();
         let core = Arc::new(CoreClient::new(&core_config).unwrap());
         let (_snapshot_tx, snapshot_rx) = watch::channel(Snapshot::pending());
         let (_logs_tx, logs_rx) = watch::channel(Vec::new());
@@ -1138,6 +1139,43 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    /// Decision 48: an enrolment that names a board whose chip cannot be
+    /// answered is refused here, with the role route's guidance, and never
+    /// reaches Core. The stub Core counts connections.
+    #[tokio::test]
+    async fn enroll_refuses_a_board_with_no_chip_without_calling_core() {
+        let core = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core_url = format!("http://{}", core.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                if core.accept().await.is_ok() {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        let base = serve_app_over(&core_url).await;
+        let http = reqwest::Client::new();
+        for body in [
+            serde_json::json!({ "role": "dut", "chip": "", "probe_serial": "ABC", "name": "plank" }),
+            serde_json::json!({ "role": "dut", "chip": "", "probe_serial": "ABC" }),
+        ] {
+            let resp = http.post(format!("{base}/api/enroll")).json(&body).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+            let text = resp.text().await.unwrap();
+            assert!(text.contains("no chip"), "{text}");
+        }
+        let named = http
+            .post(format!("{base}/api/enroll"))
+            .json(&serde_json::json!({ "role": "dut", "chip": "", "name": "plank" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(named.text().await.unwrap().contains("Board types"), "names where to set it");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "Core was called");
     }
 
     fn says_never_frame_me(resp: &reqwest::Response, what: &str) {

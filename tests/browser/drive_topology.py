@@ -67,6 +67,9 @@ SERIAL_PORTS = [
      "product_id": None, "serial_number": "SOME-OTHER", "product": None,
      "interface": None},
 ]
+# `None` serves a 404, which Core's client reads as "no port resolved" (the
+# all-empty bench below); the default is the guessed port.
+DEV_BENCH_PORT = "COM16"
 POSTED = []
 DELETED = []
 LINKED = []
@@ -116,6 +119,8 @@ class Handler(BaseHTTPRequestHandler):
             # Guessed, not determined: the state the lowest-interface
             # fallback gets wrong on a two-VCOM probe, which the pass has to
             # show as something to look at rather than as a pass.
+            if DEV_BENCH_PORT is None:
+                return self._text("no dev-bench", 404)
             return self._json({"port_name": "COM16", "detected_by": "segger-vid-match",
                                "vendor_id": 4966, "product_id": 257,
                                "serial_number": "000683001234", "product": "J-Link",
@@ -315,7 +320,8 @@ env = dict(os.environ, EMBARCH_UI_CONFIG=cfg, EMBARCH_UI_PORT=UI_PORT,
            EMBARCH_DESK_PORT="4899" if UI_PORT != "4899" else "4898",
            EMBARCH_DESK_CONFIG_DIR=_iso + "/desk-cfg", XDG_DATA_HOME=_iso + "/data",
            XDG_CONFIG_HOME=_iso + "/config")
-ui = subprocess.Popen(["./target/release/embarch-ui"], env=env,
+env["HOME"] = _iso + "/home"
+ui = subprocess.Popen([os.environ.get("EMBARCH_UI_BIN", "./target/release/embarch-ui")], env=env,
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(2)
 
@@ -696,6 +702,50 @@ try:
     time.sleep(6.5)
     check("the dialog closes on its own after the longer read time",
           script("return document.getElementById('assign-dialog').style.display === 'none';"))
+
+    # --- the summary never says "passed" over a warning or an empty bench ----
+    #
+    # State here: dut and dev-bench are enrolled and one role fails, so the
+    # first report above is a failure. Strip the bench down so that only the
+    # guessed dev-bench port is left to find, then strip the port too.
+    ENROLLED, SIGNALS = [], []
+
+    def summary_after_poll():
+        time.sleep(7)  # the validate pass reads the poll loop's snapshot
+        script("document.getElementById('topo-validate').click();")
+        time.sleep(2)
+        return script("var s=document.querySelector('#topo-validate-report .topo-check-summary');"
+                      "return s?s.textContent:'';")
+
+    warn_only = summary_after_poll()
+    check("a bench whose only finding is a guessed port never reads as passed",
+          "every check passed" not in warn_only and "to look at" in warn_only, warn_only)
+    DEV_BENCH_PORT = None
+    all_empty = summary_after_poll()
+    check("a bench with nothing to check says so, not that every check passed",
+          "every check passed" not in all_empty and "nothing to check yet" in all_empty, all_empty)
+
+    # --- enroll refuses a board with no chip, in the dialog and at the route ---
+    before = len(POSTED)
+    status, text = ui_post_status("/api/enroll", {"role": "dut", "chip": "", "name": "no-such-board",
+                                                  "probe_serial": "ABC123"})
+    check("POST /api/enroll with an unanswerable board is a 400 naming where to set the chip, "
+          "and Core is never asked",
+          status == 400 and "Board types" in text and len(POSTED) == before, (status, text, POSTED[before:]))
+    script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();")
+    script("var g=document.querySelector('[data-enroll-role=\"dut\"]');"
+           "g.querySelector('text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    time.sleep(0.5)
+    script("document.getElementById('assign-board').value='nrf52840dk/nrf52840';"
+           "document.getElementById('assign-board').dispatchEvent(new Event('change'));"
+           "document.getElementById('assign-chip').value='';"
+           "document.getElementById('assign-confirm').click();")
+    time.sleep(0.5)
+    refusal = script("return document.getElementById('assign-result').textContent;")
+    check("the dialog names the missing chip when a board type is picked",
+          "has no chip" in refusal and "nrf52840dk" in refusal and "pick a board type" not in refusal,
+          refusal)
+    check("and that refusal made no enrolment", len(POSTED) == before, POSTED[before:])
 
     check("no uncaught JS error anywhere in the run",
           script("return window.__errs;") == [], script("return window.__errs;"))

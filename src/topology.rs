@@ -883,6 +883,48 @@ pub struct SetRoleBoardRequest {
     pub variant: Option<String>,
 }
 
+/// The chip a request names, or the one looked up for its board type — or
+/// the `400` that says where to put the answer (decision 48).
+///
+/// **One refusal for every route that attaches a chip**: the role route, and
+/// `POST /api/enroll` for the drag-and-drop dialog and a saved bench's
+/// proposal alike. Before this, the enrol route turned an unanswerable board
+/// into an empty chip and sent it to Core, which answered with a 502-wrapped
+/// failure naming a field and not the fix. The refusal makes no Core call.
+pub async fn resolve_chip_or_refuse(
+    state: &AppState,
+    board: &str,
+    stated: &str,
+) -> Result<String, Response> {
+    let stated = stated.trim();
+    if !stated.is_empty() {
+        return Ok(stated.to_string());
+    }
+    let board = board.trim();
+    if board.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no chip and no board type: a probe attaches as a chip, and the chip comes from \
+             the board type — pick one for this role first."
+                .to_string(),
+        )
+            .into_response());
+    }
+    match chip_for_board(state, board).await {
+        Some(chip) => Ok(chip),
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "'{board}' has no chip: it states none in embarch/boards.toml, and this \
+                 repo's target scan does not report one SoC for it. Set the chip on \
+                 the row in Board types below — Core attaches every probe bound to \
+                 this role as it."
+            ),
+        )
+            .into_response()),
+    }
+}
+
 /// `POST /api/topology/roles/{role}/board` — which board type is in a role,
 /// through Core's `PUT /probes/enrolled/{role}/board`.
 ///
@@ -899,28 +941,11 @@ pub async fn api_set_role_board(
     // role opens as — and a request that arrives without one used to reach
     // it and come back as `502 … 400 Bad Request: a role's board needs both
     // a board type and the chip it attaches as`, which names the missing
-    // field and not the one thing a human could do about it. The chip is
-    // derivable from the SoC this repo's own scan reports, so it is derived;
-    // what survives that is a genuinely unanswerable board type, refused
-    // here as a `400` that says where to put the answer.
-    let chip = match req.chip.trim() {
-        "" => match chip_for_board(&state, &req.board).await {
-            Some(chip) => chip,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "'{}' has no chip: it states none in embarch/boards.toml, and this \
-                         repo's target scan does not report one SoC for it. Set the chip on \
-                         the row in Board types below — Core attaches every probe bound to \
-                         this role as it.",
-                        req.board
-                    ),
-                )
-                    .into_response()
-            }
-        },
-        stated => stated.to_string(),
+    // field and not the one thing a human could do about it. What survives
+    // the lookup is refused here, by the one refusal both enrol paths share.
+    let chip = match resolve_chip_or_refuse(&state, &req.board, &req.chip).await {
+        Ok(chip) => chip,
+        Err(refusal) => return refusal,
     };
     match state.core.set_role_board(&role, &req.board, &chip).await {
         Ok(row) => {
@@ -1407,12 +1432,32 @@ pub async fn api_validate(State(state): State<AppState>) -> Response {
     let warned = checks.iter().filter(|c| c.status == "warn").count();
     Json(json!({
         "ok": failed == 0,
+        "verdict": verdict(&checks),
         "failed": failed,
         "warned": warned,
         "checked_at_utc_ms": now_utc_ms(),
         "checks": checks,
     }))
     .into_response()
+}
+
+/// What the pass found, in the one word the tab draws.
+///
+/// `ok` alone is `failed == 0`, which reads as "every check passed" over a
+/// guessed dev-bench port (`warn`) and over a bench where nothing was there
+/// to check (every row `empty`). `failed` beats `warned` beats `empty`;
+/// `empty` means no check passed and none warned; the rest is `passed`.
+fn verdict(checks: &[Check]) -> &'static str {
+    let count = |s: &str| checks.iter().filter(|c| c.status == s).count();
+    if count("fail") > 0 {
+        "failed"
+    } else if count("warn") > 0 {
+        "warned"
+    } else if count("pass") == 0 {
+        "empty"
+    } else {
+        "passed"
+    }
 }
 
 // ---- profiles ---------------------------------------------------------------
@@ -1688,6 +1733,17 @@ mod tests {
             std::fs::write(boards_path(&dir), text).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn the_verdict_never_calls_a_warning_or_an_empty_bench_a_pass() {
+        let c = |status: &'static str| Check::new("x", "x".to_string(), status, String::new());
+        assert_eq!(verdict(&[c("pass"), c("empty")]), "passed");
+        assert_eq!(verdict(&[c("pass"), c("warn")]), "warned");
+        assert_eq!(verdict(&[c("empty"), c("warn")]), "warned");
+        assert_eq!(verdict(&[c("empty"), c("empty")]), "empty");
+        assert_eq!(verdict(&[]), "empty");
+        assert_eq!(verdict(&[c("pass"), c("warn"), c("fail")]), "failed");
     }
 
     #[test]
