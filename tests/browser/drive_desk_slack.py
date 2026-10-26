@@ -8,19 +8,20 @@ scratch port): it serves a view the script controls and records every
 connector or `claude -p`. A scratch config dir keeps the real desk's token out.
 
     cargo build
-    geckodriver --port 4444 &      # or WEBDRIVER=http://127.0.0.1:<port>
+    geckodriver --port 4444     geckodriver --port 4444 &      # or WEBDRIVER=http://127.0.0.1:<port>      # or any port, then EMBARCH_GECKO_PORT=<port>
     python3 tests/browser/drive_desk_slack.py
 """
 import json, os, shutil, subprocess, sys, tempfile, threading, time, urllib.request
+import addr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BIN = os.environ.get("EMBARCH_UI_BIN", str(REPO / "target" / "debug" / "embarch-ui"))
-UI_PORT = os.environ.get("DESK_UI_PORT", "4897")
+UI_PORT = addr.ui_port(4897)
 DESK_PORT = os.environ.get("DESK_PORT", "4997")
 UI = "http://127.0.0.1:" + UI_PORT
-BASE = os.environ.get("WEBDRIVER", "http://127.0.0.1:4444")
+BASE = addr.gecko_url()
 PUSH_WAIT = 13  # the server pushes a view every 10 s
 
 fails = []

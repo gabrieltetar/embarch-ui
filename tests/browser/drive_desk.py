@@ -27,16 +27,17 @@ Start work needs Linear, so its answer is stubbed in the page.
     python3 tests/browser/drive_desk.py
 """
 import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.parse, urllib.request
+import addr
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BIN = os.environ.get("EMBARCH_UI_BIN", str(REPO / "target" / "debug" / "embarch-ui"))
 DESK_BIN = os.environ.get("EMBARCH_DESK_BIN", str(REPO.parent / "embarch-desk" / "target" / "debug" / "embarch-desk"))
-UI_PORT = os.environ.get("DESK_UI_PORT", "4896")
+UI_PORT = addr.ui_port(4896)
 DESK_PORT = os.environ.get("DESK_PORT", "4998")
 UI = "http://127.0.0.1:" + UI_PORT
 DESK = "http://127.0.0.1:" + DESK_PORT
-BASE = os.environ.get("WEBDRIVER", "http://127.0.0.1:4444")
+BASE = addr.gecko_url()
 SHOT = os.environ.get("DESK_SHOT")
 
 fails = []

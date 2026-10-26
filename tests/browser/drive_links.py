@@ -28,16 +28,17 @@ from urllib.parse import urlparse
 sys.dont_write_bytecode = True   # no __pycache__ left in the checkout
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stub_core  # noqa: E402  (the Live Study fixtures, reused rather than copied)
+import addr
 
 REPO = Path(__file__).resolve().parents[2]
 BIN = os.environ.get("EMBARCH_UI_BIN", str(REPO / "target" / "debug" / "embarch-ui"))
 DESK_BIN = os.environ.get("EMBARCH_DESK_BIN", str(REPO.parent / "embarch-desk" / "target" / "debug" / "embarch-desk"))
-UI_PORT = os.environ.get("LINKS_UI_PORT", "4895")
+UI_PORT = addr.ui_port(4895)
 DESK_PORT = os.environ.get("LINKS_DESK_PORT", "4997")
 CORE_PORT = int(os.environ.get("LINKS_CORE_PORT", "4904"))
 UI = "http://127.0.0.1:" + UI_PORT
 DESK = "http://127.0.0.1:" + DESK_PORT
-BASE = os.environ.get("WEBDRIVER", "http://127.0.0.1:4444")
+BASE = addr.gecko_url()
 
 ENROLLED = [
     {"probe_serial": "000683001234", "role": "dev-bench", "name": "esp32c5_devkitc/esp32c5/hpcore",

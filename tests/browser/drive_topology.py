@@ -25,14 +25,15 @@ path is real), one enrolled under a role outside the canonical pair, and a
     python3 tests/browser/drive_topology.py
 """
 import json, os, subprocess, sys, threading, time, urllib.error, urllib.request
+import addr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 TOKEN = "stub-token"
 CORE_PORT = int(os.environ.get("EMBARCH_STUB_PORT", "4903"))
-UI_PORT = os.environ.get("EMBARCH_UI_PORT", "4897")
+UI_PORT = addr.ui_port(4897)
 UI = "http://127.0.0.1:" + UI_PORT
-BASE = "http://127.0.0.1:" + os.environ.get("EMBARCH_GECKO_PORT", "4444")
+BASE = addr.gecko_url()
 
 NOW_MS = 1758240000000
 PROBES = [
@@ -317,7 +318,7 @@ with open(cfg, "w") as f:
 import tempfile
 _iso = tempfile.mkdtemp(prefix="embarch-ui-topology-iso-")
 env = dict(os.environ, EMBARCH_UI_CONFIG=cfg, EMBARCH_UI_PORT=UI_PORT,
-           EMBARCH_DESK_PORT="4899" if UI_PORT != "4899" else "4898",
+           EMBARCH_DESK_PORT=str(int(UI_PORT) + 1),
            EMBARCH_DESK_CONFIG_DIR=_iso + "/desk-cfg", XDG_DATA_HOME=_iso + "/data",
            XDG_CONFIG_HOME=_iso + "/config")
 env["HOME"] = _iso + "/home"

@@ -9,13 +9,14 @@ bring it to 40. Needs stub_core.py, a UI pointed at it, geckodriver:
   python3 tests/browser/stub_core.py <core port> &
   geckodriver --port <gecko port> &
   EMBARCH_UI_CONFIG=<toml> EMBARCH_UI_PORT=<ui port> ./target/debug/embarch-ui &
-  GECKO=http://127.0.0.1:<gecko port> UI=http://127.0.0.1:<ui port> \\
+  EMBARCH_GECKO_PORT=<gecko port> EMBARCH_UI_PORT=<ui port> \\
     python3 tests/browser/drive_table_refresh.py
 """
 import json, os, sys, time, urllib.request
+import addr
 
-GECKO = os.environ.get("GECKO", "http://127.0.0.1:4444")
-UI = os.environ.get("UI", "http://127.0.0.1:4899")
+GECKO = addr.gecko_url()
+UI = addr.ui_url()
 
 
 def rq(method, path, body=None):

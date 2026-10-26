@@ -2,9 +2,10 @@
 """Drives embarch-ui's Live Study tab in headless Firefox via geckodriver's
 own HTTP API — no selenium package needed on this bench."""
 import json, subprocess, sys, time, urllib.request
+import addr
 
-GECKO = "http://127.0.0.1:4444"
-UI = "http://127.0.0.1:4899"
+GECKO = addr.gecko_url()
+UI = addr.ui_url()
 
 
 def rq(method, path, body=None):

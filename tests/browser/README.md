@@ -10,6 +10,33 @@ This pair does. `stub_core.py` stands in for embarch-core and serves the states
 that are hard to produce on a bench; `drive.py` opens the tab in headless
 Firefox through geckodriver and asserts what is on screen.
 
+## Where the scripts look: two variables, no hardcoded addresses
+
+Every `drive*.py` learns its geckodriver and UI through `tests/browser/addr.py`
+(`ui/094`): `EMBARCH_GECKO_PORT` (default 4444) and `EMBARCH_UI_PORT` (default
+4899, or the script's own where it starts the UI itself). Each is a bare port on
+127.0.0.1. The defaults stay the owner's interactive ports; the older names
+(`GECKO`, `UI`, `WEBDRIVER`, `ATLAS_UI_PORT`, `LINKS_UI_PORT`, `DESK_UI_PORT`)
+make a script exit with an error, because a variable that is silently ignored
+is how a script lands on someone else's browser.
+
+**A fleet worker never runs a script with these unset.** Pick two free ports
+(not 4444, 4899, 4891), start your own geckodriver and UI, and record their real
+PIDs:
+
+```sh
+geckodriver --port 4601 & GPID=$!        # plain shell, not a subshell
+EMBARCH_UI_CONFIG=/tmp/ui.toml EMBARCH_UI_PORT=4602 ./target/debug/embarch-ui & UPID=$!
+ss -ltnp | grep -E ':(4601|4602)\b'      # confirm both are yours
+EMBARCH_GECKO_PORT=4601 EMBARCH_UI_PORT=4602 python3 tests/browser/drive.py
+kill $GPID $UPID
+```
+
+`tests/drive_addresses.rs` fails `cargo test` if a drive script skips `addr.py`
+or hardcodes either address, and runs the helper itself (no browser) to show
+the variables are read and the legacy names refused. The usage blocks below
+show the default ports for the owner's interactive use.
+
 ```sh
 cargo build --release
 python3 tests/browser/stub_core.py 4901 &

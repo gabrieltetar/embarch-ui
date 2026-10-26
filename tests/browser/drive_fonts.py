@@ -23,9 +23,10 @@ Run it like the others:
     python3 tests/browser/drive_fonts.py
 """
 import json, os, urllib.request, urllib.error, time, sys
+import addr
 
-UI = "http://127.0.0.1:" + os.environ.get("EMBARCH_UI_PORT", "4899")
-BASE = "http://127.0.0.1:4444"
+UI = addr.ui_url()
+BASE = addr.gecko_url()
 # The constant in `assets/app.js` (`traceGutter`), and the size it was
 # measured at. Kept here as two numbers rather than scraped out of the JS:
 # if somebody re-measures the gutter, this file should be the second place

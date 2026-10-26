@@ -5,9 +5,10 @@ saving it, and confirming it round-trips back into the editor and the
 layout chip. Needs an open project (a scratch firmware repo is enough — no
 study-structs.toml has to exist yet) but no stub, no study and no hardware."""
 import json, sys, time, urllib.request
+import addr
 
-GECKO = "http://127.0.0.1:4444"
-UI = "http://127.0.0.1:4899"
+GECKO = addr.gecko_url()
+UI = addr.ui_url()
 
 
 def rq(method, path, body=None):

@@ -19,13 +19,14 @@ that a net and a problem open in the inspector with their citations.
     python3 tests/browser/drive_atlas.py
 """
 import json, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import addr
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BIN = os.environ.get("EMBARCH_UI_BIN", str(REPO / "target" / "release" / "embarch-ui"))
-PORT = os.environ.get("ATLAS_UI_PORT", "4897")
+PORT = addr.ui_port(4897)
 UI = "http://127.0.0.1:" + PORT
-BASE = "http://127.0.0.1:4444"
+BASE = addr.gecko_url()
 FIXTURE = REPO / "tests" / "fixtures" / "atlas" / "graph.json"
 
 

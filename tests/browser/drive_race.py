@@ -10,9 +10,10 @@ switch itself is checked by hand: it needs a real repo).
 Run it against a freshly started UI: the second half needs the stub's running
 study to be live in the UI's session, which it is only once."""
 import json, sys, time, urllib.request
+import addr
 
-GECKO = "http://127.0.0.1:4444"
-UI = "http://127.0.0.1:4899"
+GECKO = addr.gecko_url()
+UI = addr.ui_url()
 RUNNING, DONE, BARE = "aa" * 16, "bb" * 16, "ee" * 16
 
 

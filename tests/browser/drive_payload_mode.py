@@ -29,9 +29,10 @@ Run it the same way as `drive_build.py`:
     python3 tests/browser/drive_payload_mode.py
 """
 import json, os, subprocess, urllib.request, sys, time
+import addr
 
-UI = "http://127.0.0.1:" + os.environ.get("EMBARCH_UI_PORT", "4899")
-BASE = "http://127.0.0.1:4444"
+UI = addr.ui_url()
+BASE = addr.gecko_url()
 REPO = "/tmp/embarch-ui-payload-mode-drive-repo"
 
 

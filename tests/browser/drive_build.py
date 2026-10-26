@@ -22,12 +22,13 @@ Run it the same way as `drive.py`:
     python3 tests/browser/drive_build.py
 """
 import json, os, urllib.request, urllib.error, time, sys, subprocess, tempfile, threading, stat
+import addr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # `drive.py`'s harness port by default; point it at a real instance (4890)
 # to drive the available path against a bench's own workspace.
-UI = "http://127.0.0.1:" + os.environ.get("EMBARCH_UI_PORT", "4899")
-BASE = "http://127.0.0.1:4444"
+UI = addr.ui_url()
+BASE = addr.gecko_url()
 def rq(method, url, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method,

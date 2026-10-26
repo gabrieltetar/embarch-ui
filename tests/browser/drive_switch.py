@@ -6,9 +6,10 @@ Needs stub_core.py, a UI started with XDG_DATA_HOME pointed at a scratch dir
 (the recents list lives there), geckodriver, and two scratch repos passed as
 argv: each a directory with `.git/` and `embarch/studies/<slug>.json`."""
 import json, sys, time, urllib.request
+import addr
 
-GECKO = "http://127.0.0.1:4444"
-UI = "http://127.0.0.1:4899"
+GECKO = addr.gecko_url()
+UI = addr.ui_url()
 REPO_A, REPO_B = sys.argv[1], sys.argv[2]
 
 
