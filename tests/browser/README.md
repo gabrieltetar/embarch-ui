@@ -57,6 +57,8 @@ registry had forgotten had no reachable provenance or per-tap byte counts).
 python3 tests/browser/drive_live.py <a completed study_id with an outpost tap>
 ```
 
+`drive_time_chart_caps.py` (ui/086) checks that a capped sample strip and a live mark lane opened after the ring dropped marks each show a note, and an uncapped one shows none. It needs `stub_core.py`'s `CAPPED` and `LIVEBIG` studies (opened by id, not listed) and a freshly started UI.
+
 `drive_build.py` is the third: the Study Designer's Build card and the Debug
 tab's `builds` log source, which need neither the stub nor a study. It drives
 the **unavailable** path on purpose — no project open, no `embarch-api`

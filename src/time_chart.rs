@@ -93,7 +93,11 @@ use crate::AppState;
 /// see [`MarkLane::dropped_by_cap`], which the tab renders beside the lane.
 const MAX_MARKS_PER_LANE: usize = 200_000;
 /// Points kept per sample tap. A 10 kHz rail over a two-minute study is 1.2 M
-/// of them; past this the strip is drawn from a prefix and says so.
+/// of them; past this the strip is drawn from a prefix and says so
+/// ([`SeriesLane::dropped_by_cap`], [`SeriesLane::covered_to`],
+/// [`TimeChartView::series_dropped_by_cap`]). A prefix and not a decimation:
+/// the strip is already a min/max bin per pixel, and thinning rows first would
+/// drop the spike that is usually the reason someone is looking.
 const MAX_SERIES_POINTS: usize = 500_000;
 /// Bins in one windowed answer, matching the trace's own cap. A plot is at most
 /// a couple of thousand CSS pixels wide and a bin narrower than a pixel is not
@@ -251,7 +255,13 @@ pub struct SeriesLane {
     pub placed: usize,
     pub before: usize,
     pub after: usize,
+    /// Placeable rows past [`MAX_SERIES_POINTS`] — **not** counted in
+    /// `before`/`after`: they are placeable, and the strip is shorter than the
+    /// run because of the cap, not because of the axis.
     pub dropped_by_cap: usize,
+    /// When the cap cut the strip: the axis position of the last row it kept,
+    /// i.e. how far into the run the strip reaches. `None` when nothing was cut.
+    pub covered_to: Option<u64>,
     pub note: Option<String>,
     /// **Never serialized**, for the same reason as [`MarkLane::marks`].
     /// `(axis position, value)`, sorted by position.
@@ -303,6 +313,10 @@ pub struct TimeChartView {
     /// Marks past their lane's cap, summed — surfaced at the top because a
     /// chart shortened anywhere must say so where a reader will see it.
     pub marks_dropped_by_cap: usize,
+    /// Sample rows past a strip's cap, summed. Kept apart from
+    /// `marks_dropped_by_cap` (a different cap, a different lane kind) and from
+    /// every strip's `before`/`after` (rows the axis has no position for).
+    pub series_dropped_by_cap: usize,
     /// What could not be read at all. Each entry is one tap and one reason; a
     /// tap that failed does not fail the chart, the same way `api_study`'s
     /// three parts each carry their own note.
@@ -867,6 +881,7 @@ pub async fn build(state: &AppState, study_id: &str) -> Result<TimeChartView, Re
         ),
     };
 
+    let series_dropped_by_cap = series.iter().map(|s| s.dropped_by_cap).sum();
     Ok(TimeChartView {
         study_id: study_id.to_string(),
         axis,
@@ -880,6 +895,7 @@ pub async fn build(state: &AppState, study_id: &str) -> Result<TimeChartView, Re
         // is on disk and the tier was decided once, over all of it.
         axis_epoch: 0,
         marks_dropped_by_cap,
+        series_dropped_by_cap,
         notes,
     })
 }
@@ -1210,6 +1226,7 @@ fn series_lane(tap: &str, table: &Table, projection: &Projection) -> SeriesLane 
             before: 0,
             after: 0,
             dropped_by_cap: 0,
+            covered_to: None,
             note: Some(format!(
                 "tap '{tap}' has no numeric column to plot — its columns are: {}",
                 table.columns.join(", ")
@@ -1229,6 +1246,7 @@ fn series_lane(tap: &str, table: &Table, projection: &Projection) -> SeriesLane 
             before: 0,
             after: 0,
             dropped_by_cap: 0,
+            covered_to: None,
             note: Some(format!(
                 "tap '{tap}' has no core_rx_utc_ms column, so its samples carry no clock this \
                  chart can share. Its own rx_utc_ms is dev-bench uptime and is not a substitute."
@@ -1266,6 +1284,9 @@ fn series_lane(tap: &str, table: &Table, projection: &Projection) -> SeriesLane 
             None => after += 1,
         }
     }
+    // The kept rows are the first ones in file order, so the strip reaches as
+    // far as the latest of them.
+    let covered_to = if dropped_by_cap > 0 { points.iter().map(|p| p.0).max() } else { None };
     points.sort_by_key(|p| p.0);
     let placed = points.len();
 
@@ -1280,6 +1301,7 @@ fn series_lane(tap: &str, table: &Table, projection: &Projection) -> SeriesLane 
         before,
         after,
         dropped_by_cap,
+        covered_to,
         note: None,
         points,
     }
@@ -1672,6 +1694,39 @@ mod tests {
         assert_eq!(binned.bins[0].count, 2);
     }
 
+    /// A strip with more placeable rows than the cap says it was cut, by how
+    /// many, and how far into the run it reaches — and those rows are not
+    /// counted as unplaceable.
+    #[test]
+    fn a_strip_past_its_cap_says_so_and_does_not_blame_the_axis() {
+        let extra = 7usize;
+        let mut csv = String::from("rx_utc_ms,step_name,value,unit,channel_id,core_rx_utc_ms\n");
+        let n = MAX_SERIES_POINTS + extra;
+        for i in 0..n {
+            csv.push_str(&format!("{i},c,1.0,Milliamps,0,{}\n", 1_000 + i as u64));
+        }
+        let table = Table::parse(&csv);
+        let end = 1_000 + n as u64 + 10;
+        let lane = series_lane("rail", &table, &Projection::core_clock(1_000, end));
+        assert_eq!(lane.placed, MAX_SERIES_POINTS);
+        assert_eq!(lane.dropped_by_cap, extra);
+        assert_eq!((lane.before, lane.after), (0, 0), "capped rows are placeable, not unplaceable");
+        assert_eq!(lane.total, n);
+        let reaches = lane.covered_to.expect("a cut strip says how far it reaches");
+        assert!(reaches < lane.points.last().unwrap().0 + 1);
+        let json = serde_json::to_value(&lane).unwrap();
+        assert_eq!(json["dropped_by_cap"], extra);
+        assert!(json["covered_to"].is_u64());
+
+        // An uncapped strip carries neither.
+        let small = Table::parse(
+            "rx_utc_ms,step_name,value,unit,channel_id,core_rx_utc_ms\n1,c,1.0,Milliamps,0,1100\n",
+        );
+        let ok = series_lane("rail", &small, &Projection::core_clock(1_000, 2_000));
+        assert_eq!(ok.dropped_by_cap, 0);
+        assert!(ok.covered_to.is_none());
+    }
+
     /// A study with nothing stamped has **no axis**, and says so rather than
     /// drawing one from row order — which would look exactly like a time.
     #[test]
@@ -1709,6 +1764,7 @@ mod tests {
             trace: None,
             axis_epoch: 0,
             marks_dropped_by_cap: 0,
+            series_dropped_by_cap: 0,
             notes: Vec::new(),
         };
         assert!(bin_window(&view, 0, 100, 0).is_err());

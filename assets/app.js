@@ -9752,10 +9752,17 @@
       steps_note: frame.steps_note || "",
       lanes: tcLive.order.map(function (k) {
         var l = tcLive.lanes[k];
+        // **Marks this browser does not hold, not the ring's own drop count.**
+        // The server's ring drops its oldest past MAX_LIVE_MARKS, but a browser
+        // that watched from the start already holds what was dropped — so the
+        // ring's `dropped` alone would warn about marks that are on screen. A
+        // snapshot (tab opened mid-run, epoch bump) leaves a gap: total less
+        // what is held and what is still pending.
+        var missing = Math.max(0, (l.total || 0) - l.marks.length - (l.pending || 0));
         return {
           key: l.key, label: l.label, kind: l.kind,
           total: l.total, placed: l.marks.length,
-          before: 0, after: 0, dropped_by_cap: l.dropped,
+          before: 0, after: 0, dropped_by_cap: missing,
           note: null,
           pending: l.pending,
         };
@@ -9763,7 +9770,11 @@
       series: [],
       trace: null,
       axis_epoch: frame.epoch,
-      marks_dropped_by_cap: 0,
+      marks_dropped_by_cap: tcLive.order.reduce(function (n, k) {
+        var l = tcLive.lanes[k];
+        return n + Math.max(0, (l.total || 0) - l.marks.length - (l.pending || 0));
+      }, 0),
+      series_dropped_by_cap: 0,
       notes: (axis.non_monotone
         ? [axis.non_monotone + " frame arrival(s) went backwards against the one before them and " +
            "were refused — an NTP correction mid-capture is the realistic cause, and inserting " +
@@ -9896,7 +9907,19 @@
     if (view.marks_dropped_by_cap) {
       notes.push(
         view.marks_dropped_by_cap +
-          " event(s) past a lane's cap are not drawn — the whole capture is still on embarch-core's disk"
+          " event(s) past a lane's cap are not drawn — " +
+          (view.live
+            ? "this view opened after the live ring had already dropped them; the whole capture is still on embarch-core's disk"
+            : "the whole capture is still on embarch-core's disk")
+      );
+    }
+    // A sample strip past its own cap is a different cap and a different fact
+    // from "not placeable on this axis" — those rows *are* placeable.
+    if (view.series_dropped_by_cap) {
+      notes.push(
+        view.series_dropped_by_cap +
+          " sample(s) past a strip's cap are not drawn — each capped strip covers only the " +
+          "start of the run and says how far; the whole capture is still on embarch-core's disk"
       );
     }
     var notesEl = trEl("tc-notes");
@@ -10064,7 +10087,12 @@
         "<title>" + escapeHtml(
           label + " — " + (lane ? lane.kind : "samples · " + sr.column) + ", " +
           (lane ? lane.total : sr.total) + " event(s) in the whole run, " +
-          (lane ? lane.placed : sr.placed) + " of them placeable on this axis" +
+          (lane ? lane.placed + (lane.dropped_by_cap || 0) : sr.placed + (sr.dropped_by_cap || 0)) +
+          " of them placeable on this axis" +
+          ((lane ? lane.dropped_by_cap : sr.dropped_by_cap)
+            ? ", " + (lane ? lane.dropped_by_cap : sr.dropped_by_cap) +
+              " of those past the cap and not drawn"
+            : "") +
           (unplaceable ? " — " + (lane ? lane.note : sr.note) : "")
         ) + "</title>" + escapeHtml(label) + "</text>"
       );
@@ -10125,6 +10153,14 @@
         // refuses to place rather than guess at.
         tcGutterCounts(parts, plotLeft, plotRight, mid,
           binned.before, binned.after + (lane.pending || 0), lane.label, "event");
+        if (lane.dropped_by_cap) {
+          parts.push(
+            '<text class="tc-cap-note" x="' + (plotRight - 4) + '" y="' + (row.top + 9) +
+            '" text-anchor="end" fill="var(--warning)" font-size="10" ' +
+            'font-family="IBM Plex Mono, monospace">' +
+            escapeHtml(lane.dropped_by_cap + " earlier event(s) past the cap, not drawn") + "</text>"
+          );
+        }
         return;
       }
 
@@ -10157,6 +10193,17 @@
         ) + "</text>"
       );
       tcGutterCounts(parts, plotLeft, plotRight, mid, sb.before, sb.after, sr.label, "sample");
+      if (sr.dropped_by_cap) {
+        parts.push(
+          '<text class="tc-cap-note" x="' + (plotRight - 4) + '" y="' + (row.top + row.h - 2) +
+          '" text-anchor="end" fill="var(--warning)" font-size="10" ' +
+          'font-family="IBM Plex Mono, monospace">' +
+          escapeHtml(
+            "capped: " + sr.dropped_by_cap + " sample(s) not drawn — strip covers the run up to " +
+            at(sr.covered_to)
+          ) + "</text>"
+        );
+      }
     });
 
     if (!rows.length) {

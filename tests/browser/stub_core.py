@@ -17,6 +17,15 @@ DONE = "bb" * 16
 INTERRUPTED = "cc" * 16
 UNREADABLE = "dd" * 16
 BARE = "ee" * 16
+# ui/086: two studies the listing does not carry, opened by id. CAPPED is a
+# completed study whose `rail` has more placeable rows than the post-hoc strip
+# cap (500,000); LIVEBIG is a running one whose dev-bench console overflows the
+# live mark ring (20,000) before any browser asks for a snapshot.
+CAPPED = "f1" * 16
+LIVEBIG = "f2" * 16
+CAPPED_ROWS = 500_000 + 3
+LIVEBIG_LINES = 20_500
+T0 = 1700000000000
 
 STUDIES = {
     "keep": 50,
@@ -76,6 +85,27 @@ STREAMS = {
         {"id": 2, "name": "bds-status", "encoding": {"Struct": {"decoder": 0}}, "rendered": True},
     ]},
 }
+
+STEPS[CAPPED] = {"study_name": "capped-strip", "timed": True, "steps": [
+    {"index": 0, "step_name": "soak", "outcome": "Pass", "reason": None,
+     "delay_before_ms": 0, "started_utc_ms": T0, "ended_utc_ms": T0 + CAPPED_ROWS + 10}]}
+STEPS[LIVEBIG] = {"study_name": "live-big", "timed": True, "steps": [
+    {"index": 0, "step_name": "chatter", "outcome": "Pass", "reason": None,
+     "delay_before_ms": 0, "started_utc_ms": T0, "ended_utc_ms": None}]}
+STREAMS[CAPPED] = {"streams": [
+    {"id": 0, "name": "rail", "encoding": {"Samples": {"layout": "U16Le", "unit": "Milliamps", "channel_id": 0}}, "rendered": True}]}
+STREAMS[LIVEBIG] = {"streams": [{"id": 0, "name": "dev-bench", "encoding": "Text", "rendered": False}]}
+
+_capped_rail = []
+
+
+def capped_rail():
+    if not _capped_rail:
+        _capped_rail.append(("rx_utc_ms,step_name,value,unit,channel_id,core_rx_utc_ms\n" + "".join(
+            "%d,soak,%.3f,Milliamps,0,%d\n" % (i, 1.5 + (i % 7) * 0.25, T0 + i)
+            for i in range(CAPPED_ROWS))).encode())
+    return _capped_rail[0]
+
 
 CAPTURES = {
     (DONE, "dev-bench"): b"booted\nuart:~$ hrm_start\nERR_PERMISSION\na line with no newline",
@@ -145,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) >= 2 and parts[0] == "study":
             sid = parts[1]
             if len(parts) == 2:
-                if sid == RUNNING:
+                if sid in (RUNNING, LIVEBIG):
                     return self._json({"status": "running", "current_step": 0,
                                        "total_steps": 3, "result": None, "reason": None})
                 return self._text("no study job found (Core has restarted since)", 404)
@@ -163,6 +193,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = CAPTURES.get((sid, parts[3]))
                 if sid == RUNNING and parts[3] == "rail":
                     body = running_rail()
+                if sid == CAPPED and parts[3] == "rail":
+                    body = capped_rail()
                 if body is None:
                     return self._text("no such tap", 404)
                 return self._bytes(body)
@@ -170,12 +202,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._sse(sid)
         return self._text("not found in the stub", 404)
 
+    def _sse_big(self, sid):
+        """Overflows the live mark ring, then holds the stream open for a minute."""
+        try:
+            per = 500
+            for c in range(LIVEBIG_LINES // per):
+                text = "".join("line %d\n" % (c * per + j) for j in range(per))
+                body = ("data: " + json.dumps({
+                    "kind": "StreamText", "study_id": sid, "stream_id": 0,
+                    "stream_name": "dev-bench", "step_index": 0,
+                    "rx_utc_ms": 1000 + c, "core_rx_utc_ms": T0 + c * 10,
+                    "text": text}) + "\n\n").encode()
+                self.wfile.write(body)
+            self.wfile.flush()
+            time.sleep(60)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     # ---- the live stream ---------------------------------------------------
     def _sse(self, sid):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
+        if sid == LIVEBIG:
+            return self._sse_big(sid)
 
         def frame(obj, name=None):
             out = b""
