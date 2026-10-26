@@ -1,5 +1,6 @@
-// embarch-ui Desk tab: one card per work item with recent activity, its time
-// tile inside it (embarch-desk-proposal.md). Everything comes from
+// embarch-ui Desk tab: one card per work item with recent activity, and the
+// hand above them — every day's time waiting for a ✓ or ✕, as a row of cards
+// (embarch-desk decision 57). Everything comes from
 // embarch-desk through this server's /api/desk proxy; nothing is computed here
 // that the desk already knows. Zero-build (decision 2): plain JS, no library.
 //
@@ -18,7 +19,7 @@
   var slackEl = document.getElementById("desk-slack");
   var settingsEl = document.getElementById("desk-settings");
   var draftsEl = document.getElementById("desk-drafts");
-  var elsewhereEl = document.getElementById("desk-elsewhere");
+  var handEl = document.getElementById("desk-hand");
   var dayBody = document.getElementById("desk-day-body");
   var dayDate = document.getElementById("desk-day-date");
   var dayTotal = document.getElementById("desk-day-total");
@@ -128,19 +129,66 @@
     }).join(" · ");
   }
 
-  function tileHtml(t) {
+  // ---------------------------------------------------------------- the hand
+  //
+  // Every tile waiting for a ✓ or ✕, on every desk, as cards in a row under
+  // the Slack bar (embarch-desk decision 57): this desk's first, oldest
+  // first. A card is dealt in once — a pushed view does not deal it again —
+  // one sent flies to "Sent today", one discarded drops.
+  var dealt = {};
+  var lastSent = null;
+
+  function handCardHtml(t, i) {
     var lines = (t.lines || []).length;
     var ready = t.harvest && t.note;
-    return '<div class="desk-tile' + (t.date === view.today ? " today" : "") + '" data-tile="' + esc(t.id) + '">' +
+    var today = t.date === view.today;
+    var other = !!view.open_desk && t.desk_id !== view.open_desk.id;
+    var live = today && (view.cards || []).some(function (c) { return c.id === t.item_id && c.sessions && c.sessions.live; });
+    var sub = t.logged_hours ? hours(t.logged_hours) + " already in Harvest" : lines + " line" + (lines === 1 ? "" : "s");
+    return '<div class="desk-tile' + (today ? " today" : "") + (dealt[t.id] ? "" : " dealt") + '" data-tile="' + esc(t.id) + '" style="--i:' + i + '">' +
       '<button class="desk-tile-body" type="button" data-open-tile="' + esc(t.id) + '" title="Open: lines, note, Harvest project">' +
-      '<span class="desk-tile-date">' + esc(dayLabel(t.date)) + "</span>" +
+      '<span class="desk-tile-top"><span class="desk-tile-key">' + esc(t.key || "no issue") + "</span>" +
+      (other ? '<span class="desk-tile-desk">' + esc(t.desk || "no desk") + "</span>" : "") + "</span>" +
+      '<span class="desk-tile-title">' + esc(t.item_title) + "</span>" +
       '<span class="desk-tile-hours">' + hours(t.hours) + "</span>" +
-      '<span class="desk-tile-sub">' + (t.logged_hours ? hours(t.logged_hours) + " already in Harvest" : lines + " line" + (lines === 1 ? "" : "s") + (ready ? " · ready" : "")) + "</span>" +
+      '<span class="desk-tile-date">' + (live ? '<span class="desk-dot" title="A session is on it now; the time still counts"></span>' : "") + esc(dayLabel(t.date)) + "</span>" +
+      '<span class="desk-tile-sub">' + esc(sub) + (ready ? " · <b>ready</b>" : "") + "</span>" +
       "</button>" +
       '<div class="desk-tile-actions">' +
       '<button class="desk-ok" type="button" data-approve="' + esc(t.id) + '" title="Add to Harvest">✓</button>' +
       '<button class="desk-no" type="button" data-discard="' + esc(t.id) + '" title="Discard">✕</button>' +
       "</div></div>";
+  }
+
+  function renderHand() {
+    var hand = view.hand || [];
+    var unsent = hand.reduce(function (n, t) { return n + (Number(t.hours) || 0); }, 0);
+    var sent = view.day && view.day.date === view.today ? view.day.logged_hours || 0 : 0;
+    handEl.innerHTML =
+      '<div class="desk-hand-head"><span class="desk-hand-title">Your hand</span>' +
+      '<span class="desk-detail">' + (hand.length ? hand.length + " card" + (hand.length === 1 ? "" : "s") + " · " + hours(unsent) + " unsent" : "nothing to pick") + "</span>" +
+      '<span class="desk-hand-sent' + (lastSent !== null && sent > lastSent ? " bump" : "") + '" id="desk-hand-sent" title="Hours in Harvest today, every desk">Sent today <b>' + hours(sent) + "</b></span></div>" +
+      '<div class="desk-hand-row">' + (hand.length ? hand.map(handCardHtml).join("")
+        : '<div class="desk-hand-empty">No time waiting. A session\'s time is dealt here as a card, one per work item and day.</div>') + "</div>";
+    lastSent = sent;
+    dealt = {};
+    hand.forEach(function (t) { dealt[t.id] = true; });
+  }
+
+  // A card leaving the hand: "sent" flies it to the Sent today count,
+  // "dropped" lets it fall. Resolves once it is gone, or at once with
+  // nothing to animate.
+  function play(id, kind) {
+    var el = handEl.querySelector('.desk-tile[data-tile="' + CSS.escape(id) + '"]');
+    if (!el || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+    var to = document.getElementById("desk-hand-sent");
+    if (kind === "sent" && to) {
+      var a = el.getBoundingClientRect(), b = to.getBoundingClientRect();
+      el.style.setProperty("--fly-x", Math.round(b.left + b.width / 2 - a.left - a.width / 2) + "px");
+      el.style.setProperty("--fly-y", Math.round(b.top + b.height / 2 - a.top - a.height / 2) + "px");
+    }
+    el.classList.add(kind);
+    return new Promise(function (res) { setTimeout(res, kind === "sent" ? 450 : 320); });
   }
 
   // A card's sessions. While the chat setting is off (chat decision 4), each
@@ -334,10 +382,16 @@
     var bench = benchHtml(c.bench);
     if (bench) meta.push(bench);
     meta.push("active " + ago(c.last_activity_ms));
-    var tiles = (c.tiles || []).map(tileHtml).join("") ||
-      '<div class="desk-tile-empty">' + (c.logged_today
-        ? hours(c.logged_today) + " already in Harvest today. New session time lands here."
-        : "No time yet today. Open it in VS Code and the session\'s time lands here.") + "</div>";
+    // Its time is in the hand above; the card keeps a chip per waiting day.
+    var mine = (view.hand || []).filter(function (t) { return t.item_id === c.id; });
+    var time = mine.length
+      ? '<div class="desk-card-time">' + mine.map(function (t) {
+          return '<button class="desk-mini" type="button" data-open-tile="' + esc(t.id) + '" title="In your hand above: open it">' +
+            esc(dayLabel(t.date)) + " · <b>" + hours(t.hours) + "</b></button>";
+        }).join("") + '<span class="desk-detail">in your hand ↑</span></div>'
+      : '<div class="desk-tile-empty">' + (c.logged_today
+        ? hours(c.logged_today) + " already in Harvest today. New session time is dealt into your hand."
+        : "No time yet today. Open it in VS Code and the session\'s time is dealt into your hand.") + "</div>";
     return '<div class="card desk-card' + (c.pinned ? " pinned" : "") + '" data-card="' + esc(c.id) + '">' +
       '<div class="desk-card-head"><div class="desk-card-id">' + head + "</div>" + status + "</div>" +
       '<div class="desk-card-title">' + esc(c.title) + "</div>" +
@@ -345,7 +399,7 @@
       '<div class="desk-card-meta">' + meta.join(" · ") + "</div>" +
       sessionsHtml(c) +
       '<div class="desk-notes-slot" data-notes-slot="' + esc(c.id) + '">' + cardNotesHtml(c.id) + "</div>" +
-      '<div class="desk-tiles">' + tiles + "</div>" +
+      time +
       '<div class="desk-card-actions">' +
       (issue ? '<button class="btn btn-tiny btn-primary" type="button" data-start="' + esc(c.id) + '" title="Worktree on the issue\'s branch, issue to In Progress, VS Code started on it">Start work</button>' : "") +
       '<button class="btn btn-tiny" type="button" data-launch="' + esc(c.id) + '" title="' + esc(c.repo_path || "pick the repo folder first") + '">Open in VS Code</button>' +
@@ -496,16 +550,6 @@
     newDeskSel.value = keep || (d ? d.id : "");
   }
 
-  function renderElsewhere() {
-    var tiles = view.elsewhere || [];
-    if (!tiles.length) { elsewhereEl.hidden = true; elsewhereEl.innerHTML = ""; return; }
-    elsewhereEl.hidden = false;
-    elsewhereEl.innerHTML = "<span>Unsent on other desks:</span>" + tiles.map(function (t) {
-      return '<button class="desk-mini" type="button" data-open-tile="' + esc(t.id) + '" title="Open the tile">' +
-        esc(t.desk || "no desk") + " · " + esc(t.item_title) + " · " + esc(dayLabel(t.date)) + " · <b>" + hours(t.hours) + "</b></button>";
-    }).join("");
-  }
-
   // "Today's work": every work item with time, a line, bench activity or a
   // session that day, grouped by desk, the open one first — links out, what
   // was done, status and sessions. A picked date is fetched; today is pushed.
@@ -559,6 +603,7 @@
         if (r.logged_hours) meta.push('<span class="badge badge-success">' + hours(r.logged_hours) + " in Harvest</span>");
         if (r.status === "open" && r.hours > 0) meta.push('<span class="badge badge-warning">' + hours(r.hours) + " unsent</span>");
         if (r.status === "discarded") meta.push('<span class="badge badge-neutral">tile discarded</span>');
+        if (r.status === "folded") meta.push('<span class="badge badge-neutral">folded into ' + esc(dayLabel(r.folded_into)) + "</span>");
         var lines = (r.lines || []).map(function (l) { return "<li>" + esc(l.text) + "</li>"; }).join("");
         var entries = (r.harvest_entries || []).map(entryHtml).join("");
         var shown = (r.logged_hours || 0) + (r.status === "open" ? (r.hours || 0) : 0);
@@ -779,7 +824,7 @@
     if (!view) return;
     renderSlackBar();
     renderHead();
-    renderElsewhere();
+    renderHand();
     if (!pickedDay) renderDay(view.day);
     var openId = view.open_desk ? view.open_desk.id : null;
     if (openId !== pickupDesk) { pickupDesk = openId; loadPickup(); }
@@ -809,11 +854,7 @@
   // ---------------------------------------------------------------- the tile dialog
 
   function findTile(id) {
-    var out = null;
-    (view.cards || []).forEach(function (c) {
-      (c.tiles || []).forEach(function (t) { if (t.id === id) out = { card: c, tile: t }; });
-    });
-    return out;
+    return (view.hand || []).filter(function (t) { return t.id === id; })[0] || null;
   }
 
   function targetLabel(t) {
@@ -821,10 +862,13 @@
   }
 
   function renderDialog() {
-    var found = findTile(openTileId);
-    if (!found) { closeDialog(); return; }
-    var t = found.tile, c = found.card;
+    var t = findTile(openTileId);
+    if (!t) { closeDialog(); return; }
     var h = t.harvest;
+    // A later tile of the same item can take this one's time and lines:
+    // one Harvest entry, dated that day (embarch-desk decision 58).
+    var later = (view.hand || []).filter(function (x) { return x.item_id === t.item_id && x.date > t.date; })
+      .sort(function (a, b) { return a.date < b.date ? 1 : -1; })[0];
     var options = '<option value="">— pick, or Polish to have Claude guess —</option>';
     if (targets) {
       options += targets.map(function (x) {
@@ -836,7 +880,7 @@
       options += '<option value="' + h.account_id + ":" + h.project_id + ":" + h.task_id + '" selected>' + esc(h.label) + "</option>";
     }
     dialogEl.innerHTML =
-      '<div class="card-title"><span>' + esc(c.issue ? c.issue.key + " · " : "") + esc(c.title) + " — " + esc(dayLabel(t.date)) + '</span>' +
+      '<div class="card-title"><span>' + esc(t.key ? t.key + " · " : "") + esc(t.item_title) + " — " + esc(dayLabel(t.date)) + '</span>' +
       '<button class="btn btn-tiny" type="button" id="desk-dialog-close">Close</button></div>' +
       '<div class="desk-dialog-grid">' +
       "<div><div class=\"desk-label\">Lines</div><ul class=\"desk-lines\">" +
@@ -857,6 +901,8 @@
       '<button class="btn" type="button" id="desk-polish">Polish with Claude</button>' +
       '<span class="desk-detail" id="desk-dialog-status"></span>' +
       '<span style="flex:1"></span>' +
+      (later ? '<button class="btn" type="button" id="desk-fold" data-into="' + esc(later.date) + '" title="Its time and lines join ' +
+        esc(dayLabel(later.date)) + '\'s tile, sent as one Harvest entry dated that day">Fold into ' + esc(dayLabel(later.date)) + "</button>" : "") +
       '<button class="btn" type="button" id="desk-save">Save</button>' +
       '<button class="btn desk-no-big" type="button" id="desk-discard-big">✕ Discard</button>' +
       '<button class="btn btn-primary" type="button" id="desk-approve-big">✓ Add to Harvest</button>' +
@@ -909,14 +955,14 @@
     if (!found) return;
     // A tile nobody has looked at has no note and no project: open it rather
     // than send a guess the user never saw.
-    if (!fromDialog && !(found.tile.harvest && found.tile.note)) { openDialog(id); return; }
+    if (!fromDialog && !(found.harvest && found.note)) { openDialog(id); return; }
     var step = fromDialog ? dialogPatch() : Promise.resolve();
     step.then(function () {
       return api("POST", "/tiles/" + encodeURIComponent(id) + "/approve");
     }).then(function (r) {
       closeDialog();
       flash("Added to Harvest: " + hours(r.hours) + ".");
-      return load();
+      return play(id, "sent").then(load);
     }).catch(function (e) {
       if (fromDialog) setDialogStatus(e.message); else flash(e.message);
     });
@@ -926,7 +972,7 @@
     if (!window.confirm("Discard this tile? Its time will not reach Harvest.")) return;
     api("POST", "/tiles/" + encodeURIComponent(id) + "/discard").then(function () {
       closeDialog();
-      return load();
+      return play(id, "dropped").then(load);
     }).catch(function (e) { flash(e.message); });
   }
 
@@ -1205,6 +1251,12 @@
         }).then(load).catch(function (e) { setDialogStatus(e.message); });
         break;
       }
+      case "desk-fold":
+        api("POST", "/tiles/" + encodeURIComponent(id) + "/fold", { into: t.dataset.into }).then(function () {
+          closeDialog();
+          return play(id, "dropped").then(load);
+        }).catch(function (e) { setDialogStatus(e.message); });
+        break;
       case "desk-approve-big": approve(id, true); break;
       case "desk-discard-big": discard(id); break;
     }

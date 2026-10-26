@@ -109,9 +109,10 @@
            (decision 58): one line, filled with textContent only. -->
       <div id="route-note" class="route-note" role="status" hidden></div>
       <div id="desk-bench-banner" class="desk-bench-banner" hidden></div>
-      <!-- The Desk (embarch-desk-proposal.md): one card per work item, its
-           time tile inside it. Everything here comes from embarch-desk through
-           this server's /api/desk proxy; desk.js renders it. -->
+      <!-- The Desk (embarch-desk-proposal.md): one card per work item, and the
+           hand of time cards under the Slack bar (embarch-desk decision 57).
+           Everything here comes from embarch-desk through this server's
+           /api/desk proxy; desk.js renders it. -->
       <section class="tab-panel" data-tab="desk">
         <div class="desk-head">
           <div><div class="desk-label" style="margin:0;">Open desk</div><div class="desk-head-name" id="desk-head-name">no desk</div></div>
@@ -139,6 +140,7 @@
         <div id="desk-drafts" class="card desk-panel" hidden></div>
         <div id="desk-slack" class="card desk-panel" hidden></div>
         <div id="desk-settings" class="card desk-panel" hidden></div>
+        <section id="desk-hand" class="desk-hand" aria-label="Time waiting for a ✓ or ✕"></section>
         <div class="card desk-pickup" id="desk-pickup">
           <div class="card-title"><span id="desk-pickup-title">Pick up</span>
             <span class="desk-day-ctl"><input id="desk-pickup-q" class="desk-input" type="text" placeholder="Search issues in this desk" />
@@ -146,7 +148,6 @@
           <div id="desk-pickup-body"><p class="placeholder-note">reading Linear…</p></div>
         </div>
         <div id="desk-cards" class="desk-cards"><p class="placeholder-note">waiting for embarch-desk…</p></div>
-        <div id="desk-elsewhere" class="desk-elsewhere" hidden></div>
         <div class="card desk-day">
           <div class="card-title"><span>Today's work</span>
             <span class="desk-day-ctl"><span class="desk-detail" id="desk-day-total"></span>

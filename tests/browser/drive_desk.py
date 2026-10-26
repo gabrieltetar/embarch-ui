@@ -5,7 +5,8 @@ directories (so the real desk, its tokens and its state are never touched),
 seeds it through the desk's own HTTP surface — a standalone work item, a
 session that a hook puts on it, a commit-less line, a flash — then starts an
 embarch-ui pointed at that desk and a dead Core, and drives the tab: the card
-and its tile render, ✓ on a tile nobody has opened opens it instead of
+renders and its tile is dealt into the hand under the Slack bar, with a chip on
+the card that opens it, ✓ on a tile nobody has opened opens it instead of
 sending, the dialog shows the lines, ✕ discards, the Dashboard is gone. The
 chat's part (embarch-chat-desk-proposal.md): a session's row before the chat
 ships and its one line after, Open chat through the mailbox (an ended chat
@@ -179,8 +180,13 @@ def main():
                   and js("return document.querySelector('.tab-panel[data-tab=desk]').classList.contains('active')"))
             check("the card renders with its title", js("return document.querySelector('.desk-card-title').textContent") == "Client sync call")
             check("its bench activity shows", "flash ×1" in js("return document.querySelector('.desk-card-meta').textContent"))
-            tile = js("var t = document.querySelector('.desk-tile'); return t && {hours: t.querySelector('.desk-tile-hours').textContent, ok: !!t.querySelector('.desk-ok'), no: !!t.querySelector('.desk-no')}")
-            check("today's tile is a square with its hours and ✓ ✕", tile and tile["hours"] == "1h30" and tile["ok"] and tile["no"], tile)
+            tile = js("var t = document.querySelector('#desk-hand .desk-tile'); return t && {hours: t.querySelector('.desk-tile-hours').textContent, title: t.querySelector('.desk-tile-title').textContent, ok: !!t.querySelector('.desk-ok'), no: !!t.querySelector('.desk-no')}")
+            check("today's tile is a card in the hand with its item, hours and ✓ ✕",
+                  tile and tile["hours"] == "1h30" and tile["title"] == "Client sync call" and tile["ok"] and tile["no"], tile)
+            check("the hand sits right under the Slack bar, above the pick-up list and the cards",
+                  js("var h = document.getElementById('desk-hand'), p = document.getElementById('desk-pickup'); return !!(h.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING)"))
+            check("the work card holds no tile, only a chip that opens it",
+                  js("return !document.querySelector('.desk-card .desk-tile') && /1h30/.test(document.querySelector('.desk-card .desk-card-time .desk-mini').textContent)"))
             # Until the chat ships (chat decision 4) the setting is off, and a
             # session keeps its row from before: Answer, Jump and its last reply.
             for ev in ({"hook_event_name": "Stop", "session_id": "s1", "cwd": str(repo),
@@ -469,7 +475,8 @@ def main():
 
             js("window.confirm = function () { return true; }; document.querySelector('.desk-no').click(); return true")
             settle()
-            check("✕ discards the tile and it leaves the card", js("return document.querySelectorAll('.desk-tile').length") == 0)
+            check("✕ discards the tile and it leaves the hand", js("return document.querySelectorAll('.desk-tile').length") == 0)
+            check("an empty hand says so", "No time waiting" in js("return document.getElementById('desk-hand').textContent"))
 
             desk("POST", "/items", {"title": "Pushed card"}, token)
             pushed = False

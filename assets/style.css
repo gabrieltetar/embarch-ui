@@ -1988,16 +1988,48 @@ table.data-table {
 .desk-pr { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; }
 .desk-pr a { font-family: var(--font-mono); color: var(--accent-strong, var(--accent)); text-decoration: none; white-space: nowrap; }
 .desk-pr-title { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.desk-tiles { display: flex; flex-wrap: wrap; gap: 10px; }
-.desk-tile { width: 112px; height: 112px; display: flex; flex-direction: column; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--bg-surface-2); overflow: hidden; }
-.desk-tile.today { border-color: var(--accent); }
-.desk-tile-body { flex: 1; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px; padding: 8px 10px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.desk-tile-body:hover { background: var(--bg-surface); }
-.desk-tile-date { font-size: 10.5px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
-.desk-tile-hours { font: 600 22px var(--font-mono); color: var(--text-primary); }
-.desk-tile-sub { font-size: 10.5px; color: var(--text-tertiary); }
+.desk-card-time { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.desk-card-time .desk-mini { display: inline-flex; gap: 6px; align-items: center; border: 1px dashed var(--border-strong); border-radius: 8px; padding: 4px 9px; background: none; color: var(--text-secondary); font: inherit; cursor: pointer; }
+.desk-card-time .desk-mini:hover { border-color: var(--accent); color: var(--text-primary); }
+/* The hand (embarch-desk decision 57): every day's time waiting for a ✓ or ✕,
+   as cards on a table under the Slack bar. A card lifts under the pointer, is
+   dealt in once, flies to "Sent today" on ✓ and drops on ✕. */
+.desk-hand { margin: 0 0 16px; padding: 12px 16px 2px; background: var(--bg-surface-inset); border: 1px solid var(--border); border-radius: 16px; }
+:root[data-theme="light"] .desk-hand { background: var(--bg-surface-2); } /* the inset token stays dark in light: it is the terminal's */
+.desk-hand-head { display: flex; align-items: center; gap: 10px; }
+.desk-hand-title { font-size: 11.5px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-secondary); }
+.desk-hand-sent { margin-left: auto; display: inline-flex; gap: 6px; align-items: baseline; font-size: 12px; color: var(--text-tertiary); padding: 3px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-surface); }
+.desk-hand-sent b { font: 600 13px var(--font-mono); color: var(--success); }
+.desk-hand-sent.bump { animation: desk-bump 0.5s ease-out; }
+.desk-hand-row { display: flex; justify-content: safe center; gap: 14px; overflow-x: auto; padding: 14px 4px 16px; }
+.desk-hand-empty { flex: 1; padding: 14px 16px; border: 1.5px dashed var(--border-strong); border-radius: 14px; font-size: 12px; color: var(--text-tertiary); text-align: center; }
+.desk-tile { flex: 0 0 auto; width: 156px; height: 214px; display: flex; flex-direction: column; border: 1px solid var(--border-strong); border-radius: 14px; background: linear-gradient(180deg, var(--bg-surface-2), var(--bg-surface)); box-shadow: var(--shadow-card); overflow: hidden; transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease; }
+.desk-tile:hover, .desk-tile:focus-within { transform: translateY(-8px); border-color: var(--accent); box-shadow: 0 14px 26px oklch(0% 0 0 / 0.35); }
+.desk-tile.today { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 20px var(--accent-soft-bg); }
+.desk-tile-body { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 12px 12px 10px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.desk-tile-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.desk-tile-key { font: 600 12px var(--font-mono); color: var(--accent); white-space: nowrap; }
+.desk-tile-desk { font-size: 10px; padding: 1px 6px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-secondary); max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-tile-title { font-size: 12.5px; line-height: 1.3; color: var(--text-primary); min-height: 2.6em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.desk-tile-hours { margin-top: auto; font: 600 30px var(--font-mono); color: var(--text-primary); text-align: center; }
+.desk-tile-date { display: flex; align-items: center; justify-content: center; gap: 5px; font-size: 10.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
+.desk-tile.today .desk-tile-date { color: var(--accent); }
+.desk-tile-date .desk-dot { width: 6px; height: 6px; background: var(--success); }
+.desk-tile-sub { font-size: 10.5px; color: var(--text-tertiary); text-align: center; }
+.desk-tile-sub b { font-weight: 600; color: var(--success); }
 .desk-tile-actions { display: flex; border-top: 1px solid var(--border); }
-.desk-tile-actions button { flex: 1; border: 0; background: none; font-size: 15px; font-weight: 700; padding: 5px 0; cursor: pointer; }
+.desk-tile-actions button { flex: 1; border: 0; background: none; font-size: 16px; font-weight: 700; padding: 8px 0; cursor: pointer; }
+.desk-tile.dealt { animation: desk-deal 0.38s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; animation-delay: calc(var(--i, 0) * 60ms); }
+.desk-tile.sent { animation: desk-sent 0.45s ease-in forwards; pointer-events: none; }
+.desk-tile.dropped { animation: desk-drop 0.32s ease-in forwards; pointer-events: none; }
+@keyframes desk-deal { from { opacity: 0; transform: translateY(-18px) rotate(-3deg) scale(0.96); } to { opacity: 1; transform: none; } }
+@keyframes desk-sent { to { opacity: 0; transform: translate(var(--fly-x, 240px), var(--fly-y, -40px)) scale(0.2) rotate(8deg); } }
+@keyframes desk-drop { to { opacity: 0; transform: translateY(28px) rotate(-7deg) scale(0.94); } }
+@keyframes desk-bump { 35% { transform: scale(1.12); border-color: var(--success); } }
+@media (prefers-reduced-motion: reduce) {
+  .desk-tile, .desk-tile.dealt, .desk-hand-sent.bump { animation: none; transition: none; }
+  .desk-tile:hover, .desk-tile:focus-within { transform: none; }
+}
 .desk-ok { color: var(--success); }
 .desk-ok:hover { background: var(--success-soft-bg); }
 .desk-no { color: var(--danger); border-left: 1px solid var(--border) !important; }
@@ -2038,8 +2070,6 @@ table.data-table {
 .desk-draft-title { width: 100%; box-sizing: border-box; font-weight: 600; }
 .desk-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .desk-head-name { font-size: 17px; font-weight: 650; color: var(--text-primary); margin-right: 6px; }
-.desk-elsewhere { margin: 16px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--text-tertiary); }
-.desk-elsewhere .desk-mini { display: inline-flex; gap: 6px; align-items: center; border: 1px dashed var(--border-strong); border-radius: 8px; padding: 4px 9px; color: var(--text-secondary); }
 .desk-day { margin-top: 16px; }
 .desk-day-ctl { display: flex; align-items: center; gap: 10px; }
 .desk-day-group { margin-top: 6px; }
