@@ -1142,6 +1142,90 @@ impl Check {
     }
 }
 
+/// One declared signal's route, checked as far as it was declared (see
+/// [`api_validate`]). A `direct` route's carrier is the enumerated port with
+/// its USB serial and, when it declared one, its interface. **Several ports
+/// under that serial with no interface declared is a fail, not a pass**: Core
+/// refuses such a route by name rather than guess (`embarch-topology` decision
+/// 46), so the tab must not call it usable.
+fn signal_check(
+    signal: &SignalLink,
+    serial_ports: &[embarch_core_client::SerialPortResponse],
+    serial_ports_error: Option<&str>,
+) -> Check {
+    let id = format!("signal:{}", signal.name);
+    let label = format!("Signal {}", signal.name);
+    match &signal.route {
+        embarch_core_client::SignalRoute::Direct { port_serial, interface } => {
+            let carriers: Vec<_> = serial_ports
+                .iter()
+                .filter(|p| p.serial_number.as_deref() == Some(port_serial.as_str()))
+                .filter(|p| interface.is_none_or(|i| p.interface == Some(i)))
+                .collect();
+            let at = match interface {
+                Some(i) => format!("{port_serial}, interface {i}"),
+                None => port_serial.clone(),
+            };
+            match carriers.as_slice() {
+                [port] => Check::new(
+                    &id,
+                    label,
+                    "pass",
+                    format!(
+                        "direct on {} ({at}) — enumerable now. This does not confirm the wire \
+                         itself: no software can see a cable between two headers.",
+                        port.port_name
+                    ),
+                ),
+                [] if serial_ports_error.is_some() => {
+                    let mut check = Check::new(
+                        &id,
+                        label,
+                        "warn",
+                        format!(
+                            "direct on {at} — Core did not answer its port enumeration, so this \
+                             route was not checked"
+                        ),
+                    );
+                    check.log = serial_ports_error.map(str::to_string);
+                    check
+                }
+                [] => Check::new(
+                    &id,
+                    label,
+                    "fail",
+                    format!(
+                        "direct on {at} — nothing with that USB serial{} is enumerated on Core's \
+                         machine",
+                        if interface.is_some() { " on that interface" } else { "" }
+                    ),
+                ),
+                several => Check::new(
+                    &id,
+                    label,
+                    "fail",
+                    format!(
+                        "direct on {at} — {} ports share that USB serial ({}) and the route \
+                         declares no interface, so Core refuses it rather than guess; move the \
+                         route and pick the port that carries it",
+                        several.len(),
+                        several.iter().map(|p| p.port_name.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                ),
+            }
+        }
+        embarch_core_client::SignalRoute::ViaDevBench { rx_pin, tx_pin } => Check::new(
+            &id,
+            label,
+            "pass",
+            format!(
+                "via dev-bench, rx {rx_pin} / tx {tx_pin} — declared. Its carrier is the bench \
+                 link checked above; the pins themselves are a wire, which no check can see."
+            ),
+        ),
+    }
+}
+
 /// `POST /api/topology/validate` — one pass over the whole declared
 /// topology, run when a human asks for it.
 ///
@@ -1337,62 +1421,7 @@ pub async fn api_validate(State(state): State<AppState>) -> Response {
         checks.push(check);
     }
     for signal in &snapshot.signals {
-        let id = format!("signal:{}", signal.name);
-        match &signal.route {
-            embarch_core_client::SignalRoute::Direct { port_serial } => {
-                let found = snapshot
-                    .serial_ports
-                    .iter()
-                    .find(|p| p.serial_number.as_deref() == Some(port_serial.as_str()));
-                match found {
-                    Some(port) => checks.push(Check::new(
-                        &id,
-                        format!("Signal {}", signal.name),
-                        "pass",
-                        format!(
-                            "direct on {} ({port_serial}) — enumerable now. This does not \
-                             confirm the wire itself: no software can see a cable between two \
-                             headers.",
-                            port.port_name
-                        ),
-                    )),
-                    None if snapshot.serial_ports_error.is_some() => {
-                        let mut check = Check::new(
-                            &id,
-                            format!("Signal {}", signal.name),
-                            "warn",
-                            format!(
-                                "direct on {port_serial} — Core did not answer its port \
-                                 enumeration, so this route was not checked"
-                            ),
-                        );
-                        check.log = snapshot.serial_ports_error.clone();
-                        checks.push(check);
-                    }
-                    None => checks.push(Check::new(
-                        &id,
-                        format!("Signal {}", signal.name),
-                        "fail",
-                        format!(
-                            "direct on {port_serial} — nothing with that USB serial is \
-                             enumerated on Core's machine"
-                        ),
-                    )),
-                }
-            }
-            embarch_core_client::SignalRoute::ViaDevBench { rx_pin, tx_pin } => {
-                checks.push(Check::new(
-                    &id,
-                    format!("Signal {}", signal.name),
-                    "pass",
-                    format!(
-                        "via dev-bench, rx {rx_pin} / tx {tx_pin} — declared. Its carrier is \
-                         the bench link checked above; the pins themselves are a wire, which \
-                         no check can see."
-                    ),
-                ));
-            }
-        }
+        checks.push(signal_check(signal, &snapshot.serial_ports, snapshot.serial_ports_error.as_deref()));
     }
 
     // ---- board types that no longer resolve ----
@@ -1724,6 +1753,43 @@ mod tests {
     fn enrolled(role: &str, name: &str) -> embarch_core_client::EnrolledBoardResponse {
         serde_json::from_value(json!({ "role": role, "name": name, "chip": "nRF54L15" }))
             .unwrap()
+    }
+
+    fn port(name: &str, serial: &str, interface: u8) -> embarch_core_client::SerialPortResponse {
+        serde_json::from_value(json!({
+            "port_name": name, "detected_by": "enumerated",
+            "serial_number": serial, "interface": interface
+        }))
+        .unwrap()
+    }
+
+    fn direct(interface: Option<u8>) -> SignalLink {
+        let mut route = json!({ "kind": "direct", "port_serial": "FT9ABCDE" });
+        if let Some(i) = interface {
+            route["interface"] = json!(i);
+        }
+        serde_json::from_value(json!({
+            "name": "console", "origin_role": "dut", "direction": "bidirectional", "route": route
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_direct_route_on_a_two_interface_device_passes_only_with_its_interface_declared() {
+        // suite/052: Core refuses the undeclared case (embarch-topology decision 46), so the tab
+        // must fail it rather than pass it on the first matching port.
+        let ports = [port("COM15", "FT9ABCDE", 0), port("COM17", "FT9ABCDE", 2)];
+        let undeclared = signal_check(&direct(None), &ports, None);
+        assert_eq!(undeclared.status, "fail");
+        assert!(undeclared.detail.contains("COM15, COM17"), "{}", undeclared.detail);
+        let declared = signal_check(&direct(Some(2)), &ports, None);
+        assert_eq!(declared.status, "pass");
+        assert!(declared.detail.contains("COM17 (FT9ABCDE, interface 2)"), "{}", declared.detail);
+        let absent = signal_check(&direct(Some(5)), &ports, None);
+        assert_eq!(absent.status, "fail");
+        assert!(absent.detail.contains("on that interface"), "{}", absent.detail);
+        // One port under the serial still passes with nothing declared, as before.
+        assert_eq!(signal_check(&direct(None), &ports[..1], None).status, "pass");
     }
 
     fn repo_with_catalog(tag: &str, boards_toml: Option<&str>) -> PathBuf {

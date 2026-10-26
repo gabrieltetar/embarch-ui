@@ -492,7 +492,8 @@
       const colour = direct ? "var(--warning)" : "var(--accent)";
       const detail = direct
         ? "direct — bypasses dev-bench" +
-          (sig.route.port_serial ? " · " + sig.route.port_serial : "")
+          (sig.route.port_serial ? " · " + sig.route.port_serial : "") +
+          (sig.route.interface != null ? ", interface " + sig.route.interface : "")
         : "via dev-bench · rx " + (sig.route.rx_pin || "?") + " / tx " + (sig.route.tx_pin || "?");
 
       out +=
@@ -520,7 +521,19 @@
   function carrierCell(snapshot, sig) {
     if (isDirect(sig)) {
       const serial = (sig.route && sig.route.port_serial) || "";
-      const port = (snapshot.serial_ports || []).find((p) => p.serial_number === serial);
+      const iface = sig.route && sig.route.interface != null ? sig.route.interface : null;
+      const sharing = (snapshot.serial_ports || []).filter((p) => p.serial_number === serial);
+      if (iface === null && sharing.length > 1) {
+        // embarch-topology decision 46: several ports under one serial and no
+        // declared interface is refused by Core, not guessed, so this cell
+        // must not show the first of them as the carrier.
+        return (
+          '<span class="mono">' + escapeHtml(serial) + "</span> " +
+          '<span class="badge badge-warning">' + sharing.length +
+          " ports share this serial — move the route and pick one</span>"
+        );
+      }
+      const port = sharing.find((p) => iface === null || p.interface === iface);
       if (!port) {
         // A declared carrier that is not currently enumerated. Said as what it
         // is — a declared serial nothing on Core's machine answers to right
@@ -6014,18 +6027,40 @@
         "</option>";
       return;
     }
+    // A value is "<serial>|<interface>": one device can expose several ports
+    // under one serial, and then the interface is what tells them apart
+    // (embarch-topology decision 46). submitSignal declares the interface
+    // only for such a device, so a one-port device's route is unchanged.
     select.innerHTML = ports
       .map(function (p) {
         var serial = p.serial_number || "";
+        var shared = serial && sigPortsSharing(ports, serial) > 1;
         var label = p.port_name + (p.product ? " — " + p.product : "") +
-          (serial ? " · " + serial : " · (no USB serial — cannot be declared)");
+          (serial ? " · " + serial : " · (no USB serial — cannot be declared)") +
+          (shared && p.interface != null ? " · interface " + p.interface : "");
+        var value = serial ? serial + "|" + (p.interface != null ? p.interface : "") : "";
         return (
-          '<option value="' + escapeHtml(serial) + '"' + (serial ? "" : " disabled") + ">" +
+          '<option value="' + escapeHtml(value) + '"' + (serial ? "" : " disabled") + ">" +
           escapeHtml(label) + "</option>"
         );
       })
       .join("");
     if (previous) select.value = previous;
+  }
+
+  function sigPortsSharing(ports, serial) {
+    return ports.filter(function (p) { return p.serial_number === serial; }).length;
+  }
+
+  // Selects the option for a declared carrier: the exact interface when the
+  // route declared one, otherwise the first port under that serial.
+  function sigSelectCarrier(serial, iface) {
+    var select = sigEl("sig-port");
+    var exact = serial + "|" + (iface != null ? iface : "");
+    var options = Array.prototype.slice.call(select.options);
+    var match = options.find(function (o) { return o.value === exact; }) ||
+      (iface == null && options.find(function (o) { return o.value.split("|")[0] === serial; }));
+    if (match) select.value = match.value;
   }
 
   function openSignalDialog(existing) {
@@ -6051,7 +6086,7 @@
     sigEl("sig-tx").value = (existing && existing.route && existing.route.tx_pin) || "";
     sigFillPorts(latestSnapshot);
     if (existing && existing.route && existing.route.port_serial) {
-      sigEl("sig-port").value = existing.route.port_serial;
+      sigSelectCarrier(existing.route.port_serial, existing.route.interface);
     }
     sigSyncRouteFields();
     sigEl("sig-save").textContent = existing ? "Move route" : "Declare";
@@ -6074,7 +6109,10 @@
     }
     var route;
     if (sigEl("sig-route").value === "direct") {
-      var serial = sigEl("sig-port").value;
+      var picked = sigEl("sig-port").value;
+      var cut = picked.lastIndexOf("|");
+      var serial = cut < 0 ? picked : picked.slice(0, cut);
+      var ifaceText = cut < 0 ? "" : picked.slice(cut + 1);
       if (!serial) {
         result.style.display = "block";
         result.textContent =
@@ -6083,6 +6121,12 @@
         return;
       }
       route = { kind: "direct", port_serial: serial };
+      var ports = (latestSnapshot && latestSnapshot.serial_ports) || [];
+      if (ifaceText !== "" && sigPortsSharing(ports, serial) > 1) {
+        // Several ports under this serial: the interface is the only thing
+        // that names this one, and without it Core refuses the route.
+        route.interface = Number(ifaceText);
+      }
     } else {
       var rx = sigEl("sig-rx").value.trim();
       var tx = sigEl("sig-tx").value.trim();

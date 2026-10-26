@@ -74,6 +74,8 @@ DEV_BENCH_PORT = "COM16"
 POSTED = []
 DELETED = []
 LINKED = []
+# Every `POST /signals` body, so a declared route's exact shape is checkable.
+SIGNAL_POSTS = []
 # Every SoC the UI asked Core to resolve — the fact that a chip nobody typed
 # came from Core's table rather than from a string in `app.js` (decision 48).
 RESOLVED = []
@@ -189,6 +191,7 @@ class Handler(BaseHTTPRequestHandler):
             RESOLVED.append(body.get("soc"))
             return self._json({"chip": chip})
         if path == "/signals":
+            SIGNAL_POSTS.append(body)
             return self._text("", 204)
         if path == "/dev-bench/link":
             LINKED.append(body)
@@ -766,6 +769,49 @@ try:
           "has no chip" in refusal and "nrf52840dk" in refusal and "pick a board type" not in refusal,
           refusal)
     check("and that refusal made no enrolment", len(POSTED) == before, POSTED[before:])
+
+    # --- a direct route on a two-interface device declares its interface ----
+    #
+    # suite/052 (embarch-topology decision 46, amended): one device exposing
+    # two ports under one serial is told apart by interface, so picking one of
+    # them declares it, while a one-port device's route keeps its old shape.
+    SERIAL_PORTS = SERIAL_PORTS + [
+        {"port_name": "COM15", "detected_by": "enumerated", "vendor_id": None,
+         "product_id": None, "serial_number": "DUAL-1", "product": None, "interface": 0},
+        {"port_name": "COM17", "detected_by": "enumerated", "vendor_id": None,
+         "product_id": None, "serial_number": "DUAL-1", "product": None, "interface": 2},
+    ]
+    time.sleep(7)  # the dialog's port list is the poll loop's snapshot
+
+    def declare_on(value, name):
+        before = len(SIGNAL_POSTS)
+        script("document.getElementById('sig-declare').click();")
+        time.sleep(0.5)
+        script("document.getElementById('sig-name').value=arguments[0];"
+               "document.getElementById('sig-route').value='direct';"
+               "document.getElementById('sig-route').dispatchEvent(new Event('change'));"
+               "document.getElementById('sig-port').value=arguments[1];"
+               "document.getElementById('sig-save').click();", [name, value])
+        time.sleep(1.2)
+        return SIGNAL_POSTS[before:]
+
+    script("document.getElementById('sig-declare').click();")
+    time.sleep(0.5)
+    labels = script("return Array.from(document.getElementById('sig-port').options)"
+                    ".map(function(o){return o.textContent;});")
+    check("a port sharing its serial with another is labelled with its interface",
+          any("COM17" in t and "interface 2" in t for t in labels)
+          and not any("COM7" in t and "interface" in t for t in labels), labels)
+    script("document.getElementById('sig-cancel').click();")
+    time.sleep(0.3)
+    sent = declare_on("DUAL-1|2", "console")
+    check("picking one of two ports under one serial declares its interface",
+          len(sent) == 1 and sent[0]["route"] == {"kind": "direct", "port_serial": "DUAL-1",
+                                                  "interface": 2}, sent)
+    sent = declare_on("SOME-OTHER|", "probe-console")
+    check("a port alone under its serial is declared without one, as before",
+          len(sent) == 1 and sent[0]["route"] == {"kind": "direct", "port_serial": "SOME-OTHER"},
+          sent)
 
     check("no uncaught JS error anywhere in the run",
           script("return window.__errs;") == [], script("return window.__errs;"))
