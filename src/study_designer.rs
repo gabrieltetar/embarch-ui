@@ -2014,7 +2014,7 @@ async fn submit_run(
 
         let mut study = study;
         let rewrote = match update_saved_firmware_version(
-            &sd,
+            &repo,
             saved_slug.as_deref(),
             &required,
             &flashed.version,
@@ -2131,8 +2131,12 @@ async fn post_study_only(
 /// rewriting it from the runnable `Study` alone would silently turn an
 /// editable study into one the editor refuses with a `409`. None of the
 /// three CRCs cover `requires`, so nothing needs resealing.
+///
+/// **Takes the repo the run was submitted from, not the open project.** The
+/// build runs for minutes; a project switch in that window would otherwise
+/// write this repo's flashed version into the new repo's same-slug study.
 fn update_saved_firmware_version(
-    sd: &StudyDesigner,
+    repo: &std::path::Path,
     slug: Option<&str>,
     required: &str,
     built: &str,
@@ -2141,9 +2145,8 @@ fn update_saved_firmware_version(
     if required == REQUIREMENT_ANY || required == built {
         return Ok(false);
     }
-    let Some(project) = sd.project() else { return Ok(false) };
     let slug = study_slug(slug)?;
-    let path = studies_dir(&project).join(format!("{slug}.json"));
+    let path = repo.join("embarch").join("studies").join(format!("{slug}.json"));
 
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
@@ -3030,6 +3033,32 @@ pub async fn api_protocol_write(
     }
 }
 
+/// Every protocol this file declares, checked one at a time, so the refusal
+/// names the protocol a study actually uses rather than the file.
+///
+/// **Every block name counts, resolved or not**: a block that parses but does
+/// not resolve is exactly the one its author is about to fix. The file's stem
+/// is checked when the file did not parse, and also when it declares no block
+/// at all, so that a study the scan could not read still blocks the delete.
+fn protocol_delete_scan(
+    project: &StudyDesignerConfig,
+    file: &embarch_study_designer::eap_repo::ProtocolFile,
+) -> ReferenceScan {
+    let mut names: Vec<&str> = file.blocks.iter().map(|b| b.name.as_str()).collect();
+    if file.parsed.is_err() || names.is_empty() {
+        names.push(&file.stem);
+    }
+    let mut merged = ReferenceScan::default();
+    for name in names {
+        let scan = scan_references(project, RefKind::Protocol, name);
+        merged.referenced_by.extend(scan.referenced_by);
+        merged.unscannable.extend(scan.unscannable);
+    }
+    merged.unscannable.sort();
+    merged.unscannable.dedup();
+    merged
+}
+
 /// Deletes one `.eap` file, refusing while a saved study still names one of
 /// its protocols.
 pub async fn api_protocol_delete(
@@ -3049,31 +3078,7 @@ pub async fn api_protocol_delete(
         return (StatusCode::NOT_FOUND, format!("no protocol file '{stem}.eap'")).into_response();
     };
 
-    // Every protocol this file declares, checked one at a time, so the
-    // refusal names the protocol a study actually uses rather than the file.
-    //
-    // A file that did not parse declares no resolvable protocol and is
-    // therefore deletable by this check alone — which is right: nothing can
-    // be running it. `scan_references`'s own unscannable list is what keeps
-    // that from being a hole, since a study naming it by an authored name
-    // still matches.
-    let mut merged = ReferenceScan::default();
-    for (name, _) in file.resolved() {
-        let scan = scan_references(&project, RefKind::Protocol, name);
-        merged.referenced_by.extend(scan.referenced_by);
-        merged.unscannable.extend(scan.unscannable);
-    }
-    // A file that did not parse still has to be checked against its own
-    // stem, because an author who named a protocol after its file is the
-    // ordinary case and the parse failure is exactly why it stopped
-    // resolving.
-    if file.parsed.is_err() {
-        let scan = scan_references(&project, RefKind::Protocol, &stem);
-        merged.referenced_by.extend(scan.referenced_by);
-        merged.unscannable.extend(scan.unscannable);
-    }
-    merged.unscannable.sort();
-    merged.unscannable.dedup();
+    let merged = protocol_delete_scan(&project, file);
     if merged.blocks() {
         return refusal("protocol file", &stem, &merged);
     }
@@ -3406,9 +3411,18 @@ pub async fn api_studies_load(
         outpost: requires_object(&value, "outpost"),
     };
 
-    let taps = match value.get("_embarch_ui_taps") {
-        Some(saved) => serde_json::from_value::<Vec<LoadedTap>>(saved.clone()).unwrap_or_default(),
-        None => taps_from_streams(&value),
+    // Refused the way the rows sidecar is: an unreadable taps sidecar read
+    // as "no taps" would be rebuilt into an empty `Study.streams` by the
+    // next Save, dropping the taps and their record checks.
+    let taps = match loaded_taps(&value) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("{}: saved taps couldn't be read back: {e}", path.display()),
+            )
+                .into_response()
+        }
     };
 
     Json(LoadedStudy {
@@ -3422,6 +3436,17 @@ pub async fn api_studies_load(
             .map(str::to_string),
     })
     .into_response()
+}
+
+/// The taps a saved study loads with: its `_embarch_ui_taps` sidecar, or
+/// [`taps_from_streams`] when there is none. A sidecar that is present and
+/// does not parse is an `Err`, never an empty list.
+fn loaded_taps(value: &serde_json::Value) -> Result<Vec<LoadedTap>, String> {
+    match value.get("_embarch_ui_taps") {
+        Some(saved) => serde_json::from_value::<Vec<LoadedTap>>(saved.clone())
+            .map_err(|e| e.to_string()),
+        None => Ok(taps_from_streams(value)),
+    }
 }
 
 /// Reads one `requires` field back out of a saved `Study`.
@@ -5713,6 +5738,73 @@ repeat = [{ name = "green", type = "i32le" }]
         assert_eq!(out.duplicate_names.len(), 1);
         assert_eq!(out.duplicate_names[0].name, "bds");
         assert_eq!(out.duplicate_names[0].files, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// A block that parses but does not resolve is still a name a study can
+    /// use; the delete scan covers every declared block, not the resolved.
+    #[test]
+    fn a_block_that_parses_but_does_not_resolve_still_blocks_the_delete() {
+        let unresolved = "protocol half {\n    state start {\n        on_timeout 1000ms: goto nowhere\n    }\n}\n";
+        let scratch = repo_with_protocols("protocols-del-unresolved", &[("half", unresolved)]);
+        let project = StudyDesignerConfig { firmware_repo_path: scratch.0.clone() };
+        let dir = scratch.0.join("embarch").join("studies");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("uses.json"),
+            serde_json::json!({
+                "name": "uses",
+                "_embarch_ui_rows": [{ "name": "go", "action": { "protocol": "half" } }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let repo = embarch_study_designer::eap_repo::scan(&scratch.0).unwrap();
+        let file = repo.file("half").unwrap();
+        assert_eq!(file.resolved().count(), 0, "fixture must not resolve");
+        assert!(!file.blocks.is_empty(), "fixture must parse");
+        let scan = protocol_delete_scan(&project, file);
+        assert_eq!(scan.referenced_by.len(), 1);
+        assert!(scan.blocks());
+    }
+
+    /// With no block resolving, an unreadable study file still blocks.
+    #[test]
+    fn an_unreadable_study_blocks_the_delete_when_no_block_resolves() {
+        let scratch = repo_with_protocols("protocols-del-garbage", &[("garbage", "protocol x {\n")]);
+        let project = StudyDesignerConfig { firmware_repo_path: scratch.0.clone() };
+        let dir = scratch.0.join("embarch").join("studies");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.json"), "{ nope").unwrap();
+        let repo = embarch_study_designer::eap_repo::scan(&scratch.0).unwrap();
+        let scan = protocol_delete_scan(&project, repo.file("garbage").unwrap());
+        assert_eq!(scan.unscannable, vec!["broken.json is not valid JSON".to_string()]);
+        assert!(scan.blocks());
+    }
+
+    #[test]
+    fn a_taps_sidecar_that_does_not_parse_is_an_error_not_no_taps() {
+        let bad = serde_json::json!({ "_embarch_ui_taps": "not a list" });
+        assert!(loaded_taps(&bad).is_err());
+        assert!(loaded_taps(&serde_json::json!({})).unwrap().is_empty());
+    }
+
+    /// The write-back goes to the repo the run started from; a same-slug
+    /// study in the repo opened meanwhile is untouched.
+    #[test]
+    fn the_firmware_version_write_back_goes_to_the_run_s_repo_only() {
+        let study = |v: &str| serde_json::json!({ "name": "s", "requires": { "firmware_version": v } });
+        let (a, _) = repo_with_studies("wb-a", &[("same", study("1.0.0"))]);
+        let (b, _) = repo_with_studies("wb-b", &[("same", study("1.0.0"))]);
+        let b_file = b.0.join("embarch").join("studies").join("same.json");
+        let b_before = std::fs::read(&b_file).unwrap();
+
+        // The open project is B by the time the write-back runs; it is given
+        // the run's repo A, which is the only one it may touch.
+        assert!(update_saved_firmware_version(&a.0, Some("same"), "1.0.0", "2.0.0").unwrap());
+
+        let a_text = std::fs::read_to_string(a.0.join("embarch").join("studies").join("same.json")).unwrap();
+        assert!(a_text.contains("2.0.0"), "{a_text}");
+        assert_eq!(std::fs::read(&b_file).unwrap(), b_before);
     }
 }
 
