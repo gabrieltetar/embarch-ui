@@ -891,7 +891,8 @@
       '<button class="btn btn-tiny" type="button" id="desk-line-add">Add</button></div></div>' +
       "<div>" +
       '<div class="desk-label">Hours <span class="desk-detail">(captured ' + hours(t.computed_hours) + ")</span></div>" +
-      '<input id="desk-hours" class="desk-input" type="number" min="0" max="24" step="0.25" value="' + esc(t.hours) + '" />' +
+      '<input id="desk-hours" class="desk-input" type="number" min="0" max="24" step="0.25" value="' + esc(t.hours) + '" data-orig="' + esc(t.hours) + '" data-computed="' + esc(t.computed_hours) + '" />' +
+      '<button class="btn btn-tiny" type="button" id="desk-hours-computed" title="Stop overriding: the tile goes back to the hours the desk computes">Use computed</button>' +
       '<div class="desk-label">Harvest project and task</div>' +
       '<select id="desk-target" class="desk-input">' + options + "</select>" +
       '<div class="desk-label">Note</div>' +
@@ -939,7 +940,12 @@
     var hoursEl = document.getElementById("desk-hours");
     var target = document.getElementById("desk-target");
     if (note) body.note = note.value;
-    if (hoursEl && hoursEl.value !== "") body.hours = Number(hoursEl.value);
+    // Hours go only when a person changed them (desk decision 61): the
+    // prefill is not a typed value. "Use computed" sends null to clear.
+    if (hoursEl) {
+      if (hoursEl.dataset.clear === "1") body.hours = null;
+      else if (hoursEl.value !== "" && hoursEl.value !== hoursEl.dataset.orig) body.hours = Number(hoursEl.value);
+    }
     if (target && target.value) {
       var p = target.value.split(":").map(Number);
       var opt = target.options[target.selectedIndex];
@@ -1225,12 +1231,23 @@
       .then(load).catch(function (e) { flash(e.message); load(); });
   });
 
+  dialogEl.addEventListener("input", function (ev) {
+    if (ev.target.id === "desk-hours") delete ev.target.dataset.clear;
+  });
+
   dialogEl.addEventListener("click", function (ev) {
     var t = ev.target.closest("button");
     if (!t) return;
     var id = openTileId;
     switch (t.id) {
       case "desk-dialog-close": closeDialog(); break;
+      case "desk-hours-computed": {
+        var he = document.getElementById("desk-hours");
+        he.value = he.dataset.computed;
+        he.dataset.clear = "1";
+        setDialogStatus("Hours will go back to computed on Save.");
+        break;
+      }
       case "desk-save":
         dialogPatch().then(function () { setDialogStatus("Saved."); return load(); }).catch(function (e) { setDialogStatus(e.message); });
         break;
