@@ -1216,4 +1216,58 @@ mod tests {
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
         says_never_frame_me(&refused, "the proxy's refusal");
     }
+
+    /// Decision 64: a first-page `/rows` re-fetches (loading the view is the
+    /// refresh), so a table cached mid-run is not what the post-run re-read
+    /// gets; later pages and `/series` reuse that load and cost no fetch.
+    #[tokio::test]
+    async fn a_first_page_rows_read_refetches_and_later_reads_reuse_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let csv = Arc::new(std::sync::Mutex::new(String::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (c, h) = (csv.clone(), hits.clone());
+        let stub = axum::Router::new().fallback(move || {
+            let (c, h) = (c.clone(), h.clone());
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                let body = c.lock().unwrap().clone();
+                ([(header::CONTENT_TYPE, "text/csv")], body)
+            }
+        });
+        let core = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core_url = format!("http://{}", core.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(core, stub).await.unwrap() });
+        let base = serve_app_over(&core_url).await;
+        let http = reqwest::Client::new();
+        let rows = format!("{base}/api/studies/s1/stream/t/rows");
+        let series = format!("{base}/api/studies/s1/stream/t/series?width=10&column=value");
+        let mk = |n: usize| {
+            let mut s = String::from("rx_utc_ms,value\n");
+            for i in 0..n {
+                s += &format!("{},{}\n", 1000 + i, i);
+            }
+            s
+        };
+
+        *csv.lock().unwrap() = mk(3);
+        let r: serde_json::Value = http.get(&rows).send().await.unwrap().json().await.unwrap();
+        assert_eq!(r["total"], 3);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // The run wrote more; the next first-page read is the load.
+        *csv.lock().unwrap() = mk(250);
+        let r: serde_json::Value = http.get(&rows).send().await.unwrap().json().await.unwrap();
+        assert_eq!(r["total"], 250);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        // Paging and binning reuse it: no further fetch, and they agree.
+        for from in [100, 200] {
+            let r: serde_json::Value =
+                http.get(format!("{rows}?from={from}&limit=100")).send().await.unwrap().json().await.unwrap();
+            assert_eq!(r["total"], 250);
+        }
+        let s: serde_json::Value = http.get(&series).send().await.unwrap().json().await.unwrap();
+        assert!(s.to_string().contains("249"), "series sees the longer table: {s}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
 }

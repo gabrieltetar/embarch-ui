@@ -87,6 +87,19 @@ CAPTURES = {
 }
 
 
+# The running study's `rail` capture: short while the run is live, longer once
+# its StatusChanged frame has been sent (ui/085). Reset when the live stream closes.
+RUN_FINISHED = [False]
+RUN_RAIL_SHORT, RUN_RAIL_FULL = 3, 40
+
+
+def running_rail():
+    n = RUN_RAIL_FULL if RUN_FINISHED[0] else RUN_RAIL_SHORT
+    return ("rx_utc_ms,step_name,value,unit,channel_id\n" + "".join(
+        "%d,ble-connect,%.3f,Milliamps,0\n" % (1700000000000 + i * 10, 1.5 + (i % 7) * 0.25)
+        for i in range(n))).encode()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -148,6 +161,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._text("no captured streams", 404)
             if parts[2] == "stream" and len(parts) >= 4:
                 body = CAPTURES.get((sid, parts[3]))
+                if sid == RUNNING and parts[3] == "rail":
+                    body = running_rail()
                 if body is None:
                     return self._text("no such tap", 404)
                 return self._bytes(body)
@@ -208,12 +223,16 @@ class Handler(BaseHTTPRequestHandler):
                                                "captured_data": None}}))
             self.wfile.flush()
             time.sleep(1.5)
+            RUN_FINISHED[0] = True
             self.wfile.write(frame({"kind": "StatusChanged", "study_id": sid,
                                     "status": "failed", "reason": "step 2 ('hrm-start') failed (ERR_PERMISSION)"}))
             self.wfile.flush()
             time.sleep(5)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        finally:
+            if sid == RUNNING:
+                RUN_FINISHED[0] = False
 
 
 if __name__ == "__main__":

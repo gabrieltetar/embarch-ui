@@ -227,7 +227,9 @@ pub async fn api_stream_rows(
     Path((study_id, name)): Path<(String, String)>,
     Query(q): Query<RowsQuery>,
 ) -> Response {
-    let table = match table_for(&state, &study_id, &name).await {
+    // A first-page read is the load, so it re-fetches; later pages reuse it.
+    let load = q.from.unwrap_or(0) == 0;
+    let table = match table_for(&state, &study_id, &name, load).await {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -273,7 +275,7 @@ pub async fn api_stream_series(
     Path((study_id, name)): Path<(String, String)>,
     Query(q): Query<SeriesQuery>,
 ) -> Response {
-    let table = match table_for(&state, &study_id, &name).await {
+    let table = match table_for(&state, &study_id, &name, false).await {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -721,12 +723,19 @@ fn is_time_column(name: &str) -> bool {
 /// and binning a plot are both many requests against one file, and re-fetching
 /// a multi-megabyte CSV from Core per page would move the cost rather than
 /// remove it.
+///
+/// **Loading the view is the refresh** (embarch-ui decision 64), as for `trace_cache`: a
+/// `refresh` read (a first-page `/rows`) always re-fetches and replaces the
+/// entry, so a table cached mid-run is never what the post-run re-read gets.
+/// Paging and `/series` binning pass `refresh = false` and reuse what that
+/// load produced.
 async fn table_for(
     state: &AppState,
     study_id: &str,
     name: &str,
+    refresh: bool,
 ) -> Result<Arc<Table>, Response> {
-    {
+    if !refresh {
         let guard = state.table_cache.lock().await;
         if let Some(cached) = guard.as_ref() {
             if cached.study_id == study_id && cached.tap == name {
