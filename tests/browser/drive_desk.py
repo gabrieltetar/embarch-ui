@@ -613,6 +613,32 @@ def main():
             got = start_with({**start, "claude_uri": "vscode://anthropic.claude-code/open?prompt=x"})
             check("with a prompt link it opens the folder, then the prompt, as before",
                   5000 in got["delays"] and "press Enter there" in got["text"], got)
+
+            # A card's Start work that the desk refuses (2026-10-26: pressed
+            # on a card, nothing seen). The flash sat above the cards, out of
+            # sight, and the next pushed view hid it within 10 s, so a refusal
+            # read as nothing at all. The card itself says it now, under the
+            # button, and a pushed view keeps both. Only an issue's card has
+            # the button, and no connector is set up here, so it is put on
+            # the scratch card in the page.
+            card = '.desk-card[data-card="%s"]' % item
+            js("var a = document.querySelector(arguments[0] + ' .desk-card-actions'), b = document.createElement('button');"
+               "b.className = 'btn btn-tiny btn-primary'; b.type = 'button'; b.textContent = 'Start work';"
+               "b.setAttribute('data-start', arguments[1]); a.prepend(b); b.scrollIntoView({block: 'center'});"
+               "document.getElementById('desk-error').hidden = true; window.__startCard = a.closest('.desk-card'); return true",
+               card, item)
+            stub_fetch("/items/[^/]+/start$", 502, "the desk refused the start")
+            real_click(card + " [data-start]")
+            on_card = ("var s = document.querySelector(%s + ' [data-start-slot]'), r = s && s.getBoundingClientRect();"
+                       "return !!s && s.textContent.indexOf('Start work failed: the desk refused the start') >= 0"
+                       " && r.top >= 0 && r.bottom <= innerHeight") % json.dumps(card)
+            check("a refused Start work says so on its card, under the button, in sight", until(on_card, 5) is True)
+            pushed = until("return document.querySelector(%s) !== window.__startCard" % json.dumps(card), 15)
+            flash_kept = js("var e = document.getElementById('desk-error');"
+                            "return !e.hidden && e.textContent.indexOf('the desk refused the start') >= 0")
+            check("the next pushed view keeps the refusal on the card and in the flash",
+                  pushed is True and js(on_card) is True and flash_kept is True, [pushed, flash_kept])
+            unstub_fetch()
             js("document.getElementById('desk-slack-toggle').click(); return true")
             settle()
             check("the Slack bar expands to its feed and says nothing is connected",

@@ -93,8 +93,8 @@
 
   // A flash stays its full time whatever view arrives meanwhile: a pushed
   // view used to clear it within seconds, so a failed Start work vanished
-  // before it could be read. Only an unreachable desk is cleared by the
-  // next good view.
+  // before it could be read. Only an unreachable desk — said by load() or
+  // by the server's desk-error push — is cleared by the next good view.
   var unreachable = false;
 
   function showError(msg) {
@@ -401,7 +401,8 @@
       '<div class="desk-notes-slot" data-notes-slot="' + esc(c.id) + '">' + cardNotesHtml(c.id) + "</div>" +
       time +
       '<div class="desk-card-actions">' +
-      (issue ? '<button class="btn btn-tiny btn-primary" type="button" data-start="' + esc(c.id) + '" title="Worktree on the issue\'s branch, issue to In Progress, VS Code started on it">Start work</button>' : "") +
+      (issue ? '<button class="btn btn-tiny btn-primary" type="button" data-start="' + esc(c.id) + '"' + (startNotes[c.id] && startNotes[c.id].busy ? " disabled" : "") +
+        ' title="Worktree on the issue\'s branch, issue to In Progress, VS Code started on it">Start work</button>' : "") +
       '<button class="btn btn-tiny" type="button" data-launch="' + esc(c.id) + '" title="' + esc(c.repo_path || "pick the repo folder first") + '">Open in VS Code</button>' +
       (view.timer && view.timer.item_id === c.id
         ? '<button class="btn btn-tiny desk-timer-on" type="button" data-timer-stop="1">Stop timer</button>'
@@ -410,7 +411,8 @@
       '<button class="btn btn-tiny" type="button" data-folder="' + esc(c.id) + '">' + (c.repo_path ? "Repo…" : "Pick repo…") + "</button>" +
       '<button class="btn btn-tiny" type="button" data-pin="' + esc(c.id) + '" data-value="' + (!c.pinned) + '">' + (c.pinned ? "Unpin" : "Pin") + "</button>" +
       '<button class="btn btn-tiny" type="button" data-archive="' + esc(c.id) + '">Archive</button>' +
-      "</div></div>";
+      "</div>" +
+      '<div class="desk-start-slot" data-start-slot="' + esc(c.id) + '">' + startNoteHtml(c.id) + "</div></div>";
   }
 
   function renderSlackBar() {
@@ -687,13 +689,41 @@
     if (secondUri) setTimeout(function () { window.location.href = secondUri; }, delay);
   }
 
+  // Start work's progress and answer also sit on the card whose button was
+  // pressed, under that button: the flash is at the top of the tab, out of
+  // sight of a card further down, so a failed start looked like nothing had
+  // happened. Kept by item id, so the pushed views that rebuild every card
+  // keep it too; the button stays disabled while the start is on its way.
+  var startNotes = {};
+
+  function startNoteHtml(id) {
+    var n = startNotes[id];
+    if (!n) return "";
+    return '<p class="placeholder-note desk-start-note" role="status"' + (n.failed ? ' style="color:var(--danger);"' : "") + ">" + esc(n.text) + "</p>";
+  }
+
+  function setStartNote(id, note, ms) {
+    if (note) startNotes[id] = note; else delete startNotes[id];
+    Array.prototype.forEach.call(cardsEl.querySelectorAll(".desk-card[data-card]"), function (el) {
+      if (el.getAttribute("data-card") !== id) return;
+      var slot = el.querySelector("[data-start-slot]");
+      if (slot) slot.innerHTML = startNoteHtml(id);
+      var b = el.querySelector("[data-start]");
+      if (b) b.disabled = !!(note && note.busy);
+    });
+    if (note && ms) setTimeout(function () { if (startNotes[id] === note) setStartNote(id, null); }, ms);
+  }
+
   function startWork(itemId, btn) {
     if (btn) btn.disabled = true;
-    flash("Starting work: moving the issue, making the worktree…");
+    var starting = "Starting work: moving the issue, making the worktree…";
+    setStartNote(itemId, { text: starting, busy: true });
+    flash(starting);
     return api("POST", "/items/" + encodeURIComponent(itemId) + "/start").then(function (r) {
       var msg = "Worktree " + r.worktree + " on " + r.branch + " (" + r.how + ")" + (r.moved_to ? "; issue moved to " + r.moved_to : "") +
         (r.claude_uri ? ". VS Code opens with the first prompt typed in — press Enter there." : ". VS Code opens the worktree, and its chat starts there.") +
         ((r.warnings || []).length ? " Note: " + r.warnings.join("; ") : "");
+      setStartNote(itemId, { text: msg }, 8000);
       flash(msg);
       // The worktree's window first; the Claude panel opens in whichever
       // window has focus, so give the new one time to take it. No prompt
@@ -701,7 +731,11 @@
       followLinks(r.folder_uri, r.claude_uri, 5000);
       loadPickup();
       return load();
-    }).catch(function (e) { flash("Start work failed: " + e.message, 30000); }).then(function () { if (btn) btn.disabled = false; });
+    }).catch(function (e) {
+      var failed = "Start work failed: " + e.message;
+      setStartNote(itemId, { text: failed, failed: true }, 30000);
+      flash(failed, 30000);
+    }).then(function () { if (btn) btn.disabled = false; });
   }
 
   // ---------------------------------------------------------------- the desk form
@@ -1347,10 +1381,10 @@
     var source = new EventSource("/api/desk-events");
     source.addEventListener("view", function (ev) {
       try { view = JSON.parse(ev.data); } catch (_) { return; }
-      showError(null);
+      if (unreachable) showError(null);
       if (!editing()) render(); else markGoneReplies();
     });
-    source.addEventListener("desk-error", function (ev) { showError(ev.data); });
+    source.addEventListener("desk-error", function (ev) { showError(ev.data); unreachable = true; });
   }
   document.querySelectorAll('.nav-item[data-tab="desk"]').forEach(function (el) { el.addEventListener("click", load); });
   load();
