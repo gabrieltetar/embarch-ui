@@ -175,6 +175,34 @@ impl Console {
             self.partial_rx_utc_ms = rx_utc_ms;
         }
 
+        // No newline left. A partial that has outgrown the line cap is a
+        // tap that never sends one: publish the cap's worth as a finished
+        // line marked cut, instead of growing (and re-sending) it forever.
+        while self.partial.len() > MAX_CONSOLE_LINE_BYTES {
+            let mut cut = MAX_CONSOLE_LINE_BYTES;
+            while cut > 0 && !self.partial.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            if cut == 0 {
+                break;
+            }
+            let line: String = self.partial.drain(..cut).collect();
+            *seq += 1;
+            self.total += 1;
+            let entry = ConsoleLine {
+                seq: *seq,
+                step_index: self.partial_step,
+                rx_utc_ms: self.partial_rx_utc_ms,
+                text: line,
+                truncated: true,
+            };
+            self.bytes += entry.text.len();
+            self.lines.push_back(entry.clone());
+            completed.push(entry);
+            self.partial_step = step_index;
+            self.partial_rx_utc_ms = rx_utc_ms;
+        }
+
         while self.lines.len() > MAX_CONSOLE_LINES || self.bytes > MAX_CONSOLE_BYTES {
             match self.lines.pop_front() {
                 Some(gone) => {
@@ -1524,6 +1552,28 @@ pub struct LiveRunRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tap_that_never_sends_a_newline_is_capped_not_grown() {
+        let mut console = Console::default();
+        let mut seq = 0;
+        let chunk = "é".repeat(500); // 1000 bytes, multi-byte
+        let mut cut_lines = 0u64;
+        for i in 0..4000u64 {
+            for l in console.push_chunk(&mut seq, 0, i, &chunk) {
+                assert!(l.truncated);
+                assert!(l.text.len() <= MAX_CONSOLE_LINE_BYTES);
+                cut_lines += 1;
+            }
+            assert!(console.partial.len() <= MAX_CONSOLE_LINE_BYTES);
+            let frame = console.to_json("t").to_string().len();
+            assert!(frame < MAX_CONSOLE_BYTES + 200_000, "frame stays bounded");
+        }
+        assert!(cut_lines > 100);
+        assert_eq!(console.total, cut_lines);
+        assert_eq!(console.total, console.lines.len() as u64 + console.dropped);
+        assert!(console.dropped > 0, "cut lines count towards the ring's dropped");
+    }
 
     #[test]
     fn a_chunk_that_ends_mid_line_is_held_as_partial_and_never_padded() {
