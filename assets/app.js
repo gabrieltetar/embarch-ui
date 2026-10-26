@@ -5680,6 +5680,8 @@
       // than on the next visit to the Topology tab, which may never come.
       await loadBoardCatalog();
       await loadProfiles();
+      // The Live Study picker lists this project's saved studies too.
+      await lsLoadSavedStudies();
     } catch (e) {
       err.textContent = String(e);
       err.style.display = "block";
@@ -7057,6 +7059,10 @@
   // mid-run replay the run rather than start at "now".
 
   var lsStudyId = null;
+  // Bumped by every `lsOpenStudy`. A loader captures it before its first
+  // `await` and drops what it read if it moved: a slow read for the study that
+  // was open must not render under the one that is open now.
+  var lsOpenToken = 0;
   var lsSource = null;
   var lsFeedFilter = "all";
   var lsAutoScroll = true;
@@ -7380,6 +7386,7 @@
   async function lsOpenStudy(studyId, live) {
     if (!studyId) return;
     lsStudyId = studyId;
+    lsOpenToken++;
     lsLiveSeries = {};
     lsTerminal = null;
     lsEl("ls-body").style.display = "block";
@@ -7393,7 +7400,9 @@
     tcHideDetail();
     lsDetach();
 
+    var token = lsOpenToken;
     await lsLoadRecord(studyId, true);
+    if (token !== lsOpenToken) return;
     var job = (lsRecord && lsRecord.job) || null;
     var running = job && (job.status === "running" || job.status === "pending");
     if (live || running) lsAttach(studyId);
@@ -7408,18 +7417,23 @@
   /// return. So a post-run read *refreshes* the same cards instead, and each
   /// capture replaces its card's contents **only if its own read succeeded**.
   async function lsLoadRecord(studyId, rebuild) {
+    var token = lsOpenToken;
+    var stale = function () {
+      return token !== lsOpenToken || lsStudyId !== studyId;
+    };
     lsRecord = null;
     lsTaps = [];
     try {
       var resp = await fetch("/api/studies/" + encodeURIComponent(studyId));
       var text = await resp.text();
+      if (stale()) return;
       if (!resp.ok) {
         lsNote("ls-record-note", resp.status + " " + text);
         return;
       }
       lsRecord = JSON.parse(text);
     } catch (e) {
-      lsNote("ls-record-note", String(e));
+      if (!stale()) lsNote("ls-record-note", String(e));
       return;
     }
 
@@ -7473,8 +7487,10 @@
     // multi-megabyte capture does not hold up the cards that are already
     // drawable.
     await tcLoad();
+    if (stale()) return;
     if (rebuild) {
       await lsRenderConsoles();
+      if (stale()) return;
       await lsRenderData();
     } else {
       await lsRefreshCaptures();

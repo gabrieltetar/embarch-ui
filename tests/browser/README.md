@@ -163,3 +163,14 @@ cargo build && (cd ../embarch-desk && cargo build)
 geckodriver --port 4444 &
 python3 tests/browser/drive_links.py
 ```
+
+`drive_race.py` and `drive_switch.py` are the Live Study tab's two staleness
+guards (`embarch-ui` decision 60). `drive_race.py` delays the browser's own
+`fetch` of one study record, opens a second study meanwhile, and checks only
+the second is on screen; run it against a **freshly started** UI, because its
+second half needs the stub's running study live in the UI's session.
+`drive_switch.py <repoA> <repoB>` switches project and checks the saved-study
+picker follows. Start the UI for it with `EMBARCH_DESK_PORT` set to a port
+nothing listens on and `EMBARCH_DESK_CONFIG_DIR` and `XDG_DATA_HOME` at scratch
+directories: the page proxies to the real desk and writes the recents list, and
+a click on "Open project" there posts to both.
