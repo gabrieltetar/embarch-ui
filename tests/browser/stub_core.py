@@ -206,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "result": {"step_name": "hrm-start",
                                                "outcome": {"Fail": {"reason": "ERR_PERMISSION"}},
                                                "captured_data": None}}))
+            self.wfile.flush()
+            time.sleep(1.5)
             self.wfile.write(frame({"kind": "StatusChanged", "study_id": sid,
                                     "status": "failed", "reason": "step 2 ('hrm-start') failed (ERR_PERMISSION)"}))
             self.wfile.flush()

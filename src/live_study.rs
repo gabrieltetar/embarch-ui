@@ -984,6 +984,21 @@ async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>) {
     );
     session.state.lock().unwrap().axis.declares_trace = declares_trace;
 
+    // **A real status read before the follow starts.** Core sends
+    // `StatusChanged` only on failure or completion, so without this the
+    // session says `pending`, with no `total_steps`, for the whole run. A
+    // failed read leaves the default, and a step arriving still promotes it.
+    if let Ok(snapshot) = core.get_study_status(&session.study_id).await {
+        // Broadcast it: a browser that connected before this read returned
+        // holds a snapshot that says `pending`, and no other frame is due.
+        let payload = {
+            let mut state = session.state.lock().unwrap();
+            seed_status(&mut state, &snapshot.status, snapshot.current_step, snapshot.total_steps);
+            frame("status", json!({ "status": state.status_json() }))
+        };
+        session.send(payload);
+    }
+
     let options = FollowOptions {
         // No deadline: a study runs as long as it runs, and Core's own
         // watchdog is what bounds a hung one. The 30-minute backstop the
@@ -1062,6 +1077,34 @@ async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>) {
         )
     };
     session.send(payload);
+}
+
+/// Takes a status read made before the follow starts. A terminal status is
+/// never replaced by a later non-terminal one (decision 33), and `pending`
+/// is never taken over a status already known.
+fn seed_status(
+    state: &mut SessionState,
+    status: &str,
+    current_step: Option<u32>,
+    total_steps: Option<u32>,
+) {
+    if matches!(state.status.as_str(), "completed" | "failed" | "interrupted") {
+        return;
+    }
+    state.status = status.to_string();
+    if current_step.is_some() {
+        state.current_step = current_step;
+    }
+    if total_steps.is_some() {
+        state.total_steps = total_steps;
+    }
+}
+
+/// A step completing proves the run is running; `pending` never outlives it.
+fn promote_pending(state: &mut SessionState) {
+    if state.status == "pending" {
+        state.status = "running".to_string();
+    }
 }
 
 /// One item off the follow, folded into the session. Returns the frame to
@@ -1173,6 +1216,9 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             // the last step that *finished* (`embarch-core` decision 43).
             // Nothing here renumbers it.
             state.current_step = Some(step_index);
+            // A step completing is proof the run is running: Core sends no
+            // event for that status, and `pending` must not outlive it.
+            promote_pending(&mut state);
             let feed = state.push_feed("step", label);
             // The band belongs on the chart the instant the step lands, not
             // whenever the next mark happens to arrive — so the throttle is
@@ -1602,6 +1648,46 @@ mod tests {
         assert_eq!(console["lines"][0]["text"], "booted");
         assert_eq!(console["partial"], "partial", "the remainder is published as partial");
         assert_eq!(snapshot["series"][0]["points"][0][1], 1.5);
+    }
+
+    #[test]
+    fn a_live_run_reads_running_with_its_total_from_the_first_item_on() {
+        let session = LiveSession::new("abc".to_string());
+        // The pre-follow status read, then a step arrives with no status event.
+        seed_status(&mut session.state.lock().unwrap(), "running", Some(0), Some(3));
+        let v: Value = serde_json::from_str(&session.snapshot()).unwrap();
+        assert_eq!(v["status"]["status"], "running");
+        assert_eq!(v["status"]["total_steps"], 3);
+
+        // The sequence a live run produces: subscribe, status read, steps, done.
+        ingest(&session, FollowItem::Transport { mode: FollowMode::Live, detail: "live".into() });
+        promote_pending(&mut session.state.lock().unwrap());
+        assert_eq!(session.state.lock().unwrap().status, "running");
+        session.state.lock().unwrap().current_step = Some(1);
+        ingest(&session, FollowItem::Event(StudyEvent::StatusChanged {
+            status: "completed".into(), reason: None, study_id: "abc".into(),
+        }));
+        // A stale non-terminal reading does not un-say it server-side either.
+        seed_status(&mut session.state.lock().unwrap(), "running", None, None);
+        assert_eq!(session.state.lock().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn a_failed_status_read_still_promotes_pending_on_the_first_step() {
+        let bare = LiveSession::new("def".to_string());
+        assert_eq!(bare.state.lock().unwrap().status, "pending");
+        promote_pending(&mut bare.state.lock().unwrap());
+        assert_eq!(bare.state.lock().unwrap().status, "running");
+    }
+
+    #[test]
+    fn a_terminal_status_is_never_replaced_by_a_seed() {
+        let session = LiveSession::new("abc".to_string());
+        ingest(&session, FollowItem::Polled {
+            status: "interrupted".to_string(), current_step: Some(1), total_steps: Some(3), reason: None,
+        });
+        seed_status(&mut session.state.lock().unwrap(), "running", Some(0), Some(3));
+        assert_eq!(session.state.lock().unwrap().status, "interrupted");
     }
 
     #[test]

@@ -102,7 +102,14 @@ def main():
         # --- the running study: live frames, lagged, partial console -------
         script("var rows=document.querySelectorAll('#ls-studies-rows tr');"
                "for (var i=0;i<rows.length;i++){ if (rows[i].getAttribute('data-study').indexOf('aaaa')===0) { rows[i].click(); return; } }")
-        time.sleep(3.0)
+        seen = []
+        for _ in range(35):
+            seen.append(script("return document.getElementById('ls-status-badge').innerText.trim()"))
+            time.sleep(0.1)
+        first_run = next((i for i, t in enumerate(seen) if t.startswith("running")), None)
+        check("a live run's badge says running N/M, and never pending after that",
+              first_run is not None and "/" in seen[first_run] and
+              "pending" not in seen[first_run:], seen)
         check("the event feed fills from the live stream",
               script("return document.querySelectorAll('#ls-feed .ls-feed-row').length") > 0)
         check("lagged is displayed, never swallowed",
