@@ -688,7 +688,15 @@ async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest
             // enrolled-boards list) reflect the new enrollment on the very
             // next SSE push, not up to POLL_INTERVAL later.
             state.poke.notify_one();
-            (StatusCode::OK, Json(resp)).into_response()
+            // The mirror's own sentence for what this enrol moved, sent along
+            // so the page says what the CLI and the MCP tool say instead of
+            // composing a third wording (decision 61). Absent when nothing moved.
+            let note = resp.moved_roles_note();
+            let mut body = serde_json::to_value(&resp).unwrap_or_default();
+            if let (false, Some(obj)) = (note.is_empty(), body.as_object_mut()) {
+                obj.insert("moved_roles_note".into(), note.into());
+            }
+            (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }

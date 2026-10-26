@@ -144,7 +144,18 @@ class Handler(BaseHTTPRequestHandler):
             # showing an empty role after a successful enrolment, and every
             # check downstream of one would be testing the wrong state.
             global ENROLLED
-            ENROLLED = [b for b in ENROLLED if b["role"] != board["role"]] + [board]
+            # Core decision 87: say what moved. `displaced` is a different
+            # board that held the role; `vacated` is the role this probe held
+            # before (kept when a board type was declared for it).
+            same_role = [b for b in ENROLLED if b["role"] == board["role"]]
+            held = [b for b in ENROLLED if b["probe_serial"] == board["probe_serial"]
+                    and b["role"] != board["role"]]
+            ENROLLED = [b for b in ENROLLED if b not in same_role and b not in held] + [board]
+            if same_role and same_role[0]["probe_serial"] != board["probe_serial"]:
+                board["displaced"] = same_role[0]
+            if held:
+                board["vacated"] = held[0]
+                board["vacated_kept"] = bool(held[0].get("name"))
             return self._json(board)
         if path == "/validate":
             # dev-bench passes; anything else is a live mismatch, so the
@@ -295,7 +306,15 @@ with open(REPO + "/embarch/embarch.toml", "w") as f:
 cfg = "/tmp/embarch-ui-topology-drive.toml"
 with open(cfg, "w") as f:
     f.write('[core]\nbase_url = "http://127.0.0.1:%d"\ntoken = "%s"\n' % (CORE_PORT, TOKEN))
-env = dict(os.environ, EMBARCH_UI_CONFIG=cfg, EMBARCH_UI_PORT=UI_PORT)
+# Scratch desk config/data and a desk port nothing listens on: the page
+# proxies to the desk and writes the recents list, and the owner's own desk
+# service lives on :4891.
+import tempfile
+_iso = tempfile.mkdtemp(prefix="embarch-ui-topology-iso-")
+env = dict(os.environ, EMBARCH_UI_CONFIG=cfg, EMBARCH_UI_PORT=UI_PORT,
+           EMBARCH_DESK_PORT="4899" if UI_PORT != "4899" else "4898",
+           EMBARCH_DESK_CONFIG_DIR=_iso + "/desk-cfg", XDG_DATA_HOME=_iso + "/data",
+           XDG_CONFIG_HOME=_iso + "/config")
 ui = subprocess.Popen(["./target/release/embarch-ui"], env=env,
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(2)
@@ -657,6 +676,26 @@ try:
     script("document.getElementById('role-board-retract').click();")
     time.sleep(1.2)
     check("retracting a role reaches Core", DELETED == ["sniffer", "dut"], DELETED)
+
+    # --- an enrol that moves a role says so (decision 61) ---------------------
+    # State here: dev-bench holds 000683001234, dut was retracted. Enrolling
+    # that probe as dut vacates dev-bench; its board type is named, so it is kept.
+    script("document.querySelector('#probes-pool .probe-card[data-serial=\"000683001234\"]').click();")
+    script("var g=document.querySelector('[data-enroll-role=\"dut\"]');"
+           "g.querySelector('text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    time.sleep(0.5)
+    script("document.getElementById('assign-board').value='nrf52840dk/nrf52840';"
+           "document.getElementById('assign-board').dispatchEvent(new Event('change'));"
+           "document.getElementById('assign-confirm').click();")
+    time.sleep(1.5)
+    moved = script("var n=document.getElementById('assign-moved-note');return n?n.textContent:null;")
+    check("an enrol that vacated a role names it and says its board type is kept",
+          moved is not None and "'dev-bench'" in moved and "vacated" in moved and "kept" in moved, moved)
+    check("a plain enrol shows no moved-role note (the dut enrol above sent none)",
+          "moved_roles_note" not in json.dumps(POSTED[0]))
+    time.sleep(6.5)
+    check("the dialog closes on its own after the longer read time",
+          script("return document.getElementById('assign-dialog').style.display === 'none';"))
 
     check("no uncaught JS error anywhere in the run",
           script("return window.__errs;") == [], script("return window.__errs;"))

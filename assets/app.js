@@ -699,7 +699,10 @@
   // is the same chip and retyping it is the only way to get it wrong; and
   // the dialog names what it displaces, so a mis-drop is visible before the
   // button is pressed rather than after the row is gone.
+  let assignCloseTimer = null;
   function openAssignDialog(serial, role) {
+    // A pending auto-close from the last enrol must not shut this one.
+    clearTimeout(assignCloseTimer);
     const existing = findEnrolled(latestSnapshot || {}, role);
     document.getElementById("assign-probe-label").textContent = probeLabel(serial);
     document.getElementById("assign-role-label").textContent = roleLabel(role);
@@ -753,12 +756,18 @@
       const board = JSON.parse(text);
       result.innerHTML =
         '<span style="color:var(--success);">enrolled ' + escapeHtml(roleLabel(board.role)) +
-        " — " + escapeHtml(board.name || "unnamed") + ", chip " + escapeHtml(board.chip) + "</span>";
+        " — " + escapeHtml(board.name || "unnamed") + ", chip " + escapeHtml(board.chip) + "</span>" +
+        // What this enrol moved (decision 61): Core's mirror words it once.
+        (board.moved_roles_note
+          ? '<div id="assign-moved-note" style="color:var(--warning);margin-top:4px;">' +
+            escapeHtml(board.moved_roles_note) + "</div>"
+          : "");
       selectedSerial = null;
       // A new probe binding is a new thing to check; whatever the last
       // Validate said about this role described the old one.
       delete roleStatus[role];
-      setTimeout(closeAssignDialog, 700);
+      // Long enough to read a sentence about a moved role.
+      assignCloseTimer = setTimeout(closeAssignDialog, board.moved_roles_note ? 6000 : 700);
     } catch (e) {
       result.innerHTML = '<span style="color:var(--danger);">' + escapeHtml(String(e)) + "</span>";
     }

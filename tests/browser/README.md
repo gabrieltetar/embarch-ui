@@ -52,6 +52,8 @@ release build. The drop target is an SVG `<g>` rebuilt on every snapshot, so
 python3 tests/browser/drive_topology.py
 ```
 
+It starts the UI with scratch desk/XDG dirs and an unused desk port, and its stub returns `displaced`/`vacated`/`vacated_kept` so the enrol dialog's moved-role note is checked (decision 61).
+
 `drive_payload_mode.py` is the sixth: the Study Designer row editor's
 "Payload as" toggle, which also needs neither the stub nor a project — one
 `raw` row is enough. It drives a payload through both directions of the
