@@ -32,7 +32,7 @@ TOKEN = "stub-token"
 CORE_PORT = int(os.environ.get("EMBARCH_STUB_PORT", "4903"))
 UI_PORT = os.environ.get("EMBARCH_UI_PORT", "4897")
 UI = "http://127.0.0.1:" + UI_PORT
-BASE = "http://127.0.0.1:4444"
+BASE = "http://127.0.0.1:" + os.environ.get("EMBARCH_GECKO_PORT", "4444")
 
 NOW_MS = 1758240000000
 PROBES = [
@@ -363,8 +363,10 @@ try:
 
     check("the Enroll tab is gone from the sidebar",
           script("return !document.querySelector('.nav-item[data-tab=\"enroll\"]');"))
-    check("the sidebar is five tabs",
-          script("return document.querySelectorAll('.nav-item').length;") == 5)
+    check("the sidebar is six tabs: desk, topology, study designer, live study, atlas, debug",
+          script("return Array.from(document.querySelectorAll('.nav-item')).map("
+                 "function(b){return b.getAttribute('data-tab')});")
+          == ["desk", "topology", "study-designer", "live-study", "atlas", "debug"])
     check("#enroll lands on Topology rather than on the remembered tab",
           script("return document.querySelector('.tab-panel[data-tab=\"topology\"]')"
                  ".classList.contains('active');"))
@@ -376,8 +378,9 @@ try:
     check("the sidebar names the open project",
           script("return document.getElementById('project-current-name').textContent;")
           == "embarch-ui-topology-drive-repo")
-    check("and where it is under that — the parent, since the name is the line above",
-          script("return document.getElementById('project-current-path').textContent;") == "/tmp")
+    check("and where it is under that — no desk is open in this isolated run, so it says so, then the parent",
+          script("return document.getElementById('project-current-path').textContent;")
+          == "no desk \u00b7 /tmp")
     script("document.getElementById('project-button').click();")
     time.sleep(0.4)
     check("the control opens the picker from any tab",
@@ -410,8 +413,16 @@ try:
                  "!!document.querySelector('.tab-panel[data-tab=desk]');"))
 
     # --- the boxes: role title, board line, no chip, no status yet ---------
-    labels = script("return Array.from(document.querySelectorAll('#topology-diagram "
-                    "[data-enroll-role] text')).map(function(t){return t.textContent});")
+    # The diagram is drawn after the roles and the board catalog arrive, so
+    # wait for it to carry all four lines rather than racing a fixed sleep.
+    _labels_js = ("return Array.from(document.querySelectorAll('#topology-diagram "
+                  "[data-enroll-role] text')).map(function(t){return t.textContent});")
+    labels = script(_labels_js)
+    for _ in range(40):
+        if len(labels) >= 4 and labels[1] and labels[3]:
+            break
+        time.sleep(0.25)
+        labels = script(_labels_js)
     check("the box's title is the role and the board type is under it",
           labels[0] == "Dev bench" and labels[1] == "Espressif ESP32-C5-DevKitC", labels)
     check("a role with no board type says what to do rather than going blank",
@@ -621,8 +632,16 @@ try:
     check("a supported bench board is not reported as missing from the project catalog",
           "no board type of that name" not in report, report[-400:])
 
-    labels = script("return Array.from(document.querySelectorAll('#topology-diagram "
-                    "[data-enroll-role] text')).map(function(t){return t.textContent});")
+    # The diagram is drawn after the roles and the board catalog arrive, so
+    # wait for it to carry all four lines rather than racing a fixed sleep.
+    _labels_js = ("return Array.from(document.querySelectorAll('#topology-diagram "
+                  "[data-enroll-role] text')).map(function(t){return t.textContent});")
+    labels = script(_labels_js)
+    for _ in range(40):
+        if len(labels) >= 4 and labels[1] and labels[3]:
+            break
+        time.sleep(0.25)
+        labels = script(_labels_js)
     check("the verdict lands on the box, which was blank until this run",
           any("validated" in t for t in labels), labels)
     check("a role Core refused shows as failed on its own box",
