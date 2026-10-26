@@ -429,6 +429,27 @@
     }
   }
 
+  // A Slack message is identified by account, channel and ts, never by its
+  // position in the list: a pushed view reorders the list while the bar on
+  // screen is held back, so an index read at click time can name another message.
+  function slackKey(m) { return JSON.stringify([m.account, m.channel, m.ts]); }
+  function slackHas(key) { return ((view.slack || {}).items || []).some(function (m) { return slackKey(m) === key; }); }
+  var GONE = "This message has left the list; nothing was sent.";
+  // Boxes held on screen across a pushed view: say so once their message is gone.
+  function markGoneReplies() {
+    slackEl.querySelectorAll("[data-reply-box]").forEach(function (box) {
+      var key = box.getAttribute("data-msg");
+      if (!key || slackHas(key) || box.querySelector(".desk-gone")) return;
+      var send = box.querySelector("[data-send]");
+      if (send) send.disabled = true;
+      var note = document.createElement("p");
+      note.className = "placeholder-note desk-gone";
+      note.style.color = "var(--danger)";
+      note.textContent = GONE;
+      box.appendChild(note);
+    });
+  }
+
   function renderSlack() {
     if (slackEl.hidden) return;
     var sl = view.slack || {};
@@ -446,7 +467,7 @@
           '<div class="desk-msg-head"><span class="desk-msg-from">' + esc(m.user_name) + "</span>" +
           '<span class="desk-msg-where">' + (m.kind === "dm" ? "DM" : "#" + esc(m.channel_name)) + " · " + esc(m.account) + " · " + esc(when.toLocaleString()) + "</span>" +
           '<span class="desk-msg-acts"><a href="' + esc(m.permalink) + '" target="_blank" rel="noopener">Open</a> ' +
-          '<button class="btn btn-tiny" type="button" data-draft="' + i + '">Draft reply</button></span></div>' +
+          '<button class="btn btn-tiny" type="button" data-draft="' + i + '" data-msg="' + esc(slackKey(m)) + '">Draft reply</button></span></div>' +
           '<div class="desk-msg-text">' + esc(m.text) + "</div>" +
           '<div class="desk-reply" data-reply-box="' + i + '" hidden></div></div>';
       }).join("");
@@ -1074,20 +1095,25 @@
       return;
     }
     if (d.draft !== undefined) {
-      var m = view.slack.items[Number(d.draft)];
+      var m;
+      try { var k = JSON.parse(t.getAttribute("data-msg")); m = { account: k[0], channel: k[1], ts: k[2] }; } catch (_) { return; }
       var box = slackEl.querySelector('[data-reply-box="' + d.draft + '"]');
       box.hidden = false;
+      box.setAttribute("data-msg", slackKey(m));
       box.innerHTML = '<p class="placeholder-note">Claude is drafting…</p>';
       api("POST", "/slack/draft", { account: m.account, channel: m.channel, ts: m.ts }).then(function (r) {
         box.innerHTML = '<textarea class="desk-input desk-textarea" rows="3">' + esc(r.draft) + "</textarea>" +
           '<div class="desk-form"><button class="btn btn-primary btn-tiny" type="button" data-send="' + d.draft + '" data-thread="' + esc(r.thread_ts) + '">Send as me</button>' +
           '<button class="btn btn-tiny" type="button" data-cancel-reply="' + d.draft + '">Cancel</button></div>';
+        markGoneReplies();
       }).catch(function (e) { box.innerHTML = '<p class="placeholder-note" style="color:var(--danger);">' + esc(e.message) + "</p>"; });
       return;
     }
     if (d.send !== undefined) {
-      var msg = view.slack.items[Number(d.send)];
       var b2 = slackEl.querySelector('[data-reply-box="' + d.send + '"]');
+      var msg;
+      try { var k2 = JSON.parse(b2.getAttribute("data-msg")); msg = { account: k2[0], channel: k2[1] }; } catch (_) { return; }
+      if (!slackHas(b2.getAttribute("data-msg"))) { markGoneReplies(); flash(GONE); return; }
       var text = b2.querySelector("textarea").value;
       api("POST", "/slack/reply", { account: msg.account, channel: msg.channel, thread_ts: d.thread || null, text: text }).then(function () {
         b2.innerHTML = '<p class="placeholder-note" style="color:var(--success);">Sent.</p>';
@@ -1322,7 +1348,7 @@
     source.addEventListener("view", function (ev) {
       try { view = JSON.parse(ev.data); } catch (_) { return; }
       showError(null);
-      if (!editing()) render();
+      if (!editing()) render(); else markGoneReplies();
     });
     source.addEventListener("desk-error", function (ev) { showError(ev.data); });
   }
