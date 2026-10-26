@@ -575,8 +575,22 @@ pub struct RoleTarget {
     pub from_board: String,
 }
 
-/// The west target the board type in `role` builds as, or `None` when the
-/// role holds no board or the catalog cannot say what it builds as.
+/// Why the DUT role could not decide the board a build is for. The three
+/// causes `role_target` used to collapse into `None`, kept apart so the build
+/// log can say which one it was (`embarch-ui` decision 62).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RoleMiss {
+    /// The role holds no board type: no row, or a row with an empty name.
+    NoBoard,
+    /// The role holds a board type this project's catalog does not list.
+    NotInCatalog { from_board: String },
+    /// The catalog could not be read, so the role's board type could not be
+    /// looked up at all (`error` says why, or that no repo is open).
+    CatalogUnreadable { from_board: String, error: String },
+}
+
+/// The west target the board type in `role` builds as, or the reason it
+/// could not be worked out ([`RoleMiss`]).
 ///
 /// **Two lookups, in this order.** A role's board type is a string Core
 /// stores; what that type builds as is the project's business, so the
@@ -587,20 +601,29 @@ pub fn role_target(
     repo: Option<&Path>,
     enrolled: &[embarch_core_client::EnrolledBoardResponse],
     role: &str,
-) -> Option<RoleTarget> {
-    let row = enrolled.iter().find(|b| b.role == role)?;
+) -> Result<RoleTarget, RoleMiss> {
+    let row = enrolled.iter().find(|b| b.role == role).ok_or(RoleMiss::NoBoard)?;
     if row.name.is_empty() {
-        return None;
+        return Err(RoleMiss::NoBoard);
     }
-    if let Some(entry) = repo
-        .and_then(|repo| load_catalog(repo).ok())
-        .and_then(|catalog| catalog.boards.into_iter().find(|b| b.name == row.name))
+    let catalog = match repo {
+        Some(repo) => load_catalog(repo).map_err(|e| format!("{e:#}")),
+        None => Err("no firmware repo is open".to_string()),
+    };
+    if let Some(entry) = catalog
+        .as_ref()
+        .ok()
+        .and_then(|catalog| catalog.boards.iter().find(|b| b.name == row.name))
     {
-        let board = if entry.build_target.is_empty() { entry.name.clone() } else { entry.build_target };
-        return Some(RoleTarget {
+        let board = if entry.build_target.is_empty() {
+            entry.name.clone()
+        } else {
+            entry.build_target.clone()
+        };
+        return Ok(RoleTarget {
             board,
-            variant: entry.variant,
-            revision: entry.revision,
+            variant: entry.variant.clone(),
+            revision: entry.revision.clone(),
             from_board: row.name.clone(),
         });
     }
@@ -608,7 +631,7 @@ pub fn role_target(
         if let Some((board, _, _)) =
             SUPPORTED_DEV_BENCH_BOARDS.iter().find(|(board, _, _)| *board == row.name)
         {
-            return Some(RoleTarget {
+            return Ok(RoleTarget {
                 board: (*board).to_string(),
                 variant: String::new(),
                 revision: String::new(),
@@ -617,10 +640,13 @@ pub fn role_target(
         }
     }
     // A board type Core holds that this project has never heard of. Not an
-    // error and not a guess: the caller says so and builds what the study
-    // asked for, which is the behaviour that existed before roles named a
-    // board at all.
-    None
+    // error and not a guess: the caller says so (decision 62) and builds what
+    // the study asked for, which is the behaviour that existed before roles
+    // named a board at all.
+    Err(match catalog {
+        Ok(_) => RoleMiss::NotInCatalog { from_board: row.name.clone() },
+        Err(error) => RoleMiss::CatalogUnreadable { from_board: row.name.clone(), error },
+    })
 }
 
 // ---- routes -----------------------------------------------------------------
@@ -1649,6 +1675,53 @@ pub async fn api_apply_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn enrolled(role: &str, name: &str) -> embarch_core_client::EnrolledBoardResponse {
+        serde_json::from_value(json!({ "role": role, "name": name, "chip": "nRF54L15" }))
+            .unwrap()
+    }
+
+    fn repo_with_catalog(tag: &str, boards_toml: Option<&str>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("efb-roles-{tag}-{}", now_utc_ms()));
+        std::fs::create_dir_all(dir.join("embarch")).unwrap();
+        if let Some(text) = boards_toml {
+            std::fs::write(boards_path(&dir), text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_role_miss_says_which_of_the_three_causes_it_was() {
+        let listed = "[[boards]]\nname = \"rev6\"\nbuild_target = \"plank\"\nvariant = \"ns\"\n";
+        let ok = repo_with_catalog("ok", Some(listed));
+        let got = role_target(Some(&ok), &[enrolled("dut", "rev6")], "dut").unwrap();
+        assert_eq!((got.board.as_str(), got.variant.as_str()), ("plank", "ns"));
+
+        assert_eq!(role_target(Some(&ok), &[], "dut"), Err(RoleMiss::NoBoard));
+        assert_eq!(role_target(Some(&ok), &[enrolled("dut", "")], "dut"), Err(RoleMiss::NoBoard));
+        assert_eq!(
+            role_target(Some(&ok), &[enrolled("dut", "other")], "dut"),
+            Err(RoleMiss::NotInCatalog { from_board: "other".into() })
+        );
+
+        let bad = repo_with_catalog("bad", Some("[[boards\n"));
+        match role_target(Some(&bad), &[enrolled("dut", "rev6")], "dut") {
+            Err(RoleMiss::CatalogUnreadable { from_board, error }) => {
+                assert_eq!(from_board, "rev6");
+                assert!(error.contains("boards.toml"), "{error}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            role_target(None, &[enrolled("dut", "rev6")], "dut"),
+            Err(RoleMiss::CatalogUnreadable { .. })
+        ));
+        // A bench board is still found without a catalog.
+        let bench = enrolled("dev-bench", "nrf54l15dk/nrf54l15/cpuapp");
+        assert!(role_target(Some(&bad), &[bench], "dev-bench").is_ok());
+        let _ = std::fs::remove_dir_all(&ok);
+        let _ = std::fs::remove_dir_all(&bad);
+    }
 
     #[test]
     fn a_slug_cannot_escape_the_topologies_directory() {

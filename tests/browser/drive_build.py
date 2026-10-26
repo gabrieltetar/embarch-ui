@@ -21,7 +21,8 @@ Run it the same way as `drive.py`:
     EMBARCH_UI_PORT=4899 ./target/release/embarch-ui &
     python3 tests/browser/drive_build.py
 """
-import json, os, urllib.request, time, sys
+import json, os, urllib.request, urllib.error, time, sys, subprocess, tempfile, threading, stat
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # `drive.py`'s harness port by default; point it at a real instance (4890)
 # to drive the available path against a bench's own workspace.
@@ -161,6 +162,158 @@ try:
     time.sleep(1)
     check("switching back hides the picker again",
           script("return document.getElementById('log-build-pick').style.display === 'none';"))
+
+
+    # --- a build run: the board line, in the stored log (decision 62) --------
+    #
+    # A real run through a second, isolated UI: a scratch firmware repo, a
+    # stub `west` (no toolchain, no client workspace) and a stub Core that
+    # holds a DUT role and answers flash/reset. Never the live desk, a live
+    # Core or the owner's UI: scratch ports, desk config and XDG dirs.
+    RUN_PORT = os.environ.get("EMBARCH_BUILD_RUN_PORT", "4895")
+    CORE_PORT = int(os.environ.get("EMBARCH_BUILD_STUB_PORT", "4894"))
+    TOKEN = "stub-token"
+    iso = tempfile.mkdtemp(prefix="embarch-ui-build-iso-")
+    repo = iso + "/repo"
+    bd = repo + "/boards/acme/plank"
+    os.makedirs(bd); os.makedirs(repo + "/app/blinky"); os.makedirs(repo + "/embarch")
+    open(repo + "/app/blinky/CMakeLists.txt", "w").close()
+    with open(bd + "/board.yml", "w") as f:
+        f.write("board:\n  name: plank\n  socs:\n    - name: nrf54l15\n"
+                "      variants:\n        - name: ns\n          cpucluster: cpuapp\n"
+                '  revision:\n    default: "1"\n    revisions:\n      - name: "1"\n      - name: "2"\n')
+    for n in ["plank_nrf54l15_cpuapp.dts", "plank_nrf54l15_cpuapp_ns.dts",
+              "plank_nrf54l15_cpuapp_2.overlay", "plank_nrf54l15_cpuapp_ns_2.overlay"]:
+        open(bd + "/" + n, "w").close()
+    # A catalog: the DUT role's board type builds as plank / ns / 2.
+    with open(repo + "/embarch/boards.toml", "w") as f:
+        f.write('[[boards]]\nname = "rev6"\nbuild_target = "plank"\nvariant = "ns"\nrevision = "2"\n')
+    west = iso + "/west"
+    with open(west, "w") as f:
+        f.write("#!/usr/bin/env python3\nimport sys, os\n"
+                "a = sys.argv\nd = a[a.index('-d') + 1]\n"
+                "print('stub west: building ' + ' '.join(a[1:]))\n"
+                "os.makedirs(d + '/zephyr', exist_ok=True)\n"
+                "open(d + '/zephyr/zephyr.hex', 'w').write(':00000001FF')\n"
+                "print('stub west: done')\n")
+    os.chmod(west, os.stat(west).st_mode | stat.S_IEXEC)
+    with open(repo + "/embarch/embarch.toml", "w") as f:
+        f.write('[core]\nbase_url = "http://127.0.0.1:%d"\ntoken = "%s"\n\n[[projects]]\n'
+                'name = "plank"\nsource_path = "%s"\ndiscovery = "zephyr-west"\n'
+                'flash_format = "hex"\nwest_binary = "%s"\nbuild_dir_root = "%s/build"\n'
+                % (CORE_PORT, TOKEN, repo, west, repo))
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]):
+        subprocess.run(cmd, cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    ENROLLED = [{"probe_serial": "S1", "role": "dut", "name": "rev6", "chip": "nRF54L15",
+                 "hardware_id": "aa:bb", "confirmed_at_utc_ms": 1758240000000, "link_serial": None}]
+    CORE = {"flash_fails": False, "flashed": 0, "resets": 0}
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *a): pass
+        def _send(self, obj, code=200):
+            body = (json.dumps(obj) if not isinstance(obj, str) else obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+        def do_GET(self):
+            p = self.path.split("?")[0]
+            if p == "/status": return self._send({"status": "ok", "probes": []})
+            if p == "/probes/enrolled": return self._send(ENROLLED)
+            if p in ("/alerts", "/signals", "/studies", "/serial-ports"): return self._send([])
+            if p == "/logs/recent": return self._send({"lines": []})
+            return self._send("not found", 404)
+        def do_POST(self):
+            n = int(self.headers.get("content-length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}") if n else {}
+            p = self.path.split("?")[0]
+            if p == "/resolve-chip": return self._send({"chip": "nRF54L15"})
+            if p == "/flash":
+                if CORE["flash_fails"]: return self._send("probe not found", 500)
+                CORE["flashed"] += 1
+                return self._send({"flashed": True, "chip": "nRF54L15"})
+            if p == "/reset":
+                CORE["resets"] += 1
+                return self._send({"reset": True})
+            # The study submit that follows a build is not what this checks.
+            return self._send("the stub does not take studies", 500)
+    srv = ThreadingHTTPServer(("127.0.0.1", CORE_PORT), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    env = dict(os.environ, EMBARCH_UI_CONFIG=repo + "/embarch/embarch.toml",
+               EMBARCH_UI_PORT=RUN_PORT, EMBARCH_DESK_PORT="4893",
+               EMBARCH_DESK_CONFIG_DIR=iso + "/desk-cfg", XDG_DATA_HOME=iso + "/data",
+               XDG_CONFIG_HOME=iso + "/config", HOME=iso)
+    ui_bin = os.environ.get("EMBARCH_UI_BIN", "./target/release/embarch-ui")
+    run_ui = subprocess.Popen([ui_bin], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    RUN = "http://127.0.0.1:" + RUN_PORT
+    try:
+        time.sleep(3)
+        def post(path, body):
+            req = urllib.request.Request(RUN + path, data=json.dumps(body).encode(), method="POST",
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return r.status, json.loads(r.read().decode() or "{}")
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+        post("/api/study-designer/project", {"path": repo})
+        # The study stored the same board as the role but a different revision.
+        study = {"name": "board-line", "rows": [], "requires": {
+            "dev_bench_version": "any", "firmware_version": "any",
+            "build": {"board": "plank", "variant": "ns", "revision": "1"}}}
+
+        def run_and_wait():
+            code, resp = post("/api/study-designer/run", study)
+            if code != 202:
+                return code, resp, []
+            events = []
+            req = urllib.request.Request(RUN + "/api/build/events?id=" + resp["build_id"])
+            with urllib.request.urlopen(req, timeout=60) as r:
+                for raw in r:
+                    raw = raw.decode().strip()
+                    if raw.startswith("data:"):
+                        ev = json.loads(raw[5:])
+                        events.append(ev)
+                        if ev.get("kind") in ("started", "failed"): break
+            return code, resp, events
+
+        code, resp, events = run_and_wait()
+        check("a build run is accepted", code == 202, (code, resp))
+        live = [e.get("text", "") for e in events if e.get("kind") == "line"]
+        check("the live stream carries the board line",
+              any(t.startswith("board choice:") for t in live), live[:4])
+        time.sleep(1)
+
+        rq("POST", b + "/url", {"url": RUN + "/"})
+        time.sleep(2)
+        script("document.querySelector('.nav-item[data-tab=\"debug\"]').click();")
+        time.sleep(1)
+        script("document.querySelector('.chip[data-log-source=\"builds\"]').click();")
+        time.sleep(3)
+        shown = script("return document.getElementById('log-console').textContent;")
+        check("the builds source shows the board line after a run",
+              "board choice: the study stored board 'plank', variant 'ns', revision '1'" in shown, shown[-400:])
+        check("the line says what the role replaced",
+              "replaces the study's revision '1'" in shown, shown[-400:])
+        check("the stored log keeps the flash and reset lines",
+              "flashing " in shown and "reset done" in shown, shown[-400:])
+
+        # A run whose flash fails has the failure in the stored log.
+        CORE["flash_fails"] = True
+        code, resp, events = run_and_wait()
+        time.sleep(1)
+        logs = json.loads(urllib.request.urlopen(RUN + "/api/build/logs", timeout=30).read().decode())
+        entries = logs.get("logs", logs) if isinstance(logs, dict) else logs
+        newest = entries[0]["id"]
+        text = urllib.request.urlopen(RUN + "/api/build/logs/" + newest, timeout=30).read().decode()
+        check("a failed flash is in the stored log", "flash failed:" in text, text[-300:])
+        check("the file still carries the build's own verdict", newest.endswith("-ok.log"), newest)
+    finally:
+        run_ui.terminate()
+        srv.shutdown()
 
     errs = script("return window.__errs;")
     check("no uncaught JavaScript error", not errs, errs)

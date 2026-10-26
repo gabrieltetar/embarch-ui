@@ -284,12 +284,35 @@ pub async fn build_and_flash(
     // does, and which board is on the bench today is the bench's fact, the
     // same way a study names a signal and never a carrier. A study carrying
     // an older explicit target is not silently reinterpreted — the override
-    // is announced on the build log before anything is built.
-    role_target: Option<crate::topology::RoleTarget>,
+    // is announced on the build log before anything is built — and when the
+    // role could not decide, the `Err` says why and the log says so too
+    // (decision 62).
+    role_target: Result<crate::topology::RoleTarget, crate::topology::RoleMiss>,
     required_firmware: &str,
     allow_version_mismatch: bool,
     on_line: ProgressSink,
 ) -> Result<FlashedFirmware> {
+    // **Everything the run says is also kept for the stored log** (decision
+    // 62): west's output is what used to be there, and the `info` lines —
+    // the version, the board choice, flash and reset — went to the live
+    // stream only, so a log read an hour later could not say why it built
+    // what it built. `info` lines are kept with a marker so they read apart
+    // from the compiler's own output.
+    let collected = Arc::new(std::sync::Mutex::new(String::new()));
+    let live = on_line;
+    let on_line: ProgressSink = {
+        let collected = collected.clone();
+        Arc::new(move |kind, text| {
+            if kind == "info" {
+                if let Ok(mut buf) = collected.lock() {
+                    buf.push_str(INFO_MARK);
+                    buf.push_str(text);
+                    buf.push('\n');
+                }
+            }
+            live(kind, text);
+        })
+    };
     let path = config_path(configured_config, Some(repo))
         .context("no project config was found for this repo, so there is nothing to build")?;
     let config = fwconfig::Config::load_from_path(&path)?;
@@ -323,39 +346,10 @@ pub async fn build_and_flash(
     // the spec are not `&str` of the right lifetime.
     let snippets: Vec<String> = spec.snippets.iter().map(|s| s.as_str().to_string()).collect();
     let extra_args: Vec<String> = spec.extra_args.iter().map(|s| s.as_str().to_string()).collect();
-    let (board, variant, revision) = match &role_target {
-        Some(target) => {
-            let named = spec.board.as_ref().map(|s| s.as_str());
-            if let Some(named) = named.filter(|named| *named != target.board) {
-                on_line(
-                    "info",
-                    &format!(
-                        "this study names board '{named}', and the DUT role holds \
-                         '{}' ({}) — building for the role",
-                        target.board, target.from_board
-                    ),
-                );
-            } else {
-                on_line(
-                    "info",
-                    &format!(
-                        "building for the DUT role's board: {} ({})",
-                        target.board, target.from_board
-                    ),
-                );
-            }
-            (
-                Some(target.board.as_str()),
-                Some(target.variant.as_str()).filter(|v| !v.is_empty()),
-                Some(target.revision.as_str()).filter(|v| !v.is_empty()),
-            )
-        }
-        None => (
-            spec.board.as_ref().map(|s| s.as_str()),
-            spec.variant.as_ref().map(|s| s.as_str()),
-            spec.revision.as_ref().map(|s| s.as_str()),
-        ),
-    };
+    let choice = choose_board(spec, &role_target);
+    on_line("info", &choice.line);
+    let (board, variant, revision) =
+        (choice.board.as_deref(), choice.variant.as_deref(), choice.revision.as_deref());
     let selection = resolve::Selection {
         board,
         variant,
@@ -375,7 +369,6 @@ pub async fn build_and_flash(
         ),
     );
 
-    let collected = Arc::new(std::sync::Mutex::new(String::new()));
     let sink: fwbuild::LineSink = {
         let on_line = on_line.clone();
         let collected = collected.clone();
@@ -412,41 +405,66 @@ pub async fn build_and_flash(
         String::new()
     });
 
-    let built = built.with_context(|| format!("build failed for '{}'", project.name))?;
+    // From here on a line goes to the live stream and onto the end of the
+    // stored file. The file's name and header keep the *build's* verdict
+    // (decision 39: a build log is a log); how the run ended is told in its
+    // last lines (decision 62).
+    let note = |msg: &str| {
+        on_line("info", msg);
+        if !log_id.is_empty() {
+            append_log(&log_id, &format!("{INFO_MARK}{msg}\n"));
+        }
+    };
+    let built = match built {
+        Ok(built) => built,
+        Err(e) => {
+            note(&format!("the build could not run: {e:#}"));
+            return Err(e).with_context(|| format!("build failed for '{}'", project.name));
+        }
+    };
     if !built.ready_to_flash() {
         // `failure_reason` and not a sentence built here: it names the
         // compiler's own first error, which is what a reader needs from the
         // banner and what this message used to leave in the console for them
         // to go find. Its own doc comment records the `Some(1)` it replaced.
+        let reason = built.failure_reason();
+        note(&format!("the build failed, so nothing was flashed: {reason}"));
         anyhow::bail!(
             "the build for '{}' failed, so nothing was flashed: {}",
             project.name,
-            built.failure_reason()
+            reason
         );
     }
 
     let artifact_path = built.artifact_path.display().to_string();
-    on_line("info", &format!("flashing {artifact_path}"));
-    core.flash(
-        &resolved.chip,
-        &artifact_path,
-        &resolved.flash_format,
-        resolved.base_address.as_deref(),
-        resolved.probe_serial.as_deref(),
-        false,
-    )
-    .await
-    .with_context(|| format!("flash failed for '{}'", project.name))?;
+    note(&format!("flashing {artifact_path}"));
+    if let Err(e) = core
+        .flash(
+            &resolved.chip,
+            &artifact_path,
+            &resolved.flash_format,
+            resolved.base_address.as_deref(),
+            resolved.probe_serial.as_deref(),
+            false,
+        )
+        .await
+    {
+        note(&format!("flash failed: {e:#}"));
+        return Err(e).with_context(|| format!("flash failed for '{}'", project.name));
+    }
+    note("flashed");
 
     // Reversals row 75: Core's flash halts the core rather than starting it,
     // so without this the board keeps running the image that was there
     // before and the run tests the wrong firmware while reporting the right
     // one. It is also what puts a power-on outpost header on the wire for
     // Core's own pre-flight to read.
-    on_line("info", "resetting the DUT so it runs what was just flashed");
-    core.reset(&resolved.chip, resolved.probe_serial.as_deref())
-        .await
-        .with_context(|| format!("reset after flash failed for '{}'", project.name))?;
+    note("resetting the DUT so it runs what was just flashed");
+    if let Err(e) = core.reset(&resolved.chip, resolved.probe_serial.as_deref()).await {
+        note(&format!("reset after flash failed: {e:#}"));
+        return Err(e).with_context(|| format!("reset after flash failed for '{}'", project.name));
+    }
+    note("reset done");
 
     Ok(FlashedFirmware {
         version,
@@ -454,6 +472,105 @@ pub async fn build_and_flash(
         descriptor: resolved.descriptor,
         log_id,
     })
+}
+
+/// Marks a line in a stored log as the UI's own rather than west's.
+const INFO_MARK: &str = "[embarch-ui] ";
+
+/// The board a build is for, and the one line that says how that was
+/// decided (decision 62).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardChoice {
+    pub board: Option<String>,
+    pub variant: Option<String>,
+    pub revision: Option<String>,
+    pub line: String,
+}
+
+fn axes(board: Option<&str>, variant: Option<&str>, revision: Option<&str>) -> String {
+    let one = |v: Option<&str>| v.map_or("(none)".to_string(), |v| format!("'{v}'"));
+    format!("board {}, variant {}, revision {}", one(board), one(variant), one(revision))
+}
+
+/// What a build is for: the DUT role's board when it resolved (decision 45),
+/// the study's own otherwise. **Every path says which one won and why** — the
+/// `None` the role used to return was a silent fallback.
+pub fn choose_board(
+    spec: &BuildSpec,
+    role: &Result<crate::topology::RoleTarget, crate::topology::RoleMiss>,
+) -> BoardChoice {
+    use crate::topology::RoleMiss;
+    let s_board = spec.board.as_ref().map(|s| s.as_str());
+    let s_variant = spec.variant.as_ref().map(|s| s.as_str());
+    let s_revision = spec.revision.as_ref().map(|s| s.as_str());
+    let stored = axes(s_board, s_variant, s_revision);
+    match role {
+        Ok(target) => {
+            let r_variant = Some(target.variant.as_str()).filter(|v| !v.is_empty());
+            let r_revision = Some(target.revision.as_str()).filter(|v| !v.is_empty());
+            let built = axes(Some(&target.board), r_variant, r_revision);
+            let mut replaced = Vec::new();
+            if let Some(named) = s_board.filter(|n| *n != target.board) {
+                replaced.push(format!("board '{named}'"));
+            }
+            if let Some(v) = s_variant.filter(|v| Some(*v) != r_variant) {
+                replaced.push(format!("variant '{v}'"));
+            }
+            if let Some(v) = s_revision.filter(|v| Some(*v) != r_revision) {
+                replaced.push(format!("revision '{v}'"));
+            }
+            let verdict = if replaced.is_empty() {
+                "the role and the study agree".to_string()
+            } else {
+                format!("the role wins and replaces the study's {}", replaced.join(", "))
+            };
+            BoardChoice {
+                line: format!(
+                    "board choice: the study stored {stored}; the DUT role holds '{}'; \
+                     building {built} — {verdict}",
+                    target.from_board
+                ),
+                board: Some(target.board.clone()),
+                variant: r_variant.map(str::to_string),
+                revision: r_revision.map(str::to_string),
+            }
+        }
+        Err(miss) => {
+            let why = match miss {
+                RoleMiss::NoBoard => "the DUT role holds no board type".to_string(),
+                RoleMiss::NotInCatalog { from_board } => format!(
+                    "the DUT role holds '{from_board}', which this project's catalog does not list"
+                ),
+                RoleMiss::CatalogUnreadable { from_board, error } => format!(
+                    "the DUT role holds '{from_board}', and the catalog could not be read ({error})"
+                ),
+            };
+            BoardChoice {
+                line: format!(
+                    "board choice: the study stored {stored}; {why}; building {stored} — \
+                     the role could not decide, so the study's own board is used"
+                ),
+                board: s_board.map(str::to_string),
+                variant: s_variant.map(str::to_string),
+                revision: s_revision.map(str::to_string),
+            }
+        }
+    }
+}
+
+/// Appends to a stored log. Best-effort, like `prune`: a line that cannot be
+/// kept is not a reason to fail a flash.
+fn append_log(id: &str, text: &str) {
+    if let Ok(dir) = log_dir() {
+        append_to(&dir, id, text);
+    }
+}
+
+fn append_to(dir: &Path, id: &str, text: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(dir.join(id)) {
+        let _ = f.write_all(text.as_bytes());
+    }
 }
 
 pub fn now_utc_ms() -> u64 {
@@ -605,6 +722,105 @@ mod tests {
         let explicit = dir.join("elsewhere.toml");
         assert_eq!(config_path(Some(&explicit), Some(&dir)), Some(explicit));
         assert_eq!(config_path(None, None), std::env::var_os("EMBARCH_API_CONFIG").map(PathBuf::from));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn spec(board: Option<&str>, variant: Option<&str>, revision: Option<&str>) -> BuildSpec {
+        serde_json::from_value(serde_json::json!({
+            "board": board, "variant": variant, "revision": revision,
+        }))
+        .unwrap()
+    }
+
+    fn target(board: &str, variant: &str, revision: &str) -> crate::topology::RoleTarget {
+        crate::topology::RoleTarget {
+            board: board.into(),
+            variant: variant.into(),
+            revision: revision.into(),
+            from_board: "wearable-rev6".into(),
+        }
+    }
+
+    #[test]
+    fn a_role_that_agrees_with_the_study_says_so() {
+        let c = choose_board(
+            &spec(Some("plank"), Some("ns"), Some("2")),
+            &Ok(target("plank", "ns", "2")),
+        );
+        assert_eq!(c.board.as_deref(), Some("plank"));
+        assert!(c.line.contains("the study stored board 'plank', variant 'ns', revision '2'"), "{}", c.line);
+        assert!(c.line.contains("holds 'wearable-rev6'"), "{}", c.line);
+        assert!(c.line.contains("building board 'plank', variant 'ns', revision '2'"), "{}", c.line);
+        assert!(c.line.contains("agree"), "{}", c.line);
+    }
+
+    #[test]
+    fn a_role_with_a_different_board_wins_and_names_what_it_replaced() {
+        let c = choose_board(&spec(Some("old"), None, None), &Ok(target("plank", "", "")));
+        assert_eq!(c.board.as_deref(), Some("plank"));
+        assert_eq!(c.variant, None);
+        assert!(c.line.contains("replaces the study's board 'old'"), "{}", c.line);
+        assert!(c.line.contains("the study stored board 'old', variant (none)"), "{}", c.line);
+    }
+
+    /// The case the task was filed for: the same board, a different variant
+    /// or revision, which used to read as "building for the DUT role's board"
+    /// and say nothing about the study's own being thrown away.
+    #[test]
+    fn a_role_on_the_same_board_still_says_when_it_replaced_the_variant_or_revision() {
+        let c = choose_board(
+            &spec(Some("plank"), Some("ns"), Some("1")),
+            &Ok(target("plank", "", "2")),
+        );
+        assert_eq!(c.variant, None);
+        assert_eq!(c.revision.as_deref(), Some("2"));
+        assert!(c.line.contains("variant 'ns'"), "{}", c.line);
+        assert!(c.line.contains("revision '1'"), "{}", c.line);
+        assert!(!c.line.contains("agree"), "{}", c.line);
+        assert!(!c.line.contains("board 'plank' ,"), "{}", c.line);
+    }
+
+    #[test]
+    fn a_role_board_the_catalog_does_not_list_falls_back_to_the_study_out_loud() {
+        let miss = crate::topology::RoleMiss::NotInCatalog { from_board: "mystery".into() };
+        let c = choose_board(&spec(Some("plank"), Some("ns"), Some("2")), &Err(miss));
+        assert_eq!(c.board.as_deref(), Some("plank"));
+        assert_eq!(c.variant.as_deref(), Some("ns"));
+        assert_eq!(c.revision.as_deref(), Some("2"));
+        assert!(c.line.contains("holds 'mystery', which this project's catalog does not list"), "{}", c.line);
+        assert!(c.line.contains("study stored board 'plank'"), "{}", c.line);
+        assert!(c.line.contains("study's own board is used"), "{}", c.line);
+    }
+
+    #[test]
+    fn an_unreadable_catalog_says_why_it_could_not_decide() {
+        let miss = crate::topology::RoleMiss::CatalogUnreadable {
+            from_board: "wearable-rev6".into(),
+            error: "failed to parse boards.toml".into(),
+        };
+        let c = choose_board(&spec(Some("plank"), None, None), &Err(miss));
+        assert_eq!(c.board.as_deref(), Some("plank"));
+        assert!(c.line.contains("catalog could not be read (failed to parse boards.toml)"), "{}", c.line);
+    }
+
+    #[test]
+    fn an_empty_role_says_so_and_builds_the_study() {
+        let c = choose_board(&spec(None, None, None), &Err(crate::topology::RoleMiss::NoBoard));
+        assert_eq!(c.board, None);
+        assert!(c.line.contains("the DUT role holds no board type"), "{}", c.line);
+        assert!(c.line.contains("building board (none)"), "{}", c.line);
+    }
+
+    #[test]
+    fn lines_appended_after_the_build_land_at_the_end_of_the_stored_file() {
+        let dir = std::env::temp_dir().join(format!("efb-append-{}", now_utc_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.log"), "head\n").unwrap();
+        append_to(&dir, "a.log", &format!("{INFO_MARK}flash failed: boom\n"));
+        let text = std::fs::read_to_string(dir.join("a.log")).unwrap();
+        assert_eq!(text, "head\n[embarch-ui] flash failed: boom\n");
+        // A file that is not there is not a reason to fail a flash.
+        append_to(&dir, "missing.log", "x");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
