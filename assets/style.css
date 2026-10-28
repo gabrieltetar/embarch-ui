@@ -2015,6 +2015,8 @@ table.data-table {
 .desk-tile-date { display: flex; align-items: center; justify-content: center; gap: 5px; font-size: 10.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
 .desk-tile.today .desk-tile-date { color: var(--accent); }
 .desk-tile-date .desk-dot { width: 6px; height: 6px; background: var(--success); }
+.desk-tile-plus { margin-right: 2px; color: var(--success); }
+.desk-tile.more { border-style: dashed; }
 .desk-tile-sub { font-size: 10.5px; color: var(--text-tertiary); text-align: center; }
 .desk-tile-sub b { font-weight: 600; color: var(--success); }
 .desk-tile-actions { display: flex; border-top: 1px solid var(--border); }

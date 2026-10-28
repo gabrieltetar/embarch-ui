@@ -145,12 +145,14 @@
     var other = !!view.open_desk && t.desk_id !== view.open_desk.id;
     var live = today && (view.cards || []).some(function (c) { return c.id === t.item_id && c.sessions && c.sessions.live; });
     var sub = t.logged_hours ? hours(t.logged_hours) + " already in Harvest" : lines + " line" + (lines === 1 ? "" : "s");
-    return '<div class="desk-tile' + (today ? " today" : "") + (dealt[t.id] ? "" : " dealt") + '" data-tile="' + esc(t.id) + '" style="--i:' + i + '">' +
+    return '<div class="desk-tile' + (today ? " today" : "") + (t.more ? " more" : "") + (dealt[t.id] ? "" : " dealt") + '" data-tile="' + esc(t.id) + '" style="--i:' + i + '">' +
       '<button class="desk-tile-body" type="button" data-open-tile="' + esc(t.id) + '" title="Open: lines, note, Harvest project">' +
       '<span class="desk-tile-top"><span class="desk-tile-key">' + esc(t.key || "no issue") + "</span>" +
       (other ? '<span class="desk-tile-desk">' + esc(t.desk || "no desk") + "</span>" : "") + "</span>" +
       '<span class="desk-tile-title">' + esc(t.item_title) + "</span>" +
-      '<span class="desk-tile-hours">' + hours(t.hours) + "</span>" +
+      // A continuation (embarch-desk decision 64): time since the tile was
+      // sent, added to the same entry.
+      '<span class="desk-tile-hours">' + (t.more ? '<span class="desk-tile-plus" title="Time since this tile was sent: ✓ adds it to the same Harvest entry">+</span>' : "") + hours(t.hours) + "</span>" +
       '<span class="desk-tile-date">' + (live ? '<span class="desk-dot" title="A session is on it now; the time still counts"></span>' : "") + esc(dayLabel(t.date)) + "</span>" +
       '<span class="desk-tile-sub">' + esc(sub) + (ready ? " · <b>ready</b>" : "") + "</span>" +
       "</button>" +
@@ -624,12 +626,12 @@
         if (r.sessions) meta.push(r.sessions + " session" + (r.sessions === 1 ? "" : "s") + (r.live ? " (" + r.live + " live)" : ""));
         if (r.bench) meta.push(r.bench + " bench call" + (r.bench === 1 ? "" : "s") + (r.bench_failed ? ', <span style="color:var(--danger);">' + r.bench_failed + " failed</span>" : ""));
         if (r.logged_hours) meta.push('<span class="badge badge-success">' + hours(r.logged_hours) + " in Harvest</span>");
-        if (r.status === "open" && r.hours > 0) meta.push('<span class="badge badge-warning">' + hours(r.hours) + " unsent</span>");
+        if ((r.status === "open" || r.more) && r.hours > 0) meta.push('<span class="badge badge-warning">' + hours(r.hours) + " unsent</span>");
         if (r.status === "discarded") meta.push('<span class="badge badge-neutral">tile discarded</span>');
         if (r.status === "folded") meta.push('<span class="badge badge-neutral">folded into ' + esc(dayLabel(r.folded_into)) + "</span>");
         var lines = (r.lines || []).map(function (l) { return "<li>" + esc(l.text) + "</li>"; }).join("");
         var entries = (r.harvest_entries || []).map(entryHtml).join("");
-        var shown = (r.logged_hours || 0) + (r.status === "open" ? (r.hours || 0) : 0);
+        var shown = (r.logged_hours || 0) + (r.status === "open" || r.more ? (r.hours || 0) : 0);
         return '<div class="desk-day-row"><div class="desk-day-title">' + title + "</div>" +
           '<div class="desk-day-hours">' + hours(shown) + "</div>" +
           (entries ? '<ul class="desk-entries">' + entries + "</ul>" : "") +
@@ -922,7 +924,7 @@
     var h = t.harvest;
     // A later tile of the same item can take this one's time and lines:
     // one Harvest entry, dated that day (embarch-desk decision 58).
-    var later = (view.hand || []).filter(function (x) { return x.item_id === t.item_id && x.date > t.date; })
+    var later = t.more ? null : (view.hand || []).filter(function (x) { return x.item_id === t.item_id && x.date > t.date && !x.more; })
       .sort(function (a, b) { return a.date < b.date ? 1 : -1; })[0];
     var options = '<option value="">— pick, or Polish to have Claude guess —</option>';
     if (targets) {
@@ -945,13 +947,20 @@
       '</ul><div class="desk-form"><input id="desk-line" class="desk-input" type="text" placeholder="Add a line yourself" />' +
       '<button class="btn btn-tiny" type="button" id="desk-line-add">Add</button></div></div>' +
       "<div>" +
-      '<div class="desk-label">Hours <span class="desk-detail">(captured ' + hours(t.computed_hours) + ")</span></div>" +
+      (t.more
+        ? '<div class="desk-label">Hours to add <span class="desk-detail">(' + hours(t.computed_hours) + " since it was sent; the entry holds " + hours(t.entry_hours) + ")</span></div>"
+        : '<div class="desk-label">Hours <span class="desk-detail">(captured ' + hours(t.computed_hours) + ")</span></div>") +
       '<input id="desk-hours" class="desk-input" type="number" min="0" max="24" step="0.25" value="' + esc(t.hours) + '" data-orig="' + esc(t.hours) + '" data-computed="' + esc(t.computed_hours) + '" />' +
       '<button class="btn btn-tiny" type="button" id="desk-hours-computed" title="Stop overriding: the tile goes back to the hours the desk computes">Use computed</button>' +
-      '<div class="desk-label">Harvest project and task</div>' +
-      '<select id="desk-target" class="desk-input">' + options + "</select>" +
-      '<div class="desk-label">Note</div>' +
-      '<textarea id="desk-note" class="desk-input desk-textarea" rows="4" placeholder="Polish drafts this from the lines">' + esc(t.note || "") + "</textarea>" +
+      (t.more
+        ? '<div class="desk-label">Harvest entry</div><div class="desk-detail">' + esc(h ? h.label : "") + "</div>" +
+          '<div class="desk-label">Sent note</div><div class="desk-detail">' + esc(t.sent_note || "") + "</div>" +
+          '<div class="desk-label">Entry note</div>' +
+          '<textarea id="desk-note" class="desk-input desk-textarea" rows="4" placeholder="Polish drafts the whole entry\'s note. Left empty, the sent note stays with the new lines appended">' + esc(t.note || "") + "</textarea>"
+        : '<div class="desk-label">Harvest project and task</div>' +
+          '<select id="desk-target" class="desk-input">' + options + "</select>" +
+          '<div class="desk-label">Note</div>' +
+          '<textarea id="desk-note" class="desk-input desk-textarea" rows="4" placeholder="Polish drafts this from the lines">' + esc(t.note || "") + "</textarea>") +
       "</div></div>" +
       '<div class="desk-dialog-actions">' +
       '<button class="btn" type="button" id="desk-polish">Polish with Claude</button>' +
@@ -961,7 +970,7 @@
         esc(dayLabel(later.date)) + '\'s tile, sent as one Harvest entry dated that day">Fold into ' + esc(dayLabel(later.date)) + "</button>" : "") +
       '<button class="btn" type="button" id="desk-save">Save</button>' +
       '<button class="btn desk-no-big" type="button" id="desk-discard-big">✕ Discard</button>' +
-      '<button class="btn btn-primary" type="button" id="desk-approve-big">✓ Add to Harvest</button>' +
+      '<button class="btn btn-primary" type="button" id="desk-approve-big">' + (t.more ? "✓ Add to the entry" : "✓ Add to Harvest") + "</button>" +
       "</div>";
   }
 
@@ -1022,7 +1031,7 @@
       return api("POST", "/tiles/" + encodeURIComponent(id) + "/approve");
     }).then(function (r) {
       closeDialog();
-      flash("Added to Harvest: " + hours(r.hours) + ".");
+      flash(r.entry_hours ? "Added " + hours(r.hours) + " to the Harvest entry, now " + hours(r.entry_hours) + "." : "Added to Harvest: " + hours(r.hours) + ".");
       return play(id, "sent").then(load);
     }).catch(function (e) {
       if (fromDialog) setDialogStatus(e.message); else flash(e.message);
@@ -1030,7 +1039,9 @@
   }
 
   function discard(id) {
-    if (!window.confirm("Discard this tile? Its time will not reach Harvest.")) return;
+    var t = findTile(id);
+    var ask = t && t.more ? "Drop the time since this tile was sent? The Harvest entry stays as it is." : "Discard this tile? Its time will not reach Harvest.";
+    if (!window.confirm(ask)) return;
     api("POST", "/tiles/" + encodeURIComponent(id) + "/discard").then(function () {
       closeDialog();
       return play(id, "dropped").then(load);
