@@ -6783,6 +6783,9 @@
       const resp = await fetch("/api/topology/pickers");
       if (!resp.ok) return;
       rolePickers = await resp.json();
+      // The bench box takes its label from this answer, so redraw now
+      // instead of showing the raw qualifier until the next snapshot.
+      if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
     } catch (e) {
       /* the picker falls back to whatever it last had; the box still draws */
     }

@@ -426,10 +426,10 @@ try:
     _labels_js = ("return Array.from(document.querySelectorAll('#topology-diagram "
                   "[data-enroll-role] text')).map(function(t){return t.textContent});")
     labels = script(_labels_js)
-    for _ in range(40):
+    for _ in range(12):
         # The bench box first draws the raw west qualifier and takes its label
-        # once /api/topology/pickers has answered (decision 45), so a
-        # non-empty line is not yet the settled one.
+        # once /api/topology/pickers has answered (topology-boards.md, "A dev-bench
+        # board type is shown by its label"), so a non-empty line is not yet settled.
         if len(labels) >= 4 and labels[1] and labels[1] != "esp32c5_devkitc/esp32c5/hpcore" and labels[3]:
             break
         time.sleep(0.25)
@@ -648,10 +648,10 @@ try:
     _labels_js = ("return Array.from(document.querySelectorAll('#topology-diagram "
                   "[data-enroll-role] text')).map(function(t){return t.textContent});")
     labels = script(_labels_js)
-    for _ in range(40):
+    for _ in range(12):
         # The bench box first draws the raw west qualifier and takes its label
-        # once /api/topology/pickers has answered (decision 45), so a
-        # non-empty line is not yet the settled one.
+        # once /api/topology/pickers has answered (topology-boards.md, "A dev-bench
+        # board type is shown by its label"), so a non-empty line is not yet settled.
         if len(labels) >= 4 and labels[1] and labels[1] != "esp32c5_devkitc/esp32c5/hpcore" and labels[3]:
             break
         time.sleep(0.25)
