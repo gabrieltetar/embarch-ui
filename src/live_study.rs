@@ -1172,6 +1172,26 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             let row = state.push_feed("polled", format!("polled: {status}"));
             Some(frame("status", json!({ "status": state.status_json(), "row": row })))
         }
+        // A host study's step and its operator prompts (`embarch-core`
+        // decisions 95, 105) reach the feed as rows. **Rows only, for now**:
+        // the modal that answers a prompt is `tasks/ui/100`; until it lands a
+        // prompt is shown here and answered from `embarch-api`.
+        FollowItem::Event(StudyEvent::HostStepCompleted { list, step_index, result, detail, .. }) => {
+            let row = state.push_feed(
+                "host_step",
+                format!("{list:?}[{step_index}] '{}': {:?} ({detail})", result.step_name, result.outcome),
+            );
+            Some(frame("event", json!({ "row": row })))
+        }
+        FollowItem::Event(StudyEvent::PromptPending { prompt_id, step_name, text, .. }) => {
+            let row = state.push_feed("prompt", format!("prompt {prompt_id} waiting for a person — '{step_name}': {text}"));
+            Some(frame("event", json!({ "row": row })))
+        }
+        FollowItem::Event(StudyEvent::PromptResolved { prompt_id, answer, answered_by, .. }) => {
+            let by = answered_by.map(|b| format!(" (from {b})")).unwrap_or_default();
+            let row = state.push_feed("prompt", format!("prompt {prompt_id}: {answer}{by}"));
+            Some(frame("event", json!({ "row": row })))
+        }
         FollowItem::Event(StudyEvent::StatusChanged { status, reason, .. }) => {
             state.status = status.clone();
             if reason.is_some() {
