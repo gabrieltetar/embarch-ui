@@ -323,7 +323,11 @@ _iso = tempfile.mkdtemp(prefix="embarch-ui-topology-iso-")
 env = dict(os.environ, EMBARCH_UI_CONFIG=cfg, EMBARCH_UI_PORT=UI_PORT,
            EMBARCH_DESK_PORT=str(int(UI_PORT) + 1),
            EMBARCH_DESK_CONFIG_DIR=_iso + "/desk-cfg", XDG_DATA_HOME=_iso + "/data",
-           XDG_CONFIG_HOME=_iso + "/config")
+           XDG_CONFIG_HOME=_iso + "/config",
+           # The recents list is written on every project open; naming it
+           # explicitly is what keeps a run off the owner's real
+           # ~/.local/share/embarch/ui/recent-projects.json (ui/096).
+           EMBARCH_UI_STATE=_iso + "/recent-projects.json")
 env["HOME"] = _iso + "/home"
 ui = subprocess.Popen([os.environ.get("EMBARCH_UI_BIN", "./target/release/embarch-ui")], env=env,
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -423,7 +427,10 @@ try:
                   "[data-enroll-role] text')).map(function(t){return t.textContent});")
     labels = script(_labels_js)
     for _ in range(40):
-        if len(labels) >= 4 and labels[1] and labels[3]:
+        # The bench box first draws the raw west qualifier and takes its label
+        # once /api/topology/pickers has answered (decision 45), so a
+        # non-empty line is not yet the settled one.
+        if len(labels) >= 4 and labels[1] and labels[1] != "esp32c5_devkitc/esp32c5/hpcore" and labels[3]:
             break
         time.sleep(0.25)
         labels = script(_labels_js)
@@ -642,7 +649,10 @@ try:
                   "[data-enroll-role] text')).map(function(t){return t.textContent});")
     labels = script(_labels_js)
     for _ in range(40):
-        if len(labels) >= 4 and labels[1] and labels[3]:
+        # The bench box first draws the raw west qualifier and takes its label
+        # once /api/topology/pickers has answered (decision 45), so a
+        # non-empty line is not yet the settled one.
+        if len(labels) >= 4 and labels[1] and labels[1] != "esp32c5_devkitc/esp32c5/hpcore" and labels[3]:
             break
         time.sleep(0.25)
         labels = script(_labels_js)
