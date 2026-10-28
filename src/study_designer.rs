@@ -2307,6 +2307,62 @@ fn advisories_for(study: &Study, protocols_wire_len: usize) -> Vec<String> {
 /// this is the read-only view the browser shows instead, and it is also
 /// what the existing version-check dialog reads, so that dialog needs no
 /// route of its own.
+/// One protocol a saved study carries whose current `.eap` no longer matches
+/// it (`embarch-ui` decision 68). Unchanged protocols are never listed.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DivergenceNote {
+    protocol: String,
+    /// `"changed"` or `"gone"`.
+    status: &'static str,
+    differences: Vec<DivergenceDifference>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DivergenceDifference {
+    /// Rendered as text, never branched on: the study-designer owns the labels.
+    part: String,
+    name: String,
+    /// `"added"`, `"removed"` or `"modified"`.
+    how: &'static str,
+}
+
+/// Compares the protocols a saved study file carries with the repo's current
+/// definitions. A file that is not a readable `protocols` array, or a repo
+/// whose names collide (`defs()` refused), yields no note: the check is
+/// advisory (`embarch-study-designer` decision 87) and must never fail a load.
+fn divergence_notes(value: &serde_json::Value, current: &[ProtocolDef]) -> Vec<DivergenceNote> {
+    use embarch_study_designer::{Divergence, DifferenceKind};
+    let Some(carried) = value.get("protocols") else { return Vec::new() };
+    let Ok(carried) = serde_json::from_value::<Vec<ProtocolDef>>(carried.clone()) else {
+        return Vec::new();
+    };
+    embarch_study_designer::protocol_divergence(&carried, current)
+        .into_iter()
+        .filter_map(|(protocol, d)| match d {
+            Divergence::Unchanged => None,
+            Divergence::Gone => {
+                Some(DivergenceNote { protocol, status: "gone", differences: Vec::new() })
+            }
+            Divergence::Changed(diffs) => Some(DivergenceNote {
+                protocol,
+                status: "changed",
+                differences: diffs
+                    .into_iter()
+                    .map(|d| DivergenceDifference {
+                        part: d.part.to_string(),
+                        name: d.name,
+                        how: match d.how {
+                            DifferenceKind::Added => "added",
+                            DifferenceKind::Removed => "removed",
+                            DifferenceKind::Modified => "modified",
+                        },
+                    })
+                    .collect(),
+            }),
+        })
+        .collect()
+}
+
 #[derive(Debug, Serialize)]
 struct StudySummary {
     slug: String,
@@ -2318,6 +2374,8 @@ struct StudySummary {
     steps: Vec<String>,
     taps: Vec<String>,
     protocols: Vec<String>,
+    /// Protocols this file carries that the repo's `.eap` no longer matches.
+    protocol_divergence: Vec<DivergenceNote>,
     record_checks: usize,
 }
 
@@ -2373,6 +2431,10 @@ pub async fn api_study_summary(
         steps: list("steps", "name"),
         taps: list("streams", "name"),
         protocols: list("protocols", "name"),
+        protocol_divergence: sd
+            .protocol_defs()
+            .map(|current| divergence_notes(&value, &current))
+            .unwrap_or_default(),
         record_checks: value
             .get("record_checks")
             .and_then(|c| c.as_array())
@@ -3190,6 +3252,10 @@ struct LoadedStudy {
     /// stated" distinguishable after a round trip — a study reloaded and
     /// re-saved must not gain an explicit level it never had.
     dev_bench_log_level: Option<String>,
+    /// Protocols the file carries that the repo's `.eap` no longer matches
+    /// (decision 68). Advisory: the study still runs what it carries, and a
+    /// re-save resolves the current definitions.
+    protocol_divergence: Vec<DivergenceNote>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3434,6 +3500,10 @@ pub async fn api_studies_load(
             .get("dev_bench_log_level")
             .and_then(|l| l.as_str())
             .map(str::to_string),
+        protocol_divergence: sd
+            .protocol_defs()
+            .map(|current| divergence_notes(&value, &current))
+            .unwrap_or_default(),
     })
     .into_response()
 }
@@ -5653,6 +5723,53 @@ repeat = [{ name = "green", type = "i32le" }]
             std::fs::write(dir.join(format!("{stem}.eap")), text).unwrap();
         }
         scratch
+    }
+
+    fn defs_of(scratch: &Scratch) -> Vec<ProtocolDef> {
+        embarch_study_designer::eap_repo::scan(&scratch.0).unwrap().defs().unwrap()
+    }
+
+    /// Decision 68: edited reads `changed` with its differences, deleted
+    /// reads `gone`, untouched is not listed at all.
+    #[test]
+    fn a_saved_study_reports_a_protocol_that_diverged_from_its_eap() {
+        let two = format!("{ONE_PROTOCOL}\n{}", ONE_PROTOCOL.replace("bds", "other"));
+        let carried = defs_of(&repo_with_protocols("div-a", &[("p", &two)]));
+        let value = serde_json::json!({ "protocols": carried });
+
+        let same = defs_of(&repo_with_protocols("div-same", &[("p", &two)]));
+        assert!(divergence_notes(&value, &same).is_empty());
+
+        // `bds` edited (a state added), `other` deleted.
+        let edited = ONE_PROTOCOL.replace(
+            "    state done outcome: pass",
+            "    state extra outcome: fail\n    state done outcome: pass",
+        );
+        let now = defs_of(&repo_with_protocols("div-b", &[("p", &edited)]));
+        let notes = divergence_notes(&value, &now);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let bds = notes.iter().find(|n| n.protocol == "bds").unwrap();
+        assert_eq!(bds.status, "changed");
+        assert!(bds.differences.iter().any(|d| d.name == "extra" && d.how == "added"), "{bds:?}");
+        let other = notes.iter().find(|n| n.protocol == "other").unwrap();
+        assert_eq!(other.status, "gone");
+        assert!(other.differences.is_empty());
+    }
+
+    #[test]
+    fn a_study_without_readable_protocols_reports_no_divergence() {
+        let now = defs_of(&repo_with_protocols("div-c", &[("p", ONE_PROTOCOL)]));
+        assert!(divergence_notes(&serde_json::json!({ "name": "x" }), &now).is_empty());
+        assert!(divergence_notes(&serde_json::json!({ "protocols": "junk" }), &now).is_empty());
+    }
+
+    /// The note's wording is the requirement that it say the study still runs.
+    #[test]
+    fn the_divergence_note_says_the_study_still_runs_what_it_carries() {
+        const APP_JS: &str = include_str!("../assets/app.js");
+        assert!(APP_JS.contains("function sdDivergenceHtml(notes)"));
+        assert!(APP_JS.contains("still runs the protocol"));
+        assert!(APP_JS.contains("saving the study again"));
     }
 
     /// A file that did not parse carries its error and does not take the

@@ -2863,7 +2863,7 @@
       line("record checks", String(st.record_checks)) +
       (st.protocols.length ? line("protocols", st.protocols.join(", ")) : "") +
       (st.taps.length ? line("taps", st.taps.join(", ")) : "") +
-      "</div>" +
+      "</div>" + sdDivergenceHtml(st.protocol_divergence) +
       '<ol class="sd-stored-steps">' +
       (st.steps.length
         ? st.steps.map(function (n) { return "<li>" + escapeHtml(n) + "</li>"; }).join("")
@@ -2883,6 +2883,29 @@
     if (!sdStoredSlug) return;
     sdPendingRun = { kind: "stored", slug: sdStoredSlug };
     return sdOpenRunCheck();
+  }
+
+  /* The note for protocols a saved study carries that the repo's `.eap` no
+   * longer matches (ui decision 68). `part` is rendered as text, never
+   * branched on. Advisory only: nothing here blocks a run or a save. */
+  function sdDivergenceHtml(notes) {
+    if (!notes || !notes.length) return "";
+    var items = notes.map(function (n) {
+      var head = "<strong>" + escapeHtml(n.protocol) + "</strong> — " +
+        (n.status === "gone"
+          ? "no longer in this repo's .eap files (renamed, deleted, or its file does not parse)"
+          : "differs from the current .eap");
+      var diffs = (n.differences || []).map(function (d) {
+        return "<li>" + escapeHtml(d.how) + " " + escapeHtml(d.part) + " <span class=\"mono\">" +
+          escapeHtml(d.name) + "</span></li>";
+      }).join("");
+      return "<li>" + head + (diffs ? "<ul>" + diffs + "</ul>" : "") + "</li>";
+    }).join("");
+    return '<div class="sd-divergence"><p class="placeholder-note"><strong>This study carries ' +
+      "an out-of-date protocol.</strong> It still runs the protocol it carries, exactly as saved; " +
+      "nothing is broken. To adopt the current .eap, load the study into the table and save it " +
+      "again — saving the study again resolves the current definitions" +
+      " (a run-only file has no rows, so it keeps what it carries).</p><ul>" + items + "</ul></div>";
   }
 
   async function sdLoadStudy(slug) {
@@ -2912,6 +2935,9 @@
   function sdApplyStudy(loaded) {
     loaded = loaded || {};
     sdShowBuildError("");
+    // Assigned on every call like the rest: a new study clears the last note.
+    var divergence = sdEl("sd-divergence");
+    if (divergence) divergence.innerHTML = sdDivergenceHtml(loaded.protocol_divergence);
     sdEl("sd-name").value = loaded.name || "untitled-study";
     sdLoadedName = sdEl("sd-name").value;
     // `{}` rather than a skipped call when the file states no requirements:
