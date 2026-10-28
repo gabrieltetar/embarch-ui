@@ -558,6 +558,16 @@
     return '<span class="placeholder-note">—</span>';
   }
 
+  // A signal's origin is a role, or (decision 48 of embarch-topology) a
+  // role-less bench board named by its probe serial with `origin_role` empty.
+  // A board shows by its enrolled name; a serial no enrolled board matches
+  // shows as the serial itself.
+  function signalOriginLabel(snapshot, sig) {
+    if (!sig.origin_board) return sig.origin_role;
+    const board = (snapshot.enrolled || []).find((b) => b.probe_serial === sig.origin_board);
+    return board && board.name ? board.name : sig.origin_board;
+  }
+
   function signalsTableRows(snapshot) {
     const signals = snapshot.signals || [];
     if (!signals.length) {
@@ -570,7 +580,7 @@
       .map(
         (sig) =>
           '<tr><td class="mono">' + escapeHtml(sig.name) + "</td>" +
-          '<td class="mono">' + escapeHtml(sig.origin_role) + "</td>" +
+          '<td class="mono">' + escapeHtml(signalOriginLabel(snapshot, sig)) + "</td>" +
           '<td class="mono">' + escapeHtml(sig.direction) + "</td>" +
           "<td>" + routeCell(sig) + "</td>" +
           "<td>" + carrierCell(snapshot, sig) + "</td>" +
@@ -6067,17 +6077,31 @@
     sigEl("sig-result").style.display = "none";
     sigEl("sig-name").value = existing ? existing.name : "";
     sigEl("sig-name").readOnly = !!existing;
-    // The origin picker holds the two roles. A signal declared before the
-    // vocabulary closed can name something else, and that value gets its
+    // The origin picker holds the two roles, then the enrolled role-less
+    // bench boards (value "board:<probe serial>"). A signal declared before
+    // the vocabulary closed can name something else, and that value gets its
     // own option rather than falling silently back to `dut` — re-declaring
-    // a signal must not quietly re-point it at a different origin.
-    const origin = existing ? existing.origin_role : "dut";
+    // a signal must not quietly re-point it at a different origin. The same
+    // goes for a board-origin signal whose board is no longer enrolled.
     const originSelect = sigEl("sig-origin");
+    Array.prototype.slice.call(originSelect.options).forEach((o) => {
+      if (o.dataset.dynamic) originSelect.removeChild(o);
+    });
+    const addOrigin = (value, text) => {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = text;
+      o.dataset.dynamic = "1";
+      originSelect.appendChild(o);
+    };
+    ((latestSnapshot && latestSnapshot.enrolled) || []).forEach((b) => {
+      if (b.role === "" && b.probe_serial) addOrigin("board:" + b.probe_serial, (b.name || b.probe_serial) + " (bench board)");
+    });
+    const origin = existing && existing.origin_board
+      ? "board:" + existing.origin_board
+      : existing ? existing.origin_role : "dut";
     if (!Array.prototype.some.call(originSelect.options, (o) => o.value === origin)) {
-      const extra = document.createElement("option");
-      extra.value = origin;
-      extra.textContent = origin + " (not a role)";
-      originSelect.appendChild(extra);
+      addOrigin(origin, origin.replace(/^board:/, "") + (existing && existing.origin_board ? " (board not enrolled)" : " (not a role)"));
     }
     originSelect.value = origin;
     sigEl("sig-direction").value = existing ? existing.direction : "dut-to-host";
@@ -6140,10 +6164,16 @@
 
     var body = {
       name: name,
-      origin_role: sigEl("sig-origin").value || "dut",
       direction: sigEl("sig-direction").value,
       route: route,
     };
+    // One origin, never both: a bench board sends origin_board with an empty
+    // origin_role (the field has no serde default on the wire type).
+    var originPick = sigEl("sig-origin").value || "dut";
+    if (originPick.indexOf("board:") === 0) {
+      body.origin_role = "";
+      body.origin_board = originPick.slice(6);
+    } else body.origin_role = originPick;
     var resp = await fetch("/api/signals", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
