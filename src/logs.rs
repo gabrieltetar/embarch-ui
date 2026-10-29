@@ -130,11 +130,14 @@ fn publish_new_lines(previous: &mut Vec<String>, latest: Vec<String>, tx: &watch
 /// counterpart** (`tasks/ui/059`) — otherwise a still-growing last line
 /// breaks the run's exact equality outright, and the search falls through to
 /// a *shorter*, coincidental overlap on whatever the pre-growth content
-/// repeats earlier in the window, republishing everything in between even
-/// though it was already sent when that longer window was current. Checking
-/// "extends" instead of "equals" only at the run's final position keeps the
-/// longest-run anchor pinned through a growing line instead of abandoning it
-/// for a shorter, repeat-prone one.
+/// repeats earlier in the window, republishing lines already sent.
+/// **When the last line matched by growth rather than equality, the return
+/// starts at `k - 1`, not `k`:** the grown line is itself republished, so its
+/// new tail reaches the console (one duplicated line, the tolerance above)
+/// instead of being swallowed for good — `*previous` is overwritten with the
+/// grown text, so a line dropped here is never offered again. Equality at the
+/// last position still returns `new[k..]`, or every steady-state poll would
+/// republish its last line forever. Decision 70.
 fn diff_new_lines(previous: &[String], new: &[String]) -> Vec<String> {
     if previous == new {
         return Vec::new();
@@ -146,7 +149,8 @@ fn diff_new_lines(previous: &[String], new: &[String]) -> Vec<String> {
         let body_matches = prev_tail[..k - 1] == new_head[..k - 1];
         let last_matches = new_head[k - 1].starts_with(prev_tail[k - 1].as_str());
         if body_matches && last_matches {
-            return new[k..].to_vec();
+            let grew = new_head[k - 1] != prev_tail[k - 1];
+            return new[if grew { k - 1 } else { k }..].to_vec();
         }
     }
     new.to_vec()
@@ -217,29 +221,46 @@ mod tests {
 
     /// `tasks/ui/059`: the previous window's last line is still growing
     /// (Core's tail can end mid-line, decision 13) *and* its pre-growth
-    /// content repeats earlier in the same window. The true overlap is the
-    /// whole previous window with its last line extended, but the old code
-    /// only tested for exact equality, so growth broke that full-length
-    /// match and the search fell through to the shorter, coincidental
-    /// overlap on the earlier "A" — republishing "B", which was already
-    /// sent when the window was `["A", "B", "A"]`.
+    /// content repeats earlier in the window. Exact equality used to fail the
+    /// full-length match and fall through to the coincidental overlap on the
+    /// earlier "A", republishing "B". Now "B" stays unsent and the grown line
+    /// is published (leg 123 refused a first fix that returned nothing here).
     #[test]
-    fn a_growing_trailing_line_does_not_republish_a_line_already_sent() {
+    fn a_growing_trailing_line_with_a_repeat_publishes_the_grown_line_only() {
         let previous = lines(&["A", "B", "A"]);
         let new = lines(&["A", "B", "A2"]);
-        // Nothing genuinely new exists yet — "A2" is the same line as "A",
-        // still being written — so there is nothing to publish, and
-        // critically "B" must not come back.
-        assert_eq!(diff_new_lines(&previous, &new), Vec::<String>::new());
+        assert_eq!(diff_new_lines(&previous, &new), lines(&["A2"]));
     }
 
-    /// Same growth, but this time real content follows it in the same poll:
-    /// only the genuinely new line should be published, not the line that
-    /// merely repeats earlier in the window.
     #[test]
-    fn a_growing_trailing_line_followed_by_a_real_new_line_publishes_only_the_new_line() {
+    fn a_growing_trailing_line_with_a_repeat_and_a_new_line_publishes_both() {
         let previous = lines(&["A", "B", "A"]);
         let new = lines(&["A", "B", "A2", "C"]);
-        assert_eq!(diff_new_lines(&previous, &new), lines(&["C"]));
+        assert_eq!(diff_new_lines(&previous, &new), lines(&["A2", "C"]));
+    }
+
+    #[test]
+    fn plain_growth_without_a_repeat_publishes_the_grown_line() {
+        let previous = lines(&["X", "Y"]);
+        let new = lines(&["X", "Y2"]);
+        assert_eq!(diff_new_lines(&previous, &new), lines(&["Y2"]));
+    }
+
+    #[test]
+    fn steady_state_publishes_nothing() {
+        let a = lines(&["X", "Y"]);
+        assert!(diff_new_lines(&a, &a.clone()).is_empty());
+        // Window slid, last line unchanged: equality at the last position.
+        let slid = lines(&["Y", "Z"]);
+        assert!(diff_new_lines(&lines(&["X", "Y", "Z"]), &slid).is_empty());
+    }
+
+    #[test]
+    fn a_line_growing_across_two_polls_is_delivered_in_full() {
+        let p1 = lines(&["X", "Y2"]);
+        let p2 = lines(&["X", "Y2Z"]);
+        assert_eq!(diff_new_lines(&p1, &p2), lines(&["Y2Z"]));
+        let p3 = lines(&["X", "Y2Z", "W"]);
+        assert_eq!(diff_new_lines(&p2, &p3), lines(&["W"]));
     }
 }
