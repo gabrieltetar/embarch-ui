@@ -130,6 +130,38 @@ def running_rail():
         for i in range(n))).encode()
 
 
+# ui/101: a host study that stops at a `Prompt`. It is not in the listing, nor
+# does `GET /study/<id>` know it, until `POST /_stub/prompt/start` (no auth: the
+# drive's own control surface). Then it is `running` with a `pending_prompt`,
+# its event stream carries `PromptPending`/`PromptResolved`, and
+# `POST /study/<id>/prompt` answers it (or returns 409 in `conflict` mode).
+PROMPTING = "a1" * 16
+PROMPT = {"on": False, "pending": None, "frames": [], "answers": [], "conflict": False}
+PROMPT_LOCK = threading.Lock()
+
+
+def _prompt_frame(obj):
+    PROMPT["frames"].append(b"data: " + json.dumps(obj).encode() + b"\n\n")
+
+
+def prompt_open(prompt_id, text, deadline_in_ms):
+    now = int(time.time() * 1000)
+    with PROMPT_LOCK:
+        PROMPT["on"] = True
+        PROMPT["pending"] = {"prompt_id": prompt_id, "list": "Steps", "step_index": 2,
+                             "step_name": "swap the cable", "text": text,
+                             "opened_utc_ms": now, "deadline_utc_ms": now + deadline_in_ms}
+        _prompt_frame(dict(PROMPT["pending"], kind="PromptPending", study_id=PROMPTING))
+
+
+def prompt_resolve(prompt_id, answer, answered_by):
+    with PROMPT_LOCK:
+        PROMPT["pending"] = None
+        _prompt_frame({"kind": "PromptResolved", "study_id": PROMPTING, "prompt_id": prompt_id,
+                       "answer": answer, "answered_by": answered_by,
+                       "resolved_utc_ms": int(time.time() * 1000)})
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -164,6 +196,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"status": "ok", "probes": [],
                                "study_designer_schema_version": SCHEMA})
         if path == "/studies":
+            if PROMPT["on"]:
+                extra = {"study_id": PROMPTING, "study_name": "prompting", "status": "running",
+                         "started_utc_ms": T0, "steps": {"total": 3, "passed": 0, "failed": 0,
+                                                         "timed_out": 0, "unknown": 0}, "taps": []}
+                return self._json(dict(STUDIES, studies=STUDIES["studies"] + [extra]))
             return self._json(STUDIES)
         if path == "/alerts" or path == "/probes/enrolled" or path == "/signals":
             return self._json([])
@@ -175,6 +212,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) >= 2 and parts[0] == "study":
             sid = parts[1]
             if len(parts) == 2:
+                if sid == PROMPTING and PROMPT["on"]:
+                    return self._json({"status": "running", "current_step": 2, "total_steps": 3,
+                                       "result": None, "reason": None,
+                                       "pending_prompt": PROMPT["pending"]})
                 if sid in (RUNNING, LIVEBIG):
                     return self._json({"status": "running", "current_step": 0,
                                        "total_steps": 3, "result": None, "reason": None})
@@ -199,7 +240,60 @@ class Handler(BaseHTTPRequestHandler):
                     return self._text("no such tap", 404)
                 return self._bytes(body)
             if parts[2] == "events":
+                if sid == PROMPTING:
+                    return self._sse_prompt()
                 return self._sse(sid)
+        return self._text("not found in the stub", 404)
+
+    def _sse_prompt(self):
+        """Holds open, sending each frame queued after it connected (no replay,
+        like Core's stream). Ends on `reset`."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        sent = len(PROMPT["frames"])
+        try:
+            while PROMPT["on"]:
+                while sent < len(PROMPT["frames"]):
+                    self.wfile.write(PROMPT["frames"][sent])
+                    sent += 1
+                self.wfile.flush()
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        body = json.loads(raw) if raw else {}
+        path = urlparse(self.path).path
+        if path.startswith("/_stub/prompt/"):
+            op = path.rsplit("/", 1)[1]
+            if op == "start":
+                prompt_open(body.get("prompt_id", 1), body.get("text", "Move the probe to J4, then confirm"),
+                            body.get("deadline_in_ms", 120000))
+            elif op == "resolve":
+                prompt_resolve(body["prompt_id"], body["answer"], body.get("answered_by"))
+            elif op == "conflict":
+                PROMPT["conflict"] = bool(body.get("on", True))
+            elif op == "answers":
+                return self._json({"answers": PROMPT["answers"]})
+            elif op == "reset":
+                PROMPT.update(on=False, pending=None, frames=[], answers=[], conflict=False)
+            return self._json({"ok": True})
+        if self.headers.get("authorization") != "Bearer " + TOKEN:
+            return self._text("unauthorized", 401)
+        parts = [p for p in path.split("/") if p]
+        if len(parts) == 3 and parts[0] == "study" and parts[1] == PROMPTING and parts[2] == "prompt":
+            PROMPT["answers"].append(body)
+            if PROMPT["conflict"] or PROMPT["pending"] is None \
+                    or PROMPT["pending"]["prompt_id"] != body.get("prompt_id"):
+                return self._text("prompt %s is not the one waiting" % body.get("prompt_id"), 409)
+            prompt_resolve(body["prompt_id"], body["answer"], body.get("answered_by"))
+            return self._json({"study_id": PROMPTING, "prompt_id": body["prompt_id"],
+                               "answer": body["answer"], "answered_by": body.get("answered_by"),
+                               "status": "running"})
         return self._text("not found in the stub", 404)
 
     def _sse_big(self, sid):

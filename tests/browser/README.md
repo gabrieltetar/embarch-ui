@@ -205,3 +205,5 @@ picker follows. Start the UI for it with `EMBARCH_DESK_PORT` set to a port
 nothing listens on and `EMBARCH_DESK_CONFIG_DIR` and `XDG_DATA_HOME` at scratch
 directories: the page proxies to the real desk and writes the recents list, and
 a click on "Open project" there posts to both.
+
+`drive_prompt.py` (ui/101) renders the operator-prompt modal (decision 69): `stub_core.py` serves a host study with a `pending_prompt` once `POST /_stub/prompt/start` is called (a control surface on the stub's own port, no token). Needs `EMBARCH_STUB_PORT` set to the stub's port (default 4901) as well as the two address variables.
