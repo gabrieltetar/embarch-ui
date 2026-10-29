@@ -41,7 +41,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embarch_core_client::{
-    CoreClient, FollowItem, FollowMode, FollowOptions, StudyEvent,
+    CoreClient, FollowItem, FollowMode, FollowOptions, PendingPrompt, PromptAnswerRequest,
+    StudyEvent,
 };
 use crate::trace::{self, ClockAnchor, Projection};
 use axum::extract::State;
@@ -76,6 +77,10 @@ const MAX_STEPS: usize = 64;
 /// How many sessions are kept. A finished session is worth keeping so the
 /// tab can be reopened on it without a disk read; a dozen of them is not.
 const MAX_SESSIONS: usize = 8;
+/// How often the UI asks Core which studies are running, so a prompt in one
+/// it did not start still reaches the modal. Measured: no; chosen so a prompt
+/// that waits minutes is seen within seconds.
+const WATCH_INTERVAL_SECS: u64 = 3;
 
 /// Frames a browser can receive. One JSON object per SSE frame, `kind`-
 /// tagged the way Core's own events are.
@@ -720,6 +725,37 @@ struct SessionState {
     /// When a `time_chart` frame last went out, so a traced study pushing a
     /// frame every few milliseconds does not redraw per frame.
     last_time_chart: Option<std::time::Instant>,
+    /// A host study's `Prompt` that no one has answered yet (`embarch-core`
+    /// decision 105). Set by `PromptPending`, cleared by `PromptResolved` or
+    /// by the follow ending. **The snapshot carries it**, so a browser that
+    /// opens the page mid-prompt sees the modal (`embarch-ui` decision 69).
+    pending_prompt: Option<PendingPrompt>,
+}
+
+/// Milliseconds since the Unix epoch, on this process's clock.
+fn now_utc_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A pending prompt as the browser takes it. `remaining_ms` is worked out
+/// **here**, against this process's clock, because a browser (a phone at the
+/// bench) has a clock of its own and would count down to a different instant.
+/// That this process and Core agree on the time is **assumed** — they share a
+/// machine in the usual setup — and not measured.
+fn prompt_json(study_id: &str, p: &PendingPrompt) -> Value {
+    json!({
+        "study_id": study_id,
+        "prompt_id": p.prompt_id,
+        "step_name": p.step_name,
+        "step_index": p.step_index,
+        "text": p.text,
+        "opened_utc_ms": p.opened_utc_ms,
+        "deadline_utc_ms": p.deadline_utc_ms,
+        "remaining_ms": p.deadline_utc_ms.saturating_sub(now_utc_ms()),
+    })
 }
 
 impl SessionState {
@@ -912,6 +948,7 @@ impl LiveSession {
                 "provenance": state.provenance,
                 "streams": state.streams,
                 "time_chart": time_chart,
+                "pending_prompt": state.pending_prompt.as_ref().map(|p| prompt_json(&self.study_id, p)),
             }),
         )
     }
@@ -935,14 +972,53 @@ impl LiveSession {
 pub struct LiveStudies {
     core: Arc<CoreClient>,
     sessions: StdMutex<Vec<Arc<LiveSession>>>,
+    /// Every session's prompt frames, so the page's one prompt stream
+    /// (`/api/prompts/events`) hears of a prompt in any study without
+    /// subscribing to each.
+    prompts: broadcast::Sender<String>,
 }
 
 impl LiveStudies {
     pub fn new(core: Arc<CoreClient>) -> Arc<LiveStudies> {
+        let (prompts, _) = broadcast::channel(64);
         Arc::new(LiveStudies {
             core,
             sessions: StdMutex::new(Vec::new()),
+            prompts,
         })
+    }
+
+    /// Every prompt waiting right now, across all sessions.
+    pub fn pending_prompts(&self) -> Vec<Value> {
+        let sessions = self.sessions.lock().unwrap().clone();
+        sessions
+            .iter()
+            .filter_map(|s| {
+                let state = s.state.lock().unwrap();
+                state.pending_prompt.as_ref().map(|p| prompt_json(&s.study_id, p))
+            })
+            .collect()
+    }
+
+    /// **How the UI comes to follow a study it did not start** (`embarch-ui`
+    /// decision 69). A host study started from `embarch-api` is a study this
+    /// process never registered, and its prompt is the one thing that cannot
+    /// wait for someone to open it from the studies list. So this asks Core
+    /// for its studies every few seconds and `ensure`s a follow for any that
+    /// is `pending` or `running` — idempotent, so a study this UI started is
+    /// not followed twice. A failed read is skipped: Core being down is the
+    /// ordinary case and the next tick tries again.
+    pub async fn watch_running(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(WATCH_INTERVAL_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            if let Ok(listing) = self.core.list_studies().await {
+                for s in listing.studies.iter().filter(|s| matches!(s.status.as_str(), "pending" | "running")) {
+                    self.ensure(&s.study_id);
+                }
+            }
+        }
     }
 
     /// The session most recently started. What `GET /api/live/events` with
@@ -976,7 +1052,7 @@ impl LiveStudies {
                 }
             }
             drop(sessions);
-            tokio::spawn(follow(self.core.clone(), session.clone()));
+            tokio::spawn(follow(self.core.clone(), session.clone(), self.prompts.clone()));
             session
         }
     }
@@ -991,7 +1067,7 @@ impl LiveStudies {
 /// `embarch-api`'s `study_watch` runs on. Re-implementing it here would mean
 /// two copies of the one piece of logic that has to be right about missing
 /// data.
-async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>) {
+async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>, prompts: broadcast::Sender<String>) {
     // **Whether this study declared an outpost trace, read once before the
     // first event**, because it decides which of two axes the Time chart is
     // waiting for — and getting that wrong means either drawing on Core's
@@ -1038,8 +1114,15 @@ async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>) {
 
     let outcome = core
         .follow_study(&session.study_id, &options, |item| {
+            let is_prompt = matches!(
+                &item,
+                FollowItem::Event(StudyEvent::PromptPending { .. } | StudyEvent::PromptResolved { .. })
+            );
             let payload = ingest(&session, item);
             if let Some(payload) = payload {
+                if is_prompt {
+                    let _ = prompts.send(payload.clone());
+                }
                 session.send(payload);
             }
         })
@@ -1074,6 +1157,25 @@ async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>) {
                 ));
             }
         }
+    }
+
+    // A follow that ends with a prompt still pending (the study was
+    // cancelled, Core went away) must not leave its modal open for ever.
+    let ended_prompt = {
+        let mut state = session.state.lock().unwrap();
+        state.pending_prompt.take().map(|p| p.prompt_id)
+    };
+    if let Some(prompt_id) = ended_prompt {
+        let payload = frame(
+            "prompt",
+            json!({
+                "study_id": session.study_id,
+                "pending": null,
+                "resolved": { "prompt_id": prompt_id, "answer": "study_ended", "answered_by": null },
+            }),
+        );
+        let _ = prompts.send(payload.clone());
+        session.send(payload);
     }
 
     let payload = {
@@ -1172,10 +1274,9 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             let row = state.push_feed("polled", format!("polled: {status}"));
             Some(frame("status", json!({ "status": state.status_json(), "row": row })))
         }
-        // A host study's step and its operator prompts (`embarch-core`
-        // decisions 95, 105) reach the feed as rows. **Rows only, for now**:
-        // the modal that answers a prompt is `tasks/ui/100`; until it lands a
-        // prompt is shown here and answered from `embarch-api`.
+        // A host study's step reaches the feed as a row; its operator
+        // prompts (`embarch-core` decisions 95, 105) are a row plus the
+        // pending state the modal is drawn from (`embarch-ui` decision 69).
         FollowItem::Event(StudyEvent::HostStepCompleted { list, step_index, result, detail, .. }) => {
             let row = state.push_feed(
                 "host_step",
@@ -1183,14 +1284,36 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             );
             Some(frame("event", json!({ "row": row })))
         }
-        FollowItem::Event(StudyEvent::PromptPending { prompt_id, step_name, text, .. }) => {
-            let row = state.push_feed("prompt", format!("prompt {prompt_id} waiting for a person — '{step_name}': {text}"));
-            Some(frame("event", json!({ "row": row })))
+        FollowItem::Event(event @ StudyEvent::PromptPending { .. }) => {
+            let prompt = event.as_pending_prompt()?;
+            let row = state.push_feed(
+                "prompt",
+                format!("prompt {} waiting for a person — '{}': {}", prompt.prompt_id, prompt.step_name, prompt.text),
+            );
+            let pending = prompt_json(&session.study_id, &prompt);
+            state.pending_prompt = Some(prompt);
+            Some(frame(
+                "prompt",
+                json!({ "study_id": session.study_id, "pending": pending, "resolved": null, "row": row }),
+            ))
         }
         FollowItem::Event(StudyEvent::PromptResolved { prompt_id, answer, answered_by, .. }) => {
-            let by = answered_by.map(|b| format!(" (from {b})")).unwrap_or_default();
+            let by = answered_by.as_ref().map(|b| format!(" (from {b})")).unwrap_or_default();
             let row = state.push_feed("prompt", format!("prompt {prompt_id}: {answer}{by}"));
-            Some(frame("event", json!({ "row": row })))
+            // Only the prompt this names: a late resolve of an old prompt must
+            // not close the modal of a newer one.
+            if state.pending_prompt.as_ref().is_some_and(|p| p.prompt_id == prompt_id) {
+                state.pending_prompt = None;
+            }
+            Some(frame(
+                "prompt",
+                json!({
+                    "study_id": session.study_id,
+                    "pending": null,
+                    "resolved": { "prompt_id": prompt_id, "answer": answer, "answered_by": answered_by },
+                    "row": row,
+                }),
+            ))
         }
         FollowItem::Event(StudyEvent::StatusChanged { status, reason, .. }) => {
             state.status = status.clone();
@@ -1560,6 +1683,80 @@ pub async fn api_live_run(
     axum::extract::Json(req): axum::extract::Json<LiveRunRequest>,
 ) -> axum::response::Response {
     crate::study_designer::run_saved_study(&state, &req.slug, req.allow_version_mismatch).await
+}
+
+/// `GET /api/prompts/events` — the page's one stream of operator prompts,
+/// from every study this process follows. First frame is `prompts`, the ones
+/// waiting now; then a `prompt` frame per change. The modal is driven by this
+/// alone, so it opens on any tab and for a study nobody opened here.
+pub async fn api_prompt_events(State(state): State<crate::AppState>) -> axum::response::Response {
+    // Subscribe first: a frame landing between the two is then delivered
+    // twice rather than lost, and the page keys a prompt by study and id.
+    let rx = state.live.prompts.subscribe();
+    let first = frame("prompts", json!({ "pending": state.live.pending_prompts() }));
+    let live = state.live.clone();
+    let stream = futures_util::stream::unfold((rx, Some(first)), move |(mut rx, pending)| {
+        let live = live.clone();
+        async move {
+        if let Some(first) = pending {
+            return Some((Ok::<Event, Infallible>(Event::default().event("prompt").data(first)), (rx, None)));
+        }
+        loop {
+            match rx.recv().await {
+                Ok(payload) => return Some((Ok(Event::default().event("prompt").data(payload)), (rx, None))),
+                // Fell behind: resend what is pending now, which is the
+                // whole truth a missed frame could have changed.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let payload = frame("prompts", json!({ "pending": live.pending_prompts() }));
+                    return Some((Ok(Event::default().event("prompt").data(payload)), (rx, None)));
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PromptAnswerBody {
+    pub study_id: String,
+    pub prompt_id: u32,
+    /// `confirmed` or `cancelled`.
+    pub answer: String,
+}
+
+/// `POST /api/live/prompt` — the modal's Confirm / Cancel. Relays through
+/// `answer_prompt` as `answered_by: "ui"`. **A `409` is passed on as a `409`
+/// with Core's own text** (the prompt already ended, or someone else answered
+/// first), never turned into a success or a generic failure.
+pub async fn api_live_prompt(
+    State(state): State<crate::AppState>,
+    axum::extract::Json(body): axum::extract::Json<PromptAnswerBody>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    if !matches!(body.answer.as_str(), "confirmed" | "cancelled") {
+        return (StatusCode::BAD_REQUEST, "answer must be 'confirmed' or 'cancelled'").into_response();
+    }
+    let req = PromptAnswerRequest {
+        prompt_id: body.prompt_id,
+        answer: body.answer,
+        answered_by: "ui".to_string(),
+    };
+    match state.core.answer_prompt(&body.study_id, &req).await {
+        Ok(done) => (StatusCode::OK, axum::Json(json!({
+            "study_id": done.study_id,
+            "prompt_id": done.prompt_id,
+            "answer": done.answer,
+            "answered_by": done.answered_by,
+        })))
+        .into_response(),
+        Err(e) => {
+            let text = format!("{e:#}");
+            let code = if text.contains("returned 409") { StatusCode::CONFLICT } else { StatusCode::BAD_GATEWAY };
+            (code, text).into_response()
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1977,5 +2174,76 @@ mod tests {
         assert_eq!(value["kind"], "console");
         assert_eq!(value["lines"][0]["text"], "hello");
         assert_eq!(session.state.lock().unwrap().feed.len(), 0);
+    }
+
+    fn prompt_event(id: u32, deadline: u64) -> StudyEvent {
+        StudyEvent::PromptPending {
+            study_id: "abc".to_string(),
+            prompt_id: id,
+            list: embarch_study_designer::HostList::Steps,
+            step_index: 2,
+            step_name: "swap the cable".to_string(),
+            text: "Move the probe to J4, then confirm".to_string(),
+            opened_utc_ms: 1_000,
+            deadline_utc_ms: deadline,
+        }
+    }
+
+    #[test]
+    fn a_pending_prompt_is_in_the_snapshot_and_a_resolve_clears_it() {
+        let session = LiveSession::new("abc".to_string());
+        let far = now_utc_ms() + 60_000;
+        let payload = ingest(&session, FollowItem::Event(prompt_event(1, far))).unwrap();
+        let v: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["kind"], "prompt");
+        assert_eq!(v["pending"]["prompt_id"], 1);
+        assert_eq!(v["pending"]["step_name"], "swap the cable");
+        let left = v["pending"]["remaining_ms"].as_u64().unwrap();
+        assert!(left > 50_000 && left <= 60_000, "{left}");
+
+        // A page opened now sees it.
+        let snap: Value = serde_json::from_str(&session.snapshot()).unwrap();
+        assert_eq!(snap["pending_prompt"]["prompt_id"], 1);
+        assert_eq!(snap["pending_prompt"]["text"], "Move the probe to J4, then confirm");
+
+        let resolved = StudyEvent::PromptResolved {
+            study_id: "abc".to_string(),
+            prompt_id: 1,
+            answer: "confirmed".to_string(),
+            answered_by: Some("mcp".to_string()),
+            resolved_utc_ms: 2_000,
+        };
+        let payload = ingest(&session, FollowItem::Event(resolved)).unwrap();
+        let v: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["resolved"]["answered_by"], "mcp");
+        assert!(v["pending"].is_null());
+        let snap: Value = serde_json::from_str(&session.snapshot()).unwrap();
+        assert!(snap["pending_prompt"].is_null());
+    }
+
+    #[test]
+    fn a_late_resolve_of_an_old_prompt_does_not_close_a_newer_one() {
+        let session = LiveSession::new("abc".to_string());
+        let far = now_utc_ms() + 60_000;
+        ingest(&session, FollowItem::Event(prompt_event(2, far)));
+        ingest(
+            &session,
+            FollowItem::Event(StudyEvent::PromptResolved {
+                study_id: "abc".to_string(),
+                prompt_id: 1,
+                answer: "timed_out".to_string(),
+                answered_by: None,
+                resolved_utc_ms: 3,
+            }),
+        );
+        assert_eq!(session.state.lock().unwrap().pending_prompt.as_ref().unwrap().prompt_id, 2);
+    }
+
+    #[test]
+    fn an_overdue_prompt_counts_down_from_zero_not_below() {
+        let session = LiveSession::new("abc".to_string());
+        let payload = ingest(&session, FollowItem::Event(prompt_event(1, 5))).unwrap();
+        let v: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["pending"]["remaining_ms"], 0);
     }
 }

@@ -7687,7 +7687,7 @@
       if (frame.status && frame.status.finished) lsOnFinished();
       return;
     }
-    if (frame.kind === "gatt" || frame.kind === "event") {
+    if (frame.kind === "gatt" || frame.kind === "event" || frame.kind === "prompt") {
       if (frame.row) lsAppendFeed(frame.row);
       return;
     }
@@ -10649,6 +10649,240 @@
     }
   }
 
+  /* ---- Operator prompt modal (`embarch-ui` decision 69) --------------------
+   *
+   * A host study can stop at a `Prompt` step until a person answers
+   * (`embarch-core` decision 105). `/api/prompts/events` carries every such
+   * prompt from every study this server follows, so this opens on any tab and
+   * for a study that was never opened here; a page loaded mid-prompt gets the
+   * pending ones as its first frame. It closes on the resolve frame, whoever
+   * answered, and says who when it was not this page.
+   */
+  var pmSource = null;
+  var pmCurrent = null; // { study_id, prompt_id, step_name, text, deadlineAt (performance.now), resolved }
+  var pmTimer = null;
+  var pmQueue = [];
+
+  function pmEl(id) {
+    return document.getElementById(id);
+  }
+
+  function pmFmt(ms) {
+    var s = Math.max(0, Math.ceil(ms / 1000));
+    var m = Math.floor(s / 60);
+    return m + ":" + String(s % 60).padStart(2, "0");
+  }
+
+  function pmBeep() {
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      var ctx = new Ctx();
+      [880, 660, 880].forEach(function (hz, i) {
+        var osc = ctx.createOscillator();
+        var gain = ctx.createGain();
+        osc.frequency.value = hz;
+        gain.gain.value = 0.2;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + i * 0.25);
+        osc.stop(ctx.currentTime + i * 0.25 + 0.18);
+      });
+    } catch (_) {
+      /* a browser that has not had a click yet refuses audio; the modal and the notification still show */
+    }
+  }
+
+  function pmNotify(p) {
+    try {
+      if (!("Notification" in window)) return;
+      var show = function () {
+        new Notification("EmbArch is waiting for you", { body: p.text, tag: "embarch-prompt", requireInteraction: true });
+      };
+      if (Notification.permission === "granted") show();
+      else if (Notification.permission === "default") {
+        Notification.requestPermission().then(function (r) {
+          if (r === "granted" && pmCurrent && !pmCurrent.resolved) show();
+        });
+      }
+    } catch (_) {
+      /* best effort */
+    }
+  }
+
+  function pmTick() {
+    if (!pmCurrent || pmCurrent.resolved) return;
+    var left = pmCurrent.deadlineAt - performance.now();
+    var el = pmEl("prompt-countdown");
+    el.textContent = left > 0 ? "Time left: " + pmFmt(left) : "Time is up — waiting for embarch-core to end the step";
+    el.classList.toggle("prompt-urgent", left < 30000);
+  }
+
+  function pmSetButtons(open) {
+    pmEl("prompt-confirm").style.display = open ? "" : "none";
+    pmEl("prompt-cancel").style.display = open ? "" : "none";
+    pmEl("prompt-close").style.display = open ? "none" : "";
+    pmEl("prompt-confirm").disabled = false;
+    pmEl("prompt-cancel").disabled = false;
+  }
+
+  function pmShow(p) {
+    pmCurrent = {
+      study_id: p.study_id,
+      prompt_id: p.prompt_id,
+      deadlineAt: performance.now() + (p.remaining_ms || 0),
+      resolved: false,
+    };
+    pmEl("prompt-step").textContent = "Step '" + (p.step_name || "") + "'";
+    pmEl("prompt-text").textContent = p.text || "";
+    pmEl("prompt-result").style.display = "none";
+    pmEl("prompt-open-live").setAttribute("href", "#live-study?study=" + encodeURIComponent(p.study_id));
+    pmSetButtons(true);
+    pmEl("prompt-backdrop").style.display = "";
+    pmEl("prompt-dialog").style.display = "";
+    pmEl("prompt-confirm").focus();
+    document.title = "Prompt waiting - EmbArch";
+    if (pmTimer) clearInterval(pmTimer);
+    pmTimer = setInterval(pmTick, 500);
+    pmTick();
+  }
+
+  function pmHide() {
+    pmEl("prompt-backdrop").style.display = "none";
+    pmEl("prompt-dialog").style.display = "none";
+    if (pmTimer) clearInterval(pmTimer);
+    pmTimer = null;
+    pmCurrent = null;
+    document.title = "EmbArch";
+    // Another prompt may have queued behind it.
+    var next = pmQueue.shift();
+    if (next) pmShow(next);
+  }
+
+  // The modal stays up, with the reason, when it was closed by something other
+  // than this page's own click: a person at the bench must see that the
+  // question is gone, not have it vanish.
+  function pmEnded(text) {
+    if (!pmCurrent) return;
+    pmCurrent.resolved = true;
+    if (pmTimer) clearInterval(pmTimer);
+    pmTimer = null;
+    pmEl("prompt-countdown").textContent = "";
+    var r = pmEl("prompt-result");
+    r.textContent = text;
+    r.style.display = "";
+    pmSetButtons(false);
+    pmEl("prompt-close").focus();
+  }
+
+  function pmAdd(p, announce) {
+    if (pmCurrent && pmCurrent.study_id === p.study_id && pmCurrent.prompt_id === p.prompt_id) return;
+    if (pmCurrent && !pmCurrent.resolved) {
+      if (!pmQueue.some(function (q) { return q.study_id === p.study_id && q.prompt_id === p.prompt_id; })) pmQueue.push(p);
+      return;
+    }
+    pmShow(p);
+    if (announce) {
+      pmBeep();
+      pmNotify(p);
+    }
+  }
+
+  function pmApplyResolved(study_id, r) {
+    pmQueue = pmQueue.filter(function (q) { return !(q.study_id === study_id && q.prompt_id === r.prompt_id); });
+    if (!pmCurrent || pmCurrent.study_id !== study_id || pmCurrent.prompt_id !== r.prompt_id || pmCurrent.resolved) return;
+    var by = r.answered_by;
+    if (r.answer === "confirmed" || r.answer === "cancelled") {
+      if (by === "ui" && pmCurrent.answeredHere) return pmHide();
+      pmEnded("Already " + r.answer + (by ? " from " + by : "") + ".");
+    } else if (r.answer === "timed_out") {
+      pmEnded("The prompt timed out before anyone answered.");
+    } else if (r.answer === "study_cancelled") {
+      pmEnded("The study was cancelled.");
+    } else if (r.answer === "study_ended") {
+      pmEnded("The study ended.");
+    } else {
+      pmEnded("The prompt ended (" + r.answer + ").");
+    }
+  }
+
+  function pmApplyFrame(frame) {
+    if (frame.kind === "prompts") {
+      (frame.pending || []).forEach(function (p) { pmAdd(p, true); });
+      // A frame that says nothing is pending closes a stale modal (a resend
+      // after this page fell behind).
+      var keep = {};
+      (frame.pending || []).forEach(function (p) { keep[p.study_id + ":" + p.prompt_id] = true; });
+      if (pmCurrent && !pmCurrent.resolved && !keep[pmCurrent.study_id + ":" + pmCurrent.prompt_id]) {
+        pmEnded("The prompt is no longer waiting.");
+      }
+      return;
+    }
+    if (frame.kind === "prompt") {
+      if (frame.pending) pmAdd(frame.pending, true);
+      if (frame.resolved) pmApplyResolved(frame.study_id, frame.resolved);
+    }
+  }
+
+  async function pmAnswer(answer) {
+    if (!pmCurrent || pmCurrent.resolved) return;
+    var cur = pmCurrent;
+    pmEl("prompt-confirm").disabled = true;
+    pmEl("prompt-cancel").disabled = true;
+    cur.answeredHere = true;
+    try {
+      var resp = await fetch("/api/live/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer }),
+      });
+      if (resp.ok) {
+        // The resolve frame closes it; if that frame is slow, say so rather
+        // than leave two live-looking buttons.
+        pmEl("prompt-result").textContent = "Sent: " + answer + ".";
+        pmEl("prompt-result").style.display = "";
+        return;
+      }
+      cur.answeredHere = false;
+      var text = await resp.text();
+      if (resp.status === 409) {
+        // The prompt had already ended: shown, not swallowed.
+        pmEnded("Not taken - the prompt had already ended. " + text);
+      } else {
+        pmEl("prompt-result").textContent = "The answer did not reach embarch-core: " + text;
+        pmEl("prompt-result").style.display = "";
+        pmEl("prompt-confirm").disabled = false;
+        pmEl("prompt-cancel").disabled = false;
+      }
+    } catch (e) {
+      cur.answeredHere = false;
+      pmEl("prompt-result").textContent = "The answer did not reach embarch-ui: " + e;
+      pmEl("prompt-result").style.display = "";
+      pmEl("prompt-confirm").disabled = false;
+      pmEl("prompt-cancel").disabled = false;
+    }
+  }
+
+  function initPromptModal() {
+    pmEl("prompt-confirm").addEventListener("click", function () { pmAnswer("confirmed"); });
+    pmEl("prompt-cancel").addEventListener("click", function () { pmAnswer("cancelled"); });
+    pmEl("prompt-close").addEventListener("click", pmHide);
+    try {
+      pmSource = new EventSource("/api/prompts/events");
+      pmSource.addEventListener("prompt", function (ev) {
+        var frame;
+        try {
+          frame = JSON.parse(ev.data);
+        } catch (_) {
+          return;
+        }
+        pmApplyFrame(frame);
+      });
+    } catch (_) {
+      /* EventSource unsupported: the prompt is still answerable from embarch-api */
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     initNav();
     initProjectPicker();
@@ -10660,6 +10894,7 @@
     initTimeChart();
     initTraceTab();
     initDebugTab();
+    initPromptModal();
     initEvents();
     const toggle = document.querySelector(".theme-toggle");
     if (toggle) toggle.addEventListener("click", toggleTheme);

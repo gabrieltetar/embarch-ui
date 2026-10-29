@@ -234,6 +234,9 @@ async fn async_main() -> anyhow::Result<()> {
     tokio::spawn(logs::api_poll_loop(api_logs_tx));
 
     let live = live_study::LiveStudies::new(core.clone());
+    // Follows studies this process did not start, so their prompts reach the
+    // modal (`embarch-ui` decision 69).
+    tokio::spawn(live.clone().watch_running());
 
     let build_config_path = config.build.as_ref().map(|b| b.config_path.clone());
 
@@ -318,6 +321,8 @@ fn app(state: AppState) -> Router {
         // ---- Live Study -------------------------------------------------
         .route("/api/live/events", get(live_study::api_live_events))
         .route("/api/live/run", post(live_study::api_live_run))
+        .route("/api/live/prompt", post(live_study::api_live_prompt))
+        .route("/api/prompts/events", get(live_study::api_prompt_events))
         .route("/api/studies", get(studies_api::api_studies))
         .route("/api/studies/{study_id}", get(studies_api::api_study))
         .route(
@@ -1269,5 +1274,69 @@ mod tests {
         let s: serde_json::Value = http.get(&series).send().await.unwrap().json().await.unwrap();
         assert!(s.to_string().contains("249"), "series sees the longer table: {s}");
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// Decision 69: the modal's answer reaches Core as `answered_by: "ui"`
+    /// with the prompt id it names, and a `409` comes back as a `409` with
+    /// Core's own words rather than a success or a generic failure.
+    #[tokio::test]
+    async fn the_prompt_answer_route_relays_as_ui_and_passes_a_409_on() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let log = seen.clone();
+        let stub = axum::Router::new().route(
+            "/study/{id}/prompt",
+            post(move |axum::extract::Json(body): axum::extract::Json<serde_json::Value>| {
+                let log = log.clone();
+                async move {
+                    log.lock().unwrap().push(body.clone());
+                    if body["prompt_id"] == 9 {
+                        return (StatusCode::CONFLICT, "prompt 9 is not the one waiting").into_response();
+                    }
+                    axum::Json(serde_json::json!({
+                        "study_id": "s1", "prompt_id": body["prompt_id"], "answer": body["answer"],
+                        "answered_by": body["answered_by"], "status": "running",
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let core = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core_url = format!("http://{}", core.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(core, stub).await.unwrap() });
+        let base = serve_app_over(&core_url).await;
+        let http = reqwest::Client::new();
+        let route = format!("{base}/api/live/prompt");
+
+        let ok = http
+            .post(&route)
+            .json(&serde_json::json!({ "study_id": "s1", "prompt_id": 4, "answer": "confirmed" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let sent = seen.lock().unwrap()[0].clone();
+        assert_eq!(sent["answered_by"], "ui");
+        assert_eq!(sent["prompt_id"], 4);
+        assert_eq!(sent["answer"], "confirmed");
+
+        let conflict = http
+            .post(&route)
+            .json(&serde_json::json!({ "study_id": "s1", "prompt_id": 9, "answer": "cancelled" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert!(conflict.text().await.unwrap().contains("not the one waiting"));
+
+        // An answer that is neither word never reaches Core.
+        let before = seen.lock().unwrap().len();
+        let bad = http
+            .post(&route)
+            .json(&serde_json::json!({ "study_id": "s1", "prompt_id": 4, "answer": "maybe" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(seen.lock().unwrap().len(), before);
     }
 }
