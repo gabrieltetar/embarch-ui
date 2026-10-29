@@ -1701,17 +1701,15 @@ pub async fn api_prompt_events(State(state): State<crate::AppState>) -> axum::re
         if let Some(first) = pending {
             return Some((Ok::<Event, Infallible>(Event::default().event("prompt").data(first)), (rx, None)));
         }
-        loop {
-            match rx.recv().await {
-                Ok(payload) => return Some((Ok(Event::default().event("prompt").data(payload)), (rx, None))),
-                // Fell behind: resend what is pending now, which is the
-                // whole truth a missed frame could have changed.
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let payload = frame("prompts", json!({ "pending": live.pending_prompts() }));
-                    return Some((Ok(Event::default().event("prompt").data(payload)), (rx, None)));
-                }
-                Err(broadcast::error::RecvError::Closed) => return None,
+        match rx.recv().await {
+            Ok(payload) => Some((Ok(Event::default().event("prompt").data(payload)), (rx, None))),
+            // Fell behind: resend what is pending now, which is the
+            // whole truth a missed frame could have changed.
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                let payload = frame("prompts", json!({ "pending": live.pending_prompts() }));
+                Some((Ok(Event::default().event("prompt").data(payload)), (rx, None)))
             }
+            Err(broadcast::error::RecvError::Closed) => None,
         }
         }
     });
