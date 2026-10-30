@@ -6,8 +6,8 @@
 //
 // Two kinds of write, and the tab keeps them apart: a status move (an issue's
 // state, a tile's ✓, ✕) happens on the click; anything carrying prose (a
-// tile's note, a Slack reply) is shown in an editable box first and is sent
-// only as the user left it.
+// tile's note, an agent's draft) is shown in an editable box first and is
+// sent only as the user left it.
 
 (function () {
   "use strict";
@@ -16,7 +16,6 @@
   if (!panel) return;
   var cardsEl = document.getElementById("desk-cards");
   var errorEl = document.getElementById("desk-error");
-  var slackEl = document.getElementById("desk-slack");
   var settingsEl = document.getElementById("desk-settings");
   var draftsEl = document.getElementById("desk-drafts");
   var handEl = document.getElementById("desk-hand");
@@ -131,8 +130,8 @@
 
   // ---------------------------------------------------------------- the hand
   //
-  // Every tile waiting for a ✓ or ✕, on every desk, as cards in a row under
-  // the Slack bar (embarch-desk decision 57): this desk's first, oldest
+  // Every tile waiting for a ✓ or ✕, on every desk, as a row of cards above
+  // the work cards (embarch-desk decision 57): this desk's first, oldest
   // first. A card is dealt in once — a pushed view does not deal it again —
   // one sent flies to "Sent today", one discarded drops.
   var dealt = {};
@@ -417,13 +416,8 @@
       '<div class="desk-start-slot" data-start-slot="' + esc(c.id) + '">' + startNoteHtml(c.id) + "</div></div>";
   }
 
-  function renderSlackBar() {
-    var sl = view.slack || {};
-    var parts = [];
-    parts.push((sl.mentions || 0) + " mention" + (sl.mentions === 1 ? "" : "s"));
-    parts.push((sl.dms || 0) + " DM" + (sl.dms === 1 ? "" : "s"));
-    if (sl.unread) parts.push(sl.unread + " unread");
-    document.getElementById("desk-slack-counts").textContent = "Slack · " + parts.join(" · ");
+  // Sessions still waiting to be told their work item (embarch-desk decision 7).
+  function renderWaiting() {
     var w = document.getElementById("desk-waiting");
     if (view.sessions_waiting) {
       w.hidden = false;
@@ -431,50 +425,6 @@
     } else {
       w.hidden = true;
     }
-  }
-
-  // A Slack message is identified by account, channel and ts, never by its
-  // position in the list: a pushed view reorders the list while the bar on
-  // screen is held back, so an index read at click time can name another message.
-  function slackKey(m) { return JSON.stringify([m.account, m.channel, m.ts]); }
-  function slackHas(key) { return ((view.slack || {}).items || []).some(function (m) { return slackKey(m) === key; }); }
-  var GONE = "This message has left the list; nothing was sent.";
-  // Boxes held on screen across a pushed view: say so once their message is gone.
-  function markGoneReplies() {
-    slackEl.querySelectorAll("[data-reply-box]").forEach(function (box) {
-      var key = box.getAttribute("data-msg");
-      if (!key || slackHas(key) || box.querySelector(".desk-gone")) return;
-      var send = box.querySelector("[data-send]");
-      if (send) send.disabled = true;
-      var note = document.createElement("p");
-      note.className = "placeholder-note desk-gone";
-      note.style.color = "var(--danger)";
-      note.textContent = GONE;
-      box.appendChild(note);
-    });
-  }
-
-  function renderSlack() {
-    if (slackEl.hidden) return;
-    var sl = view.slack || {};
-    var items = sl.items || [];
-    var errs = (sl.errors || []).map(function (e) { return '<p class="placeholder-note" style="color:var(--danger);">' + esc(e) + "</p>"; }).join("");
-    if (!items.length) {
-      slackEl.innerHTML = '<div class="card-title">Slack</div>' + errs +
-        '<p class="placeholder-note">' + ((view.connectors || []).some(function (c) { return c.kind === "slack"; }) ? "Nothing in the last three days." : "No Slack workspace connected — add one under Connectors.") + "</p>";
-      return;
-    }
-    slackEl.innerHTML = '<div class="card-title">Slack — mentions and DMs, last three days</div>' + errs +
-      items.map(function (m, i) {
-        var when = new Date(parseFloat(m.ts) * 1000);
-        return '<div class="desk-msg' + (m.unread ? " unread" : "") + '">' +
-          '<div class="desk-msg-head"><span class="desk-msg-from">' + esc(m.user_name) + "</span>" +
-          '<span class="desk-msg-where">' + (m.kind === "dm" ? "DM" : "#" + esc(m.channel_name)) + " · " + esc(m.account) + " · " + esc(when.toLocaleString()) + "</span>" +
-          '<span class="desk-msg-acts"><a href="' + esc(m.permalink) + '" target="_blank" rel="noopener">Open</a> ' +
-          '<button class="btn btn-tiny" type="button" data-draft="' + i + '" data-msg="' + esc(slackKey(m)) + '">Draft reply</button></span></div>' +
-          '<div class="desk-msg-text">' + esc(m.text) + "</div>" +
-          '<div class="desk-reply" data-reply-box="' + i + '" hidden></div></div>';
-      }).join("");
   }
 
   // The panel's form is built once each time the panel opens. A view after
@@ -879,7 +829,7 @@
 
   function render() {
     if (!view) return;
-    renderSlackBar();
+    renderWaiting();
     renderHead();
     renderHand();
     if (!pickedDay) renderDay(view.day);
@@ -892,7 +842,6 @@
     renderTimer();
     renderDrafts();
     renderCards();
-    renderSlack();
     renderSettings();
     if (openTileId) renderDialog();
   }
@@ -1139,38 +1088,6 @@
       api("DELETE", "/connectors/" + encodeURIComponent(parts[0]) + "/" + encodeURIComponent(parts.slice(1).join("/"))).then(load).catch(function (e) { flash(e.message); });
       return;
     }
-    if (d.draft !== undefined) {
-      var m;
-      try { var k = JSON.parse(t.getAttribute("data-msg")); m = { account: k[0], channel: k[1], ts: k[2] }; } catch (_) { return; }
-      var box = slackEl.querySelector('[data-reply-box="' + d.draft + '"]');
-      box.hidden = false;
-      box.setAttribute("data-msg", slackKey(m));
-      box.innerHTML = '<p class="placeholder-note">Claude is drafting…</p>';
-      api("POST", "/slack/draft", { account: m.account, channel: m.channel, ts: m.ts }).then(function (r) {
-        box.innerHTML = '<textarea class="desk-input desk-textarea" rows="3">' + esc(r.draft) + "</textarea>" +
-          '<div class="desk-form"><button class="btn btn-primary btn-tiny" type="button" data-send="' + d.draft + '" data-thread="' + esc(r.thread_ts) + '">Send as me</button>' +
-          '<button class="btn btn-tiny" type="button" data-cancel-reply="' + d.draft + '">Cancel</button></div>';
-        markGoneReplies();
-      }).catch(function (e) { box.innerHTML = '<p class="placeholder-note" style="color:var(--danger);">' + esc(e.message) + "</p>"; });
-      return;
-    }
-    if (d.send !== undefined) {
-      var b2 = slackEl.querySelector('[data-reply-box="' + d.send + '"]');
-      var msg;
-      try { var k2 = JSON.parse(b2.getAttribute("data-msg")); msg = { account: k2[0], channel: k2[1] }; } catch (_) { return; }
-      if (!slackHas(b2.getAttribute("data-msg"))) { markGoneReplies(); flash(GONE); return; }
-      var text = b2.querySelector("textarea").value;
-      api("POST", "/slack/reply", { account: msg.account, channel: msg.channel, thread_ts: d.thread || null, text: text }).then(function () {
-        b2.innerHTML = '<p class="placeholder-note" style="color:var(--success);">Sent.</p>';
-      }).catch(function (e) { flash(e.message); });
-      return;
-    }
-    if (d.cancelReply !== undefined) {
-      var b3 = slackEl.querySelector('[data-reply-box="' + d.cancelReply + '"]');
-      b3.hidden = true;
-      b3.innerHTML = "";
-      return;
-    }
     if (d.entryEdit) {
       var e = findEntry(d.entryEdit);
       var li = t.closest(".desk-entry");
@@ -1221,12 +1138,6 @@
         break;
       case "desk-edit":
         if (view.open_desk) openForm(view.open_desk.id);
-        break;
-      case "desk-slack-toggle":
-        slackEl.hidden = !slackEl.hidden;
-        t.setAttribute("aria-expanded", String(!slackEl.hidden));
-        t.querySelector(".desk-caret").textContent = slackEl.hidden ? "▸" : "▾";
-        renderSlack();
         break;
       case "desk-settings-toggle":
         settingsEl.hidden = !settingsEl.hidden;
@@ -1373,7 +1284,7 @@
 
   // Live by SSE, like every other tab (decision 6): the server asks the desk
   // for its view and pushes it. A pushed view never re-renders under an open
-  // editor — the dialog, a reply box and the connector form keep what the user
+  // editor — the dialog, a draft and the connector form keep what the user
   // is typing until they finish. In the settings panel only text entry
   // counts: a view leaves its form alone, and focus on the chat setting's box
   // must not hold every pushed view back.
@@ -1385,7 +1296,7 @@
 
   function editing() {
     var a = document.activeElement;
-    return dialogEl.contains(a) || slackEl.contains(a) || (settingsEl.contains(a) && typing(a)) ||
+    return dialogEl.contains(a) || (settingsEl.contains(a) && typing(a)) ||
       draftsEl.contains(a) || formEl.contains(a) || dayBody.contains(a);
   }
   if (window.EventSource) {
@@ -1393,7 +1304,7 @@
     source.addEventListener("view", function (ev) {
       try { view = JSON.parse(ev.data); } catch (_) { return; }
       if (unreachable) showError(null);
-      if (!editing()) render(); else markGoneReplies();
+      if (!editing()) render();
     });
     source.addEventListener("desk-error", function (ev) { showError(ev.data); unreachable = true; });
   }

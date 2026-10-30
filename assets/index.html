@@ -110,7 +110,7 @@
       <div id="route-note" class="route-note" role="status" hidden></div>
       <div id="desk-bench-banner" class="desk-bench-banner" hidden></div>
       <!-- The Desk (embarch-desk-proposal.md): one card per work item, and the
-           hand of time cards under the Slack bar (embarch-desk decision 57).
+           hand of time cards above them (embarch-desk decision 57).
            Everything here comes from embarch-desk through this server's
            /api/desk proxy; desk.js renders it. -->
       <section class="tab-panel" data-tab="desk">
@@ -121,24 +121,20 @@
           <button class="btn btn-tiny" id="desk-create" type="button">New desk</button>
         </div>
         <div class="desk-bar">
-          <button class="desk-slack-bar" id="desk-slack-toggle" type="button" aria-expanded="false">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10H9l-5 4Z"/></svg>
-            <span id="desk-slack-counts">Slack</span>
-            <span class="desk-caret">▸</span>
-          </button>
+          <!-- The Slack bar's spot, left empty for a Promptu section
+               (embarch-desk decision 65). -->
           <span id="desk-waiting" class="badge badge-warning" hidden></span>
           <div class="desk-bar-actions">
             <input id="desk-new" class="desk-input" type="text" placeholder="Issue key, or a title for a standalone card" />
             <select id="desk-new-desk" class="desk-input" title="A standalone card's desk"></select>
             <button class="btn" id="desk-add" type="button">Add card</button>
-            <button class="btn" id="desk-refresh" type="button" title="Refresh issues, PRs and Slack now">Refresh</button>
+            <button class="btn" id="desk-refresh" type="button" title="Refresh issues, PRs and Harvest now">Refresh</button>
             <button class="btn" id="desk-settings-toggle" type="button">Connectors</button>
           </div>
         </div>
         <div id="desk-timer" class="desk-timer" hidden></div>
         <div id="desk-error" class="card desk-error" hidden></div>
         <div id="desk-drafts" class="card desk-panel" hidden></div>
-        <div id="desk-slack" class="card desk-panel" hidden></div>
         <div id="desk-settings" class="card desk-panel" hidden></div>
         <section id="desk-hand" class="desk-hand" aria-label="Time waiting for a ✓ or ✕"></section>
         <div class="card desk-pickup" id="desk-pickup">

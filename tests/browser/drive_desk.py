@@ -5,7 +5,7 @@ directories (so the real desk, its tokens and its state are never touched),
 seeds it through the desk's own HTTP surface — a standalone work item, a
 session that a hook puts on it, a commit-less line, a flash — then starts an
 embarch-ui pointed at that desk and a dead Core, and drives the tab: the card
-renders and its tile is dealt into the hand under the Slack bar, with a chip on
+renders and its tile is dealt into the hand above the work cards, with a chip on
 the card that opens it, ✓ on a tile nobody has opened opens it instead of
 sending, the dialog shows the lines, ✕ discards, the Dashboard is gone. The
 chat's part (embarch-chat-desk-proposal.md): a session's row before the chat
@@ -184,7 +184,7 @@ def main():
             tile = js("var t = document.querySelector('#desk-hand .desk-tile'); return t && {hours: t.querySelector('.desk-tile-hours').textContent, title: t.querySelector('.desk-tile-title').textContent, ok: !!t.querySelector('.desk-ok'), no: !!t.querySelector('.desk-no')}")
             check("today's tile is a card in the hand with its item, hours and ✓ ✕",
                   tile and tile["hours"] == "1h30" and tile["title"] == "Client sync call" and tile["ok"] and tile["no"], tile)
-            check("the hand sits right under the Slack bar, above the pick-up list and the cards",
+            check("the hand sits above the pick-up list and the cards",
                   js("var h = document.getElementById('desk-hand'), p = document.getElementById('desk-pickup'); return !!(h.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING)"))
             check("the work card holds no tile, only a chip that opens it",
                   js("return !document.querySelector('.desk-card .desk-tile') && /1h30/.test(document.querySelector('.desk-card .desk-card-time .desk-mini').textContent)"))
@@ -639,10 +639,9 @@ def main():
             check("the next pushed view keeps the refusal on the card and in the flash",
                   pushed is True and js(on_card) is True and flash_kept is True, [pushed, flash_kept])
             unstub_fetch()
-            js("document.getElementById('desk-slack-toggle').click(); return true")
-            settle()
-            check("the Slack bar expands to its feed and says nothing is connected",
-                  "No Slack workspace connected" in js("return document.getElementById('desk-slack').textContent"))
+            check("the Desk draws no Slack bar and no Slack panel (embarch-desk decision 65)",
+                  js("return !document.getElementById('desk-slack-toggle') && !document.getElementById('desk-slack')"
+                     " && !document.querySelector('.desk-slack-bar, .desk-msg')"))
 
             # The proxy carries the desk's token, so it answers only this UI's
             # own page (desk review r1, finding 2). A plain-text POST needs no
