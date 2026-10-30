@@ -6,7 +6,7 @@
 //! every other tab. The token rides on everything forwarded, so the proxy
 //! also refuses any request that did not come from this server's own page
 //! (`same_origin`): otherwise every other site the browser has open could
-//! make the desk post to Slack or Harvest as the user, or queue a prompt for
+//! make the desk write to Linear or Harvest as the user, or queue a prompt for
 //! a chat in auto mode.
 
 use axum::body::Bytes;
@@ -59,7 +59,7 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
 /// `Origin`, and another origin cannot read the answer.
 ///
 /// What this closes: a page elsewhere posting plain text, which needs no CORS
-/// preflight, to `/api/desk/mailbox` or `/api/desk/slack/reply`.
+/// preflight, to `/api/desk/mailbox` or `/api/desk/tiles/{id}/approve`.
 fn same_origin(method: &Method, headers: &HeaderMap) -> bool {
     if let Some(site) = headers.get("sec-fetch-site") {
         return site.as_bytes() == b"same-origin";

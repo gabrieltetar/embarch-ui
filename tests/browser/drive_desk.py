@@ -18,7 +18,7 @@ without a prompt link, a proxy that answers only the UI's own page — a
 bodyless POST from another origin included — and a page no other site can
 frame.
 
-No connector is configured, so nothing reaches Linear, Harvest or Slack;
+No connector is configured, so nothing reaches Linear or Harvest;
 GitHub falls back to the machine's `gh` login for a read-only identity check.
 Start work needs Linear, so its answer is stubbed in the page.
 
@@ -219,7 +219,7 @@ def main():
             # What is typed in the panel and not saved yet survives a click on
             # the setting, and the box keeps focus (desk review r2, finding 2);
             # a box with focus must not hold every pushed view back (r1, 2).
-            typed = ["Bench workspace", "xoxp-not-a-token", "/w/never-tracked"]
+            typed = ["Bench workspace", "lin-not-a-token", "/w/never-tracked"]
             for css, text in zip(("#desk-conn-label", "#desk-conn-token", "#desk-ignore"), typed):
                 type_into(css, text)
             typed_js = ("return [document.getElementById('desk-conn-label').value, document.getElementById('desk-conn-token').value,"
@@ -571,6 +571,10 @@ def main():
             js("document.getElementById('desk-settings-toggle').click(); return true")
             settle()
             check("the Connectors panel opens with its add form", js("return !!document.getElementById('desk-conn-token')"))
+            check("it offers Linear, Harvest and GitHub, and no Slack (embarch-desk decision 66)",
+                  js("return Array.from(document.querySelectorAll('#desk-conn-kind option')).map(function (o) { return o.value; })")
+                  == ["linear", "harvest", "github"]
+                  and "slack" not in js("return document.getElementById('desk-settings').textContent.toLowerCase()"))
             # A save the desk refuses puts the box back and says why.
             was = js("return document.getElementById('desk-chat-panel').checked")
             stub_fetch("/api/desk/settings$", 500, "settings refused")

@@ -440,14 +440,13 @@
         '<div class="card-title">Connectors</div>' +
         '<table class="data-table"><thead><tr><th>Service</th><th>Account</th><th>Status</th><th></th></tr></thead><tbody id="desk-conn-rows"></tbody></table>' +
         '<div class="desk-form">' +
-        '<select id="desk-conn-kind" class="desk-input"><option value="linear">Linear</option><option value="harvest">Harvest</option><option value="github">GitHub</option><option value="slack">Slack</option></select>' +
+        '<select id="desk-conn-kind" class="desk-input"><option value="linear">Linear</option><option value="harvest">Harvest</option><option value="github">GitHub</option></select>' +
         '<input id="desk-conn-label" class="desk-input" type="text" placeholder="Name, e.g. the workspace" />' +
         '<input id="desk-conn-token" class="desk-input" type="password" placeholder="Token" autocomplete="off" />' +
         '<button class="btn btn-primary" id="desk-conn-add" type="button">Connect</button></div>' +
         '<p class="desk-help">Linear: Settings → Security &amp; access → Personal API keys, one per workspace. ' +
         "Harvest: id.getharvest.com/developers → Create new personal access token. " +
         "GitHub: nothing to do if you are logged in to <span class=\"mono\">gh</span>. " +
-        "Slack: create an app in your workspace from embarch-desk's <span class=\"mono\">slack-manifest.json</span>, install it, and paste its User OAuth Token (<span class=\"mono\">xoxp-…</span>). " +
         "Tokens stay in <span class=\"mono\">~/.config/embarch-desk/connectors.toml</span>, owner-only.</p>" +
         '<div class="card-title" style="margin-top:18px;">Never tracked</div>' +
         '<p class="desk-help">Sessions under these folders make no time and are never asked for a work item — open-source work, the agent fleet.</p>' +
