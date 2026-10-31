@@ -443,8 +443,11 @@
         '<select id="desk-conn-kind" class="desk-input"><option value="linear">Linear</option><option value="harvest">Harvest</option><option value="github">GitHub</option></select>' +
         '<input id="desk-conn-label" class="desk-input" type="text" placeholder="Name, e.g. the workspace" />' +
         '<input id="desk-conn-token" class="desk-input" type="password" placeholder="Token" autocomplete="off" />' +
-        '<button class="btn btn-primary" id="desk-conn-add" type="button">Connect</button></div>' +
+        '<button class="btn btn-primary" id="desk-conn-add" type="button">Connect</button>' +
+        '<button class="btn" id="desk-conn-mcp" type="button">Sign in through Linear MCP</button></div>' +
+        '<p class="desk-help" id="desk-conn-signin" hidden></p>' +
         '<p class="desk-help">Linear: Settings → Security &amp; access → Personal API keys, one per workspace. ' +
+        "A workspace that gives you no key, as a guest in a client's: type its name and sign in through Linear MCP instead (embarch-desk decision 68). " +
         "Harvest: id.getharvest.com/developers → Create new personal access token. " +
         "GitHub: nothing to do if you are logged in to <span class=\"mono\">gh</span>. " +
         "Tokens stay in <span class=\"mono\">~/.config/embarch-desk/connectors.toml</span>, owner-only.</p>" +
@@ -1019,6 +1022,36 @@
     }).catch(function (e) { if (e.message !== "no folder picked") flash(e.message); });
   }
 
+  // A Linear sign-in through its MCP server (embarch-desk decision 68): the
+  // link opens in a new tab, and stays here in case the browser blocked it,
+  // until the desk says the browser came back. The desk drops a sign-in after
+  // 10 minutes, and its 404 ends the wait.
+  function waitForSignIn(state, url, label, button) {
+    var line = document.getElementById("desk-conn-signin");
+    if (line) {
+      line.hidden = false;
+      line.innerHTML = 'Waiting for the sign-in: <a href="' + esc(url) + '" target="_blank" rel="noopener">open Linear</a> and pick the workspace for ' + esc(label) + ".";
+    }
+    function done(msg) {
+      var l = document.getElementById("desk-conn-signin");
+      if (l) l.hidden = true;
+      button.disabled = false;
+      flash(msg);
+    }
+    (function poll() {
+      setTimeout(function () {
+        api("GET", "/linear/signin/" + encodeURIComponent(state)).then(function (r) {
+          if (r.status === "waiting") { poll(); return; }
+          if (r.status !== "ok") { done("Linear / " + label + " did not connect: " + (r.detail || "?")); return; }
+          var input = document.getElementById("desk-conn-label");
+          if (input && input.value.trim() === label) input.value = "";
+          done("Connected linear / " + label + ": " + (r.detail || "ok"));
+          return api("POST", "/sync").then(load);
+        }).catch(function (e) { done(e.message); });
+      }, 2000);
+    })();
+  }
+
   panel.addEventListener("click", function (ev) {
     var t = ev.target.closest("button, a");
     if (!t || !panel.contains(t)) return;
@@ -1171,6 +1204,16 @@
           flash("Connected " + kind + " / " + label + ": " + (r.detail || "ok"));
           return api("POST", "/sync");
         }).then(load).catch(function (e) { flash(e.message); }).then(function () { t.disabled = false; });
+        break;
+      }
+      case "desk-conn-mcp": {
+        var mcpLabel = document.getElementById("desk-conn-label").value.trim();
+        if (!mcpLabel) { flash("Type the Linear workspace's name first."); break; }
+        t.disabled = true;
+        api("POST", "/linear/signin", { label: mcpLabel }).then(function (r) {
+          window.open(r.url, "_blank", "noopener");
+          waitForSignIn(r.state, r.url, mcpLabel, t);
+        }).catch(function (e) { flash(e.message); t.disabled = false; });
         break;
       }
       case "desk-ignore-save": {

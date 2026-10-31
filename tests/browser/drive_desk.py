@@ -575,6 +575,28 @@ def main():
                   js("return Array.from(document.querySelectorAll('#desk-conn-kind option')).map(function (o) { return o.value; })")
                   == ["linear", "harvest", "github"]
                   and "slack" not in js("return document.getElementById('desk-settings').textContent.toLowerCase()"))
+            # Linear MCP sign-in (embarch-desk decision 68): the link opens in
+            # a tab and stays in the panel; the desk's answer ends the wait.
+            # Registering at Linear is stubbed, so nothing leaves the machine.
+            js("window.__opened = []; window.open = function (u) { window.__opened.push(u); return null; }; return true")
+            js("var start = arguments[0], done = arguments[1];"
+               "window.__realFetch = window.__realFetch || window.fetch;"
+               "window.fetch = function (u) {"
+               " var a = /\\/linear\\/signin$/.test(u) ? start : /\\/linear\\/signin\\/st1$/.test(u) ? done : null;"
+               " if (a) return Promise.resolve(new Response(JSON.stringify(a), {status: 200}));"
+               " return window.__realFetch.apply(window, arguments); }; return true",
+               {"url": "https://mcp.linear.app/authorize?state=st1", "state": "st1"},
+               {"status": "ok", "label": "client", "detail": "me @ Client, through Linear's MCP"})
+            js("document.getElementById('desk-conn-label').value = 'client'; document.getElementById('desk-conn-mcp').click(); return true")
+            said = until("return document.getElementById('desk-error').textContent.indexOf('Connected linear / client') >= 0", 8)
+            check("signing in through Linear MCP opens Linear's page and reports the connection when the browser comes back",
+                  said is True and js("return window.__opened[0]") == "https://mcp.linear.app/authorize?state=st1"
+                  and js("return document.getElementById('desk-conn-signin').hidden") is True
+                  and js("return document.getElementById('desk-conn-label').value") == "")
+            unstub_fetch()
+            js("document.getElementById('desk-conn-label').value = ''; document.getElementById('desk-conn-mcp').click(); return true")
+            check("it asks for the workspace's name first",
+                  until("return document.getElementById('desk-error').textContent.indexOf('name first') >= 0", 5) is True)
             # A save the desk refuses puts the box back and says why.
             was = js("return document.getElementById('desk-chat-panel').checked")
             stub_fetch("/api/desk/settings$", 500, "settings refused")
