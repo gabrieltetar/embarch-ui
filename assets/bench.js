@@ -1,18 +1,21 @@
 // embarch-ui bench canvas: a saved bench drawn as the hardware on the shelf.
 //
-// Phase 2 of embarch-bench-editor-proposal.md, read-only, beside the Topology
-// tab's old diagram. Everything drawn comes from the UI server's bench routes
-// (`/api/bench/*`): the vocabulary, the part templates and the bench files. A
-// template's `look` picks the drawing and a connector's `kind` picks its
-// glyph; a look or kind this file has no drawing for is drawn as a plain
-// board or a plain port, never dropped.
+// Phase 2 of embarch-bench-editor-proposal.md, read-only: the Topology tab's
+// main surface, with every other card a panel over it. Everything drawn comes
+// from the UI server's bench routes (`/api/bench/*`): the vocabulary, the part
+// templates and the bench files. A template's `look` picks the drawing and a
+// connector's `kind` picks its glyph; a look or kind this file has no drawing
+// for is drawn as a plain board or a plain port, never dropped.
 //
-// The live glow is the one thing taken from the Topology snapshot (app.js
-// re-dispatches each one as `embarch:snapshot`), and **a snapshot only
-// toggles classes**: the canvas is rebuilt by a gesture or a load, never by a
-// poll, so a selection or a hover survives it. Decision 43's properties carry
-// over: every listener lives on the `<svg>`, and what the pointer marked is
-// state re-applied on every rebuild rather than waited for.
+// Two things come from app.js as document events. **The snapshot**
+// (`embarch:snapshot`) lights a glow: a `usb-host` connector whose bound probe,
+// or bound serial port, Core enumerates now. A snapshot only toggles classes —
+// the canvas is rebuilt by a gesture or a load, never by a poll, so a
+// selection or a hover survives it. **Validate's verdicts**
+// (`embarch:verdicts`) are drawn under the part holding the role, sent after a
+// pass and when one is dropped, never from the poll. Decision 43's properties
+// carry over: every listener lives on the `<svg>`, and what the pointer marked
+// is state re-applied on every rebuild rather than waited for.
 //
 // Zero-build (decision 2): plain JS, one SVG, no library, no timer.
 
@@ -31,6 +34,7 @@
   var cfgEl = document.getElementById("bench-configs");
   var insEl = document.getElementById("bench-inspector");
   var notesEl = document.getElementById("bench-notes");
+  var liveEl = document.getElementById("bench-live-state");
 
   var ROUTE_VOCAB = "/api/bench/vocabulary";
   var ROUTE_PARTS = "/api/bench/parts";
@@ -42,21 +46,29 @@
   var FOOT = 10;            // below the last row
   var TOP_STEP = 40;        // between two connectors on a part's top edge
   var DEFAULT_WIDTH = 180;  // a part whose template is gone or gives none
+  var DUP_OFFSET = 28;      // how far a second part under one id is drawn from the first
+  var GRID_COLS = 5, GRID_DX = 220, GRID_DY = 200;   // where unplaced parts go
   var MONO_ADVANCE = 6.6;   // px per character, 11px Plex Mono (0.6 em, decision 42)
   var SANS_ADVANCE = 7.4;   // px per character, 13px Plex Sans semibold, roughly
-  var ZOOM_MIN = 0.3, ZOOM_MAX = 2.5, FIT_MAX = 1.4, FIT_PAD = 60, ZOOM_STEP = 1.2;
+  var ZOOM_MIN = 0.01, ZOOM_MAX = 2.5, FIT_MAX = 1.4, FIT_PAD = 60, ZOOM_STEP = 1.2;
+
+  function hasOwn(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+  function dict() { return Object.create(null); }
 
   // ---------------------------------------------------------------- state
   var vocab = null;          // GET /api/bench/vocabulary
-  var templates = {};        // template id -> template, GET /api/bench/parts
-  var fileErrors = [];       // the files those two lists could not read
+  var templates = dict();    // template id -> template, GET /api/bench/parts
+  var unreadable = dict();   // template id -> why its file would not load
+  var partErrors = [];       // the template files that list could not read
+  var benchErrors = [];      // the bench files the bench list could not read
   var benchList = [];
-  var bench = null;          // the bench on screen, GET /api/bench/benches/{slug}
+  var bench = null;          // the bench on screen, held whole: `version` and `chip` go back on save
   var model = null;          // bench + the config on screen, resolved into parts and cables
   var cfgIx = 0;
   var sel = null;            // { kind: "part" | "cable", id }
   var hoverPart = null;
-  var attached = {};         // probe serial -> true, from the latest snapshot
+  var verdicts = { roles: dict(), boards: dict() };
+  var snap = { seen: false, known: false, probes: dict(), ports: [] };
   var view = { x: 0, y: 0, k: 1 };
   var fitted = false;
   var pan = null;
@@ -70,7 +82,7 @@
   }
   function f(v) { return Math.round(v * 10) / 10; }
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-  function closest(el, sel) { return el && el.closest ? el.closest(sel) : null; }
+  function closest(el, s) { return el && el.closest ? el.closest(s) : null; }
   function cut(text, max) {
     text = String(text == null ? "" : text);
     max = Math.max(3, Math.floor(max));
@@ -86,6 +98,64 @@
     if (!vocab || (vocab.kinds || []).indexOf(kind) < 0 || kind === vocab.hub_kind) return false;
     return !(vocab.joins || []).some(function (pair) { return pair.indexOf(kind) >= 0; });
   }
+  function carries(conn, fn) {
+    return (conn && conn.functions || []).some(function (e) { return e && e.function === fn; });
+  }
+
+  // ---------------------------------------------------------------- bindings
+  // A `usb` binding is a USB serial, an interface on the device the
+  // connector's probe is (a number), or a table naming any of serial,
+  // interface, vid and pid. One reader for all three, one way to say one.
+  function bindingSerial(b, deviceSerial) {
+    if (typeof b === "string") return b;
+    if (typeof b === "number") return deviceSerial || null;
+    if (b && typeof b === "object") {
+      if (b.serial != null) return String(b.serial);
+      return b.interface != null && b.vid == null && b.pid == null ? deviceSerial || null : null;
+    }
+    return null;
+  }
+  function bindingInterface(b) {
+    if (typeof b === "number") return b;
+    return b && typeof b === "object" && b.interface != null ? b.interface : null;
+  }
+  function hex4(n) { return typeof n === "number" ? "0x" + ("000" + n.toString(16)).slice(-4) : String(n); }
+  function bindingText(b) {
+    if (typeof b === "string") return b;
+    if (typeof b === "number") return "interface " + b;
+    if (b && typeof b === "object") {
+      var bits = [];
+      if (b.serial != null) bits.push(String(b.serial));
+      if (b.interface != null) bits.push("interface " + b.interface);
+      if (b.vid != null) bits.push("vid " + hex4(b.vid));
+      if (b.pid != null) bits.push("pid " + hex4(b.pid));
+      return bits.join(" · ") || "nothing named";
+    }
+    return String(b);
+  }
+  function connBindings(p, cid) {
+    var usb = p.inst.usb;
+    var m = hasOwn(usb, cid) ? usb[cid] : null;
+    return m && typeof m === "object" ? m : null;
+  }
+  function deviceSerial(p, cid) {
+    var m = connBindings(p, cid);
+    return m && hasOwn(m, "probe") ? bindingSerial(m.probe, null) : null;
+  }
+
+  // Enumerated now, by the latest snapshot: a probe among its probes, anything
+  // else among its serial ports by serial (and interface, when the binding
+  // gives one). Nothing is inferred from anything else.
+  function bindingLive(fn, b, devSerial) {
+    if (!snap.known) return false;
+    var serial = bindingSerial(b, devSerial);
+    if (!serial) return false;
+    if (fn === "probe") return !!snap.probes[serial];
+    var iface = bindingInterface(b);
+    return snap.ports.some(function (pt) {
+      return pt && String(pt.serial_number) === serial && (iface == null || pt.interface === iface);
+    });
+  }
 
   // ---------------------------------------------------------------- the model
   function currentConfig() {
@@ -93,47 +163,70 @@
     return cfgs[cfgIx] || null;
   }
 
-  function name(p) { return p.inst.label || p.tpl.label || p.id; }
+  function name(p) { return p.inst.label || (p.missing ? p.inst.template : p.tpl.label) || p.id; }
 
-  // A part whose template is gone is drawn, never dropped (decision 44): a
-  // plain board under its own id, its connectors whatever its cables name.
-  function missingTemplate(inst) {
+  // A part whose template is gone, or whose file would not load, is drawn,
+  // never dropped (decision 44): a plain board under its own id, its
+  // connectors whatever its cables name.
+  function standIn(inst) {
     return { id: inst.template, label: inst.template, subtitle: null, category: null, look: null,
              source: null, hub: false, width: DEFAULT_WIDTH, min_height: null, rows_top: null,
              connectors: [], passthrough: [] };
   }
 
   function buildModel() {
-    var m = { parts: {}, order: [], cables: [], notes: [] };
+    var m = { parts: dict(), order: [], cables: [], notes: [] };
+    var dupCount = dict();
     (bench.parts || []).forEach(function (inst) {
-      var tpl = templates[inst.template];
-      var p = { id: inst.id, inst: inst, tpl: tpl || missingTemplate(inst), missing: !tpl, conns: [], byId: {} };
+      inst = inst || {};
+      var id = String(inst.id == null ? "" : inst.id);
+      var tpl = hasOwn(templates, inst.template) ? templates[inst.template] : null;
+      var key = id, n = 1;
+      while (m.parts[key]) { n++; key = id + "#" + n; }
+      var p = { key: key, id: id, inst: inst, tpl: tpl || standIn(inst), missing: !tpl,
+                unreadable: !tpl && hasOwn(unreadable, inst.template) ? unreadable[inst.template] : null,
+                dup: n - 1, conns: [], byId: dict() };
+      if (n > 1) {
+        dupCount[id] = n;
+      }
       (p.tpl.connectors || []).forEach(function (c) {
         var conn = { id: c.id, label: c.label || c.id, kind: c.kind, side: c.side, power: c.power,
-                     functions: c.functions || [], stack: neverCabled(c.kind), tpl: c };
+                     functions: c.functions || [], stack: neverCabled(c.kind) };
         p.conns.push(conn);
         p.byId[c.id] = conn;
       });
-      m.parts[inst.id] = p;
+      m.parts[key] = p;
       m.order.push(p);
     });
-    (bench.cables || []).forEach(function (c, i) { addCable(m, c.from, c.to, "bench", "b" + i); });
+    Object.keys(dupCount).forEach(function (id) {
+      m.notes.push(dupCount[id] + " parts are called " + id + ": the others are drawn offset from the first, and no cable or mount can name them");
+    });
+    var seen = dict();
+    (bench.cables || []).forEach(function (c) { addCable(m, c && c.from, c && c.to, "bench", seen); });
     var cfg = currentConfig();
-    ((cfg && cfg.cables) || []).forEach(function (pair, i) { addCable(m, pair[0], pair[1], "config", "c" + i); });
+    ((cfg && cfg.cables) || []).forEach(function (pair) { addCable(m, pair && pair[0], pair && pair[1], "config", seen); });
     placeUnplaced(m);
     sideMissing(m);
     hubPorts(m);
     model = m;
   }
 
-  function addCable(m, from, to, level, id) {
+  // A cable is named by its two ends, so the same cable keeps its id across
+  // configs and a selection follows it, never the cable at the same index.
+  function cableId(level, from, to, seen) {
+    var id = (level === "bench" ? "b:" : "c:") + [String(from), String(to)].sort().join(" ");
+    seen[id] = (seen[id] || 0) + 1;
+    return seen[id] > 1 ? id + " #" + seen[id] : id;
+  }
+
+  function addCable(m, from, to, level, seen) {
     var a = resolveEnd(m, from), b = resolveEnd(m, to);
     if (!a || !b) {
       var gone = !a ? from : to;
       m.notes.push("cable " + from + " ↔ " + to + ": no part " + String(gone).split(".")[0] + " on this bench");
       return;
     }
-    m.cables.push({ id: id, level: level, a: a, b: b, from: from, to: to });
+    m.cables.push({ id: cableId(level, from, to, seen), level: level, a: a, b: b, from: from, to: to });
   }
 
   // `<part>.<connector>`, or `<part>` alone for a hub. A connector its template
@@ -156,24 +249,29 @@
     return { part: p, conn: conn };
   }
 
-  // A part with no position and no base to sit on goes in a row under the rest.
+  // A part with no position and no base to sit on goes in a grid under the rest.
   function placeUnplaced(m) {
-    var bottom = 0, row = 0;
+    var bottom = 0, i = 0;
     m.order.forEach(function (p) { if (p.inst.at) bottom = Math.max(bottom, p.inst.at[1] + 160); });
     m.order.forEach(function (p) {
-      if (p.inst.at || (p.inst.mounted_on && m.parts[p.inst.mounted_on])) return;
-      p.fallbackAt = [20 + row * 220, bottom + 40];
-      row++;
+      if (p.inst.at || (p.inst.mounted_on && m.parts[p.inst.mounted_on] && !p.dup)) return;
+      p.fallbackAt = [20 + (i % GRID_COLS) * GRID_DX, bottom + 40 + Math.floor(i / GRID_COLS) * GRID_DY];
+      i++;
     });
   }
 
-  // Where a part's file puts it: its own `at`, its row under the rest, or the
-  // `at` of what it is mounted on.
+  // Where a part's file puts it: its own `at`, its place in the grid under the
+  // rest, or the `at` of what it is mounted on; a second part under one id
+  // sits a little off the first.
   function rawAt(m, p, depth) {
-    if (p.inst.at) return p.inst.at;
-    if (p.fallbackAt) return p.fallbackAt;
-    var base = p.inst.mounted_on && (depth || 0) < 8 ? m.parts[p.inst.mounted_on] : null;
-    return base ? rawAt(m, base, (depth || 0) + 1) : [0, 0];
+    var at;
+    if (p.inst.at) at = p.inst.at;
+    else if (p.fallbackAt) at = p.fallbackAt;
+    else {
+      var base = p.inst.mounted_on && (depth || 0) < 8 ? m.parts[p.inst.mounted_on] : null;
+      at = base ? rawAt(m, base, (depth || 0) + 1) : [0, 0];
+    }
+    return p.dup ? [at[0] + p.dup * DUP_OFFSET, at[1] + p.dup * DUP_OFFSET] : at;
   }
 
   // An invented connector faces the far end of its first cable.
@@ -188,39 +286,55 @@
   }
 
   // **This machine is a hub**: it has no ports of its own, one per cable that
-  // reaches it, named by the part at the far end — a probe's by what its other
-  // cable reaches — and ordered top to bottom by that part so cables do not cross.
+  // reaches it, named by what it carries — the part at the far end, with the
+  // connector when two cables come from one part, and "→ <part>" when that
+  // connector carries a probe whose SWD lead reaches another part. Ordered top
+  // to bottom by the far part so the cables do not cross.
   function hubPorts(m) {
-    var ports = [];
+    var ports = [], fromPart = dict();
+    m.cables.forEach(function (cb) {
+      [[cb.a, cb.b], [cb.b, cb.a]].forEach(function (pair) {
+        if (pair[0].hub && !pair[1].hub) fromPart[pair[1].part.key] = (fromPart[pair[1].part.key] || 0) + 1;
+      });
+    });
     m.cables.forEach(function (cb) {
       [[cb.a, cb.b], [cb.b, cb.a]].forEach(function (pair) {
         var end = pair[0], far = pair[1];
         if (!end.hub) return;
-        var port = { id: "~" + cb.id, label: hubLabel(m, far), kind: hubKind(), side: "right",
+        var port = { id: "~" + cb.id, label: hubLabel(m, far, fromPart[far.part.key] > 1), kind: hubKind(), side: "right",
                      hubPort: true, cable: cb, far: far, functions: [] };
         end.conn = port;
         ports.push({ hub: end.part, port: port });
       });
     });
     ports.sort(function (x, y) {
-      return rawAt(m, x.port.far.part)[1] - rawAt(m, y.port.far.part)[1];
+      var a = rawAt(m, x.port.far.part), b = rawAt(m, y.port.far.part);
+      return a[1] - b[1] || a[0] - b[0];
     });
     ports.forEach(function (e) { e.hub.conns.push(e.port); e.hub.byId[e.port.id] = e.port; });
   }
 
-  function hubLabel(m, far) {
-    var p = far.part;
-    if (p.tpl.category !== "probe") return name(p);
+  function hubLabel(m, far, several) {
+    if (far.hub) return name(far.part);
+    var label = name(far.part) + (several && far.conn ? " · " + far.conn.label : "");
+    var reach = probeReach(m, far.part, far.conn);
+    return reach ? label + " → " + name(reach) : label;
+  }
+
+  // The part a probe reaches: the connector that reaches this machine carries
+  // the probe, and the same part's SWD lead goes to another part.
+  function probeReach(m, p, conn) {
+    if (!carries(conn, "probe")) return null;
     var reach = null;
     m.cables.some(function (cb) {
-      var mine = cb.a.part === p ? cb.a : cb.b.part === p ? cb.b : null;
-      if (!mine || mine.hub || !mine.conn || mine.conn.kind === hubKind()) return false;
+      var mine = cb.a.part === p && !cb.a.hub ? cb.a : cb.b.part === p && !cb.b.hub ? cb.b : null;
+      if (!mine || !mine.conn || mine.conn.kind !== "swd") return false;
       var other = mine === cb.a ? cb.b : cb.a;
-      if (other.part === p) return false;
+      if (other.part === p || other.hub) return false;
       reach = other.part;
       return true;
     });
-    return reach ? name(p) + " → " + name(reach) : name(p);
+    return reach;
   }
 
   function cablesAt(p, c) {
@@ -239,16 +353,14 @@
     return model ? model.cables.filter(function (cb) { return cb.id === id; })[0] || null : null;
   }
 
-  // The serial a USB connector is bound to, when it is the hub's kind and the
-  // part binds a probe on it: the only thing the glow reads.
-  function boundProbe(p, c) {
-    if (!c || c.kind !== hubKind()) return null;
-    var usb = p.inst.usb || {};
-    var b = usb[c.id];
-    return b && b.probe ? String(b.probe) : null;
+  // The connector key whose bindings decide a glow: the connector itself, or
+  // for a hub port or a cable, its far end on a part.
+  function liveKeyOf(p, c) {
+    return connBindings(p, c.id) ? p.key + "." + c.id : null;
   }
-  function cableProbe(cb) {
-    return boundProbe(cb.a.part, cb.a.conn) || boundProbe(cb.b.part, cb.b.conn);
+  function cableLiveKey(cb) {
+    var end = cb.a.hub ? cb.b : cb.b.hub ? cb.a : null;
+    return end && end.conn ? liveKeyOf(end.part, end.conn) : null;
   }
 
   // ---------------------------------------------------------------- geometry
@@ -264,15 +376,15 @@
   // hovered or selected. Wired rows come first on every side, so revealing the
   // free ones never moves a cable.
   function visibleConns(p) {
-    if (cache && cache.vis[p.id]) return cache.vis[p.id];
-    var showAll = hoverPart === p.id || (!!sel && sel.kind === "part" && sel.id === p.id);
+    if (cache && cache.vis[p.key]) return cache.vis[p.key];
+    var showAll = hoverPart === p.key || (!!sel && sel.kind === "part" && sel.id === p.key);
     var wired = [], free = [];
     p.conns.forEach(function (c) {
       if (isWired(p, c)) wired.push(c);
       else if (!c.stack && showAll) free.push(c);
     });
     var out = { list: wired.concat(free), free: free };
-    if (cache) cache.vis[p.id] = out;
+    if (cache) cache.vis[p.key] = out;
     return out;
   }
 
@@ -294,10 +406,14 @@
     return Math.max(p.tpl.min_height || 0, h);
   }
 
+  function mountedBase(p, depth) {
+    return p.inst.mounted_on && !p.dup && (depth || 0) < 8 ? model.parts[p.inst.mounted_on] || null : null;
+  }
+
   function geom(p, depth) {
-    if (cache && cache.geo[p.id]) return cache.geo[p.id];
+    if (cache && cache.geo[p.key]) return cache.geo[p.key];
     var w = p.tpl.width || DEFAULT_WIDTH, h = partH(p), g;
-    var base = p.inst.mounted_on && (depth || 0) < 8 ? model.parts[p.inst.mounted_on] : null;
+    var base = mountedBase(p, depth);
     if (base) {
       var bg = geom(base, (depth || 0) + 1);
       g = { x: bg.x, y: bg.y - h, w: w, h: h };
@@ -305,7 +421,7 @@
       var at = rawAt(model, p);
       g = { x: at[0], y: at[1], w: w, h: h };
     }
-    if (cache) cache.geo[p.id] = g;
+    if (cache) cache.geo[p.key] = g;
     return g;
   }
 
@@ -378,7 +494,7 @@
   }
   function hasRows(p, g) { return g.h > (p.tpl.rows_top || HEAD) + FOOT; }
   function pcb(p, g, cls) {
-    return shadow(g, 5) + bodyRect(g, 5, cls + (p.missing ? " bn-body-missing" : "")) + (g.h >= 40 ? holes(g) : "");
+    return shadow(g, 5) + bodyRect(g, 5, cls) + (g.h >= 40 ? holes(g) : "");
   }
   var PCB_LABEL = { tx: 20, text: "bn-silk", inset: 18, labelCls: "bn-silk", trace: true };
   function onPcb(svgText, extra) {
@@ -432,7 +548,7 @@
       return onPcb(s);
     },
     // A bench instrument: a display, a knob and keys, on feet. The display reads
-    // the first power role its connectors carry, verbatim.
+    // the first power role its connectors carry, as served.
     instrument: function (p, g) {
       var role = null;
       p.conns.some(function (c) { if (c.power) role = c.power; return !!c.power; });
@@ -456,7 +572,7 @@
         led(g.x + g.w - 18, g.y + g.h - 16, 3);
       return { svg: s, tx: 16, text: "bn-on-case", inset: 22, labelCls: "bn-on-case" };
     },
-    // A probe: a pod.
+    // A probe or a bridge: a pod.
     pod: function (p, g) {
       return { svg: shadow(g, 16) + bodyRect(g, 16, "bn-case") + led(g.x + g.w - 18, g.y + 16, 3),
                tx: 14, text: "bn-on-case", inset: 14, labelCls: "bn-on-case", subEnd: g.x + g.w - 26 };
@@ -470,15 +586,19 @@
       }
       return onPcb(s);
     },
-    // The generic look: a board.
+    // The generic look: a board. A part with no template to read is a blank
+    // outline instead, so what it says about its template stays legible.
     board: function (p, g) {
+      if (p.missing) {
+        return { svg: shadow(g, 5) + bodyRect(g, 5, "bn-body-missing"), tx: 12, text: "", inset: 14, labelCls: "" };
+      }
       var s = pcb(p, g, "bn-pcb");
       if (hasRows(p, g)) s += chip(quietSide(p) === "right" ? g.x + g.w - 44 : g.x + 22, rowMid(p, g) - 10, 20);
       return onPcb(s);
     }
   };
   function lookOf(p) {
-    return !p.missing && Object.prototype.hasOwnProperty.call(LOOKS, p.tpl.look) ? p.tpl.look : "board";
+    return !p.missing && hasOwn(LOOKS, p.tpl.look) ? p.tpl.look : "board";
   }
 
   // ---------------------------------------------------------------- the ports
@@ -534,20 +654,48 @@
   }
 
   // ---------------------------------------------------------------- drawing
+  function carriedBy(p) {
+    return model.order.filter(function (q) { return mountedBase(q) === p; });
+  }
+
   function partSubtitle(p) {
+    if (p.unreadable != null) return "template unreadable · " + p.inst.template;
     if (p.missing) return "template missing · " + p.inst.template;
-    var shields = model.order.filter(function (q) { return q.inst.mounted_on === p.id; });
+    var shields = carriedBy(p);
     if (shields.length) return p.tpl.label + " + " + shields.map(name).join(" + ");
     if (p.inst.label && p.inst.label !== p.tpl.label) return p.tpl.label;
     return p.tpl.subtitle || "";
   }
 
+  // What Validate last said about this part: its role's verdict, or a bench
+  // board's by the probe it is bound to.
+  function verdictOf(p) {
+    if (p.inst.role) return hasOwn(verdicts.roles, p.inst.role) ? verdicts.roles[p.inst.role] : null;
+    var usb = p.inst.usb || {}, found = null;
+    Object.keys(usb).some(function (cid) {
+      var serial = deviceSerial(p, cid);
+      if (serial && hasOwn(verdicts.boards, serial)) found = verdicts.boards[serial];
+      return !!found;
+    });
+    return found;
+  }
+
+  function verdictSVG(p, g, deco) {
+    var v = verdictOf(p);
+    if (!v) return "";
+    var text = cut(v.text, (g.w + 80) / 6.4);
+    var w = text.length * 6.4 + 16, x = g.x + g.w / 2 - w / 2, y = g.y + g.h + 6 + (deco.below || 0);
+    var status = /^[a-z]+$/.test(String(v.status)) ? v.status : "other";
+    return '<g class="bn-verdict bn-v-' + status + '" data-verdict="' + esc(p.key) + '">' + rect("", x, y, w, 18, 9) +
+      '<text x="' + f(g.x + g.w / 2) + '" y="' + f(y + 12.5) + '" text-anchor="middle">' + esc(text) + "</text></g>";
+  }
+
   function partSVG(p) {
     var g = geom(p), look = lookOf(p), vis = visibleConns(p);
-    var isSel = !!sel && sel.kind === "part" && sel.id === p.id;
+    var isSel = !!sel && sel.kind === "part" && sel.id === p.key;
     var deco = LOOKS[look](p, g);
-    var s = '<g class="bn-part' + (isSel ? " bn-sel" : "") + (hoverPart === p.id ? " bn-hover" : "") +
-      (p.missing ? " bn-part-missing" : "") + '" data-part="' + esc(p.id) + '" data-look="' + look + '" data-template="' + esc(p.inst.template) + '">';
+    var s = '<g class="bn-part' + (isSel ? " bn-sel" : "") + (hoverPart === p.key ? " bn-hover" : "") +
+      (p.missing ? " bn-part-missing" : "") + '" data-part="' + esc(p.key) + '" data-look="' + look + '" data-template="' + esc(p.inst.template) + '">';
     s += deco.svg;
     var tx = g.x + deco.tx;
     var role = p.inst.role ? String(p.inst.role).toUpperCase() : "";
@@ -562,30 +710,32 @@
       s += '<g class="bn-role">' + rect("", g.x + g.w - pillW - 16, g.y + 8, pillW, 16, 8) +
         '<text x="' + f(g.x + g.w - pillW / 2 - 16) + '" y="' + f(g.y + 19.5) + '" text-anchor="middle">' + esc(role) + "</text></g>";
     }
-    if (p.inst.mounted_on && model.parts[p.inst.mounted_on]) {
+    if (mountedBase(p)) {
       var pins = '<g class="bn-pins">';
       for (var i = 0; g.x + 22 + i * 18 + 8 <= g.x + g.w - 14; i++) pins += rect("", g.x + 22 + i * 18, g.y + g.h - 3, 8, 6, 1);
       s += pins + "</g>";
     }
     vis.list.forEach(function (c) {
       var pos = connPos(p, c), free = vis.free.indexOf(c) >= 0;
-      var cables = cablesAt(p, c).map(function (cb) { return cb.id; });
-      var probe = c.hubPort ? cableProbe(c.cable) : boundProbe(p, c);
+      var first = cablesAt(p, c)[0];
+      var live = c.hubPort ? cableLiveKey(c.cable) : liveKeyOf(p, c);
       var title = c.label + (c.kind ? " · " + c.kind : "") + (c.power ? " · " + c.power : "") +
         (c.missing ? " · not on " + p.tpl.label : "");
       s += '<g class="bn-port' + (free ? " bn-free" : " bn-wired") + (c.missing ? " bn-port-missing" : "") +
-        '" data-conn="' + esc(p.id + "." + c.id) + '" data-kind="' + esc(c.kind || "") + '" data-x="' + f(pos.x) + '" data-y="' + f(pos.y) + '"' +
-        (cables.length ? ' data-cables="' + esc(cables.join(" ")) + '"' : "") + (c.hubPort ? " data-hub-port" : "") + ">" +
+        '" data-conn="' + esc(p.key + "." + c.id) + '" data-kind="' + esc(c.kind || "") + '" data-x="' + f(pos.x) + '" data-y="' + f(pos.y) + '"' +
+        (first ? ' data-cable-of="' + esc(first.id) + '"' : "") + (c.hubPort ? " data-hub-port" : "") +
+        (live ? ' data-live="' + esc(live) + '"' : "") + ">" +
         circle("bn-hit", pos.x, pos.y, 12) + portGlyph(c, pos, look) + "<title>" + esc(title) + "</title></g>";
       s += labelSVG(c, pos, g, free, deco);
-      if (probe) s += '<circle class="bn-livering" data-probe="' + esc(probe) + '" cx="' + f(pos.x) + '" cy="' + f(pos.y) + '" r="11"/>';
+      if (live) s += '<circle class="bn-livering" data-live="' + esc(live) + '" cx="' + f(pos.x) + '" cy="' + f(pos.y) + '" r="11"/>';
     });
+    s += verdictSVG(p, g, deco);
     return s + "</g>";
   }
 
   function render() {
     if (!bench || !model) return;
-    cache = { vis: {}, geo: {} };
+    cache = { vis: dict(), geo: dict() };
     var s = '<defs><pattern id="bench-dots" width="24" height="24" patternUnits="userSpaceOnUse">' +
       '<circle class="bn-grid-dot" cx="1" cy="1" r="1"/></pattern></defs>' +
       '<rect id="bench-grid" fill="url(#bench-dots)" x="0" y="0" width="10" height="10"/>';
@@ -593,18 +743,18 @@
       var d = cablePath(connPos(cb.a.part, cb.a.conn), connPos(cb.b.part, cb.b.conn));
       var kindEnd = cb.a.hub ? cb.b : cb.a;
       var kind = (kindEnd.conn && kindEnd.conn.kind) || "";
-      var probe = cableProbe(cb);
+      var live = cableLiveKey(cb);
       var isSel = !!sel && sel.kind === "cable" && sel.id === cb.id;
-      if (probe) s += '<path class="bn-glow" data-probe="' + esc(probe) + '" d="' + d + '"/>';
+      if (live) s += '<path class="bn-glow" data-live="' + esc(live) + '" d="' + d + '"/>';
       s += '<path class="bn-cable' + (cb.level === "config" ? " bn-cfg" : " bn-bench") + (isSel ? " bn-sel" : "") +
-        '" data-cable="' + cb.id + '" data-kind="' + esc(kind) + '" d="' + d + '"/>';
-      s += '<path class="bn-cable-hit" data-cable-hit="' + cb.id + '" d="' + d + '"><title>' +
+        '" data-cable="' + esc(cb.id) + '" data-kind="' + esc(kind) + '" d="' + d + '"/>';
+      s += '<path class="bn-cable-hit" data-cable-hit="' + esc(cb.id) + '" d="' + d + '"><title>' +
         esc(endName(cb.a) + " ↔ " + endName(cb.b)) + "</title></path>";
     });
     // Bases first, so a mounted part sits on top of the one it is mounted on.
     var depth = function (p) {
       var n = 0, q = p;
-      while (q && q.inst.mounted_on && model.parts[q.inst.mounted_on] && n < 8) { q = model.parts[q.inst.mounted_on]; n++; }
+      while (q && mountedBase(q) && n < 8) { q = mountedBase(q); n++; }
       return n;
     };
     model.order.slice().sort(function (a, b) { return depth(a) - depth(b); }).forEach(function (p) { s += partSVG(p); });
@@ -614,30 +764,67 @@
   }
 
   // ---------------------------------------------------------------- the live glow
-  // **A `usb-host` connector glows when its bound probe is enumerated now** —
-  // read off the Topology snapshot and nothing else. Toggling classes is all a
-  // snapshot does here.
-  function applyLive() {
-    [svg, insEl].forEach(function (root) {
-      root.querySelectorAll("[data-probe]").forEach(function (el) {
-        el.classList.toggle("bn-live", !!attached[el.getAttribute("data-probe")]);
+  // Toggling classes is all a snapshot does here.
+  function liveSets() {
+    var out = { conns: dict(), bindings: dict() };
+    if (!model) return out;
+    model.order.forEach(function (p) {
+      var usb = p.inst.usb;
+      if (!usb || typeof usb !== "object") return;
+      Object.keys(usb).forEach(function (cid) {
+        var m = connBindings(p, cid);
+        if (!m) return;
+        var dev = deviceSerial(p, cid);
+        Object.keys(m).forEach(function (fn) {
+          if (!bindingLive(fn, m[fn], dev)) return;
+          out.conns[p.key + "." + cid] = true;
+          out.bindings[p.key + "|" + cid + "|" + fn] = true;
+        });
       });
     });
+    return out;
+  }
+
+  function applyLive() {
+    var sets = liveSets();
+    svg.querySelectorAll("[data-live]").forEach(function (el) {
+      el.classList.toggle("bn-live", !!sets.conns[el.getAttribute("data-live")]);
+    });
+    insEl.querySelectorAll("[data-live-binding]").forEach(function (el) {
+      el.classList.toggle("bn-live", !!sets.bindings[el.getAttribute("data-live-binding")]);
+    });
+    // Core not answering is not "nothing plugged in": say so, glows off.
+    liveEl.hidden = !snap.seen || snap.known || !model;
+    liveEl.textContent = "Core is not answering: what is plugged in is unknown";
   }
 
   document.addEventListener("embarch:snapshot", function (ev) {
-    var snap = ev.detail || {};
-    var now = {};
-    (snap.probes || []).forEach(function (p) { if (p && p.serial_number) now[String(p.serial_number)] = true; });
-    attached = now;
+    var s = ev.detail || {};
+    var probes = dict();
+    (s.probes || []).forEach(function (p) { if (p && p.serial_number) probes[String(p.serial_number)] = true; });
+    snap = { seen: true, known: !!s.core_reachable, probes: probes, ports: s.serial_ports || [] };
     applyLive();
   });
 
+  // Validate's verdicts, sent after a pass and when one is dropped. A pass is
+  // a gesture, not a poll, so the canvas redraws for it.
+  document.addEventListener("embarch:verdicts", function (ev) {
+    var d = ev.detail || {};
+    var next = { roles: dict(), boards: dict() };
+    ["roles", "boards"].forEach(function (k) {
+      var src = d[k] || {};
+      Object.keys(src).forEach(function (id) { next[k][id] = src[id]; });
+    });
+    verdicts = next;
+    render();
+  });
+
   // ---------------------------------------------------------------- the inspector
+  function lineFacts(v) { return typeof v === "string" ? JSON.stringify(v) : String(v); }
   function kindCell(c) {
     var fns = (c.functions || []).map(function (fn) {
       var bits = [fn.function];
-      for (var k in fn) if (k !== "function" && fn[k] != null) bits.push(k + " " + fn[k]);
+      for (var k in fn) if (hasOwn(fn, k) && k !== "function" && fn[k] != null) bits.push(k + " " + lineFacts(fn[k]));
       return bits.join(" ");
     });
     return [c.kind || "?"].concat(c.power ? [c.power] : []).join(" · ") + (fns.length ? " · " + fns.join(", ") : "");
@@ -645,26 +832,34 @@
 
   function reaches(p, c) {
     if (c.stack) {
-      var on = model.order.filter(function (q) { return q.inst.mounted_on === p.id; }).map(name);
+      var on = carriedBy(p).map(name);
       if (on.length) return on.join(", ");
-      var base = p.inst.mounted_on && model.parts[p.inst.mounted_on];
+      var base = mountedBase(p);
       return base ? name(base) : "";
     }
     return cablesAt(p, c).map(function (cb) { return endName(otherEnd(cb, p, c)); }).join(", ");
   }
 
   function partInspector(p) {
-    var src = p.missing ? "" : p.tpl.source === "repo" ? "embarch/parts/" + p.tpl.id + ".toml" : "built in";
     var h = '<div class="bn-ins-title">' + esc(name(p)) + "</div>";
-    h += p.missing
-      ? '<div class="sd-error">template ' + esc(p.inst.template) + " missing</div>"
-      : '<div class="bn-ins-meta">' + esc(p.tpl.label) + " · " + esc(src) + "</div>";
+    if (p.unreadable != null) {
+      h += '<div class="sd-error">template ' + esc(p.inst.template) + " unreadable: " + esc(p.unreadable) + "</div>";
+    } else if (p.missing) {
+      h += '<div class="sd-error">template ' + esc(p.inst.template) + " missing</div>";
+    } else {
+      var src = p.tpl.source === "repo" ? "embarch/parts/" + p.tpl.id + ".toml" : "built in";
+      h += '<div class="bn-ins-meta">' + esc(p.tpl.label) + " · " + esc(src) + "</div>";
+    }
     var kv = [["Role", p.inst.role || "none"]];
     if (p.inst.board) kv.push(["Board", p.inst.board]);
-    var base = p.inst.mounted_on && model.parts[p.inst.mounted_on];
-    if (p.inst.mounted_on) kv.push(["On", base ? name(base) : p.inst.mounted_on + " (not on this bench)"]);
-    var carried = model.order.filter(function (q) { return q.inst.mounted_on === p.id; }).map(name);
+    if (p.inst.mounted_on) {
+      var base = mountedBase(p);
+      kv.push(["On", base ? name(base) : p.inst.mounted_on + (p.dup ? "" : " (not on this bench)")]);
+    }
+    var carried = carriedBy(p).map(name);
     if (carried.length) kv.push(["Carries", carried.join(", ")]);
+    var v = verdictOf(p);
+    if (v) kv.push(["Validate", v.text]);
     h += '<dl class="bn-kv">' + kv.map(function (r) { return "<dt>" + esc(r[0]) + "</dt><dd>" + esc(r[1]) + "</dd>"; }).join("") + "</dl>";
     var rows = p.conns.map(function (c) {
       var r = reaches(p, c);
@@ -673,14 +868,15 @@
         '<td class="mono">' + esc(kindCell(c)) + "</td><td>" + (r ? esc(r) : '<span class="bn-muted">—</span>') + "</td></tr>";
     }).join("");
     if (rows) h += '<table class="bn-conns"><tbody>' + rows + "</tbody></table>";
-    var usb = p.inst.usb || {};
+    var usb = p.inst.usb && typeof p.inst.usb === "object" ? p.inst.usb : {};
     Object.keys(usb).forEach(function (cid) {
-      var b = usb[cid] || {}, c = p.byId[cid];
-      var bits = [];
-      for (var k in b) if (k !== "probe" && b[k] != null) bits.push(k + " " + b[k]);
-      h += '<div class="bn-usb"' + (b.probe ? ' data-probe="' + esc(b.probe) + '"' : "") + "><span>" + esc(c ? c.label : cid) + "</span> " +
-        '<span class="mono">' + (b.probe ? "probe " + esc(b.probe) : "") + (bits.length ? (b.probe ? " · " : "") + esc(bits.join(" · ")) : "") + "</span>" +
-        (b.probe ? '<span class="bn-enum">enumerated</span>' : "") + "</div>";
+      var m = connBindings(p, cid), c = p.byId[cid];
+      if (!m) return;
+      h += '<div class="bn-usb-conn">' + esc(c ? c.label : cid) + "</div>";
+      Object.keys(m).forEach(function (fn) {
+        h += '<div class="bn-usb" data-live-binding="' + esc(p.key + "|" + cid + "|" + fn) + '"><span>' + esc(fn) + "</span> " +
+          '<span class="mono">' + esc(bindingText(m[fn])) + '</span><span class="bn-enum">enumerated</span></div>';
+      });
     });
     return h;
   }
@@ -689,20 +885,31 @@
     var kindEnd = cb.a.hub ? cb.b : cb.a;
     var kind = (kindEnd.conn && kindEnd.conn.kind) || "?";
     var cfg = currentConfig();
-    var probe = cableProbe(cb);
     var h = '<div class="bn-ins-title">' + esc(kind) + " cable</div>" +
       '<div class="bn-ins-meta">' + esc(endName(cb.a)) + " ↔ " + esc(endName(cb.b)) + "</div>";
-    var kv = '<dt>Config</dt><dd>' + esc(cb.level === "bench" ? "every config" : (cfg ? cfg.name : "")) + "</dd>";
-    if (probe) kv += '<dt>Probe</dt><dd data-probe="' + esc(probe) + '"><span class="mono">' + esc(probe) + '</span><span class="bn-enum">enumerated</span></dd>';
-    return h + '<dl class="bn-kv">' + kv + "</dl>";
+    h += '<dl class="bn-kv"><dt>Config</dt><dd>' + esc(cb.level === "bench" ? "every config" : (cfg ? cfg.name : "")) + "</dd></dl>";
+    var end = cb.a.hub ? cb.b : cb.b.hub ? cb.a : null;
+    var m = end && end.conn ? connBindings(end.part, end.conn.id) : null;
+    if (m) {
+      Object.keys(m).forEach(function (fn) {
+        h += '<div class="bn-usb" data-live-binding="' + esc(end.part.key + "|" + end.conn.id + "|" + fn) + '"><span>' + esc(fn) + "</span> " +
+          '<span class="mono">' + esc(bindingText(m[fn])) + '</span><span class="bn-enum">enumerated</span></div>';
+      });
+    }
+    return h;
   }
 
+  // The inspector floats over the canvas only while something is selected.
   function renderInspector() {
-    if (!bench || !model) { insEl.innerHTML = ""; return; }
     var cb = sel && sel.kind === "cable" ? cableById(sel.id) : null;
-    if (sel && sel.kind === "part" && model.parts[sel.id]) insEl.innerHTML = partInspector(model.parts[sel.id]);
-    else if (cb) insEl.innerHTML = cableInspector(cb);
-    else insEl.innerHTML = '<div class="bn-ins-title">' + esc(bench.name || bench.slug) + '</div><p class="bn-muted">select a part or a cable</p>';
+    var p = sel && sel.kind === "part" && model ? model.parts[sel.id] : null;
+    if (!bench || !model || (!cb && !p)) {
+      insEl.innerHTML = "";
+      insEl.hidden = true;
+      return;
+    }
+    insEl.innerHTML = p ? partInspector(p) : cableInspector(cb);
+    insEl.hidden = false;
     applyLive();
   }
 
@@ -710,13 +917,13 @@
   function renderConfigs() {
     var cfgs = (bench && bench.configs) || [];
     cfgEl.innerHTML = cfgs.map(function (c, i) {
-      return '<button type="button" class="bench-cfg" role="tab" aria-selected="' + (i === cfgIx) + '" data-cfg="' + i + '">' + esc(c.name) + "</button>";
+      return '<button type="button" class="bench-cfg" role="tab" aria-selected="' + (i === cfgIx) + '" data-cfg="' + i + '">' + esc(c && c.name) + "</button>";
     }).join("");
     cfgRow.hidden = !cfgs.length;
   }
 
   function renderNotes() {
-    var lines = fileErrors.map(function (e) {
+    var lines = partErrors.concat(benchErrors).map(function (e) {
       return (e && e.file ? e.file : "a file") + ": " + (e && e.error ? e.error : "unreadable");
     }).concat(model && bench ? model.notes : []);
     notesEl.innerHTML = lines.map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("");
@@ -729,23 +936,32 @@
     stateEl.hidden = !text;
   }
 
+  function clearBench() {
+    bench = null; model = null; sel = null; hoverPart = null;
+    svg.innerHTML = "";
+    bodyEl.hidden = true;
+    pathEl.hidden = true;
+    pathEl.textContent = "";
+    renderInspector();
+  }
+
   // The routes answered 404: this server has no bench routes. One quiet line —
   // never a banner, and never an empty bench standing in for a real one.
   function showUnavailable() {
-    bench = null; model = null; vocab = null; templates = {}; fileErrors = []; benchList = [];
-    svg.innerHTML = "";
-    bodyEl.hidden = true;
+    clearBench();
+    vocab = null; templates = dict(); unreadable = dict(); partErrors = []; benchErrors = []; benchList = [];
     picker.hidden = true;
-    pathEl.hidden = true;
     notesEl.hidden = true;
     showState("bench routes not available on this server", false);
   }
 
-  function showFailure(e) {
-    bench = null; model = null;
-    svg.innerHTML = "";
-    bodyEl.hidden = true;
-    showState((e && e.route ? e.route + ": " : "") + (e && e.message ? e.message : String(e)), true);
+  // No project open (409) is a state, said in the server's words; anything
+  // else that refused is shown as what it is, route and all.
+  function showFailure(e, keepPicker) {
+    clearBench();
+    if (!keepPicker) picker.hidden = true;
+    if (e && e.status === 409) showState(e.message, false);
+    else showState((e && e.route ? e.route + ": " : "") + (e && e.message ? e.message : String(e)), true);
     renderNotes();
   }
 
@@ -770,35 +986,40 @@
 
   function loadAll() {
     var seq = ++loadSeq;
+    ++benchSeq;   // a bench still loading from before this answers into nothing
     Promise.all([api(ROUTE_VOCAB), api(ROUTE_PARTS), api(ROUTE_BENCHES)]).then(function (res) {
       if (seq !== loadSeq) return;
       vocab = res[0] || {};
-      templates = {};
-      ((res[1] && res[1].parts) || []).forEach(function (t) { templates[t.id] = t; });
-      fileErrors = ((res[1] && res[1].errors) || []).concat((res[2] && res[2].errors) || []);
+      templates = dict();
+      ((res[1] && res[1].parts) || []).forEach(function (t) { if (t && t.id != null) templates[t.id] = t; });
+      partErrors = (res[1] && res[1].errors) || [];
+      benchErrors = (res[2] && res[2].errors) || [];
+      unreadable = dict();
+      partErrors.forEach(function (e) { if (e && e.id != null && !hasOwn(templates, e.id)) unreadable[e.id] = e.error || "unreadable"; });
       benchList = (res[2] && res[2].benches) || [];
+      var onScreen = bench ? bench.slug || picker.value : null;
       picker.innerHTML = benchList.map(function (b) {
         return '<option value="' + esc(b.slug) + '">' + esc(b.name || b.slug) + "</option>";
       }).join("");
       picker.hidden = !benchList.length;
       if (!benchList.length) {
-        bench = null; model = null;
-        bodyEl.hidden = true;
+        clearBench();
         pathEl.hidden = false;
         pathEl.textContent = "embarch/topologies/";
-        // A list emptied by files it could not read is not "no benches".
-        showState(fileErrors.length ? "no saved bench could be read" : "no saved benches", false);
+        // A list emptied by bench files it could not read is not "no benches".
+        showState(benchErrors.length ? "no saved bench could be read" : "no saved benches", false);
         renderNotes();
         return;
       }
-      var want = remembered();
+      // A reload keeps the bench on screen when it is still listed.
+      var want = onScreen || remembered();
       var slug = benchList.some(function (b) { return b.slug === want; }) ? want : benchList[0].slug;
       picker.value = slug;
       loadBench(slug);
     }).catch(function (e) {
       if (seq !== loadSeq) return;
       if (e && e.status === 404) showUnavailable();
-      else showFailure(e);
+      else showFailure(e, false);
     });
   }
 
@@ -822,7 +1043,7 @@
       fit();
     }).catch(function (e) {
       if (seq !== benchSeq) return;
-      showFailure(e);
+      showFailure(e, true);
     });
   }
 
@@ -855,11 +1076,12 @@
     setViewBox();
   }
 
+  // Fit the whole bench, however large, centred in the canvas.
   function fit() {
     if (!model || !model.order.length) return;
     var r = wrapSize();
     if (r.w < 20 || r.h < 20) return;   // a hidden tab has no size yet; the resize observer fits it later
-    cache = cache || { vis: {}, geo: {} };
+    cache = cache || { vis: dict(), geo: dict() };
     var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     model.order.forEach(function (p) {
       var g = geom(p);
@@ -868,8 +1090,8 @@
     });
     var bw = x1 - x0 + FIT_PAD * 2, bh = y1 - y0 + FIT_PAD * 2;
     view.k = clamp(Math.min(r.w / bw, r.h / bh), ZOOM_MIN, FIT_MAX);
-    view.x = x0 - FIT_PAD - Math.max(0, (r.w / view.k - bw) / 2);
-    view.y = y0 - FIT_PAD - Math.max(0, (r.h / view.k - bh) / 2);
+    view.x = (x0 + x1) / 2 - r.w / view.k / 2;
+    view.y = (y0 + y1) / 2 - r.h / view.k / 2;
     fitted = true;
     setViewBox();
   }
@@ -886,8 +1108,8 @@
     var port = closest(e.target, "[data-conn]");
     var part = closest(e.target, "[data-part]");
     var hit = closest(e.target, "[data-cable-hit]");
-    if (port && port.getAttribute("data-cables")) {
-      select({ kind: "cable", id: port.getAttribute("data-cables").split(" ")[0] });
+    if (port && port.getAttribute("data-cable-of")) {
+      select({ kind: "cable", id: port.getAttribute("data-cable-of") });
       return;
     }
     if (part) { select({ kind: "part", id: part.getAttribute("data-part") }); return; }
@@ -958,12 +1180,10 @@
     window.addEventListener("resize", function () { if (model) { if (!fitted) fit(); else setViewBox(); } });
   }
 
-  // A project switch reloads: the parts and benches are the open repo's. The
-  // first event only reports the project the load below already read.
-  var projectHeard = false;
-  document.addEventListener("embarch:project", function () {
-    if (projectHeard) loadAll();
-    projectHeard = true;
-  });
+  // A project switch reloads — the parts and benches are the open repo's — and
+  // so does a save or delete on the Saved benches panel, which writes the same
+  // files. A load already in flight is discarded by its sequence number.
+  document.addEventListener("embarch:project", loadAll);
+  document.addEventListener("embarch:benches-changed", loadAll);
   loadAll();
 })();

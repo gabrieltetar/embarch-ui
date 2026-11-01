@@ -28,6 +28,10 @@
     document.querySelectorAll(".tab-panel").forEach((el) => {
       el.classList.toggle("active", el.dataset.tab === name);
     });
+    // The Topology tab fills the screen with no page scroll (owner,
+    // 2026-11-01): the bench canvas takes the space and the wheel zooms it.
+    const content = document.querySelector(".content");
+    if (content) content.classList.toggle("topo-on", name === "topology");
     const title = document.querySelector(`.nav-item[data-tab="${name}"] .nav-label`);
     const topbarTitle = document.querySelector(".topbar-title");
     if (title && topbarTitle) {
@@ -197,6 +201,28 @@
   // nobody ran. Cleared when a role's bindings change underneath it, so a
   // pass can never describe a board that is no longer there.
   let roleStatus = {};
+  // What the same pass said about each bench board (`bench:<probe serial>`),
+  // keyed by its probe serial; dropped when that board is no longer enrolled.
+  let benchStatus = {};
+
+  // **The bench canvas draws the same verdicts** (bench.js): under the part
+  // holding a role, and under a bench board's part by its probe serial. Sent
+  // after a Validate pass and whenever one is dropped — never from the poll.
+  function publishVerdicts() {
+    const out = { roles: {}, boards: {} };
+    Object.keys(roleStatus).forEach(function (role) {
+      out.roles[role] = { status: roleStatus[role].status, text: statusText(roleStatus[role]) };
+    });
+    Object.keys(benchStatus).forEach(function (serial) {
+      out.boards[serial] = { status: benchStatus[serial].status, text: statusText(benchStatus[serial]) };
+    });
+    document.dispatchEvent(new CustomEvent("embarch:verdicts", { detail: out }));
+  }
+
+  function dropRoleStatus(role) {
+    delete roleStatus[role];
+    publishVerdicts();
+  }
 
   function statusColor(status) {
     if (status === "pass") return "var(--success)";
@@ -447,6 +473,8 @@
     if (first) {
       if (!linkBoardScrolled) {
         linkBoardScrolled = true;
+        const host = first.closest(".topo-panel");
+        if (host) openTopoPanel(host.id.replace("topo-panel-", ""));
         first.scrollIntoView({ block: "center" });
       }
       showRouteNote(null);
@@ -790,7 +818,7 @@
       selectedSerial = null;
       // A new probe binding is a new thing to check; whatever the last
       // Validate said about this role described the old one.
-      delete roleStatus[role];
+      dropRoleStatus(role);
       // Long enough to read a sentence about a moved role.
       assignCloseTimer = setTimeout(closeAssignDialog, board.moved_roles_note ? 6000 : 700);
     } catch (e) {
@@ -860,6 +888,13 @@
 
   function renderSnapshot(snapshot) {
     latestSnapshot = snapshot;
+    if (snapshot.core_reachable) {
+      const still = {};
+      (snapshot.enrolled || []).forEach(function (b) { if (!b.role && b.probe_serial) still[b.probe_serial] = true; });
+      const gone = Object.keys(benchStatus).filter(function (serial) { return !still[serial]; });
+      gone.forEach(function (serial) { delete benchStatus[serial]; });
+      if (gone.length) publishVerdicts();
+    }
     renderStatusChip(snapshot);
     renderTopology(snapshot);
     // The bench canvas (bench.js) is a file of its own and glows from the
@@ -6508,7 +6543,7 @@
       return;
     }
     showError(topoEl("topo-profile-error"), null);
-    delete roleStatus[role];
+    dropRoleStatus(role);
   }
 
   // ---- Validate topology ----
@@ -6568,15 +6603,18 @@
       // one source, two renderings, the rule the signal rows and the signal
       // lanes are already under.
       roleStatus = {};
+      benchStatus = {};
       (body.checks || []).forEach(function (c) {
-        if (c.id.indexOf("role:") !== 0) return;
-        roleStatus[c.id.slice("role:".length)] = {
+        const entry = {
           status: c.status,
           at: formatTimestamp(body.checked_at_utc_ms),
           short: c.status === "empty" ? "nothing to check yet" : c.detail.split("—")[0].trim(),
         };
+        if (c.id.indexOf("role:") === 0) roleStatus[c.id.slice("role:".length)] = entry;
+        else if (c.id.indexOf("bench:") === 0 && c.id.length > "bench:".length) benchStatus[c.id.slice("bench:".length)] = entry;
       });
       if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
+      publishVerdicts();
       const head =
         '<div class="topo-check-summary">' +
         // The server's own verdict, never `ok`, which is only "nothing failed":
@@ -6680,6 +6718,7 @@
     topoEl("topo-profile-picker").value = body.saved;
     topoEl("topo-profile-name").textContent = name;
     closeSaveTopologyDialog();
+    document.dispatchEvent(new CustomEvent("embarch:benches-changed"));
   }
 
   async function deleteTopology() {
@@ -6699,6 +6738,7 @@
     savedProfiles = JSON.parse(text).profiles || [];
     showError(topoEl("topo-profile-error"), null);
     renderProfilePicker();
+    document.dispatchEvent(new CustomEvent("embarch:benches-changed"));
   }
 
   // **Loading applies two halves and proposes the third.** Signals and the
@@ -6972,7 +7012,7 @@
       showError(topoEl("role-board-result"), resp.status + " " + (await resp.text()));
       return;
     }
-    delete roleStatus[role];
+    dropRoleStatus(role);
     closeBoardPicker();
   }
 
@@ -7019,8 +7059,64 @@
     // The board in this role changed, so whatever the last Validate said
     // about it describes a different board. Dropped rather than kept: a
     // stale badge is a claim nobody made.
-    delete roleStatus[role];
+    dropRoleStatus(role);
     closeBoardPicker();
+  }
+
+  // --- The Topology tab's panels --------------------------------------------
+  //
+  // Every card but the canvas opens over it as a panel, one at a time,
+  // anchored under the bar and scrolling inside itself. Esc, its own button
+  // or a pointer press outside closes it — outside meaning neither the panel,
+  // a panel button, Validate, nor a dialog a panel opened (the signal, board
+  // and enrol dialogs sit above it and must not close what they belong to).
+  function openTopoPanel(name) {
+    document.querySelectorAll(".topo-panel").forEach(function (p) {
+      p.hidden = p.id !== "topo-panel-" + name;
+    });
+    document.querySelectorAll("[data-topo-panel]").forEach(function (b) {
+      const on = b.getAttribute("data-topo-panel") === name;
+      b.classList.toggle("is-open", on);
+      b.setAttribute("aria-expanded", on ? "true" : "false");
+    });
+  }
+
+  function closeTopoPanels() {
+    openTopoPanel(null);
+  }
+
+  function topoPanelOpen() {
+    return Array.from(document.querySelectorAll(".topo-panel")).some(function (p) { return !p.hidden; });
+  }
+
+  function aDialogIsOpen() {
+    return Array.from(document.querySelectorAll(".dialog, .desk-dialog")).some(function (d) {
+      return d.offsetParent !== null;
+    });
+  }
+
+  function initTopologyPanels() {
+    const bar = document.getElementById("topo-bar");
+    if (!bar) return;
+    bar.addEventListener("click", function (ev) {
+      const btn = ev.target.closest("[data-topo-panel]");
+      if (!btn) return;
+      const name = btn.getAttribute("data-topo-panel");
+      if (btn.classList.contains("is-open")) closeTopoPanels();
+      else openTopoPanel(name);
+    });
+    const validate = document.getElementById("topo-validate");
+    if (validate) validate.addEventListener("click", function () { openTopoPanel("validate"); });
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Escape" || !topoPanelOpen() || aDialogIsOpen()) return;
+      closeTopoPanels();
+    });
+    document.addEventListener("pointerdown", function (ev) {
+      if (!topoPanelOpen()) return;
+      const t = ev.target;
+      if (!t.closest || t.closest(".topo-panel, [data-topo-panel], #topo-validate, .dialog, .dialog-backdrop, .desk-dialog, .desk-backdrop")) return;
+      closeTopoPanels();
+    }, true);
   }
 
   function initTopologyTab() {
@@ -10892,6 +10988,7 @@
     initEnrollOnDiagram();
     initSignals();
     initTopologyTab();
+    initTopologyPanels();
     initStudyDesignerTab();
     initLiveStudyTab();
     initTimeChart();

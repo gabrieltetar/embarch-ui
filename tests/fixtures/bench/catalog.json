@@ -1,0 +1,554 @@
+{
+  "catalog": {
+    "errors": [],
+    "parts": [
+      {
+        "category": "computer",
+        "connectors": [],
+        "hub": true,
+        "id": "this-machine",
+        "label": "This machine",
+        "look": "monitor",
+        "min_height": 132,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "embarch-core host",
+        "version": null,
+        "width": 190
+      },
+      {
+        "category": "board",
+        "connectors": [
+          {
+            "functions": [
+              {
+                "function": "probe"
+              },
+              {
+                "function": "vcom"
+              }
+            ],
+            "id": "stlink",
+            "kind": "usb-host",
+            "label": "ST-LINK USB",
+            "max_cables": 1,
+            "power": null,
+            "side": "left"
+          },
+          {
+            "functions": [],
+            "id": "stack",
+            "kind": "stack-socket",
+            "label": "Shield headers",
+            "max_cables": 1,
+            "power": null,
+            "side": "top"
+          }
+        ],
+        "hub": false,
+        "id": "nucleo-g0b1re",
+        "label": "NUCLEO-G0B1RE",
+        "look": "nucleo64",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "Nucleo-64",
+        "version": null,
+        "width": 200
+      },
+      {
+        "category": "shield",
+        "connectors": [
+          {
+            "functions": [],
+            "id": "usb-c",
+            "kind": "usb-c",
+            "label": "USB-C",
+            "max_cables": 1,
+            "power": "drp",
+            "side": "right"
+          },
+          {
+            "functions": [],
+            "id": "cn2",
+            "kind": "terminal",
+            "label": "CN2 consumer out",
+            "max_cables": 1,
+            "power": "out",
+            "side": "right"
+          },
+          {
+            "functions": [],
+            "id": "cn3",
+            "kind": "terminal",
+            "label": "CN3 provider in",
+            "max_cables": 1,
+            "power": "in",
+            "side": "right"
+          },
+          {
+            "functions": [],
+            "id": "stack",
+            "kind": "stack-plug",
+            "label": "Nucleo headers",
+            "max_cables": 1,
+            "power": null,
+            "side": "top"
+          }
+        ],
+        "hub": false,
+        "id": "x-nucleo-drp1m1",
+        "label": "X-NUCLEO-DRP1M1",
+        "look": "shield",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "PD shield, dual role",
+        "version": null,
+        "width": 200
+      },
+      {
+        "category": "shield",
+        "connectors": [
+          {
+            "functions": [],
+            "id": "usb-c",
+            "kind": "usb-c",
+            "label": "USB-C",
+            "max_cables": 1,
+            "power": "sink",
+            "side": "right"
+          },
+          {
+            "functions": [],
+            "id": "out",
+            "kind": "terminal",
+            "label": "VBUS out",
+            "max_cables": 1,
+            "power": "out",
+            "side": "right"
+          },
+          {
+            "functions": [],
+            "id": "stack",
+            "kind": "stack-plug",
+            "label": "Nucleo headers",
+            "max_cables": 1,
+            "power": null,
+            "side": "top"
+          }
+        ],
+        "hub": false,
+        "id": "x-nucleo-snk1m1",
+        "label": "X-NUCLEO-SNK1M1",
+        "look": "shield",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "PD shield, sink",
+        "version": null,
+        "width": 200
+      },
+      {
+        "category": "analyzer",
+        "connectors": [
+          {
+            "functions": [],
+            "id": "in",
+            "kind": "usb-c",
+            "label": "USB-C",
+            "max_cables": 1,
+            "power": "pass",
+            "side": "left"
+          },
+          {
+            "functions": [],
+            "id": "usb",
+            "kind": "usb-host",
+            "label": "USB",
+            "max_cables": 1,
+            "power": null,
+            "side": "top"
+          },
+          {
+            "functions": [],
+            "id": "out",
+            "kind": "usb-c",
+            "label": "USB-C",
+            "max_cables": 1,
+            "power": "pass",
+            "side": "right"
+          }
+        ],
+        "hub": false,
+        "id": "cy4500",
+        "label": "CY4500",
+        "look": "analyzer",
+        "min_height": 132,
+        "passthrough": [
+          [
+            "in",
+            "out"
+          ]
+        ],
+        "rows_top": 72,
+        "source": "builtin",
+        "subtitle": "PD analyzer, inline",
+        "version": null,
+        "width": 184
+      },
+      {
+        "category": "board",
+        "connectors": [
+          {
+            "functions": [
+              {
+                "function": "probe"
+              },
+              {
+                "function": "vcom",
+                "interface": 2
+              }
+            ],
+            "id": "usb",
+            "kind": "usb-host",
+            "label": "Debugger USB",
+            "max_cables": 1,
+            "power": null,
+            "side": "left"
+          },
+          {
+            "functions": [],
+            "id": "radio",
+            "kind": "radio",
+            "label": "Radio",
+            "max_cables": 1,
+            "power": null,
+            "side": "right"
+          }
+        ],
+        "hub": false,
+        "id": "nrf54l15dk",
+        "label": "nRF54L15 DK",
+        "look": "devkit",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "Nordic DK",
+        "version": null,
+        "width": 190
+      },
+      {
+        "category": "probe",
+        "connectors": [
+          {
+            "functions": [
+              {
+                "function": "probe"
+              }
+            ],
+            "id": "usb",
+            "kind": "usb-host",
+            "label": "USB",
+            "max_cables": 1,
+            "power": null,
+            "side": "left"
+          },
+          {
+            "functions": [],
+            "id": "swd",
+            "kind": "swd",
+            "label": "SWD",
+            "max_cables": 1,
+            "power": null,
+            "side": "right"
+          }
+        ],
+        "hub": false,
+        "id": "debug-probe",
+        "label": "Debug probe",
+        "look": "pod",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "SWD probe",
+        "version": null,
+        "width": 160
+      },
+      {
+        "category": "adapter",
+        "connectors": [
+          {
+            "functions": [
+              {
+                "function": "vcom"
+              }
+            ],
+            "id": "usb",
+            "kind": "usb-host",
+            "label": "USB",
+            "max_cables": 1,
+            "power": null,
+            "side": "left"
+          },
+          {
+            "functions": [],
+            "id": "pins",
+            "kind": "pin-header",
+            "label": "UART pins",
+            "max_cables": 1,
+            "power": null,
+            "side": "right"
+          }
+        ],
+        "hub": false,
+        "id": "usb-uart-bridge",
+        "label": "USB-UART bridge",
+        "look": "pod",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "a VCOM on pins",
+        "version": null,
+        "width": 160
+      },
+      {
+        "category": "adapter",
+        "connectors": [
+          {
+            "functions": [],
+            "id": "usb-c",
+            "kind": "usb-c",
+            "label": "USB-C",
+            "max_cables": 1,
+            "power": "pass",
+            "side": "left"
+          },
+          {
+            "functions": [],
+            "id": "banana",
+            "kind": "banana",
+            "label": "VBUS / GND",
+            "max_cables": 1,
+            "power": "pass",
+            "side": "right"
+          }
+        ],
+        "hub": false,
+        "id": "usb-c-breakout",
+        "label": "USB-C breakout",
+        "look": "breakout",
+        "min_height": null,
+        "passthrough": [
+          [
+            "usb-c",
+            "banana"
+          ]
+        ],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "USB-C to banana",
+        "version": null,
+        "width": 170
+      },
+      {
+        "category": "instrument",
+        "connectors": [
+          {
+            "functions": [],
+            "id": "out",
+            "kind": "banana",
+            "label": "+/- out",
+            "max_cables": 1,
+            "power": "supply",
+            "side": "right"
+          }
+        ],
+        "hub": false,
+        "id": "bench-supply",
+        "label": "Bench supply",
+        "look": "instrument",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "current-limited",
+        "version": null,
+        "width": 170
+      },
+      {
+        "category": "instrument",
+        "connectors": [
+          {
+            "functions": [],
+            "id": "in",
+            "kind": "banana",
+            "label": "+/- in",
+            "max_cables": 1,
+            "power": "load",
+            "side": "left"
+          },
+          {
+            "functions": [
+              {
+                "ack_err": "Rexecu err",
+                "ack_ok": "Rexecu success",
+                "baud": 9600,
+                "function": "scpi",
+                "min_interval_ms": 200,
+                "read_terminator": "\r\n",
+                "write_terminator": "\n"
+              }
+            ],
+            "id": "usb",
+            "kind": "usb-host",
+            "label": "USB",
+            "max_cables": 1,
+            "power": null,
+            "side": "left"
+          }
+        ],
+        "hub": false,
+        "id": "scpi-load",
+        "label": "Electronic load",
+        "look": "instrument",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "SCPI over USB serial",
+        "version": null,
+        "width": 170
+      },
+      {
+        "category": "board",
+        "connectors": [
+          {
+            "functions": [
+              {
+                "function": "probe"
+              },
+              {
+                "function": "vcom"
+              }
+            ],
+            "id": "usb",
+            "kind": "usb-host",
+            "label": "USB",
+            "max_cables": 1,
+            "power": null,
+            "side": "left"
+          }
+        ],
+        "hub": false,
+        "id": "generic-board",
+        "label": "Board",
+        "look": "board",
+        "min_height": null,
+        "passthrough": [],
+        "rows_top": null,
+        "source": "builtin",
+        "subtitle": "not described by this repo",
+        "version": null,
+        "width": 180
+      }
+    ]
+  },
+  "vocabulary": {
+    "categories": [
+      "computer",
+      "board",
+      "shield",
+      "instrument",
+      "analyzer",
+      "probe",
+      "adapter"
+    ],
+    "functions": [
+      "probe",
+      "vcom",
+      "scpi",
+      "bootload-app",
+      "bootload-bootloader"
+    ],
+    "hub_kind": "usb-host",
+    "joins": [
+      [
+        "usb-c",
+        "usb-c"
+      ],
+      [
+        "banana",
+        "banana"
+      ],
+      [
+        "banana",
+        "terminal"
+      ],
+      [
+        "terminal",
+        "terminal"
+      ],
+      [
+        "swd",
+        "swd"
+      ],
+      [
+        "pin-header",
+        "pin-header"
+      ],
+      [
+        "radio",
+        "radio"
+      ]
+    ],
+    "kinds": [
+      "usb-c",
+      "usb-host",
+      "banana",
+      "terminal",
+      "swd",
+      "pin-header",
+      "radio",
+      "stack-socket",
+      "stack-plug"
+    ],
+    "looks": [
+      "monitor",
+      "nucleo64",
+      "shield",
+      "devkit",
+      "power-board",
+      "instrument",
+      "analyzer",
+      "pod",
+      "breakout",
+      "board"
+    ],
+    "power": {
+      "consumers": [
+        "sink",
+        "load",
+        "in"
+      ],
+      "either": [
+        "drp"
+      ],
+      "pass": [
+        "pass"
+      ],
+      "providers": [
+        "source",
+        "supply",
+        "out"
+      ]
+    }
+  }
+}

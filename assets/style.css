@@ -2189,32 +2189,55 @@ table.data-table {
   --bn-grid-dot: oklch(86% 0.008 250);
   --bn-swd: oklch(50% 0.12 300);
 }
-.bench-card [hidden] { display: none !important; }
-.bench-state { margin: 8px 0 0; }
-.bench-main { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 12px; margin-top: 12px; }
-.bench-wrap { position: relative; height: 560px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-canvas); overflow: hidden; }
+/* The Topology tab fills the screen: no page scroll, the canvas takes the
+ * space, every other card is a panel over it (index.html says why). */
+.content.topo-on { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.content.topo-on > .tab-panel.active { flex: 1; min-height: 0; display: flex; }
+.topo-full { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.topo-full [hidden] { display: none !important; }
+.topo-error { flex-shrink: 0; margin: 10px 14px 0; }
+.topo-bar { flex-shrink: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg-surface); }
+.topo-bar .sd-input { padding: 6px 9px; font-size: 12.5px; max-width: 100%; }
+.topo-bar .btn { padding: 6px 12px; }
+.topo-bar-path { font-size: 11.5px; color: var(--text-tertiary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-bar-spacer { flex: 1; }
+.topo-menu { display: flex; gap: 6px; flex-wrap: wrap; }
+.topo-menu-btn.is-open { border-color: var(--accent); background: var(--accent-soft-bg); }
+.topo-stage { position: relative; flex: 1; min-height: 0; min-width: 0; }
+.topo-panel { position: absolute; top: 8px; right: 12px; z-index: 6; width: min(820px, calc(100% - 24px)); max-height: calc(100% - 16px); overflow: auto; box-shadow: 0 10px 34px oklch(0% 0 0 / 0.35); }
+.topo-panel .topo-check-log { max-width: 100%; }
+
+.bench-card { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; }
+.bench-state { margin: 0; padding: 14px 16px; }
+.bench-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.bench-wrap { position: relative; flex: 1; min-height: 0; background: var(--bg-canvas); overflow: hidden; }
 #bench-svg { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
-.bench-tools { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; }
+.bench-tools { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; right: 300px; pointer-events: none; }
+.bench-tools > * { pointer-events: auto; }
 .bench-tools .btn { padding: 4px 10px; min-width: 32px; justify-content: center; font-family: var(--font-mono); }
-.bench-legend { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 3px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font: 11px var(--font-mono); color: var(--text-secondary); pointer-events: none; }
+.bench-live-state { font: 11.5px var(--font-mono); color: var(--warning); background: var(--bg-surface); border: 1px solid var(--border); border-radius: 99px; padding: 3px 10px; }
+.bench-legend { position: absolute; bottom: 30px; right: 10px; display: flex; flex-direction: column; gap: 3px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font: 11px var(--font-mono); color: var(--text-secondary); pointer-events: none; }
 .bench-legend span { display: flex; align-items: center; gap: 6px; }
 .bench-legend svg { flex: none; }
 .bench-legend-line { stroke: var(--text-secondary); stroke-width: 2.4; }
 .bench-legend-cfg { stroke-dasharray: 7 5; }
 .bench-legend-glow { stroke: var(--success); stroke-width: 9; opacity: 0.3; }
-.bench-hint { position: absolute; bottom: 8px; left: 12px; right: 12px; font: 11px var(--font-mono); color: var(--text-tertiary); pointer-events: none; }
-.bench-inspector { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg-surface-2); font-size: 12.5px; min-width: 0; align-self: start; display: flex; flex-direction: column; gap: 8px; }
-.bench-config-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.bench-hint { position: absolute; bottom: 8px; left: 12px; right: 12px; font: 11px var(--font-mono); color: var(--text-tertiary); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bench-inspector { position: absolute; top: 10px; right: 10px; width: 290px; max-width: calc(100% - 20px); max-height: calc(100% - 130px); overflow: auto; z-index: 3; border: 1px solid var(--border-strong); border-radius: 10px; padding: 12px; background: var(--bg-surface); box-shadow: 0 8px 26px oklch(0% 0 0 / 0.3); font-size: 12.5px; display: flex; flex-direction: column; gap: 8px; }
+.bench-foot { flex-shrink: 0; display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; padding: 7px 14px; border-top: 1px solid var(--border); background: var(--bg-surface); }
 .bench-config-label { font: 600 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
 .bench-configs { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
-.bench-cfg { border: 1px solid var(--border); background: var(--bg-surface); border-radius: 8px; padding: 5px 10px; color: var(--text-secondary); font: 12.5px var(--font-ui); cursor: pointer; }
+.bench-cfg { border: 1px solid var(--border); background: var(--bg-surface); border-radius: 8px; padding: 4px 10px; color: var(--text-secondary); font: 12.5px var(--font-ui); cursor: pointer; }
 .bench-cfg:hover { border-color: var(--border-strong); }
 .bench-cfg[aria-selected="true"] { border-color: var(--accent); color: var(--text-primary); background: var(--bg-surface-2); }
-.bench-notes { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font: 12px var(--font-mono); color: var(--warning); }
-@media (max-width: 900px) {
-  .bench-main { grid-template-columns: minmax(0, 1fr); }
-  .bench-wrap { height: 62vh; }
-  .bench-legend { display: none; }
+.bench-notes { flex-shrink: 0; list-style: none; margin: 0; padding: 6px 14px; display: flex; flex-direction: column; gap: 2px; font: 11.5px var(--font-mono); color: var(--warning); max-height: 5.6em; overflow: auto; border-top: 1px solid var(--border); background: var(--bg-surface); }
+@media (max-width: 720px) {
+  .topo-bar { padding: 6px 8px; }
+  .topo-panel { left: 6px; right: 6px; top: 6px; width: auto; max-height: calc(100% - 12px); }
+  .bench-legend, .bench-hint, .topo-bar-path { display: none; }
+  .topo-bar .btn { padding: 5px 9px; font-size: 12px; }
+  .bench-tools { right: 10px; }
+  .bench-inspector { left: 10px; right: 10px; width: auto; top: auto; bottom: 10px; max-height: 55%; }
 }
 
 /* the inspector */
@@ -2261,7 +2284,7 @@ table.data-table {
 .bn-part { cursor: pointer; }
 .bn-body { stroke-width: 1.4; }
 .bn-part.bn-sel .bn-body { stroke: var(--accent); stroke-width: 2.4; }
-.bn-body-missing { stroke: var(--danger) !important; stroke-dasharray: 6 4; }
+.bn-body-missing { fill: var(--bg-surface-2); stroke: var(--danger); stroke-dasharray: 6 4; }
 .bn-shadow { fill: var(--bn-shadow); }
 .bn-pcb { fill: var(--bn-pcb); stroke: var(--bn-pcb-edge); }
 .bn-pcb-2 { fill: var(--bn-pcb-2); stroke: var(--bn-pcb-2-edge); }
@@ -2316,3 +2339,12 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
 .bn-clabel.bn-free { font-style: italic; opacity: 0.75; }
 .bn-clabel.bn-outside { fill: var(--text-secondary); opacity: 1; }
 .bn-missing-text.bn-clabel, .bn-sub.bn-missing-text { fill: var(--danger); }
+.bn-verdict rect { fill: var(--bg-surface); stroke: var(--border-strong); stroke-width: 1; }
+.bn-verdict text { font: 600 10.5px var(--font-mono); fill: var(--text-tertiary); pointer-events: none; }
+.bn-v-pass rect { fill: var(--success-soft-bg); stroke: var(--success); }
+.bn-v-pass text { fill: var(--success); }
+.bn-v-fail rect { fill: var(--danger-soft-bg); stroke: var(--danger); }
+.bn-v-fail text { fill: var(--danger); }
+.bn-v-warn rect { fill: var(--warning-soft-bg); stroke: var(--warning); }
+.bn-v-warn text { fill: var(--warning); }
+.bn-usb-conn { font-size: 11.5px; color: var(--text-tertiary); margin-top: 2px; }

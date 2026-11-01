@@ -158,84 +158,61 @@
       </section>
 
       <section class="tab-panel" data-tab="topology">
-        <div id="topology-error" class="card" style="display:none; margin-bottom:16px; border-color:var(--danger);"></div>
-
-        <!-- decision 44. Two things live here rather than beside the
-             diagram: the saved-bench picker, which is the same shape the
-             saved-study picker has on Live Study, and Validate topology,
-             which replaced the alert list. An alert answered "did a
-             mismatch happen at some point" — a question nobody is asking
-             at the moment they look at this tab, and one that says nothing
-             at all about a signal route, since a signal mismatch is never
-             written to that log. This button answers "is the bench in
-             front of me what this tab says it is", now, check by check. -->
-        <div class="card" style="margin-bottom:16px;">
-          <div class="sd-toolbar">
-            <div class="card-title" style="margin:0;">Bench &mdash; <span id="topo-profile-name" class="mono">unsaved</span></div>
-            <div class="sd-toolbar-actions">
-              <select id="topo-profile-picker" class="sd-input mono" style="min-width:210px;"><option value="">no project open</option></select>
-              <button id="topo-profile-load" class="btn" title="Apply this saved topology">Load</button>
-              <button id="topo-profile-save" class="btn" title="Save the bench as it stands now">Save as&hellip;</button>
-              <button id="topo-profile-delete" class="btn btn-icon-danger" title="Delete the selected saved topology">&#10005;</button>
-              <span style="flex:1;"></span>
-              <button id="topo-validate" class="btn btn-primary">Validate topology</button>
+        <!-- The Topology tab fills the screen (owner, 2026-11-01): the bench
+             canvas takes the space, a bar on top holds the bench picker,
+             Validate topology and one button per panel, and every other card
+             opens as a panel over the canvas — anchored under the bar,
+             scrolling inside itself, closed by Esc, its own button or a
+             click outside. The old diagram, with its probe pool and enrol
+             drop targets, lives in its panel until the editor replaces it. -->
+        <div class="topo-full">
+          <div id="topology-error" class="card topo-error" style="display:none; border-color:var(--danger);"></div>
+          <div class="topo-bar" id="topo-bar">
+            <select id="bench-pick" class="sd-input mono" title="A saved bench, drawn below" hidden></select>
+            <span id="bench-path" class="topo-bar-path mono" hidden></span>
+            <span class="topo-bar-spacer"></span>
+            <button id="topo-validate" class="btn btn-primary">Validate topology</button>
+            <div class="topo-menu" role="group" aria-label="Panels">
+              <button type="button" class="btn topo-menu-btn" data-topo-panel="signals" aria-expanded="false" aria-controls="topo-panel-signals">Signals</button>
+              <button type="button" class="btn topo-menu-btn" data-topo-panel="boards" aria-expanded="false" aria-controls="topo-panel-boards">Board types</button>
+              <button type="button" class="btn topo-menu-btn" data-topo-panel="saved" aria-expanded="false" aria-controls="topo-panel-saved">Saved benches</button>
+              <button type="button" class="btn topo-menu-btn" data-topo-panel="diagram" aria-expanded="false" aria-controls="topo-panel-diagram">Old diagram</button>
             </div>
           </div>
-          <p class="placeholder-note" style="margin:8px 0 0;"><span class="mono">embarch/topologies/</span></p>
-          <div id="topo-profile-error" class="sd-error" style="display:none; margin-top:10px;"></div>
-          <div id="topo-apply-report" style="display:none; margin-top:12px;"></div>
-          <div id="topo-validate-report" style="display:none; margin-top:12px;"></div>
-        </div>
+          <div class="topo-stage" id="topo-stage">
 
-        <div class="card" style="margin-bottom:16px; padding:26px 30px;">
-          <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
-          <div class="topo-enroll-strip">
-            <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the Dev bench or DUT box above, or click a probe then a box</div>
-            <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
-          </div>
-        </div>
-
-        <!-- The bench canvas (embarch-bench-editor-proposal.md, phase 2): a
-             saved bench drawn as the hardware on the shelf, read-only, from
-             the UI server's /api/bench/* routes. bench.js draws all of it;
-             this is the frame. It sits beside the diagram above until the
-             editor replaces that diagram. -->
-        <div class="card bench-card" id="bench-card" style="margin-bottom:16px;">
-          <div class="sd-toolbar">
-            <div class="card-title" style="margin:0;">Bench canvas</div>
-            <div class="sd-toolbar-actions">
-              <select id="bench-pick" class="sd-input mono" style="min-width:210px;" title="A saved bench" hidden></select>
-            </div>
-          </div>
-          <p id="bench-path" class="placeholder-note mono" style="margin:8px 0 0;" hidden></p>
-          <p id="bench-state" class="placeholder-note bench-state">reading&hellip;</p>
-          <div id="bench-body" hidden>
-            <div class="bench-main">
-              <div class="bench-wrap" id="bench-wrap">
-                <svg id="bench-svg" aria-label="Bench canvas"></svg>
-                <div class="bench-tools">
-                  <button type="button" class="btn" id="bench-zoom-out" title="Zoom out">&minus;</button>
-                  <button type="button" class="btn" id="bench-zoom-in" title="Zoom in">+</button>
-                  <button type="button" class="btn" id="bench-fit" title="Fit the bench">Fit</button>
+            <!-- The bench canvas (embarch-bench-editor-proposal.md, phase 2):
+                 a saved bench drawn as the hardware on the shelf, read-only,
+                 from the UI server's /api/bench/* routes. bench.js draws all
+                 of it; this is the frame. -->
+            <div class="bench-card" id="bench-card">
+              <p id="bench-state" class="placeholder-note bench-state">reading&hellip;</p>
+              <div id="bench-body" class="bench-body" hidden>
+                <div class="bench-wrap" id="bench-wrap">
+                  <svg id="bench-svg" aria-label="Bench canvas"></svg>
+                  <div class="bench-tools">
+                    <button type="button" class="btn" id="bench-zoom-out" title="Zoom out">&minus;</button>
+                    <button type="button" class="btn" id="bench-zoom-in" title="Zoom in">+</button>
+                    <button type="button" class="btn" id="bench-fit" title="Fit the bench">Fit</button>
+                    <span id="bench-live-state" class="bench-live-state" hidden></span>
+                  </div>
+                  <div class="bench-legend" aria-hidden="true">
+                    <span><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" class="bench-legend-line"/></svg>to this machine, every config</span>
+                    <span><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" class="bench-legend-line bench-legend-cfg"/></svg>this config</span>
+                    <span><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-glow"/><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-line"/></svg>enumerated now</span>
+                  </div>
+                  <div class="bench-hint">hover a part for its free connectors &middot; click to inspect &middot; drag empty space to pan &middot; wheel zooms</div>
+                  <aside class="bench-inspector" id="bench-inspector" aria-label="Selection" hidden></aside>
                 </div>
-                <div class="bench-legend" aria-hidden="true">
-                  <span><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" class="bench-legend-line"/></svg>to this machine, every config</span>
-                  <span><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" class="bench-legend-line bench-legend-cfg"/></svg>this config</span>
-                  <span><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-glow"/><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-line"/></svg>probe enumerated now</span>
+                <div class="bench-foot" id="bench-config-row" hidden>
+                  <span class="bench-config-label">Config</span>
+                  <div class="bench-configs" id="bench-configs" role="tablist" aria-label="Configs"></div>
                 </div>
-                <div class="bench-hint">hover a part for its free connectors &middot; click to inspect &middot; drag empty space to pan &middot; wheel zooms</div>
               </div>
-              <aside class="bench-inspector" id="bench-inspector" aria-label="Selection"></aside>
+              <ul class="bench-notes" id="bench-notes" hidden></ul>
             </div>
-            <div class="bench-config-row" id="bench-config-row" hidden>
-              <span class="bench-config-label">Config</span>
-              <div class="bench-configs" id="bench-configs" role="tablist" aria-label="Configs"></div>
-            </div>
-          </div>
-          <ul class="bench-notes" id="bench-notes" hidden></ul>
-        </div>
 
-        <div class="card" style="margin-bottom:16px;">
+            <div class="card topo-panel" id="topo-panel-signals" role="region" aria-label="Signals" hidden>
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">DUT signals</div>
             <div class="sd-toolbar-actions">
@@ -258,14 +235,14 @@
               <tbody id="signals-table-body"><tr><td colspan="6" class="placeholder-note">waiting for embarch-core…</td></tr></tbody>
             </table>
           </div>
-        </div>
+            </div>
 
-        <!-- The project's board catalog (decisions 44, 45): the board
-             *types* this repo builds for — shapes, not pieces of hardware,
-             the same sense Zephyr means by a board. No probe serial here on
-             purpose: a probe is moved between boards, so which probe serves
-             a role is a separate binding, made on the diagram above. -->
-        <div class="card">
+            <!-- The project's board catalog (decisions 44, 45): the board
+                 *types* this repo builds for — shapes, not pieces of hardware,
+                 the same sense Zephyr means by a board. No probe serial here on
+                 purpose: a probe is moved between boards, so which probe serves
+                 a role is a separate binding, made on the old diagram. -->
+            <div class="card topo-panel" id="topo-panel-boards" role="region" aria-label="Board types" hidden>
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">Board types in this project</div>
             <div class="sd-toolbar-actions">
@@ -279,6 +256,42 @@
             <thead><tr><th style="width:190px;">Board type</th><th style="width:150px;">Revisions</th><th style="width:170px;">Variants</th><th>Notes</th><th style="width:100px;"></th></tr></thead>
             <tbody id="board-catalog-body"><tr><td colspan="5" class="placeholder-note">reading…</td></tr></tbody>
           </table>
+            </div>
+
+            <!-- decision 44: the saved-bench picker, the same shape the
+                 saved-study picker has on Live Study. -->
+            <div class="card topo-panel" id="topo-panel-saved" role="region" aria-label="Saved benches" hidden>
+              <div class="sd-toolbar">
+                <div class="card-title" style="margin:0;">Bench &mdash; <span id="topo-profile-name" class="mono">unsaved</span></div>
+                <div class="sd-toolbar-actions">
+                  <select id="topo-profile-picker" class="sd-input mono" style="min-width:210px;"><option value="">no project open</option></select>
+                  <button id="topo-profile-load" class="btn" title="Apply this saved topology">Load</button>
+                  <button id="topo-profile-save" class="btn" title="Save the bench as it stands now">Save as&hellip;</button>
+                  <button id="topo-profile-delete" class="btn btn-icon-danger" title="Delete the selected saved topology">&#10005;</button>
+                </div>
+              </div>
+              <p class="placeholder-note" style="margin:8px 0 0;"><span class="mono">embarch/topologies/</span></p>
+              <div id="topo-profile-error" class="sd-error" style="display:none; margin-top:10px;"></div>
+              <div id="topo-apply-report" style="display:none; margin-top:12px;"></div>
+            </div>
+
+            <!-- Validate topology replaced the alert list (decision 44): it
+                 answers "is the bench in front of me what this tab says it
+                 is", now, check by check. Its report opens here. -->
+            <div class="card topo-panel" id="topo-panel-validate" role="region" aria-label="Validate topology" hidden>
+              <div class="card-title" style="margin:0 0 4px;">Validate topology</div>
+              <div id="topo-validate-report" style="display:none; margin-top:8px;"></div>
+            </div>
+
+            <div class="card topo-panel" id="topo-panel-diagram" role="region" aria-label="Old diagram" hidden>
+              <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
+              <div class="topo-enroll-strip">
+                <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the Dev bench or DUT box above, or click a probe then a box</div>
+                <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
+              </div>
+            </div>
+
+          </div>
         </div>
       </section>
 

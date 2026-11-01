@@ -208,20 +208,28 @@ a click on "Open project" there posts to both.
 
 `drive_prompt.py` (ui/101) renders the operator-prompt modal (decision 69): `stub_core.py` serves a host study with a `pending_prompt` once `POST /_stub/prompt/start` is called (a control surface on the stub's own port, no token). Needs `EMBARCH_STUB_PORT` set to the stub's port (default 4901) as well as the two address variables.
 
-`drive_bench.py` drives the Topology tab's bench canvas (`assets/bench.js`, the
-bench editor's read-only phase). The bench routes are served from
-`tests/fixtures/bench/fixture.json` — one answer per `GET /api/bench/*`, keyed
-by route — through a proxy the script puts in front of the real binary;
-everything else, `/events` included, passes through, so the live glow reads the
-UI's own poll of the script's stub Core. It checks that every look is drawn
-(an unknown look as a board, a missing template as a board that says so),
-that hovering a part reveals its free connectors without moving a wired one,
-that this machine has one port per cable, that the config tabs switch the
-dashed cables, that a snapshot lights and puts out a glow without rebuilding
-the canvas or dropping the selection, pan, zoom and fit, and that a server
-answering `404` on the bench routes gets one quiet line. It uses four ports:
+`drive_bench.py` drives the Topology tab as the bench canvas fills it
+(`assets/bench.js`, the bench editor's read-only phase): the bar, the panels
+over the canvas (Esc, their button, a click outside), and the canvas itself.
+The bench routes are served through a proxy the script puts in front of the
+real binary, from `tests/fixtures/bench/catalog.json` — the vocabulary and the
+built-ins exactly as this build serves them, rewritten with
+`EMBARCH_REGEN_FIXTURES=1 cargo test` when a template changes — and
+`fixture.json`, the repo templates and benches; `src/bench/drive_fixture.rs`
+holds both to the real types. The proxy answers `409` while the UI has no
+project open, passes everything else (`/events` included) through, and puts an
+error listener at the top of the page. It checks the first project opened
+loads, every look is drawn (an unknown look as a board, a missing or
+unreadable template as an outline that says which), hovering reveals free
+connectors without moving a wired one, this machine's ports and their names,
+config tabs and a selection that follows its cable, a glow a snapshot lights
+and puts out without rebuilding the canvas (probes and serial ports, by
+interface), Core not answering, Validate's verdicts under the parts, the
+Saved benches panel and the canvas agreeing, pan, zoom, fit, a huge bench,
+odd ids, phone width, and a server with no bench routes. It uses four ports:
 `EMBARCH_UI_PORT` and the three after it (desk, proxy, stub Core);
-`EMBARCH_BENCH_SHOTS=<dir>` also saves the card in each theme.
+`EMBARCH_BENCH_SHOTS=<dir>` also saves screenshots. `drive_topology.py` opens
+each card's panel before touching it.
 
 ```sh
 cargo build --release

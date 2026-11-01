@@ -363,6 +363,16 @@ def script(js, args=None):
     return rq("POST", b + "/execute/sync", {"script": js, "args": args or []})
 
 
+# The Topology tab is the bench canvas with every card a panel over it (owner,
+# 2026-11-01): open the card's panel before touching it, the way a human has to.
+def panel(name):
+    script("var b=document.querySelector('[data-topo-panel=\"'+arguments[0]+'\"]');"
+           "if (!b.classList.contains('is-open')) b.click();", [name])
+    time.sleep(0.1)
+    if not script("var p=document.getElementById('topo-panel-'+arguments[0]); return !p.hidden && p.offsetParent !== null;", [name]):
+        raise SystemExit("the %s panel did not open" % name)
+
+
 try:
     # --- the tab is gone, and its address still lands ----------------------
     rq("POST", b + "/url", {"url": UI + "/#enroll"})
@@ -401,6 +411,7 @@ try:
           script("return !document.getElementById('sd-project-picker');"))
 
     # --- the pool and the targets ------------------------------------------
+    panel("diagram")
     check("the probe pool renders inside the diagram card",
           script("return !!document.getElementById('probes-pool').closest('.card')"
                  ".querySelector('#topology-diagram');"))
@@ -448,6 +459,7 @@ try:
           == ["dev-bench", "dut"])
 
     # --- the board-type catalog, which the DUT picker reads ----------------
+    panel("boards")
     check("the catalog names the file it is",
           "boards.toml" in script("return document.getElementById('board-catalog-path').textContent;"))
     script("document.getElementById('board-add').click();")
@@ -464,6 +476,7 @@ try:
           os.path.exists(REPO + "/embarch/boards.toml"))
 
     # --- picking a board type on the box -----------------------------------
+    panel("diagram")
     script("document.querySelector('[data-board-role=\"dut\"] text')"
            ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
     time.sleep(0.5)
@@ -496,6 +509,7 @@ try:
                             "chip": "nRF54L15"}], BOARD_WRITES)
 
     # --- what a board type can be *built* as (the catalog's own columns) ----
+    panel("boards")
     #
     # The list used to carry the chip and the west target. Neither is what a
     # human reads a bench list for; what this repo can build each board as
@@ -521,6 +535,7 @@ try:
                                         ".textContent;"))
 
     # --- picking a *real* combination for the DUT --------------------------
+    panel("diagram")
     script("document.querySelector('[data-board-role=\"dut\"] text')"
            ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
     time.sleep(0.6)
@@ -562,6 +577,7 @@ try:
     plank = catalog.split('name = "plank"')[-1]
     check("and the combination is recorded on the board in the project's own file",
           'revision = "2"' in plank and 'variant = "ns"' in plank, plank)
+    panel("boards")
     check("the list marks the combination a build would use now",
           script("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');"))
     # The other end of decision 48: a board type nothing can answer for is
@@ -573,6 +589,7 @@ try:
           status == 400 and "Board types" in text, (status, text))
 
     # --- click-to-assign, onto the label rather than the rect --------------
+    panel("diagram")
     script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();")
     script("var g=document.querySelector('[data-enroll-role=\"dev-bench\"]');"
            "g.querySelector('text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
@@ -626,6 +643,8 @@ try:
     # --- Validate topology --------------------------------------------------
     script("document.getElementById('topo-validate').click();")
     time.sleep(2)
+    check("Validate topology opens its report as a panel over the canvas",
+          script("return !document.getElementById('topo-panel-validate').hidden;"))
     report = script("return document.getElementById('topo-validate-report').textContent;")
     check("a passing role is reported as a pass, under the role's own label",
           "Role Dev bench" in report and "pass" in report, report[:200])
@@ -656,12 +675,14 @@ try:
             break
         time.sleep(0.25)
         labels = script(_labels_js)
+    panel("diagram")
     check("the verdict lands on the box, which was blank until this run",
           any("validated" in t for t in labels), labels)
     check("a role Core refused shows as failed on its own box",
           any("failed" in t for t in labels), labels)
 
     # --- saving and loading a bench ----------------------------------------
+    panel("saved")
     script("document.getElementById('topo-profile-save').click();")
     time.sleep(0.3)
     script("document.getElementById('topo-save-name').value='bench a';"
@@ -707,6 +728,7 @@ try:
 
     # And a canonical role is retracted from its own picker, since it has
     # no row anywhere either.
+    panel("diagram")
     script("document.querySelector('[data-board-role=\"dut\"] text')"
            ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
     time.sleep(0.4)
@@ -717,6 +739,7 @@ try:
     check("retracting a role reaches Core", DELETED == ["sniffer", "dut"], DELETED)
 
     # --- an enrol that moves a role says so (decision 61) ---------------------
+    panel("diagram")
     # State here: dev-bench holds 000683001234, dut was retracted. Enrolling
     # that probe as dut vacates dev-bench; its board type is named, so it is kept.
     script("document.querySelector('#probes-pool .probe-card[data-serial=\"000683001234\"]').click();")
@@ -759,6 +782,7 @@ try:
           "every check passed" not in all_empty and "nothing to check yet" in all_empty, all_empty)
 
     # --- enroll refuses a board with no chip, in the dialog and at the route ---
+    panel("diagram")
     before = len(POSTED)
     status, text = ui_post_status("/api/enroll", {"role": "dut", "chip": "", "name": "no-such-board",
                                                   "probe_serial": "ABC123"})
@@ -781,6 +805,7 @@ try:
     check("and that refusal made no enrolment", len(POSTED) == before, POSTED[before:])
 
     # --- a direct route on a two-interface device declares its interface ----
+    panel("signals")
     #
     # suite/052 (embarch-topology decision 46, amended): one device exposing
     # two ports under one serial is told apart by interface, so picking one of
