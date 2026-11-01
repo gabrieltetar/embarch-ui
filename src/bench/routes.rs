@@ -4,82 +4,137 @@
 //! from the binary, the repo's templates and benches are files in the open
 //! repo, and the checks are pure. Making a bench live is the apply path's
 //! (`/api/topology/profiles/{slug}/apply`), unchanged in phase 1.
+//!
+//! **Creating and updating are two routes.** `POST` creates and refuses `409`
+//! when anything is already at the derived path; `PUT` updates and names the
+//! `version` its `GET` returned, refused `409` when the file changed since or
+//! does not parse — so two windows cannot silently overwrite each other, and
+//! a new bench cannot land on an old one.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-use axum::extract::{Path, State};
+use axum::extract::{FromRequestParts, Path};
+use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::json;
 
 use super::files::{self, Bench, LoadError};
-use super::{builtin_clash, builtins, catalog, check, parts_dir, template_toml, vocabulary_json, PartTemplate};
-use crate::topology::{now_utc_ms, profile_path, slugify};
+use super::{
+    builtin_clash, builtins, catalog, check, parse_template, parts_dir, template_toml, version_of, vocabulary_json,
+    write_in_repo, PartTemplate, WriteError, WriteMode,
+};
+use crate::topology::now_utc_ms;
 use crate::AppState;
 
 fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
     (status, text.into()).into_response()
 }
 
-/// The open repo, or `409` with the sentence the Atlas and Study Designer
-/// tabs refuse with.
+const NO_PROJECT: &str = "no project is open — pick a firmware repo in Project, at the bottom of the sidebar";
+
+/// The open repo, extracted **ahead of any body**, so a request with no
+/// project open is refused `409` with the Atlas and Study Designer tabs'
+/// sentence whatever its body holds — never a `400`/`415`/`422` about JSON.
 ///
 /// **Every bench route refuses without a project, the vocabulary and the
 /// built-ins included.** Answered with empty lists, a canvas would draw "no
 /// saved benches" — a claim about a repo nobody opened, the unreadable-as-
-/// empty failure spec.md rules out — and a parts bin of built-ins alone would
-/// look like a repo that describes none of its boards.
-fn repo(state: &AppState) -> Result<PathBuf, Box<Response>> {
-    state
-        .study_designer
-        .repo_path()
-        .ok_or_else(|| Box::new(refuse(StatusCode::CONFLICT, NO_PROJECT)))
+/// empty failure spec.md rules out.
+pub struct OpenRepo(pub PathBuf);
+
+impl FromRequestParts<AppState> for OpenRepo {
+    type Rejection = Response;
+
+    async fn from_request_parts(_parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        state
+            .study_designer
+            .repo_path()
+            .map(OpenRepo)
+            .ok_or_else(|| refuse(StatusCode::CONFLICT, NO_PROJECT))
+    }
 }
 
-const NO_PROJECT: &str = "no project is open — pick a firmware repo in Project, at the bottom of the sidebar";
+/// Held across every read-compare-write of a repo file, so two saves of one
+/// file in this process cannot both pass the version check.
+static WRITES: Mutex<()> = Mutex::new(());
+
+fn write_refusal(what: &str, e: WriteError) -> Response {
+    match e {
+        WriteError::Exists => refuse(
+            StatusCode::CONFLICT,
+            format!("{what} already exists — open it and save that, or pick another name"),
+        ),
+        WriteError::Other(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
 
 /// `GET /api/bench/vocabulary` — kinds, which kinds join, power roles,
 /// categories, looks and functions, served so the browser restates none.
-pub async fn api_vocabulary(State(state): State<AppState>) -> Response {
-    if let Err(resp) = repo(&state) {
-        return *resp;
-    }
+pub async fn api_vocabulary(OpenRepo(_): OpenRepo) -> Response {
     Json(vocabulary_json()).into_response()
 }
 
 /// `GET /api/bench/parts` — the built-ins, then the open repo's
-/// `embarch/parts/*.toml`, with every file that could not be used in
-/// `errors`.
-pub async fn api_parts(State(state): State<AppState>) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
+/// `embarch/parts/*.toml` (each with its file's `version`), with every file
+/// that could not be used in `errors`.
+pub async fn api_parts(OpenRepo(repo): OpenRepo) -> Response {
     Json(catalog(Some(&repo))).into_response()
 }
 
-/// `PUT /api/bench/parts/{id}` — writes a repo template to
-/// `embarch/parts/<id>.toml` and answers the whole catalog again.
-///
-/// **A built-in's id is refused `409`**, naming the built-in (owner,
-/// 2026-11-01). The id in the path must be the body's, and a slug: it is the
-/// file name. A `source` key echoed back from `GET` is ignored.
-pub async fn api_put_part(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(mut body): Json<serde_json::Value>,
-) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
+/// A template from a request body: `source` and `version` (echoed back from
+/// `GET`) are not template fields, and the rest must be.
+fn template_from(mut body: serde_json::Value) -> Result<(PartTemplate, Option<String>), Box<Response>> {
+    let mut version = None;
     if let Some(obj) = body.as_object_mut() {
         obj.remove("source");
+        version = obj.remove("version").and_then(|v| v.as_str().map(str::to_string));
     }
-    let template: PartTemplate = match serde_json::from_value(body) {
+    let template: PartTemplate = serde_json::from_value(body)
+        .map_err(|e| Box::new(refuse(StatusCode::BAD_REQUEST, format!("not a part template: {e}"))))?;
+    template.check().map_err(|e| Box::new(refuse(StatusCode::BAD_REQUEST, e)))?;
+    if let Some(builtin) = builtins().iter().find(|b| b.id == template.id) {
+        return Err(Box::new(refuse(StatusCode::CONFLICT, builtin_clash(&template.id, &builtin.label))));
+    }
+    Ok((template, version))
+}
+
+fn write_template(repo: &std::path::Path, template: &PartTemplate, mode: WriteMode) -> Result<(), Box<Response>> {
+    let text = template_toml(template).map_err(|e| Box::new(refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))))?;
+    write_in_repo(repo, &["embarch", "parts"], &format!("{}.toml", template.id), text.as_bytes(), mode)
+        .map(|_| ())
+        .map_err(|e| Box::new(write_refusal(&format!("embarch/parts/{}.toml", template.id), e)))
+}
+
+/// `POST /api/bench/parts` — creates a repo template at
+/// `embarch/parts/<id>.toml` and answers the whole catalog, `201`.
+///
+/// **A built-in's id is refused `409`**, naming the built-in (owner,
+/// 2026-11-01), and so is an id whose file already exists, parseable or not.
+pub async fn api_post_part(OpenRepo(repo): OpenRepo, Json(body): Json<serde_json::Value>) -> Response {
+    let (template, _) = match template_from(body) {
         Ok(t) => t,
-        Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("not a part template: {e}")),
+        Err(resp) => return *resp,
+    };
+    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(resp) = write_template(&repo, &template, WriteMode::Create) {
+        return *resp;
+    }
+    (StatusCode::CREATED, Json(catalog(Some(&repo)))).into_response()
+}
+
+/// `PUT /api/bench/parts/{id}` — replaces a repo template, naming the
+/// `version` `GET /api/bench/parts` served for it; answers the catalog.
+///
+/// `404` when there is no such file (create it with `POST`), `409` when the
+/// file changed since that version or does not parse as a template, `400`
+/// when the path and the body's id differ.
+pub async fn api_put_part(OpenRepo(repo): OpenRepo, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Response {
+    let (template, version) = match template_from(body) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
     };
     if template.id != id {
         return refuse(
@@ -87,34 +142,36 @@ pub async fn api_put_part(
             format!("the path names `{id}` and the template's id is `{}`; they must be the same", template.id),
         );
     }
-    if let Err(e) = template.check() {
-        return refuse(StatusCode::BAD_REQUEST, e);
-    }
-    if let Some(builtin) = builtins().iter().find(|b| b.id == template.id) {
-        return refuse(StatusCode::CONFLICT, builtin_clash(&template.id, &builtin.label));
-    }
-    let text = match template_toml(&template) {
-        Ok(t) => t,
-        Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    let Some(version) = version else {
+        return refuse(StatusCode::BAD_REQUEST, "an update names the `version` it read; create a new part with POST /api/bench/parts");
     };
-    let dir = parts_dir(&repo);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to create {}: {e}", dir.display()));
+    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let path = parts_dir(&repo).join(format!("{id}.toml"));
+    let current = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return refuse(StatusCode::NOT_FOUND, format!("no part template embarch/parts/{id}.toml; create it with POST /api/bench/parts"))
+        }
+        Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("could not read embarch/parts/{id}.toml: {e}")),
+    };
+    if version_of(&current) != version {
+        return refuse(StatusCode::CONFLICT, format!("embarch/parts/{id}.toml changed since it was read; reload it and save again"));
     }
-    let path = dir.join(format!("{id}.toml"));
-    if let Err(e) = std::fs::write(&path, text) {
-        return refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to write {}: {e}", path.display()));
+    if let Err(e) = std::str::from_utf8(&current).map_err(|e| e.to_string()).and_then(parse_template) {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!("embarch/parts/{id}.toml does not load as a template ({e}), so it is left alone — fix it by hand"),
+        );
+    }
+    if let Err(resp) = write_template(&repo, &template, WriteMode::Replace) {
+        return *resp;
     }
     Json(catalog(Some(&repo))).into_response()
 }
 
 /// `GET /api/bench/benches` — every bench in the repo, newest first, and
 /// every file that would not load in `errors`.
-pub async fn api_benches(State(state): State<AppState>) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
+pub async fn api_benches(OpenRepo(repo): OpenRepo) -> Response {
     let (benches, errors) = files::list(&repo);
     Json(json!({ "benches": benches, "errors": errors })).into_response()
 }
@@ -126,69 +183,105 @@ fn load_refusal(slug: &str, e: LoadError) -> Response {
     }
 }
 
-/// `GET /api/bench/benches/{slug}` — one bench; a legacy file comes back laid
-/// out as parts, with `legacy: true`, and is not rewritten.
-pub async fn api_bench(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
+/// A path's slug, or the `400` for one that is not a slug: **a path is never
+/// slugified into another bench's name** (fix round 1).
+fn path_slug(slug: &str) -> Result<&str, Box<Response>> {
+    if files::is_slug(slug) {
+        Ok(slug)
+    } else {
+        Err(Box::new(refuse(
+            StatusCode::BAD_REQUEST,
+            format!("`{slug}` is not a bench slug: lowercase letters and digits, joined by single hyphens"),
+        )))
+    }
+}
+
+/// `GET /api/bench/benches/{slug}` — one bench with its `version`; a legacy
+/// file comes back laid out as parts, with `legacy: true`, and is not
+/// rewritten.
+pub async fn api_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>) -> Response {
+    let slug = match path_slug(&slug) {
+        Ok(s) => s,
         Err(resp) => return *resp,
     };
-    let slug = slugify(&slug);
-    match files::load(&repo, &slug) {
+    match files::load(&repo, slug) {
         Ok(bench) => Json(bench).into_response(),
+        Err(e) => load_refusal(slug, e),
+    }
+}
+
+/// `POST /api/bench/benches` — creates a bench at the slug derived from its
+/// `name` (saved-benches.md: derived, never taken), `201` with the bench as
+/// `GET` now answers it. **Anything already at that path is `409`**,
+/// parseable or not: a new bench never lands on an old one.
+pub async fn api_post_bench(OpenRepo(repo): OpenRepo, Json(bench): Json<Bench>) -> Response {
+    if let Err(e) = files::check_shape(&bench) {
+        return refuse(StatusCode::BAD_REQUEST, e);
+    }
+    let slug = crate::topology::slugify(&bench.name);
+    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let file = files::file_from_bench(&bench, now_utc_ms());
+    if let Err(e) = files::write(&repo, &slug, &file, WriteMode::Create) {
+        return write_refusal(&files::bench_file(&slug), e);
+    }
+    match files::load(&repo, &slug) {
+        Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
         Err(e) => load_refusal(&slug, e),
     }
 }
 
-/// `PUT /api/bench/benches/{slug}` — saves a bench in the new shape and
-/// answers it as `GET` now would.
+/// `PUT /api/bench/benches/{slug}` — saves a bench in the new shape, naming
+/// the `version` its `GET` returned, and answers it as `GET` now would.
 ///
-/// **The file name is derived from `name`, never taken from the path or the
-/// body** (saved-benches.md). A path naming a bench that exists must be the
-/// one the name derives: **renaming is refused `409`**, because the old slug
-/// is what a desk names (decision 57) and a study will name its configs
-/// through it. A path naming no file creates the bench at the derived slug,
-/// unless a bench already lives there.
-pub async fn api_put_bench(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    Json(bench): Json<Bench>,
-) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
+/// `404` when there is no such bench (create it with `POST`); `409` when the
+/// file changed since that version or does not parse (it is left alone), and
+/// when `name` no longer derives this slug — **renaming is refused**, because
+/// a desk names a bench by its slug (decision 57) and a study will name its
+/// configs through it.
+pub async fn api_put_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>, Json(bench): Json<Bench>) -> Response {
+    let slug = match path_slug(&slug) {
+        Ok(s) => s.to_string(),
         Err(resp) => return *resp,
     };
     if let Err(e) = files::check_shape(&bench) {
         return refuse(StatusCode::BAD_REQUEST, e);
     }
-    let derived = slugify(&bench.name);
-    let asked = slugify(&slug);
-    if derived != asked {
-        if profile_path(&repo, &asked).exists() {
-            return refuse(
-                StatusCode::CONFLICT,
-                format!(
-                    "`{}` names the bench `{derived}`, not `{asked}`: renaming a saved bench is refused, \
-                     because a desk and a study name it by its slug. Keep a name that slugs to `{asked}`, \
-                     or save a new bench under the new name.",
-                    bench.name.trim()
-                ),
-            );
+    let Some(version) = bench.version.clone() else {
+        return refuse(StatusCode::BAD_REQUEST, "an update names the `version` it read; create a new bench with POST /api/bench/benches");
+    };
+    let derived = crate::topology::slugify(&bench.name);
+    if derived != slug {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "`{}` names the bench `{derived}`, not `{slug}`: renaming a saved bench is refused, because a \
+                 desk and a study name it by its slug. Keep a name that slugs to `{slug}`, or create a new \
+                 bench under the new name.",
+                bench.name.trim()
+            ),
+        );
+    }
+    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    match files::read_file(&repo, &slug) {
+        Ok((_, current)) if current == version => {}
+        Ok(_) => {
+            return refuse(StatusCode::CONFLICT, format!("{} changed since it was read; reload it and save again", files::bench_file(&slug)))
         }
-        if profile_path(&repo, &derived).exists() {
-            return refuse(
-                StatusCode::CONFLICT,
-                format!("a bench named `{derived}` already exists; pick another name, or save to `{derived}` itself"),
-            );
+        Err(LoadError::Missing) => {
+            return refuse(StatusCode::NOT_FOUND, format!("no saved bench `{slug}`; create it with POST /api/bench/benches"))
         }
+        Err(LoadError::Unparseable(e)) => {
+            return refuse(StatusCode::CONFLICT, format!("{e} — the file does not parse, so it is left alone; fix it by hand"))
+        }
+        Err(LoadError::Unreadable(e)) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
     let file = files::file_from_bench(&bench, now_utc_ms());
-    if let Err(e) = files::write(&repo, &derived, &file) {
-        return refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
+    if let Err(e) = files::write(&repo, &slug, &file, WriteMode::Replace) {
+        return write_refusal(&files::bench_file(&slug), e);
     }
-    match files::load(&repo, &derived) {
+    match files::load(&repo, &slug) {
         Ok(saved) => Json(saved).into_response(),
-        Err(e) => load_refusal(&derived, e),
+        Err(e) => load_refusal(&slug, e),
     }
 }
 
@@ -209,11 +302,6 @@ pub struct CandidatesRequest {
     pub from: String,
 }
 
-/// The templates the open repo can use, by id.
-fn templates(repo: &std::path::Path) -> check::Templates {
-    catalog(Some(repo)).by_id()
-}
-
 fn config_of<'a>(bench: &'a Bench, name: Option<&str>) -> Result<Option<&'a files::Config>, Box<Response>> {
     match name {
         None => Ok(None),
@@ -225,32 +313,66 @@ fn config_of<'a>(bench: &'a Bench, name: Option<&str>) -> Result<Option<&'a file
 }
 
 /// `POST /api/bench/check` — a bench and a config in, its findings out.
-pub async fn api_check(State(state): State<AppState>, Json(req): Json<CheckRequest>) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
+pub async fn api_check(OpenRepo(repo): OpenRepo, Json(req): Json<CheckRequest>) -> Response {
+    if let Err(e) = files::check_size(&req.bench) {
+        return refuse(StatusCode::BAD_REQUEST, e);
+    }
     let config = match config_of(&req.bench, req.config.as_deref()) {
         Ok(c) => c,
         Err(resp) => return *resp,
     };
-    let findings = check::check(&req.bench, &templates(&repo), config);
+    let findings = check::check(&req.bench, &catalog(Some(&repo)).by_id(), config);
     Json(json!({ "findings": findings })).into_response()
 }
 
 /// `POST /api/bench/candidates` — one verdict per connector end on the bench
 /// for a cable being laid from `from`, so the browser decides nothing.
-pub async fn api_candidates(State(state): State<AppState>, Json(req): Json<CandidatesRequest>) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
+pub async fn api_candidates(OpenRepo(repo): OpenRepo, Json(req): Json<CandidatesRequest>) -> Response {
+    if let Err(e) = files::check_size(&req.bench) {
+        return refuse(StatusCode::BAD_REQUEST, e);
+    }
     let config = match config_of(&req.bench, req.config.as_deref()) {
         Ok(c) => c,
         Err(resp) => return *resp,
     };
-    match check::candidates(&req.bench, &templates(&repo), config, &req.from) {
+    match check::candidates(&req.bench, &catalog(Some(&repo)).by_id(), config, &req.from) {
         Ok(verdicts) => Json(json!({ "verdicts": verdicts })).into_response(),
         Err(e) => refuse(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_repo_write_never_follows_a_link_out_of_the_repo() {
+        let base = std::env::temp_dir().join(format!("ebm-links-{}-{}", std::process::id(), now_utc_ms()));
+        let repo = base.join("repo");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(repo.join("embarch/parts")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("rc"), "precious").unwrap();
+        // A committed link at the target is replaced, never written through.
+        std::os::unix::fs::symlink(outside.join("rc"), repo.join("embarch/parts/x.toml")).unwrap();
+        write_in_repo(&repo, &["embarch", "parts"], "x.toml", b"id = 1", WriteMode::Replace).unwrap();
+        assert_eq!(std::fs::read_to_string(outside.join("rc")).unwrap(), "precious");
+        assert_eq!(std::fs::read_to_string(repo.join("embarch/parts/x.toml")).unwrap(), "id = 1");
+        // Create refuses anything at the path, a dangling link included.
+        std::os::unix::fs::symlink(outside.join("gone"), repo.join("embarch/parts/y.toml")).unwrap();
+        assert!(matches!(write_in_repo(&repo, &["embarch", "parts"], "y.toml", b"", WriteMode::Create), Err(WriteError::Exists)));
+        assert!(!outside.join("gone").exists());
+        // A linked directory resolving outside the repo is refused, and nothing is created there.
+        std::os::unix::fs::symlink(&outside, repo.join("embarch/topologies")).unwrap();
+        let e = write_in_repo(&repo, &["embarch", "topologies"], "b.toml", b"", WriteMode::Replace).unwrap_err();
+        assert!(e.to_string().contains("outside the repo"), "{e}");
+        assert!(!outside.join("b.toml").exists());
+        std::os::unix::fs::symlink(&outside, repo.join("embarch/link")).unwrap();
+        assert!(write_in_repo(&repo, &["embarch", "link", "deeper"], "c.toml", b"", WriteMode::Replace).is_err());
+        assert!(!outside.join("deeper").exists(), "no directory was made outside");
+        let leftovers: Vec<_> = std::fs::read_dir(repo.join("embarch/parts")).unwrap().flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+        assert!(leftovers.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

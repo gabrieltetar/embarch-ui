@@ -452,6 +452,9 @@ pub struct ServedPart {
     #[serde(flatten)]
     pub template: PartTemplate,
     pub source: Source,
+    /// A repo template's file version, which `PUT /api/bench/parts/{id}`
+    /// must name; `None` for a built-in, which cannot be written.
+    pub version: Option<String>,
 }
 
 /// A file that could not be used, and why — listed, never dropped.
@@ -515,15 +518,20 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
     let mut parts: Vec<ServedPart> = builtins
         .iter()
         .cloned()
-        .map(|template| ServedPart { template, source: Source::Builtin })
+        .map(|template| ServedPart { template, source: Source::Builtin, version: None })
         .collect();
     let mut errors = Vec::new();
     let Some(repo) = repo else {
         return Catalog { parts, errors };
     };
     let dir = parts_dir(repo);
-    if !dir.exists() {
-        return Catalog { parts, errors };
+    match dir.try_exists() {
+        Ok(true) => {}
+        Ok(false) => return Catalog { parts, errors },
+        Err(e) => {
+            errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not tell whether the directory exists: {e}") });
+            return Catalog { parts, errors };
+        }
     }
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -532,19 +540,39 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
             return Catalog { parts, errors };
         }
     };
-    let mut paths: Vec<std::path::PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("toml"))
-        .collect();
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) == Some("toml") {
+                    paths.push(path);
+                }
+            }
+            Err(e) => errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not read a directory entry: {e}") }),
+        }
+    }
     paths.sort();
     for path in paths {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            errors.push(FileError {
+                file: format!("embarch/parts/{}", path.file_name().unwrap_or_default().to_string_lossy()),
+                error: "the file name is not UTF-8, so it cannot be a part id".to_string(),
+            });
+            continue;
+        };
         let file = repo_file(&stem);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
             Err(e) => {
                 errors.push(FileError { file, error: format!("could not read: {e}") });
+                continue;
+            }
+        };
+        let text = match String::from_utf8(bytes.clone()) {
+            Ok(t) => t,
+            Err(_) => {
+                errors.push(FileError { file, error: "the file is not UTF-8 text".to_string() });
                 continue;
             }
         };
@@ -569,7 +597,7 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
             });
             continue;
         }
-        parts.push(ServedPart { template, source: Source::Repo });
+        parts.push(ServedPart { template, source: Source::Repo, version: Some(version_of(&bytes)) });
     }
     Catalog { parts, errors }
 }
@@ -580,6 +608,103 @@ pub fn builtin_clash(id: &str, builtin_label: &str) -> String {
         "id `{id}` is the built-in part `{id}` ({builtin_label}); a repo template cannot reuse a \
          built-in's id — give embarch/parts/{id}.toml another id"
     )
+}
+
+/// A file's version: an FNV-1a hash of its bytes, which a save names to say
+/// "I am replacing the file I read". Not a security measure — a concurrency
+/// token, stable across processes and builds, so a page held over a restart
+/// still saves.
+pub fn version_of(bytes: &[u8]) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hash = bytes.iter().fold(OFFSET, |h, &b| (h ^ u64::from(b)).wrapping_mul(PRIME));
+    format!("{hash:016x}-{}", bytes.len())
+}
+
+/// Whether a repo write may replace a file or must create one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    Create,
+    Replace,
+}
+
+#[derive(Debug)]
+pub enum WriteError {
+    /// `Create` found something already at the path — a file, a directory or
+    /// a link.
+    Exists,
+    Other(String),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Exists => write!(f, "something already exists at that path"),
+            WriteError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Every file this UI writes into a repo goes through here: `bytes` to
+/// `<repo>/<dirs…>/<file_name>`, atomically, and **never outside the repo**.
+///
+/// A repo is someone else's checkout, so a link committed at
+/// `embarch/parts/x.toml -> ../../../.bashrc` must not get `~/.bashrc`
+/// rewritten. So the directory is resolved and must lie inside the resolved
+/// repo (checked before it is created, so no directory is made outside
+/// either); the bytes go to a fresh temporary file opened with `create_new`,
+/// which never follows a link; and the temporary file is renamed over the
+/// target, which replaces a link rather than writing through it. `Create`
+/// links the temporary file into place instead, which fails on anything
+/// already there.
+pub fn write_in_repo(repo: &Path, dirs: &[&str], file_name: &str, bytes: &[u8], mode: WriteMode) -> Result<std::path::PathBuf, WriteError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let other = |what: &str, e: std::io::Error| WriteError::Other(format!("{what}: {e}"));
+    if file_name.is_empty() || file_name.contains(['/', '\\']) || file_name.starts_with('.') {
+        return Err(WriteError::Other(format!("`{file_name}` is not a plain file name")));
+    }
+    let root = repo.canonicalize().map_err(|e| other(&format!("the repo {}", repo.display()), e))?;
+    let dir = dirs.iter().fold(repo.to_path_buf(), |p, d| p.join(d));
+    let inside = |p: &Path| -> Result<(), WriteError> {
+        let resolved = p.canonicalize().map_err(|e| other(&format!("resolving {}", p.display()), e))?;
+        if resolved.starts_with(&root) {
+            Ok(())
+        } else {
+            Err(WriteError::Other(format!("{} resolves outside the repo, to {}; nothing was written", p.display(), resolved.display())))
+        }
+    };
+    let mut existing = dir.as_path();
+    while !existing.try_exists().map_err(|e| other(&format!("checking {}", existing.display()), e))? {
+        existing = existing.parent().unwrap_or(repo);
+    }
+    inside(existing)?;
+    std::fs::create_dir_all(&dir).map_err(|e| other(&format!("creating {}", dir.display()), e))?;
+    inside(&dir)?;
+
+    let target = dir.join(file_name);
+    let tmp = dir.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(other(&format!("writing {}", tmp.display()), e));
+    }
+    let placed = match mode {
+        WriteMode::Replace => std::fs::rename(&tmp, &target),
+        WriteMode::Create => std::fs::hard_link(&tmp, &target),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    match placed {
+        Ok(()) => Ok(target),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(WriteError::Exists),
+        Err(e) => Err(other(&format!("writing {}", target.display()), e)),
+    }
 }
 
 /// A connector as a repo template's file writes it: no empty `functions`,
@@ -706,7 +831,8 @@ mod tests {
     #[test]
     fn a_served_template_is_the_contracts_shape() {
         let cy = builtins().into_iter().find(|t| t.id == "cy4500").unwrap();
-        let served = serde_json::to_value(ServedPart { template: cy, source: Source::Builtin }).unwrap();
+        let served = serde_json::to_value(ServedPart { template: cy, source: Source::Builtin, version: None }).unwrap();
+        assert_eq!(served["version"], serde_json::Value::Null);
         assert_eq!(served["source"], "builtin");
         assert_eq!(served["hub"], false);
         assert_eq!(served["rows_top"], 72);

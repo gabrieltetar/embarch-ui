@@ -18,7 +18,8 @@ use std::path::Path;
 use embarch_core_client::SignalLink;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{builtins, FileError, Function, Kind, Role, GENERIC_BOARD, HUB_TEMPLATE};
+use super::check::Templates;
+use super::{builtins, version_of, write_in_repo, FileError, Function, Kind, Role, WriteError, WriteMode, GENERIC_BOARD, HUB_TEMPLATE};
 use crate::topology::{profile_path, slugify, topologies_dir, Profile, RoleBinding};
 
 /// Which USB identity a `usb-host` function is bound to, picked from Core's
@@ -83,6 +84,12 @@ pub struct Part {
     /// builds for, never a unit.
     #[serde(default)]
     pub board: Option<String>,
+    /// The chip a legacy file recorded for this role, kept when the file is
+    /// converted. **Only a fallback**: apply and enrol look the chip up from
+    /// the board type first, and use this when nothing answers (decision 48,
+    /// "looked up, never typed"). Written only when present.
+    #[serde(default)]
+    pub chip: Option<String>,
     /// Connector id → function → the identity it is bound to.
     #[serde(default)]
     pub usb: BTreeMap<String, BTreeMap<Function, Binding>>,
@@ -131,6 +138,10 @@ pub struct Bench {
     /// `dut`/`dev-bench`. Ignored on save, which writes the new shape.
     #[serde(default)]
     pub legacy: bool,
+    /// The file's version as it was read (`super::version_of`), which an
+    /// update must name. `None` for a bench never saved.
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(default)]
     pub parts: Vec<Part>,
     #[serde(default)]
@@ -142,10 +153,6 @@ pub struct Bench {
 }
 
 impl Bench {
-    pub fn part(&self, id: &str) -> Option<&Part> {
-        self.parts.iter().find(|p| p.id == id)
-    }
-
     pub fn config(&self, name: &str) -> Option<&Config> {
         self.configs.iter().find(|c| c.name == name)
     }
@@ -242,6 +249,7 @@ fn legacy_part(id: &str, role: Role, binding: &RoleBinding) -> (Part, Option<Cab
         mounted_on: None,
         flip: false,
         board: (!board.is_empty()).then(|| board.to_string()),
+        chip: Some(binding.chip.trim().to_string()).filter(|c| !c.is_empty()),
         usb,
     };
     let cable = connector.map(|c| Cable { from: format!("{id}.{c}"), to: LEGACY_HUB.to_string() });
@@ -259,6 +267,7 @@ pub fn legacy_layout(dut: Option<&RoleBinding>, dev_bench: Option<&RoleBinding>)
         mounted_on: None,
         flip: false,
         board: None,
+        chip: None,
         usb: BTreeMap::new(),
     }];
     let mut cables = Vec::new();
@@ -271,8 +280,9 @@ pub fn legacy_layout(dut: Option<&RoleBinding>, dev_bench: Option<&RoleBinding>)
     (parts, cables)
 }
 
-/// A file as the routes serve it.
-pub fn bench_from_file(slug: &str, file: BenchFile) -> Bench {
+/// A file as the routes serve it; `version` is the hash of the bytes it was
+/// read from.
+pub fn bench_from_file(slug: &str, file: BenchFile, version: Option<String>) -> Bench {
     let (parts, cables, legacy) = match file.parts {
         Some(parts) => (parts, file.cables, false),
         None => {
@@ -285,6 +295,7 @@ pub fn bench_from_file(slug: &str, file: BenchFile) -> Bench {
         slug: slug.to_string(),
         name: file.name,
         legacy,
+        version,
         parts,
         cables,
         configs: file.configs,
@@ -306,17 +317,53 @@ pub fn file_from_bench(bench: &Bench, saved_at_utc_ms: u64) -> BenchFile {
     }
 }
 
+/// The probe serial a part is reached by: its own, else the one on the far
+/// end of an SWD lead from it — a debug probe cabled to the board — looked for
+/// in the bench-level cables and then each config in order (fix round 1: a
+/// role whose probe is a separate pod was proposed nothing).
+fn reached_probe(part: &Part, parts: &[Part], cables: &[Cable], configs: &[Config], templates: &Templates) -> Option<String> {
+    if let Some(own) = part.probe_serial() {
+        return Some(own.to_string());
+    }
+    let swd = |p: &Part, connector: &str| {
+        templates
+            .get(&p.template)
+            .and_then(|t| t.connector(connector))
+            .is_some_and(|c| c.kind == Kind::Swd)
+    };
+    let pairs = cables
+        .iter()
+        .map(|c| (c.from.as_str(), c.to.as_str()))
+        .chain(configs.iter().flat_map(|cfg| cfg.cables.iter().map(|[a, b]| (a.as_str(), b.as_str()))));
+    for (a, b) in pairs {
+        for (near, far) in [(a, b), (b, a)] {
+            let (Some((np, nc)), Some((fp, fc))) = (near.split_once('.'), far.split_once('.')) else { continue };
+            if np != part.id || !swd(part, nc) {
+                continue;
+            }
+            let Some(other) = parts.iter().find(|p| p.id == fp) else { continue };
+            if swd(other, fc) {
+                if let Some(serial) = other.probe_serial() {
+                    return Some(serial.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// A role's binding, derived from the part holding it, for the topology
 /// routes that still read `dut`/`dev-bench`.
 ///
-/// **The chip is left empty**: a part carries none, because a chip is looked
-/// up from the board type, never typed (decision 48). The apply route looks
-/// it up the same way the role picker does.
-fn role_binding(parts: &[Part], role: Role) -> Option<RoleBinding> {
+/// **The chip is the one the part recorded, if any** — a fallback only: the
+/// apply route looks the chip up the way the role picker does and uses this
+/// when nothing answers (decision 48).
+fn role_binding(file: &BenchFile, parts: &[Part], role: Role, templates: &Templates) -> Option<RoleBinding> {
     let part = parts.iter().find(|p| p.role == Some(role))?;
     let mut binding = RoleBinding {
         board: part.board.clone().unwrap_or_default(),
-        probe_serial: part.probe_serial().unwrap_or_default().to_string(),
+        chip: part.chip.clone().unwrap_or_default(),
+        probe_serial: reached_probe(part, parts, &file.cables, &file.configs, templates).unwrap_or_default(),
         ..RoleBinding::default()
     };
     if role == Role::DevBench {
@@ -333,14 +380,14 @@ fn role_binding(parts: &[Part], role: Role) -> Option<RoleBinding> {
 
 /// A bench file as a topology profile: the old keys for a legacy file, and
 /// the role parts' bindings for one in the new shape.
-pub fn profile_from_file(file: BenchFile) -> Profile {
+pub fn profile_from_file(file: BenchFile, templates: &Templates) -> Profile {
     match &file.parts {
         Some(parts) => Profile {
-            dut: role_binding(parts, Role::Dut),
-            dev_bench: role_binding(parts, Role::DevBench),
-            name: file.name,
+            dut: role_binding(&file, parts, Role::Dut, templates),
+            dev_bench: role_binding(&file, parts, Role::DevBench, templates),
+            name: file.name.clone(),
             saved_at_utc_ms: file.saved_at_utc_ms,
-            signals: file.signals,
+            signals: file.signals.clone(),
         },
         None => Profile {
             name: file.name,
@@ -376,19 +423,29 @@ pub fn bench_file(slug: &str) -> String {
     format!("embarch/topologies/{slug}.toml")
 }
 
-pub fn read_file(repo: &Path, slug: &str) -> Result<BenchFile, LoadError> {
+/// A bench slug is what [`slugify`] makes of itself; anything else names no
+/// bench (fix round 1: a path was slugified, so `Bench-A` read `bench-a`).
+pub fn is_slug(slug: &str) -> bool {
+    !slug.is_empty() && slugify(slug) == slug
+}
+
+/// A bench file and its version.
+pub fn read_file(repo: &Path, slug: &str) -> Result<(BenchFile, String), LoadError> {
     let path = profile_path(repo, slug);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(LoadError::Missing),
         Err(e) => return Err(LoadError::Unreadable(format!("could not read {}: {e}", bench_file(slug)))),
     };
-    toml::from_str(&text)
-        .map_err(|e| LoadError::Unparseable(format!("{}: {}", bench_file(slug), super::toml_error_line(&text, &e))))
+    let version = version_of(&bytes);
+    let text = String::from_utf8(bytes).map_err(|_| LoadError::Unparseable(format!("{} is not UTF-8 text", bench_file(slug))))?;
+    let file = toml::from_str(&text)
+        .map_err(|e| LoadError::Unparseable(format!("{}: {}", bench_file(slug), super::toml_error_line(&text, &e))))?;
+    Ok((file, version))
 }
 
 pub fn load(repo: &Path, slug: &str) -> Result<Bench, LoadError> {
-    read_file(repo, slug).map(|file| bench_from_file(slug, file))
+    read_file(repo, slug).map(|(file, version)| bench_from_file(slug, file, Some(version)))
 }
 
 /// One row of `GET /api/bench/benches`.
@@ -400,30 +457,54 @@ pub struct BenchRow {
 }
 
 /// Every bench file, newest first; **one that will not load is listed in
-/// `errors`**, never skipped, and so is a directory that exists and cannot be
-/// read.
+/// `errors`**, never skipped — and so is a directory that exists and cannot
+/// be read, an entry that cannot be read, a name that is not UTF-8, and a
+/// name that is not a slug (no route could address it).
 pub fn list(repo: &Path) -> (Vec<BenchRow>, Vec<FileError>) {
     let dir = topologies_dir(repo);
     let mut rows: Vec<(u64, BenchRow)> = Vec::new();
     let mut errors = Vec::new();
-    if !dir.exists() {
-        return (Vec::new(), errors);
+    let here = "embarch/topologies".to_string();
+    match dir.try_exists() {
+        Ok(true) => {}
+        Ok(false) => return (Vec::new(), errors),
+        Err(e) => {
+            errors.push(FileError { file: here, error: format!("could not tell whether the directory exists: {e}") });
+            return (Vec::new(), errors);
+        }
     }
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) => {
-            errors.push(FileError { file: "embarch/topologies".to_string(), error: format!("could not read the directory: {e}") });
+            errors.push(FileError { file: here, error: format!("could not read the directory: {e}") });
             return (Vec::new(), errors);
         }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                errors.push(FileError { file: here.clone(), error: format!("could not read a directory entry: {e}") });
+                continue;
+            }
+        };
         if path.extension().and_then(|x| x.to_str()) != Some("toml") {
             continue;
         }
-        let Some(slug) = path.file_stem().and_then(|x| x.to_str()).map(str::to_string) else { continue };
+        let shown = format!("embarch/topologies/{}", path.file_name().unwrap_or_default().to_string_lossy());
+        let Some(slug) = path.file_stem().and_then(|x| x.to_str()).map(str::to_string) else {
+            errors.push(FileError { file: shown, error: "the file name is not UTF-8, so no slug names it".to_string() });
+            continue;
+        };
+        if !is_slug(&slug) {
+            errors.push(FileError {
+                file: shown,
+                error: format!("`{slug}` is not a slug, so no route can address it; rename the file to {}.toml", slugify(&slug)),
+            });
+            continue;
+        }
         match read_file(repo, &slug) {
-            Ok(file) => rows.push((
+            Ok((file, _)) => rows.push((
                 file.saved_at_utc_ms,
                 BenchRow { legacy: file.parts.is_none(), name: file.name, slug },
             )),
@@ -435,11 +516,46 @@ pub fn list(repo: &Path) -> (Vec<BenchRow>, Vec<FileError>) {
     (rows.into_iter().map(|(_, r)| r).collect(), errors)
 }
 
+/// Whether the old Topology save or delete may touch `<slug>.toml`: only
+/// when nothing is there, or the file parses as TOML and holds none of the
+/// bench editor's keys. **A file that does not parse is refused** — it may
+/// be a bench the editor wrote with one typo, and writing the old shape over
+/// it would drop every part, cable and config (fix round 1).
+pub fn guard_old_shape(repo: &Path, slug: &str) -> Result<(), String> {
+    let path = profile_path(repo, slug);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{} could not be read ({e}), so it is left alone", bench_file(slug))),
+    };
+    let table: toml::Table = text.parse().map_err(|_| {
+        format!(
+            "{} does not parse, and it may be a bench the editor saved; it is left alone — fix it by \
+             hand, or use another name",
+            bench_file(slug)
+        )
+    })?;
+    if ["parts", "cables", "configs"].iter().any(|k| table.contains_key(*k)) {
+        return Err(format!(
+            "the saved bench '{slug}' has parts, cables or configs, which the Topology tab's save and \
+             delete would drop — use another name, or edit it in the bench editor"
+        ));
+    }
+    Ok(())
+}
+
+/// The most parts and the most cables in one scope (the bench level, or one
+/// config) a bench may hold: far past any bench, and a bound on what one
+/// check request costs.
+pub const MAX_PARTS: usize = 500;
+pub const MAX_CABLES: usize = 2000;
+
 /// What a save refuses: only what would make the file unreadable as a bench
 /// or ambiguous to address. Everything else — a cable of the wrong kind, a
 /// full connector — is the checks' business, and a bench that breaks one
 /// still saves, so a legacy file with a problem can be rewritten.
 pub fn check_shape(bench: &Bench) -> Result<(), String> {
+    check_size(bench)?;
     if slugify(&bench.name).is_empty() {
         return Err("a bench needs a name with at least one letter or digit in it".to_string());
     }
@@ -469,6 +585,18 @@ pub fn check_shape(bench: &Bench) -> Result<(), String> {
     Ok(())
 }
 
+/// The size bounds alone, for the routes that take a bench without saving it.
+pub fn check_size(bench: &Bench) -> Result<(), String> {
+    if bench.parts.len() > MAX_PARTS {
+        return Err(format!("a bench holds at most {MAX_PARTS} parts; this one has {}", bench.parts.len()));
+    }
+    let longest = bench.configs.iter().map(|c| c.cables.len()).chain([bench.cables.len()]).max().unwrap_or(0);
+    if longest > MAX_CABLES {
+        return Err(format!("a bench or config holds at most {MAX_CABLES} cables; one here has {longest}"));
+    }
+    Ok(())
+}
+
 /// A part as the file writes it: the JSON's fields in the same order, less
 /// the defaults a hand-written file would leave out (`flip = false`, an empty
 /// `usb`, every `None`).
@@ -488,6 +616,8 @@ struct PartOut<'a> {
     flip: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     board: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chip: &'a Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     usb: &'a BTreeMap<String, BTreeMap<Function, Binding>>,
 }
@@ -526,6 +656,7 @@ pub fn bench_toml(file: &BenchFile) -> anyhow::Result<String> {
                 mounted_on: &p.mounted_on,
                 flip: p.flip,
                 board: &p.board,
+                chip: &p.chip,
                 usb: &p.usb,
             })
             .collect(),
@@ -536,16 +667,12 @@ pub fn bench_toml(file: &BenchFile) -> anyhow::Result<String> {
     Ok(toml::to_string(&out)?)
 }
 
-/// Writes through a temporary file and a rename, so a reader never sees half
-/// a bench.
-pub fn write(repo: &Path, slug: &str, file: &BenchFile) -> anyhow::Result<()> {
-    let dir = topologies_dir(repo);
-    std::fs::create_dir_all(&dir).map_err(|e| anyhow::anyhow!("failed to create {}: {e}", dir.display()))?;
-    let text = bench_toml(file)?;
-    let path = profile_path(repo, slug);
-    let tmp = dir.join(format!(".{slug}.toml.tmp"));
-    std::fs::write(&tmp, text).map_err(|e| anyhow::anyhow!("failed to write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))
+/// Writes a bench file through the repo writer (`super::write_in_repo`):
+/// atomically, never through a link, never outside the repo; `Create` fails
+/// on anything already at the path.
+pub fn write(repo: &Path, slug: &str, file: &BenchFile, mode: WriteMode) -> Result<(), WriteError> {
+    let text = bench_toml(file).map_err(|e| WriteError::Other(format!("{e:#}")))?;
+    write_in_repo(repo, &["embarch", "topologies"], &format!("{slug}.toml"), text.as_bytes(), mode).map(|_| ())
 }
 
 #[cfg(test)]
@@ -583,11 +710,12 @@ port_serial = "FT9ABCDE"
     #[test]
     fn a_legacy_file_loads_as_the_ble_layout() {
         let file: BenchFile = toml::from_str(LEGACY).unwrap();
-        let bench = bench_from_file("ble-bench", file);
+        let bench = bench_from_file("ble-bench", file, None);
         assert!(bench.legacy);
         let ids: Vec<_> = bench.parts.iter().map(|p| (p.id.as_str(), p.template.as_str())).collect();
         assert_eq!(ids, [("host", "this-machine"), ("dev-bench", "nrf54l15dk"), ("dut", "generic-board")]);
-        let dev = bench.part("dev-bench").unwrap();
+        let part = |id: &str| bench.parts.iter().find(|p| p.id == id).unwrap();
+        let dev = part("dev-bench");
         assert_eq!(dev.role, Some(Role::DevBench));
         assert_eq!(dev.board.as_deref(), Some("nrf54l15dk/nrf54l15/cpuapp"));
         assert_eq!(dev.usb["usb"][&Function::Probe], Binding::Serial("001050288460".into()));
@@ -595,7 +723,8 @@ port_serial = "FT9ABCDE"
             dev.usb["usb"][&Function::Vcom],
             Binding::Port(PortBinding { serial: Some("D607104".into()), interface: Some(2), ..Default::default() })
         );
-        assert_eq!(bench.part("dut").unwrap().probe_serial(), Some("001057729826"));
+        assert_eq!(part("dut").probe_serial(), Some("001057729826"));
+        assert_eq!(dev.chip.as_deref(), Some("nRF54L15"), "the recorded chip is kept as the fallback");
         assert_eq!(
             bench.cables,
             [
@@ -610,12 +739,12 @@ port_serial = "FT9ABCDE"
     #[test]
     fn a_saved_bench_writes_the_new_shape_and_never_the_old_keys() {
         let file: BenchFile = toml::from_str(LEGACY).unwrap();
-        let bench = bench_from_file("ble-bench", file);
+        let bench = bench_from_file("ble-bench", file, None);
         let text = bench_toml(&file_from_bench(&bench, 1)).unwrap();
         assert!(!text.contains("[dut]") && !text.contains("[dev-bench]"), "{text}");
         assert!(!text.contains("flip"), "{text}");
-        assert!(!text.contains("chip"), "{text}");
-        let back = bench_from_file("ble-bench", toml::from_str(&text).unwrap());
+        assert_eq!(text.matches("chip = \"nRF54L15\"").count(), 2, "{text}");
+        let back = bench_from_file("ble-bench", toml::from_str(&text).unwrap(), None);
         assert!(!back.legacy);
         assert_eq!(back.parts, bench.parts);
         assert_eq!(back.cables, bench.cables);
@@ -624,20 +753,21 @@ port_serial = "FT9ABCDE"
 
     #[test]
     fn an_empty_bench_saves_as_the_new_shape_and_stays_one() {
-        let bench = Bench { slug: String::new(), name: "Empty".into(), legacy: false, parts: vec![], cables: vec![], configs: vec![], signals: vec![] };
+        let bench = Bench { slug: String::new(), name: "Empty".into(), legacy: false, version: None, parts: vec![], cables: vec![], configs: vec![], signals: vec![] };
         let text = bench_toml(&file_from_bench(&bench, 1)).unwrap();
         assert!(text.contains("parts = []"), "{text}");
-        assert!(!bench_from_file("empty", toml::from_str(&text).unwrap()).legacy);
+        assert!(!bench_from_file("empty", toml::from_str(&text).unwrap(), None).legacy);
     }
 
     #[test]
     fn the_topology_routes_read_role_bindings_from_either_shape() {
+        let t = templates();
         let legacy: BenchFile = toml::from_str(LEGACY).unwrap();
-        let old = profile_from_file(legacy.clone());
-        let new = profile_from_file(toml::from_str(&bench_toml(&file_from_bench(&bench_from_file("b", legacy), 1)).unwrap()).unwrap());
+        let old = profile_from_file(legacy.clone(), &t);
+        let new = profile_from_file(toml::from_str(&bench_toml(&file_from_bench(&bench_from_file("b", legacy, None), 1)).unwrap()).unwrap(), &t);
         let (o, n) = (old.dev_bench.unwrap(), new.dev_bench.unwrap());
         assert_eq!((o.board, o.probe_serial, o.link_port_serial, o.link_port_interface), (n.board, n.probe_serial, n.link_port_serial, n.link_port_interface));
-        assert_eq!(n.chip, "", "a part carries no chip; apply looks it up");
+        assert_eq!(n.chip, o.chip, "the recorded chip survives the conversion");
         assert_eq!(old.dut.unwrap().probe_serial, new.dut.unwrap().probe_serial);
         assert_eq!(new.signals.len(), 1);
     }
@@ -645,17 +775,17 @@ port_serial = "FT9ABCDE"
     #[test]
     fn the_contract_example_round_trips_through_json_and_toml() {
         let example = json!({
-            "slug": "pd-bench-drp", "name": "PD bench · DRP", "legacy": false,
+            "slug": "pd-bench-drp", "name": "PD bench · DRP", "legacy": false, "version": "0123456789abcdef-42",
             "parts": [
                 { "id": "host", "template": "this-machine", "label": null, "at": [20, 150], "role": null,
-                  "mounted_on": null, "flip": false, "board": null, "usb": {} },
+                  "mounted_on": null, "flip": false, "board": null, "chip": null, "usb": {} },
                 { "id": "partner", "template": "nucleo-g0b1re", "label": "pd-bench", "at": [300, 330], "role": null,
-                  "mounted_on": null, "flip": false, "board": null,
+                  "mounted_on": null, "flip": false, "board": null, "chip": null,
                   "usb": { "stlink": { "probe": "0671FF3833554B3043164817", "vcom": 1 } } },
                 { "id": "drp", "template": "x-nucleo-drp1m1", "label": null, "at": null, "role": null,
-                  "mounted_on": "partner", "flip": false, "board": null, "usb": {} },
+                  "mounted_on": "partner", "flip": false, "board": null, "chip": null, "usb": {} },
                 { "id": "dut", "template": "generic-board", "label": "DUT", "at": [900, 150], "role": "dut",
-                  "mounted_on": null, "flip": false, "board": "nrf54l15dk/nrf54l15/cpuapp", "usb": {} }
+                  "mounted_on": null, "flip": false, "board": "nrf54l15dk/nrf54l15/cpuapp", "chip": null, "usb": {} }
             ],
             "cables": [ { "from": "partner.stlink", "to": "host" } ],
             "configs": [ { "name": "A · DUT sources", "cables": [["dut.usb-c-1", "cy4500.in"], ["cy4500.out", "drp.usb-c"]] } ],
@@ -664,7 +794,7 @@ port_serial = "FT9ABCDE"
         let bench: Bench = serde_json::from_value(example.clone()).unwrap();
         assert_eq!(serde_json::to_value(&bench).unwrap(), example, "JSON is the contract's, field for field");
         let text = bench_toml(&file_from_bench(&bench, 1)).unwrap();
-        let back = bench_from_file("pd-bench-drp", toml::from_str(&text).unwrap());
+        let back = bench_from_file("pd-bench-drp", toml::from_str(&text).unwrap(), Some("0123456789abcdef-42".into()));
         assert_eq!(serde_json::to_value(&back).unwrap(), example, "{text}");
     }
 
@@ -676,8 +806,8 @@ port_serial = "FT9ABCDE"
 
     #[test]
     fn a_save_refuses_only_what_makes_the_file_ambiguous() {
-        let part = |id: &str| Part { id: id.into(), template: "cy4500".into(), label: None, at: None, role: None, mounted_on: None, flip: false, board: None, usb: BTreeMap::new() };
-        let mut bench = Bench { slug: String::new(), name: "B".into(), legacy: false, parts: vec![part("a"), part("b")], cables: vec![], configs: vec![], signals: vec![] };
+        let part = |id: &str| Part { id: id.into(), template: "cy4500".into(), label: None, at: None, role: None, mounted_on: None, flip: false, board: None, chip: None, usb: BTreeMap::new() };
+        let mut bench = Bench { slug: String::new(), name: "B".into(), legacy: false, version: None, parts: vec![part("a"), part("b")], cables: vec![], configs: vec![], signals: vec![] };
         assert!(check_shape(&bench).is_ok());
         bench.parts.push(part("a"));
         assert!(check_shape(&bench).unwrap_err().contains("two parts"));
@@ -686,5 +816,88 @@ port_serial = "FT9ABCDE"
         bench.parts.pop();
         bench.name = "///".into();
         assert!(check_shape(&bench).unwrap_err().contains("name"));
+        bench.name = "B".into();
+        bench.parts = (0..=MAX_PARTS).map(|i| part(&format!("p{i}"))).collect();
+        assert!(check_shape(&bench).unwrap_err().contains("at most 500 parts"));
+    }
+
+    fn templates() -> Templates {
+        builtins().into_iter().map(|t| (t.id.clone(), t)).collect()
+    }
+
+    #[test]
+    fn a_role_whose_probe_is_a_separate_pod_is_reached_over_its_swd_lead() {
+        let file: BenchFile = toml::from_str(
+            r#"
+name = "pod"
+[[parts]]
+id = "host"
+template = "this-machine"
+[[parts]]
+id = "probe"
+template = "debug-probe"
+usb.usb = { probe = "J1" }
+[[parts]]
+id = "dut"
+template = "generic-board"
+role = "dut"
+board = "plank"
+[[parts]]
+id = "swd-dut"
+template = "pd-dut"
+role = "dev-bench"
+[[cables]]
+from = "probe.usb"
+to = "host"
+[[configs]]
+name = "A"
+cables = [["probe.swd", "swd-dut.swd"]]
+"#,
+        )
+        .unwrap();
+        let mut t = templates();
+        let pd: crate::bench::PartTemplate = toml::from_str(
+            "id = \"pd-dut\"\nlabel = \"PD DUT\"\ncategory = \"board\"\nlook = \"power-board\"\n[[connectors]]\nid = \"swd\"\nlabel = \"SWD\"\nkind = \"swd\"\nside = \"left\"\n",
+        )
+        .unwrap();
+        t.insert(pd.id.clone(), pd);
+        let profile = profile_from_file(file, &t);
+        assert_eq!(profile.dev_bench.unwrap().probe_serial, "J1", "reached over the SWD lead in config A");
+        assert_eq!(profile.dut.unwrap().probe_serial, "", "no probe on its part and no lead: empty, and apply says so");
+    }
+
+    fn repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ebm-files-{tag}-{}-{}", std::process::id(), crate::topology::now_utc_ms()));
+        std::fs::create_dir_all(topologies_dir(&dir)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_old_save_touches_only_a_missing_or_old_shape_file() {
+        let dir = repo("guard");
+        let at = |slug: &str| profile_path(&dir, slug);
+        assert!(guard_old_shape(&dir, "none").is_ok());
+        std::fs::write(at("old"), LEGACY).unwrap();
+        assert!(guard_old_shape(&dir, "old").is_ok());
+        std::fs::write(at("new"), "name = \"n\"\nparts = []\n").unwrap();
+        assert!(guard_old_shape(&dir, "new").unwrap_err().contains("parts, cables or configs"));
+        std::fs::write(at("typo"), "name = \"n\"\n[[parts]\nid = \"a\"\n").unwrap();
+        assert!(guard_old_shape(&dir, "typo").unwrap_err().contains("does not parse"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_no_slug_names_is_listed_as_an_error_and_a_version_tracks_the_bytes() {
+        let dir = repo("slugs");
+        std::fs::write(profile_path(&dir, "Bench-A"), LEGACY).unwrap();
+        std::fs::write(profile_path(&dir, "ok"), LEGACY).unwrap();
+        let (rows, errors) = list(&dir);
+        assert_eq!(rows.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(), ["ok"]);
+        assert!(errors[0].error.contains("rename the file to bench-a.toml"), "{errors:?}");
+        assert!(!is_slug("Bench-A") && !is_slug("") && is_slug("bench-a"));
+        let v1 = load(&dir, "ok").unwrap().version.unwrap();
+        std::fs::write(profile_path(&dir, "ok"), format!("{LEGACY}\n")).unwrap();
+        assert_ne!(load(&dir, "ok").unwrap().version.unwrap(), v1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

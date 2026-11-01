@@ -326,9 +326,9 @@ fn app(state: AppState) -> Router {
         // from `embarch/parts/` and `embarch/topologies/`, and no route here
         // calls Core. A bench goes live through the apply route above.
         .route("/api/bench/vocabulary", get(bench::routes::api_vocabulary))
-        .route("/api/bench/parts", get(bench::routes::api_parts))
+        .route("/api/bench/parts", get(bench::routes::api_parts).post(bench::routes::api_post_part))
         .route("/api/bench/parts/{id}", axum::routing::put(bench::routes::api_put_part))
-        .route("/api/bench/benches", get(bench::routes::api_benches))
+        .route("/api/bench/benches", get(bench::routes::api_benches).post(bench::routes::api_post_bench))
         .route(
             "/api/bench/benches/{slug}",
             get(bench::routes::api_bench).put(bench::routes::api_put_bench),
@@ -693,7 +693,7 @@ async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest
     // 48) — an enrolment attaches, so it needs a chip, and the paths that
     // produce one must not disagree about where it comes from or what an
     // unanswerable one says. No Core call is made on a refusal.
-    let chip = match crate::topology::resolve_chip_or_refuse(&state, req.name.as_deref().unwrap_or(""), &req.chip).await {
+    let chip = match crate::topology::resolve_chip_or_refuse(&state, &req.role, req.name.as_deref().unwrap_or(""), &req.chip).await {
         Ok(chip) => chip,
         Err(refusal) => return refusal,
     };
@@ -1445,35 +1445,109 @@ mod tests {
         let saved: serde_json::Value = saved.json().await.unwrap();
         assert_eq!(saved["legacy"], false);
         assert_eq!(saved["parts"], bench["parts"]);
+        assert_ne!(saved["version"], bench["version"], "a save moves the version");
         let text = std::fs::read_to_string(dir.join("ble-bench.toml")).unwrap();
         assert!(text.contains("[[parts]]") && !text.contains("[dut]"), "{text}");
 
-        // The topology routes read the same file, roles derived from the parts.
+        // A second window holding the old version cannot overwrite the save.
+        let stale = http.put(format!("{base}/api/bench/benches/ble-bench")).json(&bench).send().await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert!(stale.text().await.unwrap().contains("changed since it was read"));
+        let mut unversioned = saved.clone();
+        unversioned["version"] = serde_json::Value::Null;
+        let refused = http.put(format!("{base}/api/bench/benches/ble-bench")).json(&unversioned).send().await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let not_slug = http.get(format!("{base}/api/bench/benches/BLE-Bench")).send().await.unwrap();
+        assert_eq!(not_slug.status(), StatusCode::BAD_REQUEST, "a path is never slugified into another bench");
+
+        // The topology routes read the same file, roles derived from the parts,
+        // and neither the old save nor the old delete touches it.
         let profiles: serde_json::Value = http.get(format!("{base}/api/topology/profiles")).send().await.unwrap().json().await.unwrap();
         let row = profiles["profiles"].as_array().unwrap().iter().find(|p| p["slug"] == "ble-bench").unwrap().clone();
         assert_eq!(row["dev_bench"]["link_port_interface"], 2);
         assert_eq!(row["dut"]["probe_serial"], "001057729826");
-        let overwrite = http
-            .post(format!("{base}/api/topology/profiles"))
-            .json(&serde_json::json!({ "name": "BLE bench" }))
-            .send().await.unwrap();
+        let overwrite = http.post(format!("{base}/api/topology/profiles")).json(&serde_json::json!({ "name": "BLE bench" })).send().await.unwrap();
         assert_eq!(overwrite.status(), StatusCode::CONFLICT);
+        let delete = http.delete(format!("{base}/api/topology/profiles/ble-bench")).send().await.unwrap();
+        assert_eq!(delete.status(), StatusCode::CONFLICT);
+        // A new-shape file with one typo is not overwritten either.
+        std::fs::write(dir.join("typo.toml"), "name = \"Typo\"\n[[parts]\nid = \"a\"\n").unwrap();
+        let typo = http.post(format!("{base}/api/topology/profiles")).json(&serde_json::json!({ "name": "Typo" })).send().await.unwrap();
+        assert_eq!(typo.status(), StatusCode::CONFLICT);
+        assert!(typo.text().await.unwrap().contains("does not parse"));
+        assert!(std::fs::read_to_string(dir.join("typo.toml")).unwrap().contains("[[parts]\n"));
 
-        // Renaming is refused; a new name at a free path creates a new bench.
-        let mut renamed = bench.clone();
+        // Renaming is refused; a new bench is created with POST, once.
+        let mut renamed = saved.clone();
         renamed["name"] = serde_json::json!("Other bench");
         let refused = http.put(format!("{base}/api/bench/benches/ble-bench")).json(&renamed).send().await.unwrap();
         assert_eq!(refused.status(), StatusCode::CONFLICT);
-        let created: serde_json::Value = http.put(format!("{base}/api/bench/benches/new")).json(&renamed).send().await.unwrap().json().await.unwrap();
+        let created = http.post(format!("{base}/api/bench/benches")).json(&renamed).send().await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: serde_json::Value = created.json().await.unwrap();
         assert_eq!(created["slug"], "other-bench");
-        assert!(dir.join("other-bench.toml").exists());
+        assert!(created["version"].is_string());
+        let again = http.post(format!("{base}/api/bench/benches")).json(&renamed).send().await.unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+        let mut onto_broken = renamed.clone();
+        onto_broken["name"] = serde_json::json!("Broken");
+        let onto = http.post(format!("{base}/api/bench/benches")).json(&onto_broken).send().await.unwrap();
+        assert_eq!(onto.status(), StatusCode::CONFLICT, "a file that does not parse is still a file");
         let _ = std::fs::remove_dir_all(&repo);
     }
 
-    /// `PUT /api/bench/parts/{id}` writes a repo template, refuses a
-    /// built-in's id naming it, and serves the result.
+    /// Fix round 1, H1: a bench the editor saved records no chip for a
+    /// supported dev-bench board, so apply looks it up and the proposal
+    /// carries it; an enrol for the dev-bench role with no chip finds the same
+    /// one rather than refusing. A recorded chip is only the fallback, and a
+    /// role with no probe says so.
     #[tokio::test]
-    async fn a_repo_part_is_written_and_a_builtin_id_is_refused() {
+    async fn apply_proposes_the_chip_it_looked_up_and_says_when_a_role_has_no_probe() {
+        let repo = bench_repo("apply");
+        let dir = repo.join("embarch").join("topologies");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pd.toml"),
+            "name = \"pd\"\n\n[[parts]]\nid = \"host\"\ntemplate = \"this-machine\"\n\n[[parts]]\nid = \"dev-bench\"\ntemplate = \"nrf54l15dk\"\nrole = \"dev-bench\"\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\nusb.usb = { probe = \"001050288460\", vcom = 2 }\n\n[[parts]]\nid = \"dut\"\ntemplate = \"generic-board\"\nrole = \"dut\"\nboard = \"plank\"\nchip = \"STM32G0B1VE\"\n",
+        )
+        .unwrap();
+        let base = serve_app_with_repo(&repo).await;
+        let http = reqwest::Client::new();
+        let report: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd/apply")).send().await.unwrap().json().await.unwrap();
+        let proposals = report["proposals"].as_array().unwrap();
+        assert_eq!(proposals.len(), 1, "{report}");
+        assert_eq!(proposals[0]["role"], "dev-bench");
+        assert_eq!(proposals[0]["chip"], "nRF54L15", "the looked-up chip, not the empty recorded one");
+        assert_eq!(proposals[0]["link_port_interface"], 2);
+        let applied = report["applied"].as_array().unwrap();
+        assert!(applied.iter().any(|a| a["detail"] == "dut: no probe on its part — not proposed"), "{report}");
+        // The DUT's board is in no catalog; the recorded chip is the fallback, so the
+        // board write reached Core (unreachable here) rather than being refused.
+        let dut_board = applied.iter().find(|a| a["what"] == "dut board").unwrap();
+        assert!(!dut_board["detail"].as_str().unwrap().contains("has no chip"), "{report}");
+
+        let enrol = http
+            .post(format!("{base}/api/enroll"))
+            .json(&serde_json::json!({ "role": "dev-bench", "chip": "", "name": "nrf54l15dk/nrf54l15/cpuapp", "probe_serial": "001050288460" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(enrol.status(), StatusCode::BAD_GATEWAY, "the chip was found; only the unreachable Core failed");
+        let refused = http
+            .post(format!("{base}/api/enroll"))
+            .json(&serde_json::json!({ "role": "dut", "chip": "", "name": "plank", "probe_serial": "X" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(refused.text().await.unwrap().contains("it is not a row in embarch/boards.toml"), "the refusal says why");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Parts: `POST` creates once, `PUT` names the version it read, and a
+    /// built-in's id is refused naming the built-in.
+    #[tokio::test]
+    async fn a_repo_part_is_created_once_updated_by_version_and_a_builtin_id_is_refused() {
         let repo = bench_repo("parts");
         let base = serve_app_with_repo(&repo).await;
         let http = reqwest::Client::new();
@@ -1483,25 +1557,40 @@ mod tests {
             "connectors": [{ "id": "usb-c-1", "label": "USB-C 1", "kind": "usb-c", "side": "left", "power": "source", "max_cables": 1, "functions": [] }],
             "passthrough": []
         });
-        let ok = http.put(format!("{base}/api/bench/parts/pd-charger")).json(&part).send().await.unwrap();
-        assert_eq!(ok.status(), StatusCode::OK);
-        let body: serde_json::Value = ok.json().await.unwrap();
+        let created = http.post(format!("{base}/api/bench/parts")).json(&part).send().await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body: serde_json::Value = created.json().await.unwrap();
         let served = body["parts"].as_array().unwrap().iter().find(|p| p["id"] == "pd-charger").unwrap().clone();
         assert_eq!(served["source"], "repo");
-        assert!(repo.join("embarch/parts/pd-charger.toml").exists());
+        assert!(served["version"].is_string());
+        assert_eq!(http.post(format!("{base}/api/bench/parts")).json(&part).send().await.unwrap().status(), StatusCode::CONFLICT);
+
+        let mut edited = served.clone();
+        edited["label"] = serde_json::json!("PD charger rev B");
+        let put = http.put(format!("{base}/api/bench/parts/pd-charger")).json(&edited).send().await.unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        let stale = http.put(format!("{base}/api/bench/parts/pd-charger")).json(&edited).send().await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT, "the version moved");
+        let unversioned = http.put(format!("{base}/api/bench/parts/pd-charger")).json(&part).send().await.unwrap();
+        assert_eq!(unversioned.status(), StatusCode::BAD_REQUEST);
+        let missing = http.put(format!("{base}/api/bench/parts/nothing")).json(&{ let mut p = edited.clone(); p["id"] = "nothing".into(); p }).send().await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert!(std::fs::read_to_string(repo.join("embarch/parts/pd-charger.toml")).unwrap().contains("rev B"));
+
         let mut clash = part.clone();
         clash["id"] = serde_json::json!("cy4500");
-        let refused = http.put(format!("{base}/api/bench/parts/cy4500")).json(&clash).send().await.unwrap();
+        let refused = http.post(format!("{base}/api/bench/parts")).json(&clash).send().await.unwrap();
         assert_eq!(refused.status(), StatusCode::CONFLICT);
         assert!(refused.text().await.unwrap().contains("built-in part `cy4500` (CY4500)"));
-        let mismatch = http.put(format!("{base}/api/bench/parts/other")).json(&part).send().await.unwrap();
+        let mismatch = http.put(format!("{base}/api/bench/parts/other")).json(&edited).send().await.unwrap();
         assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// Without a project every bench route refuses `409` naming the picker,
-    /// the vocabulary and the built-ins included: an empty list would read as
-    /// "this repo has no benches".
+    /// the vocabulary and the built-ins included, **whatever the body** — the
+    /// repo is extracted before it: an empty list would read as "this repo has
+    /// no benches", and a 422 about JSON would hide the real cause.
     #[tokio::test]
     async fn without_a_repo_every_bench_route_refuses_naming_the_picker() {
         let base = serve_app().await;
@@ -1510,12 +1599,16 @@ mod tests {
         let calls = [
             http.get(format!("{base}/api/bench/vocabulary")),
             http.get(format!("{base}/api/bench/parts")),
+            http.post(format!("{base}/api/bench/parts")).json(&serde_json::json!({})),
             http.put(format!("{base}/api/bench/parts/x")).json(&serde_json::json!({})),
             http.get(format!("{base}/api/bench/benches")),
+            http.post(format!("{base}/api/bench/benches")).json(&bench),
             http.get(format!("{base}/api/bench/benches/b")),
             http.put(format!("{base}/api/bench/benches/b")).json(&bench),
             http.post(format!("{base}/api/bench/check")).json(&serde_json::json!({ "bench": bench })),
             http.post(format!("{base}/api/bench/candidates")).json(&serde_json::json!({ "bench": bench, "from": "x" })),
+            http.post(format!("{base}/api/bench/check")).body("not json"),
+            http.put(format!("{base}/api/bench/benches/b")).header("content-type", "application/json").body("{"),
         ];
         for call in calls {
             let resp = call.send().await.unwrap();

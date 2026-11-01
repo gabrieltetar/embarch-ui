@@ -12,6 +12,10 @@
 //!
 //! **A bus** is the usb-c, banana and terminal connectors joined by cables
 //! and passthrough pairs: one VBUS, whichever connectors it runs through.
+//!
+//! Everything a check looks up repeatedly — a part by id, the cables on an
+//! end, the bus an end is on — is indexed once per request, so a bench at
+//! the size cap (`files::MAX_PARTS`) costs a few lookups per rule, not a scan.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -63,10 +67,6 @@ struct Wire {
 }
 
 impl Wire {
-    fn touches(&self, end: &str) -> bool {
-        self.a == end || self.b == end
-    }
-
     fn other(&self, end: &str) -> &str {
         if self.a == end { &self.b } else { &self.a }
     }
@@ -76,17 +76,45 @@ impl Wire {
     }
 }
 
-/// The cables in scope: the bench-level ones and the picked config's.
-fn wires(bench: &Bench, config: Option<&Config>) -> Vec<Wire> {
-    let mut out: Vec<Wire> = bench
-        .cables
-        .iter()
-        .map(|c| Wire { a: c.from.clone(), b: c.to.clone(), scope: Scope::Bench })
-        .collect();
-    if let Some(config) = config {
-        out.extend(config.cables.iter().map(|[a, b]| Wire { a: a.clone(), b: b.clone(), scope: Scope::Config }));
+/// The cables in scope — the bench-level ones and the picked config's — and
+/// which of them touch each end.
+struct Wiring {
+    wires: Vec<Wire>,
+    on_end: BTreeMap<String, Vec<usize>>,
+}
+
+impl Wiring {
+    fn new(bench: &Bench, config: Option<&Config>) -> Wiring {
+        let mut wires: Vec<Wire> = bench
+            .cables
+            .iter()
+            .map(|c| Wire { a: c.from.clone(), b: c.to.clone(), scope: Scope::Bench })
+            .collect();
+        if let Some(config) = config {
+            wires.extend(config.cables.iter().map(|[a, b]| Wire { a: a.clone(), b: b.clone(), scope: Scope::Config }));
+        }
+        let mut on_end: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, w) in wires.iter().enumerate() {
+            on_end.entry(w.a.clone()).or_default().push(i);
+            if w.b != w.a {
+                on_end.entry(w.b.clone()).or_default().push(i);
+            }
+        }
+        Wiring { wires, on_end }
     }
-    out
+
+    /// The cables touching an end.
+    fn at<'w>(&'w self, end: &str) -> impl Iterator<Item = &'w Wire> + 'w {
+        self.on_end.get(end).into_iter().flatten().map(move |&i| &self.wires[i])
+    }
+
+    fn count(&self, end: &str) -> usize {
+        self.on_end.get(end).map_or(0, Vec::len)
+    }
+
+    fn joins_pair(&self, a: &str, b: &str) -> bool {
+        self.at(a).any(|w| w.other(a) == b)
+    }
 }
 
 /// What a cable end names.
@@ -104,11 +132,24 @@ fn part_id(end: &str) -> &str {
 }
 
 struct Ctx<'a> {
-    bench: &'a Bench,
     templates: &'a Templates,
+    /// The first part with each id; a second is reported as `part-id-twice`.
+    by_id: BTreeMap<&'a str, &'a Part>,
 }
 
 impl<'a> Ctx<'a> {
+    fn new(bench: &'a Bench, templates: &'a Templates) -> Ctx<'a> {
+        let mut by_id = BTreeMap::new();
+        for p in &bench.parts {
+            by_id.entry(p.id.as_str()).or_insert(p);
+        }
+        Ctx { templates, by_id }
+    }
+
+    fn part(&self, id: &str) -> Option<&'a Part> {
+        self.by_id.get(id).copied()
+    }
+
     fn template(&self, part: &Part) -> Option<&'a PartTemplate> {
         self.templates.get(&part.template)
     }
@@ -122,7 +163,7 @@ impl<'a> Ctx<'a> {
             Some((p, c)) => (p, Some(c)),
             None => (end, None),
         };
-        let Some(part) = self.bench.part(pid) else {
+        let Some(part) = self.part(pid) else {
             return End::Bad(format!("`{end}` names no part on this bench"));
         };
         let Some(template) = self.template(part) else {
@@ -161,65 +202,68 @@ impl<'a> Ctx<'a> {
 
 // ---- buses ------------------------------------------------------------------
 
-/// The power connectors on a bench, grouped into buses by a union-find.
+/// The power connectors on a bench grouped into buses: a union-find run
+/// once, then frozen into a lookup from end to bus.
 struct Buses {
-    index: BTreeMap<String, usize>,
-    parent: Vec<usize>,
+    bus_of: BTreeMap<String, usize>,
+    members: Vec<Vec<String>>,
 }
 
 impl Buses {
-    fn new(ctx: &Ctx, wires: &[Wire]) -> Buses {
-        let mut buses = Buses { index: BTreeMap::new(), parent: Vec::new() };
-        for part in &ctx.bench.parts {
+    fn new(ctx: &Ctx, bench: &Bench, wiring: &Wiring) -> Buses {
+        let mut index: BTreeMap<String, usize> = BTreeMap::new();
+        let mut parent: Vec<usize> = Vec::new();
+        for part in &bench.parts {
             let Some(template) = ctx.template(part) else { continue };
             for c in template.connectors.iter().filter(|c| carries_power(c.kind)) {
                 let key = format!("{}.{}", part.id, c.id);
-                if !buses.index.contains_key(&key) {
-                    buses.index.insert(key, buses.parent.len());
-                    buses.parent.push(buses.parent.len());
+                if let std::collections::btree_map::Entry::Vacant(slot) = index.entry(key) {
+                    slot.insert(parent.len());
+                    parent.push(parent.len());
                 }
             }
+        }
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let mut union = |a: &str, b: &str| {
+            if let (Some(&x), Some(&y)) = (index.get(a), index.get(b)) {
+                let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+                parent[rx] = ry;
+            }
+        };
+        for part in &bench.parts {
+            let Some(template) = ctx.template(part) else { continue };
             for [a, b] in &template.passthrough {
-                buses.union(&format!("{}.{a}", part.id), &format!("{}.{b}", part.id));
+                union(&format!("{}.{a}", part.id), &format!("{}.{b}", part.id));
             }
         }
-        for w in wires {
-            buses.union(&w.a, &w.b);
+        for w in &wiring.wires {
+            union(&w.a, &w.b);
         }
-        buses
+        let mut bus_of = BTreeMap::new();
+        let mut by_root: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut members: Vec<Vec<String>> = Vec::new();
+        for (key, &i) in &index {
+            let root = find(&mut parent, i);
+            let bus = *by_root.entry(root).or_insert_with(|| {
+                members.push(Vec::new());
+                members.len() - 1
+            });
+            members[bus].push(key.clone());
+            bus_of.insert(key.clone(), bus);
+        }
+        Buses { bus_of, members }
     }
 
-    fn find(&mut self, key: &str) -> Option<usize> {
-        let mut i = *self.index.get(key)?;
-        while self.parent[i] != i {
-            self.parent[i] = self.parent[self.parent[i]];
-            i = self.parent[i];
-        }
-        Some(i)
-    }
-
-    fn union(&mut self, a: &str, b: &str) {
-        if let (Some(x), Some(y)) = (self.find(a), self.find(b)) {
-            self.parent[x] = y;
-        }
-    }
-
-    /// Every bus, as its connectors' ends.
-    fn groups(&mut self) -> Vec<Vec<String>> {
-        let keys: Vec<String> = self.index.keys().cloned().collect();
-        let mut by_root: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-        for k in keys {
-            if let Some(root) = self.find(&k) {
-                by_root.entry(root).or_default().push(k);
-            }
-        }
-        by_root.into_values().collect()
-    }
-
-    fn group_of(&mut self, key: &str) -> Vec<String> {
-        let Some(root) = self.find(key) else { return Vec::new() };
-        let keys: Vec<String> = self.index.keys().cloned().collect();
-        keys.into_iter().filter(|k| self.find(k) == Some(root)).collect()
+    /// The ends on the same bus as `key`, sorted; empty for an end that
+    /// carries no power.
+    fn group_of(&self, key: &str) -> &[String] {
+        self.bus_of.get(key).map(|&b| self.members[b].as_slice()).unwrap_or_default()
     }
 }
 
@@ -256,7 +300,8 @@ struct Identity {
 }
 
 impl Identity {
-    /// Whether two identities could be one physical device.
+    /// Whether two identities could be one physical device — or two that
+    /// nothing can tell apart, which is as bad for a binding.
     fn same_device(&self, other: &Identity) -> bool {
         match (&self.serial, &other.serial) {
             (Some(a), Some(b)) => a == b,
@@ -269,13 +314,24 @@ impl Identity {
             }
         }
     }
+}
 
-    fn describe(&self) -> String {
-        match (&self.serial, self.vid, self.pid) {
-            (Some(s), _, _) => format!("USB serial {s}"),
-            (None, Some(v), Some(p)) => format!("USB {v:04x}:{p:04x}"),
-            _ => "an unnamed USB device".to_string(),
-        }
+/// The sentence for two bindings [`Identity::same_device`] matched.
+fn identity_clash_text(ctx: &Ctx, a: &Identity, b: &Identity) -> String {
+    match (&a.serial, &b.serial) {
+        (Some(s), Some(_)) => format!(
+            "One USB device (USB serial {s}) is bound on {} and on {}; a device is on one part.",
+            ctx.name(&a.end),
+            ctx.name(&b.end)
+        ),
+        _ => format!(
+            "{} and {} both bind USB {:04x}:{:04x} with no serial and no interface that differs, so the two \
+             cannot be told apart; give one a serial or an interface.",
+            ctx.name(&a.end),
+            ctx.name(&b.end),
+            a.vid.unwrap_or_default(),
+            a.pid.unwrap_or_default()
+        ),
     }
 }
 
@@ -323,7 +379,7 @@ fn role_text(role: Role) -> &'static str {
 
 /// Whether a part's own probe reaches this machine: a `usb-host` carrying
 /// `probe`, cabled to a hub.
-fn probe_to_hub(ctx: &Ctx, wires: &[Wire], part: &Part) -> bool {
+fn probe_to_hub(ctx: &Ctx, wiring: &Wiring, part: &Part) -> bool {
     let Some(template) = ctx.template(part) else { return false };
     template
         .connectors
@@ -331,47 +387,48 @@ fn probe_to_hub(ctx: &Ctx, wires: &[Wire], part: &Part) -> bool {
         .filter(|c| c.kind == Kind::UsbHost && c.carries(Function::Probe))
         .any(|c| {
             let end = format!("{}.{}", part.id, c.id);
-            wires
-                .iter()
-                .filter(|w| w.touches(&end))
-                .any(|w| matches!(ctx.resolve(w.other(&end)), End::Hub(_)))
+            wiring.at(&end).any(|w| matches!(ctx.resolve(w.other(&end)), End::Hub(_)))
         })
 }
 
 /// A probe path: the part's own probe to this machine, or an SWD lead to a
 /// part whose probe reaches it.
-fn has_probe_path(ctx: &Ctx, wires: &[Wire], part: &Part) -> bool {
-    if probe_to_hub(ctx, wires, part) {
+fn has_probe_path(ctx: &Ctx, wiring: &Wiring, part: &Part) -> bool {
+    if probe_to_hub(ctx, wiring, part) {
         return true;
     }
     let Some(template) = ctx.template(part) else { return false };
     template.connectors.iter().filter(|c| c.kind == Kind::Swd).any(|c| {
         let end = format!("{}.{}", part.id, c.id);
-        wires.iter().filter(|w| w.touches(&end)).any(|w| match ctx.resolve(w.other(&end)) {
-            End::Conn(other, oc) => oc.kind == Kind::Swd && probe_to_hub(ctx, wires, other),
+        wiring.at(&end).any(|w| match ctx.resolve(w.other(&end)) {
+            End::Conn(other, oc) => oc.kind == Kind::Swd && probe_to_hub(ctx, wiring, other),
             _ => false,
         })
     })
 }
 
-/// Whether two parts are joined by part-to-part cables or a stack. This
+/// Which parts are joined to which by part-to-part cables or a stack. This
 /// machine is not a path: a USB host carries nothing between two devices.
-fn joined(ctx: &Ctx, wires: &[Wire], from: &str, to: &str) -> bool {
-    let is_hub = |id: &str| ctx.bench.part(id).is_none_or(|p| ctx.is_hub(p));
+fn adjacency<'b>(ctx: &Ctx, bench: &'b Bench, wiring: &'b Wiring) -> BTreeMap<&'b str, Vec<&'b str>> {
+    let is_hub = |id: &str| ctx.part(id).is_none_or(|p| ctx.is_hub(p));
     let mut adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for w in wires {
+    for w in &wiring.wires {
         let (a, b) = (part_id(&w.a), part_id(&w.b));
         if a != b && !is_hub(a) && !is_hub(b) {
             adj.entry(a).or_default().push(b);
             adj.entry(b).or_default().push(a);
         }
     }
-    for p in &ctx.bench.parts {
+    for p in &bench.parts {
         if let Some(base) = &p.mounted_on {
             adj.entry(p.id.as_str()).or_default().push(base.as_str());
             adj.entry(base.as_str()).or_default().push(p.id.as_str());
         }
     }
+    adj
+}
+
+fn joined(adj: &BTreeMap<&str, Vec<&str>>, from: &str, to: &str) -> bool {
     let mut seen: BTreeSet<&str> = BTreeSet::from([from]);
     let mut queue: VecDeque<&str> = VecDeque::from([from]);
     while let Some(at) = queue.pop_front() {
@@ -387,11 +444,35 @@ fn joined(ctx: &Ctx, wires: &[Wire], from: &str, to: &str) -> bool {
     false
 }
 
+/// Every chain of `mounted_on` that comes back to where it started, each
+/// once, as its parts in chain order from the smallest id.
+fn mount_cycles(ctx: &Ctx, bench: &Bench) -> Vec<Vec<String>> {
+    let mut cycles: BTreeSet<Vec<String>> = BTreeSet::new();
+    for start in &bench.parts {
+        let mut chain: Vec<&str> = vec![start.id.as_str()];
+        let mut at = start;
+        while let Some(next) = at.mounted_on.as_deref().and_then(|b| ctx.part(b)) {
+            if next.id == start.id {
+                let min = chain.iter().enumerate().min_by_key(|(_, id)| **id).map_or(0, |(i, _)| i);
+                chain.rotate_left(min);
+                cycles.insert(chain.iter().map(|s| s.to_string()).collect());
+                break;
+            }
+            if chain.contains(&next.id.as_str()) || chain.len() > bench.parts.len() {
+                break;
+            }
+            chain.push(&next.id);
+            at = next;
+        }
+    }
+    cycles.into_iter().collect()
+}
+
 /// Every finding for one bench and config (`None`: the bench-level cables
-/// alone). Errors first, then warnings.
+/// alone). Errors first, then warnings, then notes.
 pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> Vec<Finding> {
-    let ctx = Ctx { bench, templates };
-    let wires = wires(bench, config);
+    let ctx = Ctx::new(bench, templates);
+    let wiring = Wiring::new(bench, config);
     let mut out = Vec::new();
 
     // ---- parts ----
@@ -414,6 +495,16 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
     }
 
     // ---- stacking ----
+    for cycle in mount_cycles(&ctx, bench) {
+        let text = match cycle.as_slice() {
+            [one] => format!("{} is mounted on itself.", ctx.part(one).map_or(one.as_str(), |p| p.display())),
+            _ => format!(
+                "{} are mounted on each other in a ring; a stack has a board at the bottom.",
+                cycle.iter().map(|id| ctx.part(id).map_or(id.as_str(), |p| p.display())).collect::<Vec<_>>().join(" → ")
+            ),
+        };
+        out.push(finding(Level::Error, "mount-cycle", text, cycle, vec![]));
+    }
     for part in &bench.parts {
         let Some(template) = ctx.template(part) else { continue };
         let has_plug = template.connectors.iter().any(|c| c.kind == Kind::StackPlug);
@@ -428,9 +519,10 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
                         format!("{} is mounted on {base_id}, but a {} has no stack plug to mount by.", part.display(), template.label),
                         vec![part.id.clone()], vec![]));
                 }
-                match bench.part(base_id) {
-                    _ if base_id == &part.id => out.push(finding(Level::Error, "mount-unknown",
-                        format!("{} is mounted on itself.", part.display()), vec![part.id.clone()], vec![])),
+                if base_id == &part.id {
+                    continue;
+                }
+                match ctx.part(base_id) {
                     None => out.push(finding(Level::Error, "mount-unknown",
                         format!("{} is mounted on `{base_id}`, which is not a part on this bench.", part.display()),
                         vec![part.id.clone()], vec![])),
@@ -447,11 +539,21 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
             }
         }
     }
-    for base in &bench.parts {
+    let mut mounted_on: BTreeMap<&str, Vec<&Part>> = BTreeMap::new();
+    for p in &bench.parts {
+        if let Some(base) = p.mounted_on.as_deref().filter(|b| *b != p.id) {
+            mounted_on.entry(base).or_default().push(p);
+        }
+    }
+    for (base_id, on) in &mounted_on {
+        let Some(base) = ctx.part(base_id) else { continue };
         let Some(bt) = ctx.template(base) else { continue };
-        let room: u32 = bt.connectors.iter().filter(|c| c.kind == Kind::StackSocket).map(|c| c.max_cables).sum();
-        let on: Vec<&Part> = bench.parts.iter().filter(|p| p.mounted_on.as_deref() == Some(base.id.as_str()) && p.id != base.id).collect();
-        if room > 0 && on.len() as u32 > room {
+        let room = bt
+            .connectors
+            .iter()
+            .filter(|c| c.kind == Kind::StackSocket)
+            .fold(0u32, |sum, c| sum.saturating_add(c.max_cables));
+        if room > 0 && on.len() > room as usize {
             let mut parts = vec![base.id.clone()];
             parts.extend(on.iter().map(|p| p.id.clone()));
             out.push(finding(Level::Error, "mount-full",
@@ -507,14 +609,12 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
             if !reported.insert(key) {
                 continue;
             }
-            out.push(finding(Level::Error, "usb-identity-twice",
-                format!("One USB device ({}) is bound on {} and on {}; a device is on one part.", a.describe(), ctx.name(&a.end), ctx.name(&b.end)),
-                vec![a.part.clone(), b.part.clone()], vec![]));
+            out.push(finding(Level::Error, "usb-identity-twice", identity_clash_text(&ctx, a, b), vec![a.part.clone(), b.part.clone()], vec![]));
         }
     }
 
     // ---- cables ----
-    for w in &wires {
+    for w in &wiring.wires {
         let (ea, eb) = (ctx.resolve(&w.a), ctx.resolve(&w.b));
         let mut bad = false;
         for (end, resolved) in [(&w.a, &ea), (&w.b, &eb)] {
@@ -550,19 +650,13 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
             out.push(finding(Level::Error, "kind-mismatch", why, parts_of(&[w.a.clone(), w.b.clone()]), vec![w.pair()]));
         }
     }
-    let mut counted: BTreeSet<String> = BTreeSet::new();
-    for w in &wires {
-        for end in [&w.a, &w.b] {
-            let End::Conn(part, c) = ctx.resolve(end) else { continue };
-            if !counted.insert(end.clone()) {
-                continue;
-            }
-            let on: Vec<&Wire> = wires.iter().filter(|x| x.touches(end)).collect();
-            if on.len() as u32 > c.max_cables {
-                out.push(finding(Level::Error, "connector-full",
-                    format!("{} has {} cables and takes {}.", ctx.name(end), on.len(), c.max_cables),
-                    vec![part.id.clone()], on.iter().map(|x| x.pair()).collect()));
-            }
+    for end in wiring.on_end.keys() {
+        let End::Conn(part, c) = ctx.resolve(end) else { continue };
+        let n = wiring.count(end);
+        if n > c.max_cables as usize {
+            out.push(finding(Level::Error, "connector-full",
+                format!("{} has {n} cables and takes {}.", ctx.name(end), c.max_cables),
+                vec![part.id.clone()], wiring.at(end).map(Wire::pair).collect()));
         }
     }
 
@@ -576,12 +670,20 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
     }
 
     // ---- buses ----
-    let mut buses = Buses::new(&ctx, &wires);
-    for group in buses.groups() {
-        let providers = of_class(&ctx, &group, PowerClass::Provider);
-        let consumers = of_class(&ctx, &group, PowerClass::Consumer);
-        let either = of_class(&ctx, &group, PowerClass::Either);
-        let bus_cables: Vec<[String; 2]> = wires.iter().filter(|w| group.contains(&w.a) && group.contains(&w.b)).map(Wire::pair).collect();
+    let buses = Buses::new(&ctx, bench, &wiring);
+    for group in &buses.members {
+        let providers = of_class(&ctx, group, PowerClass::Provider);
+        let consumers = of_class(&ctx, group, PowerClass::Consumer);
+        let either = of_class(&ctx, group, PowerClass::Either);
+        let on_bus: BTreeSet<&str> = group.iter().map(String::as_str).collect();
+        let bus_cables: Vec<[String; 2]> = group
+            .iter()
+            .flat_map(|e| wiring.at(e))
+            .filter(|w| on_bus.contains(w.a.as_str()) && on_bus.contains(w.b.as_str()))
+            .map(Wire::pair)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         if providers.len() > 1 {
             out.push(finding(Level::Error, "two-providers",
                 format!("Two sources on one bus: {}.", names(&ctx, &providers)), parts_of(&providers), bus_cables));
@@ -599,13 +701,13 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
         }
         let own = |e: &String| part_id(e) == part.id;
         let port = buses.group_of(&format!("{}.usb-c", part.id));
-        let partner_consumes = of_class(&ctx, &port, PowerClass::Consumer).iter().any(|e| !own(e));
-        let partner_sources = of_class(&ctx, &port, PowerClass::Provider).iter().any(|e| !own(e));
+        let partner_consumes = of_class(&ctx, port, PowerClass::Consumer).iter().any(|e| !own(e));
+        let partner_sources = of_class(&ctx, port, PowerClass::Provider).iter().any(|e| !own(e));
         if partner_sources && template.connector("cn2").is_some() {
             // The mockup's note, kept as `info`: sinking with nothing on CN2
             // is a legitimate state (a contract read back, no load drawn).
             let cn2 = format!("{}.cn2", part.id);
-            let loaded = of_class(&ctx, &buses.group_of(&cn2), PowerClass::Consumer).iter().any(|e| !own(e));
+            let loaded = of_class(&ctx, buses.group_of(&cn2), PowerClass::Consumer).iter().any(|e| !own(e));
             if !loaded {
                 out.push(finding(Level::Info, "drp-cn2-empty",
                     format!("The {} sinks on this wiring, and CN2 has no load on it.", template.label),
@@ -616,11 +718,11 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
             continue;
         }
         let cn3 = format!("{}.cn3", part.id);
-        let fed = of_class(&ctx, &buses.group_of(&cn3), PowerClass::Provider).iter().any(|e| !own(e));
+        let fed = of_class(&ctx, buses.group_of(&cn3), PowerClass::Provider).iter().any(|e| !own(e));
         if fed {
             continue;
         }
-        let text = if wires.iter().any(|w| w.touches(&cn3)) {
+        let text = if wiring.count(&cn3) > 0 {
             format!("The {} sources only what CN3 gives it, and nothing on CN3's leads sources it.", template.label)
         } else {
             format!("The {} sources only what CN3 gives it, and CN3 has nothing on it.", template.label)
@@ -633,7 +735,7 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
         if ctx.template(part).is_none() || (part.role.is_none() && part.probe_serial().is_none()) {
             continue;
         }
-        if !has_probe_path(&ctx, &wires, part) {
+        if !has_probe_path(&ctx, &wiring, part) {
             let what = part.role.map(role_text).unwrap_or("bench board");
             out.push(finding(Level::Warn, "no-probe-path",
                 format!("{} ({what}) has no probe path to this machine, so Core cannot flash or validate it.", part.display()),
@@ -642,6 +744,7 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
     }
 
     // ---- a signal's origin and its carrier ----
+    let adj = adjacency(&ctx, bench, &wiring);
     for signal in &bench.signals {
         let origin = match signal.origin_board.as_deref() {
             Some(board) => bench.parts.iter().find(|p| p.probe_serial() == Some(board) || p.label.as_deref() == Some(board)),
@@ -660,7 +763,7 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
                             && id.serial.as_deref() == Some(port_serial.as_str())
                             && (interface.is_none() || id.interface.is_none() || id.interface == *interface)
                     })
-                    .and_then(|id| bench.part(&id.part));
+                    .and_then(|id| ctx.part(&id.part));
                 (carrier, at)
             }
             SignalRoute::ViaDevBench { .. } => {
@@ -671,7 +774,7 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
         let text = match (origin, carrier) {
             (None, _) => format!("Signal `{}` leaves `{leaves}`, which is no part on this bench.", signal.name),
             (Some(o), None) => format!("Signal `{}` leaves {} on {carried_by}, which no part on this bench binds.", signal.name, o.display()),
-            (Some(o), Some(c)) if !joined(&ctx, &wires, &o.id, &c.id) => format!(
+            (Some(o), Some(c)) if !joined(&adj, &o.id, &c.id) => format!(
                 "Signal `{}` leaves {} and rides {carried_by} on {}, and no cable joins the two.",
                 signal.name,
                 o.display(),
@@ -746,8 +849,8 @@ impl Verdict {
 }
 
 /// Why an end that is already at its limit takes no more.
-fn full_why(ctx: &Ctx, wires: &[Wire], end: &str) -> String {
-    let on: Vec<&Wire> = wires.iter().filter(|w| w.touches(end)).collect();
+fn full_why(ctx: &Ctx, wiring: &Wiring, end: &str) -> String {
+    let on: Vec<&Wire> = wiring.at(end).collect();
     match on.as_slice() {
         [one] => format!("{} already goes to {}", ctx.name(end), ctx.name(one.other(end))),
         _ => format!("{} already has {} cables, the most it takes", ctx.name(end), on.len()),
@@ -758,16 +861,19 @@ fn full_why(ctx: &Ctx, wires: &[Wire], end: &str) -> String {
 /// from `from`, so the browser decides nothing. `Err` when `from` is not an
 /// end a cable can start at.
 pub fn candidates(bench: &Bench, templates: &Templates, config: Option<&Config>, from: &str) -> Result<BTreeMap<String, Verdict>, String> {
-    let ctx = Ctx { bench, templates };
-    let wires = wires(bench, config);
+    let ctx = Ctx::new(bench, templates);
+    let wiring = Wiring::new(bench, config);
     let from_end = ctx.resolve(from);
     match &from_end {
         End::Hub(_) | End::Conn(..) => {}
         End::Unknowable(p) => return Err(format!("`{from}`: {}'s template `{}` is missing, so its connectors are unknown", p.display(), p.template)),
         End::Bad(why) => return Err(why.clone()),
     }
-    let count = |end: &str| wires.iter().filter(|w| w.touches(end)).count() as u32;
-    let mut buses = Buses::new(&ctx, &wires);
+    let buses = Buses::new(&ctx, bench, &wiring);
+    let from_full = match &from_end {
+        End::Conn(_, c) => wiring.count(from) >= c.max_cables as usize,
+        _ => false,
+    };
 
     let mut ends: Vec<String> = Vec::new();
     for part in &bench.parts {
@@ -797,25 +903,22 @@ pub fn candidates(bench: &Bench, templates: &Templates, config: Option<&Config>,
             continue;
         }
         let verdict = 'v: {
-            for (end, resolved) in [(from, &from_end), (to.as_str(), &to_end)] {
-                if let End::Conn(_, c) = resolved {
-                    if count(end) >= c.max_cables {
-                        break 'v Verdict::refused(full_why(&ctx, &wires, end));
-                    }
+            if from_full {
+                break 'v Verdict::refused(full_why(&ctx, &wiring, from));
+            }
+            if let End::Conn(_, c) = &to_end {
+                if wiring.count(&to) >= c.max_cables as usize {
+                    break 'v Verdict::refused(full_why(&ctx, &wiring, &to));
                 }
             }
-            if wires.iter().any(|w| (w.a == from && w.b == to) || (w.a == to && w.b == from)) {
+            if wiring.joins_pair(from, &to) {
                 break 'v Verdict::refused(format!("{} and {} are already joined", ctx.name(from), ctx.name(&to)));
             }
             if let (End::Conn(_, x), End::Conn(_, y)) = (&from_end, &to_end) {
                 if carries_power(x.kind) && carries_power(y.kind) {
-                    let mut merged = buses.group_of(from);
-                    for e in buses.group_of(&to) {
-                        if !merged.contains(&e) {
-                            merged.push(e);
-                        }
-                    }
-                    merged.sort();
+                    let mut merged: BTreeSet<&String> = buses.group_of(from).iter().collect();
+                    merged.extend(buses.group_of(&to));
+                    let merged: Vec<String> = merged.into_iter().cloned().collect();
                     let providers = of_class(&ctx, &merged, PowerClass::Provider);
                     if providers.len() > 1 {
                         break 'v Verdict::refused(format!("Two sources on one bus: {}", names(&ctx, &providers)));
@@ -898,6 +1001,7 @@ power = "drp"
             slug: "pd".into(),
             name: "PD".into(),
             legacy: false,
+            version: None,
             parts: vec![part("host", "this-machine"), partner, drp, part("cy4500", "cy4500"), dut, probe, part("load", "scpi-load"), part("psu", "bench-supply")],
             cables: vec![cable("partner.stlink", "host"), cable("cy4500.usb", "host"), cable("probe.usb", "host"), cable("load.usb", "host")],
             configs: vec![
@@ -1009,6 +1113,38 @@ power = "drp"
         assert_eq!((missing.level, missing.parts.as_slice()), (Level::Warn, &["ghost".to_string()][..]));
         bench.parts[2].mounted_on = Some("cy4500".into());
         assert!(codes(&check(&bench, &templates(), None)).contains(&"mount-no-socket"));
+    }
+
+    #[test]
+    fn a_ring_of_mounts_is_an_error_named_once() {
+        let mut bench = pd_bench();
+        bench.parts[1].mounted_on = Some("drp".into()); // partner on drp, drp on partner
+        let f = check(&bench, &templates(), None);
+        let rings: Vec<_> = f.iter().filter(|f| f.code == "mount-cycle").collect();
+        assert_eq!(rings.len(), 1, "{f:#?}");
+        assert_eq!(rings[0].parts, ["drp", "partner"]);
+        assert!(rings[0].text.contains("drp → pd-bench"), "{}", rings[0].text);
+        bench.parts[1].mounted_on = Some("partner".into());
+        let f = check(&bench, &templates(), None);
+        assert!(f.iter().any(|f| f.code == "mount-cycle" && f.text == "pd-bench is mounted on itself."), "{f:#?}");
+    }
+
+    #[test]
+    fn two_bridges_with_no_serial_cannot_be_told_apart() {
+        let mut bench = pd_bench();
+        for id in ["ch1", "ch2"] {
+            let mut bridge = part(id, "usb-uart-bridge");
+            bridge.usb.insert("usb".into(), BTreeMap::from([(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), ..Default::default() }))]));
+            bench.parts.push(bridge);
+        }
+        let f = check(&bench, &templates(), None);
+        let clash = f.iter().find(|f| f.code == "usb-identity-twice").unwrap();
+        assert!(clash.text.contains("USB 1a86:7523 with no serial") && clash.text.contains("cannot be told apart"), "{}", clash.text);
+        // An interface that differs tells them apart.
+        bench.parts.last_mut().unwrap().usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), interface: Some(2), ..Default::default() }));
+        let second_last = bench.parts.len() - 2;
+        bench.parts[second_last].usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), interface: Some(0), ..Default::default() }));
+        assert!(!codes(&check(&bench, &templates(), None)).contains(&"usb-identity-twice"));
     }
 
     #[test]

@@ -423,21 +423,70 @@ async fn chips_from_scan(
 }
 
 /// The chip a board type attaches as, for a caller that holds only its name:
-/// what the catalog states, else what the scan's SoC resolves to.
+/// what the catalog states, else what the scan's SoC resolves to — or **why
+/// neither answered**, because the fix differs by cause: a `boards.toml` that
+/// does not parse, a board type that is not a row in it, a scan that is
+/// unavailable, a scan reporting no one SoC, or Core failing `/resolve-chip`.
 ///
 /// The slow path on purpose — it re-runs the target scan — because it exists
 /// for a request that arrived *without* a chip, which is a human pressing a
 /// button, not a poll.
-pub async fn chip_for_board(state: &AppState, board: &str) -> Option<String> {
-    let repo = state.study_designer.repo_path()?;
-    let catalog = load_catalog(&repo).ok()?;
-    if let Some(row) = catalog.boards.iter().find(|b| b.name == board) {
-        if !row.chip.trim().is_empty() {
-            return Some(row.chip.trim().to_string());
+pub async fn chip_for_board(state: &AppState, board: &str) -> Result<String, String> {
+    let repo = state
+        .study_designer
+        .repo_path()
+        .ok_or_else(|| "no firmware repo is open, so there is no board catalog to look it up in".to_string())?;
+    let catalog = load_catalog(&repo).map_err(|e| format!("embarch/boards.toml could not be read ({e:#})"))?;
+    let row = catalog
+        .boards
+        .iter()
+        .find(|b| b.name == board)
+        .ok_or_else(|| "it is not a row in embarch/boards.toml".to_string())?;
+    if !row.chip.trim().is_empty() {
+        return Ok(row.chip.trim().to_string());
+    }
+    let (by_west_board, reason) = scan_by_west_board(state, &repo).await;
+    let Some(by_west_board) = by_west_board else {
+        return Err(format!(
+            "its row states none, and this repo's target scan is unavailable ({})",
+            reason.unwrap_or_else(|| "no reason given".to_string())
+        ));
+    };
+    let key = scan_key(row);
+    let Some(scanned) = by_west_board.get(&key) else {
+        return Err(format!("its row states none, and this repo's target scan does not report the west board '{key}'"));
+    };
+    let socs: std::collections::BTreeSet<&str> =
+        scanned.combos.iter().map(|c| c.soc.trim()).filter(|s| !s.is_empty()).collect();
+    let soc = match socs.len() {
+        1 => socs.into_iter().next().unwrap_or_default().to_string(),
+        0 => return Err(format!("its row states none, and the scan reports no SoC for '{key}'")),
+        _ => {
+            return Err(format!(
+                "its row states none, and the scan reports {} SoCs for '{key}' ({}), so it is not guessed",
+                socs.len(),
+                socs.into_iter().collect::<Vec<_>>().join(", ")
+            ))
+        }
+    };
+    state
+        .core
+        .resolve_chip(&soc)
+        .await
+        .map_err(|e| format!("its row states none, and Core could not resolve the SoC '{soc}' ({e:#})"))
+}
+
+/// The chip a role's board type attaches as: **a supported dev-bench board's
+/// own first** for the `dev-bench` role — a bench is the suite's, not the
+/// project's, and need not be in its catalog (decision 45) — then
+/// [`chip_for_board`].
+pub async fn lookup_chip(state: &AppState, role: &str, board: &str) -> Result<String, String> {
+    if role == "dev-bench" {
+        if let Some((_, _, chip)) = SUPPORTED_DEV_BENCH_BOARDS.iter().find(|(b, _, _)| *b == board) {
+            return Ok((*chip).to_string());
         }
     }
-    let builds = builds_by_catalog_name(state, &repo, &catalog.boards).await;
-    chips_from_scan(state, &catalog.boards, &builds).await.remove(board)
+    chip_for_board(state, board).await
 }
 
 // ---- a saved topology profile -----------------------------------------------
@@ -518,7 +567,8 @@ fn load_profile(repo: &Path, slug: &str) -> anyhow::Result<Profile> {
         }
         other => anyhow::anyhow!("{other}"),
     })?;
-    Ok(crate::bench::files::profile_from_file(file))
+    let templates = crate::bench::catalog(Some(repo)).by_id();
+    Ok(crate::bench::files::profile_from_file(file.0, &templates))
 }
 
 /// Every profile in the project, newest first. **A file that will not parse
@@ -899,6 +949,7 @@ pub struct SetRoleBoardRequest {
 /// failure naming a field and not the fix. The refusal makes no Core call.
 pub async fn resolve_chip_or_refuse(
     state: &AppState,
+    role: &str,
     board: &str,
     stated: &str,
 ) -> Result<String, Response> {
@@ -916,19 +967,19 @@ pub async fn resolve_chip_or_refuse(
         )
             .into_response());
     }
-    match chip_for_board(state, board).await {
-        Some(chip) => Ok(chip),
-        None => Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "'{board}' has no chip: it states none in embarch/boards.toml, and this \
-                 repo's target scan does not report one SoC for it. Set the chip on \
-                 the row in Board types below — Core attaches every probe bound to \
-                 this role as it."
-            ),
-        )
-            .into_response()),
+    match lookup_chip(state, role, board).await {
+        Ok(chip) => Ok(chip),
+        Err(why) => Err((StatusCode::BAD_REQUEST, no_chip_sentence(board, &why)).into_response()),
     }
+}
+
+/// The refusal for a board type nothing could find a chip for: why, then
+/// where to put the answer.
+fn no_chip_sentence(board: &str, why: &str) -> String {
+    format!(
+        "'{board}' has no chip: {why}. Set the chip on the row in Board types below — Core \
+         attaches every probe bound to this role as it."
+    )
 }
 
 /// `POST /api/topology/roles/{role}/board` — which board type is in a role,
@@ -949,7 +1000,7 @@ pub async fn api_set_role_board(
     // a board type and the chip it attaches as`, which names the missing
     // field and not the one thing a human could do about it. What survives
     // the lookup is refused here, by the one refusal both enrol paths share.
-    let chip = match resolve_chip_or_refuse(&state, &req.board, &req.chip).await {
+    let chip = match resolve_chip_or_refuse(&state, &role, &req.board, &req.chip).await {
         Ok(chip) => chip,
         Err(refusal) => return refusal,
     };
@@ -1563,35 +1614,29 @@ pub async fn api_save_profile(
         signals: snapshot.signals.clone(),
     };
 
-    // **A bench the editor saved is not overwritten from here.** This save
-    // writes the old shape from the snapshot, which knows nothing of parts,
-    // cables or configs; writing it over a file that has them would drop
-    // every one silently.
-    if let Ok(existing) = crate::bench::files::read_file(&repo, &slug) {
-        if existing.parts.is_some() {
-            return (
-                StatusCode::CONFLICT,
-                format!(
-                    "the saved bench '{slug}' has parts and cables, which saving from the role \
-                     snapshot would drop — save it under another name"
-                ),
-            )
-                .into_response();
-        }
+    // **A bench the editor saved is not overwritten from here**, nor a file
+    // that does not parse and so might be one. This save writes the old
+    // shape from the snapshot, which knows nothing of parts, cables or
+    // configs; writing it over a file that has them would drop every one
+    // silently.
+    if let Err(why) = crate::bench::files::guard_old_shape(&repo, &slug) {
+        return (StatusCode::CONFLICT, why).into_response();
     }
 
-    let dir = topologies_dir(&repo);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return (StatusCode::BAD_REQUEST, format!("failed to create {}: {e}", dir.display()))
-            .into_response();
-    }
     let text = match toml::to_string_pretty(&profile) {
         Ok(t) => t,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
     };
     let path = profile_path(&repo, &slug);
-    match std::fs::write(&path, text) {
-        Ok(()) => Json(json!({
+    let written = crate::bench::write_in_repo(
+        &repo,
+        &["embarch", "topologies"],
+        &format!("{slug}.toml"),
+        text.as_bytes(),
+        crate::bench::WriteMode::Replace,
+    );
+    match written {
+        Ok(_) => Json(json!({
             "saved": slug,
             "path": path.to_string_lossy(),
             "profiles": list_profiles(&repo),
@@ -1618,6 +1663,11 @@ pub async fn api_delete_profile(
     let path = profile_path(&repo, &slug);
     if !path.exists() {
         return (StatusCode::NOT_FOUND, format!("no saved topology '{slug}'")).into_response();
+    }
+    // The same guard the save has: a bench the editor wrote, or a file that
+    // does not parse and might be one, is not deleted from the old tab.
+    if let Err(why) = crate::bench::files::guard_old_shape(&repo, &slug) {
+        return (StatusCode::CONFLICT, why).into_response();
     }
     match std::fs::remove_file(&path) {
         Ok(()) => Json(json!({ "removed": slug, "profiles": list_profiles(&repo) })).into_response(),
@@ -1715,18 +1765,19 @@ pub async fn api_apply_profile(
         // only the probe binding below, which is an identity claim, waits
         // for a human.
         //
-        // **A bench the editor saved records no chip** — a part carries none,
-        // because a chip is looked up from the board type, never typed
-        // (decision 48) — so it is looked up here the way the role picker
-        // does, and a board nothing can answer for is reported, not skipped.
-        let chip = if binding.chip.is_empty() && !binding.board.is_empty() {
-            role_board_chip(&state, role, &binding.board).await
+        // **The chip is looked up once and used for both halves**: the
+        // board write here and the proposal below, which the browser
+        // confirms through `/api/enroll` with that chip. Looked up first,
+        // the recorded chip only a fallback (decision 48: looked up, never
+        // typed); a board nothing answers for is reported, not skipped.
+        let chip = if binding.board.is_empty() {
+            Ok(binding.chip.clone())
         } else {
-            Some(binding.chip.clone())
+            pick_chip(lookup_chip(&state, role, &binding.board).await, &binding.chip)
         };
-        match chip {
-            Some(chip) if !binding.board.is_empty() && !chip.is_empty() => {
-                match state.core.set_role_board(role, &binding.board, &chip).await {
+        if !binding.board.is_empty() {
+            match &chip {
+                Ok(chip) => match state.core.set_role_board(role, &binding.board, chip).await {
                     Ok(_) => applied.push(json!({
                         "what": format!("{role} board"),
                         "ok": true,
@@ -1737,22 +1788,25 @@ pub async fn api_apply_profile(
                         "ok": false,
                         "detail": format!("{e:#}"),
                     })),
-                }
+                },
+                Err(why) => applied.push(json!({
+                    "what": format!("{role} board"),
+                    "ok": false,
+                    "detail": no_chip_sentence(&binding.board, why),
+                })),
             }
-            None => applied.push(json!({
-                "what": format!("{role} board"),
-                "ok": false,
-                "detail": format!(
-                    "'{}' has no chip: embarch/boards.toml states none and this repo's target scan \
-                     reports no one SoC for it — set the chip on its row in Board types",
-                    binding.board
-                ),
-            })),
-            Some(_) => {}
         }
+        // **Never a silent skip** (fix round 1): a role whose part, or the
+        // part an SWD lead reaches, binds no probe says so.
         if binding.probe_serial.is_empty() {
+            applied.push(json!({
+                "what": format!("{role} probe"),
+                "ok": false,
+                "detail": format!("{role}: no probe on its part — not proposed"),
+            }));
             continue;
         }
+        let chip = chip.unwrap_or_default();
         let current = snapshot.enrolled.iter().find(|b| b.role == role);
         let already = current
             .is_some_and(|b| b.probe_serial.as_deref() == Some(binding.probe_serial.as_str()));
@@ -1763,7 +1817,7 @@ pub async fn api_apply_profile(
         proposals.push(json!({
             "role": role,
             "board": binding.board,
-            "chip": binding.chip,
+            "chip": chip,
             "probe_serial": binding.probe_serial,
             "link_port_serial": binding.link_port_serial,
             "link_port_interface": binding.link_port_interface,
@@ -1791,16 +1845,15 @@ pub async fn api_apply_profile(
     .into_response()
 }
 
-/// The chip a role's board type attaches as, for a binding that records
-/// none: a supported dev-bench board's own, else the catalog's or the scan's
-/// ([`chip_for_board`]).
-async fn role_board_chip(state: &AppState, role: &str, board: &str) -> Option<String> {
-    if role == "dev-bench" {
-        if let Some((_, _, chip)) = SUPPORTED_DEV_BENCH_BOARDS.iter().find(|(b, _, _)| *b == board) {
-            return Some((*chip).to_string());
-        }
+/// The chip a saved role uses: the lookup when it answers, **the chip the
+/// file recorded only when it does not** — decision 48's "looked up, never
+/// typed", with a bench saved before a catalog row existed still loading.
+fn pick_chip(looked_up: Result<String, String>, recorded: &str) -> Result<String, String> {
+    match looked_up {
+        Ok(chip) => Ok(chip),
+        Err(_) if !recorded.trim().is_empty() => Ok(recorded.trim().to_string()),
+        Err(why) => Err(why),
     }
-    chip_for_board(state, board).await
 }
 
 #[cfg(test)]
@@ -1900,6 +1953,13 @@ mod tests {
         assert!(role_target(Some(&bad), &[bench], "dev-bench").is_ok());
         let _ = std::fs::remove_dir_all(&ok);
         let _ = std::fs::remove_dir_all(&bad);
+    }
+
+    #[test]
+    fn a_looked_up_chip_wins_and_a_recorded_one_is_only_the_fallback() {
+        assert_eq!(pick_chip(Ok("nRF54L15".into()), "STM32G0B1VE"), Ok("nRF54L15".into()));
+        assert_eq!(pick_chip(Err("not a row".into()), "STM32G0B1VE"), Ok("STM32G0B1VE".into()));
+        assert_eq!(pick_chip(Err("not a row".into()), " "), Err("not a row".into()));
     }
 
     #[test]
