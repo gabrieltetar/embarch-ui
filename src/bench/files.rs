@@ -509,14 +509,14 @@ pub fn list(repo: &Path) -> (Vec<BenchRow>, Vec<FileError>) {
         Ok(true) => {}
         Ok(false) => return (Vec::new(), errors),
         Err(e) => {
-            errors.push(FileError { file: here, error: format!("could not tell whether the directory exists: {e}") });
+            errors.push(FileError { file: here, error: format!("could not tell whether the directory exists: {e}"), ..Default::default() });
             return (Vec::new(), errors);
         }
     }
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) => {
-            errors.push(FileError { file: here, error: format!("could not read the directory: {e}") });
+            errors.push(FileError { file: here, error: format!("could not read the directory: {e}"), ..Default::default() });
             return (Vec::new(), errors);
         }
     };
@@ -524,7 +524,7 @@ pub fn list(repo: &Path) -> (Vec<BenchRow>, Vec<FileError>) {
         let path = match entry {
             Ok(entry) => entry.path(),
             Err(e) => {
-                errors.push(FileError { file: here.clone(), error: format!("could not read a directory entry: {e}") });
+                errors.push(FileError { file: here.clone(), error: format!("could not read a directory entry: {e}"), ..Default::default() });
                 continue;
             }
         };
@@ -533,13 +533,14 @@ pub fn list(repo: &Path) -> (Vec<BenchRow>, Vec<FileError>) {
         }
         let shown = format!("embarch/topologies/{}", path.file_name().unwrap_or_default().to_string_lossy());
         let Some(slug) = path.file_stem().and_then(|x| x.to_str()).map(str::to_string) else {
-            errors.push(FileError { file: shown, error: "the file name is not UTF-8, so no slug names it".to_string() });
+            errors.push(FileError { file: shown, error: "the file name is not UTF-8, so no slug names it".to_string(), ..Default::default() });
             continue;
         };
         if !is_slug(&slug) {
             errors.push(FileError {
                 file: shown,
                 error: format!("`{slug}` is not a slug, so no route can address it; rename the file to {}.toml", slugify(&slug)),
+                ..Default::default()
             });
             continue;
         }
@@ -548,7 +549,7 @@ pub fn list(repo: &Path) -> (Vec<BenchRow>, Vec<FileError>) {
                 file.saved_at_utc_ms,
                 BenchRow { legacy: file.parts.is_none(), name: file.name, slug },
             )),
-            Err(e) => errors.push(FileError { file: bench_file(&slug), error: e.to_string() }),
+            Err(e) => errors.push(FileError { file: bench_file(&slug), error: e.to_string(), id: None, slug: Some(slug) }),
         }
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.slug.cmp(&b.1.slug)));

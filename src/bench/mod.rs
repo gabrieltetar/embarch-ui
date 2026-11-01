@@ -20,6 +20,8 @@
 pub mod check;
 pub mod files;
 pub mod routes;
+#[cfg(test)]
+mod drive_fixture;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -464,10 +466,19 @@ pub struct ServedPart {
 }
 
 /// A file that could not be used, and why — listed, never dropped.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// When the error is about one template or one bench, it also names it —
+/// the template's `id` (the file stem) or the bench's `slug` — so the page
+/// can say "unreadable" on the part or bench that uses it instead of
+/// "missing". A directory that could not be read names neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct FileError {
     pub file: String,
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
 }
 
 /// Every template a bench may use: the built-ins, then the open repo's.
@@ -535,14 +546,14 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
         Ok(true) => {}
         Ok(false) => return Catalog { parts, errors },
         Err(e) => {
-            errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not tell whether the directory exists: {e}") });
+            errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not tell whether the directory exists: {e}"), ..Default::default() });
             return Catalog { parts, errors };
         }
     }
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) => {
-            errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not read the directory: {e}") });
+            errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not read the directory: {e}"), ..Default::default() });
             return Catalog { parts, errors };
         }
     };
@@ -555,7 +566,7 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
                     paths.push(path);
                 }
             }
-            Err(e) => errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not read a directory entry: {e}") }),
+            Err(e) => errors.push(FileError { file: "embarch/parts".to_string(), error: format!("could not read a directory entry: {e}"), ..Default::default() }),
         }
     }
     paths.sort();
@@ -564,6 +575,7 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
             errors.push(FileError {
                 file: format!("embarch/parts/{}", path.file_name().unwrap_or_default().to_string_lossy()),
                 error: "the file name is not UTF-8, so it cannot be a part id".to_string(),
+                ..Default::default()
             });
             continue;
         };
@@ -571,21 +583,21 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
-                errors.push(FileError { file, error: format!("could not read: {e}") });
+                errors.push(FileError { file, error: format!("could not read: {e}"), id: Some(stem), slug: None });
                 continue;
             }
         };
         let text = match String::from_utf8(bytes.clone()) {
             Ok(t) => t,
             Err(_) => {
-                errors.push(FileError { file, error: "the file is not UTF-8 text".to_string() });
+                errors.push(FileError { file, error: "the file is not UTF-8 text".to_string(), id: Some(stem), slug: None });
                 continue;
             }
         };
         let template = match parse_template(&text) {
             Ok(t) => t,
             Err(error) => {
-                errors.push(FileError { file, error });
+                errors.push(FileError { file, error, id: Some(stem), slug: None });
                 continue;
             }
         };
@@ -593,6 +605,8 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
             errors.push(FileError {
                 file,
                 error: format!("id `{}` is not this file's name; a template lives at embarch/parts/<id>.toml", template.id),
+                id: Some(stem),
+                slug: None,
             });
             continue;
         }
@@ -600,6 +614,8 @@ pub fn catalog(repo: Option<&Path>) -> Catalog {
             errors.push(FileError {
                 file,
                 error: builtin_clash(&template.id, &builtin.label),
+                id: Some(stem),
+                slug: None,
             });
             continue;
         }
