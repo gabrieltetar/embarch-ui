@@ -1449,6 +1449,16 @@ mod tests {
         let text = std::fs::read_to_string(dir.join("ble-bench.toml")).unwrap();
         assert!(text.contains("[[parts]]") && !text.contains("[dut]"), "{text}");
 
+        // Fix round 3, M1(b): a USB key that is no connector of the part is
+        // refused before anything is written; the saved file is untouched.
+        let before = std::fs::read(dir.join("ble-bench.toml")).unwrap();
+        let mut hostile = saved.clone();
+        hostile["parts"][1]["usb"]["a\nb\"'''"] = serde_json::json!({ "probe": "X" });
+        let refused = http.put(format!("{base}/api/bench/benches/ble-bench")).json(&hostile).send().await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(refused.text().await.unwrap().contains("is not a connector of `nrf54l15dk`"));
+        assert_eq!(std::fs::read(dir.join("ble-bench.toml")).unwrap(), before);
+
         // A second window holding the old version cannot overwrite the save.
         let stale = http.put(format!("{base}/api/bench/benches/ble-bench")).json(&bench).send().await.unwrap();
         assert_eq!(stale.status(), StatusCode::CONFLICT);
@@ -1562,6 +1572,26 @@ mod tests {
         assert_eq!(detail("dev-bench probe"), "dev-bench: its SWD leads reach different probes (J1 in config “A”; J2 in config “B”) — not proposed");
         assert!(detail("dut board").contains("(recorded chip was for wearable-rev6, not used)"), "{report}");
         assert!(detail("dut probe").starts_with("dut: not proposed — 'plank' has no chip"), "{report}");
+
+        // Fix round 3: the first bench proposed a dev-bench enrolment, so its
+        // link waits for it; a cleared board never keeps the old board's chip,
+        // and a dev-bench link with no enrolment proposed says what to do.
+        let first: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd/apply")).send().await.unwrap().json().await.unwrap();
+        let link = first["applied"].as_array().unwrap().iter().find(|a| a["what"] == "dev-bench link").unwrap().clone();
+        assert!(link["detail"].as_str().unwrap().starts_with("deferred:"), "{first}");
+        std::fs::write(
+            dir.join("pd3.toml"),
+            "name = \"pd3\"\n\n[[parts]]\nid = \"host\"\ntemplate = \"this-machine\"\n\n[[parts]]\nid = \"bench\"\ntemplate = \"nrf54l15dk\"\nrole = \"dev-bench\"\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\nusb.usb = { vcom = { serial = \"D607104\", interface = 2 } }\n\n[[parts]]\nid = \"dut\"\ntemplate = \"generic-board\"\nrole = \"dut\"\nchip = { board = \"wearable-rev6\", chip = \"nRF54L15\" }\nusb.usb = { probe = \"X1\" }\n",
+        )
+        .unwrap();
+        let third: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd3/apply")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(third["proposals"], serde_json::json!([]), "{third}");
+        let detail = |what: &str| third["applied"].as_array().unwrap().iter().find(|a| a["what"] == what).map(|a| a["detail"].as_str().unwrap().to_string()).unwrap_or_default();
+        assert_eq!(
+            detail("dut probe"),
+            "dut: not proposed — no board type to look a chip up for, and the recorded chip was for wearable-rev6, not used"
+        );
+        assert!(detail("dev-bench link").starts_with("not declared:") && detail("dev-bench link").contains("proposes no dev-bench enrolment"), "{third}");
         let _ = std::fs::remove_dir_all(&repo);
     }
 

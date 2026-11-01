@@ -527,7 +527,7 @@ pub struct RoleBinding {
     pub probe_note: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     /// What the human called this bench. The file is named from a slug of
     /// it; this is the spelling shown.
@@ -1643,6 +1643,11 @@ pub async fn api_save_profile(
         Ok(t) => t,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
     };
+    // Read back before anything is replaced (fix round 3): text that would
+    // not load as this profile leaves the old file as it was.
+    if let Err(e) = crate::bench::round_trips(&text, &profile) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("embarch/topologies/{slug}.toml: {e}")).into_response();
+    }
     let path = profile_path(&repo, &slug);
     let written = crate::bench::write_in_repo(
         &repo,
@@ -1738,42 +1743,6 @@ pub async fn api_apply_profile(
         }
     }
 
-    // The link amends dev-bench's enrolment row, so Core refuses it when
-    // that role is empty. Left to the confirmation step in that case, and
-    // said out loud — a silent skip would leave a bench half-loaded with
-    // nothing on screen about it.
-    let bench_enrolled = snapshot.enrolled.iter().any(|b| b.role == "dev-bench");
-    if let Some(bench) = &profile.dev_bench {
-        if bench.link_port_serial.is_some() || bench.link_port_interface.is_some() {
-            if bench_enrolled {
-                match state
-                    .core
-                    .set_dev_bench_link(bench.link_port_serial.as_deref(), bench.link_port_interface)
-                    .await
-                {
-                    Ok(()) => applied.push(json!({
-                        "what": "dev-bench link",
-                        "ok": true,
-                        "detail": "declared",
-                    })),
-                    Err(e) => applied.push(json!({
-                        "what": "dev-bench link",
-                        "ok": false,
-                        "detail": format!("{e:#}"),
-                    })),
-                }
-            } else {
-                applied.push(json!({
-                    "what": "dev-bench link",
-                    "ok": false,
-                    "detail": "deferred: Core amends the dev-bench row, so the role has to hold \
-                               a board first — confirm its enrolment below and the link is \
-                               declared with it",
-                }));
-            }
-        }
-    }
-
     let mut proposals: Vec<serde_json::Value> = Vec::new();
     for (role, binding) in [("dev-bench", &profile.dev_bench), ("dut", &profile.dut)] {
         let Some(binding) = binding else { continue };
@@ -1789,7 +1758,9 @@ pub async fn api_apply_profile(
         // the recorded chip only a fallback (decision 48: looked up, never
         // typed); a board nothing answers for is reported, not skipped.
         let chip = if binding.board.is_empty() {
-            Ok(binding.chip.clone())
+            // No board to look a chip up for: only a chip recorded for no
+            // board either is usable (fix round 3).
+            recorded_chip(&binding.chip, binding.chip_board.as_deref(), "").map(Option::unwrap_or_default)
         } else {
             pick_chip(
                 lookup_chip(&state, role, &binding.board).await,
@@ -1839,6 +1810,12 @@ pub async fn api_apply_profile(
                 )));
                 continue;
             }
+            Err(why) if binding.board.is_empty() => {
+                applied.push(not_proposed(format!(
+                    "{role}: not proposed — no board type to look a chip up for, and the {why}"
+                )));
+                continue;
+            }
             Err(why) => {
                 applied.push(not_proposed(format!("{role}: not proposed — {}", no_chip_sentence(&binding.board, &why))));
                 continue;
@@ -1872,6 +1849,53 @@ pub async fn api_apply_profile(
         }));
     }
 
+    // The link amends dev-bench's enrolment row, so Core refuses it when
+    // that role is empty. **Worded after the proposals are decided** (fix
+    // round 3): "declared with its enrolment" is only true when a dev-bench
+    // enrolment is actually proposed; otherwise the row says what to do.
+    // Never a silent skip — a bench half-loaded with nothing on screen about
+    // it is the failure this report exists to prevent.
+    let bench_enrolled = snapshot.enrolled.iter().any(|b| b.role == "dev-bench");
+    let bench_proposed = proposals.iter().any(|p| p["role"] == "dev-bench");
+    if let Some(bench) = &profile.dev_bench {
+        if bench.link_port_serial.is_some() || bench.link_port_interface.is_some() {
+            if bench_enrolled {
+                match state
+                    .core
+                    .set_dev_bench_link(bench.link_port_serial.as_deref(), bench.link_port_interface)
+                    .await
+                {
+                    Ok(()) => applied.push(json!({
+                        "what": "dev-bench link",
+                        "ok": true,
+                        "detail": "declared",
+                    })),
+                    Err(e) => applied.push(json!({
+                        "what": "dev-bench link",
+                        "ok": false,
+                        "detail": format!("{e:#}"),
+                    })),
+                }
+            } else if bench_proposed {
+                applied.push(json!({
+                    "what": "dev-bench link",
+                    "ok": false,
+                    "detail": "deferred: Core amends the dev-bench row, so the role has to hold \
+                               a board first — confirm its enrolment below and the link is \
+                               declared with it",
+                }));
+            } else {
+                applied.push(json!({
+                    "what": "dev-bench link",
+                    "ok": false,
+                    "detail": "not declared: Core amends the dev-bench row, so the role has to hold \
+                               a board first, and this bench proposes no dev-bench enrolment (its \
+                               row above says why) — enrol dev-bench, then apply this bench again",
+                }));
+            }
+        }
+    }
+
     state.poke.notify_one();
     Json(json!({
         "slug": slug,
@@ -1888,14 +1912,30 @@ pub async fn api_apply_profile(
 /// and only while the role holds the board it was recorded for
 /// (`recorded_for`; `None` is an old file's chip, which is its own board's).
 fn pick_chip(looked_up: Result<String, String>, recorded: &str, recorded_for: Option<&str>, board: &str) -> Result<String, String> {
-    let recorded = recorded.trim();
     match looked_up {
         Ok(chip) => Ok(chip),
-        Err(why) if recorded.is_empty() => Err(why),
-        Err(why) => match recorded_for {
-            Some(other) if other != board => Err(format!("{why} (recorded chip was for {other}, not used)")),
-            _ => Ok(recorded.to_string()),
+        Err(why) => match recorded_chip(recorded, recorded_for, board) {
+            Ok(Some(chip)) => Ok(chip),
+            Ok(None) => Err(why),
+            Err(note) => Err(format!("{why} ({note})")),
         },
+    }
+}
+
+/// The recorded chip, if the role may use it: `Ok(None)` when none was
+/// recorded, `Err` saying why one was not used. Usable only while the role
+/// holds the board it was recorded for — **an empty board never matches a
+/// non-empty recorded one**, and `None` is an old file's chip, which belongs
+/// to that file's own board.
+fn recorded_chip(recorded: &str, recorded_for: Option<&str>, board: &str) -> Result<Option<String>, String> {
+    let recorded = recorded.trim();
+    if recorded.is_empty() {
+        return Ok(None);
+    }
+    match recorded_for {
+        Some(other) if other != board && other.is_empty() => Err("recorded chip was recorded with no board, not used".to_string()),
+        Some(other) if other != board => Err(format!("recorded chip was for {other}, not used")),
+        _ => Ok(Some(recorded.to_string())),
     }
 }
 
@@ -2009,6 +2049,18 @@ mod tests {
             "a chip never outlives the board it was recorded for"
         );
         assert_eq!(pick_chip(Err("not a row".into()), " ", None, "b"), Err("not a row".into()));
+        assert_eq!(
+            pick_chip(Err("not a row".into()), "nRF54L15", Some(""), "plank"),
+            Err("not a row (recorded chip was recorded with no board, not used)".into())
+        );
+    }
+
+    #[test]
+    fn a_cleared_board_never_keeps_the_old_boards_chip() {
+        assert_eq!(recorded_chip("nRF54L15", Some("wearable-rev6"), ""), Err("recorded chip was for wearable-rev6, not used".into()));
+        assert_eq!(recorded_chip("nRF54L15", Some(""), ""), Ok(Some("nRF54L15".into())), "recorded with no board, still no board");
+        assert_eq!(recorded_chip("nRF54L15", None, ""), Ok(Some("nRF54L15".into())), "an old file's own chip");
+        assert_eq!(recorded_chip("", Some("wearable-rev6"), ""), Ok(None));
     }
 
     #[test]
@@ -2062,6 +2114,7 @@ chip = "STM32F407VG"
         };
         let text = toml::to_string_pretty(&profile).unwrap();
         assert!(text.contains("[dev-bench]"), "{text}");
+        assert!(crate::bench::round_trips(&text, &profile).is_ok(), "the old save's read-back check passes: {text}");
         let back: Profile = toml::from_str(&text).unwrap();
         assert_eq!(back.dev_bench.unwrap().link_port_interface, Some(2));
         assert_eq!(back.dut.unwrap().board, "wearable-rev6");

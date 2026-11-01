@@ -627,6 +627,24 @@ pub fn version_of(bytes: &[u8]) -> String {
     format!("{hash:016x}-{}", bytes.len())
 }
 
+/// Whether `text` — about to be written — parses back as exactly `meant`.
+/// Every repo write checks this **before** it replaces anything, so a
+/// serializer that produced text no load could read, or that reads back as
+/// something else, leaves the old file as it was (fix round 3).
+pub fn round_trips<T>(text: &str, meant: &T) -> Result<(), String>
+where
+    T: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let back: T = toml::from_str(text).map_err(|e| {
+        format!("the text about to be written does not parse back ({}), so nothing was written", toml_error_line(text, &e))
+    })?;
+    if back == *meant {
+        Ok(())
+    } else {
+        Err("the text about to be written does not read back as what was saved, so nothing was written".to_string())
+    }
+}
+
 /// Whether a repo write may replace a file or must create one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
@@ -787,8 +805,15 @@ struct TemplateOut<'a> {
     connectors: Vec<ConnectorOut<'a>>,
 }
 
-/// Writes a repo template as TOML.
+/// Writes a repo template as TOML, **refusing text that would not read back
+/// as the same template** ([`round_trips`]).
 pub fn template_toml(t: &PartTemplate) -> anyhow::Result<String> {
+    let text = template_toml_unchecked(t)?;
+    round_trips(&text, t).map_err(|e| anyhow::anyhow!("embarch/parts/{}.toml: {e}", t.id))?;
+    Ok(text)
+}
+
+fn template_toml_unchecked(t: &PartTemplate) -> anyhow::Result<String> {
     let out = TemplateOut {
         id: &t.id,
         label: &t.label,

@@ -352,18 +352,20 @@ fn identity_clashes(ctx: &Ctx, ids: &[Identity]) -> Vec<Finding> {
         any: TwoParts<'i>,
         by_interface: BTreeMap<Option<u8>, TwoParts<'i>>,
     }
-    let mut buckets: BTreeMap<(u16, u16), Bucket> = BTreeMap::new();
+    // Keyed on the VID and the PID *as declared*, so two VID-only bindings
+    // (a bridge whose product id nobody wrote down) are compared too.
+    let mut buckets: BTreeMap<(u16, Option<u16>), Bucket> = BTreeMap::new();
     for id in ids {
-        if let (Some(vid), Some(pid)) = (id.vid, id.pid) {
-            let b = buckets.entry((vid, pid)).or_default();
+        if let Some(vid) = id.vid {
+            let b = buckets.entry((vid, id.pid)).or_default();
             b.any.add(id);
             b.by_interface.entry(id.interface).or_default().add(id);
         }
     }
     let mut reported: BTreeSet<(String, String)> = BTreeSet::new();
     for id in ids.iter().filter(|i| i.serial.is_none()) {
-        let (Some(vid), Some(pid)) = (id.vid, id.pid) else { continue };
-        let b = &buckets[&(vid, pid)];
+        let Some(vid) = id.vid else { continue };
+        let b = &buckets[&(vid, id.pid)];
         let other = match id.interface {
             None => b.any.other_than(&id.part),
             Some(i) => b
@@ -384,7 +386,10 @@ fn identity_clashes(ctx: &Ctx, ids: &[Identity]) -> Vec<Finding> {
 /// The sentence for a serial-less identity `a` that a port matching `b`
 /// would also match.
 fn identity_clash_text(ctx: &Ctx, a: &Identity, b: &Identity) -> String {
-    let usb = format!("USB {:04x}:{:04x}", a.vid.unwrap_or_default(), a.pid.unwrap_or_default());
+    let usb = match a.pid {
+        Some(pid) => format!("USB {:04x}:{pid:04x}", a.vid.unwrap_or_default()),
+        None => format!("USB vendor {:04x} (no product id)", a.vid.unwrap_or_default()),
+    };
     match &b.serial {
         Some(serial) => format!(
             "{} binds {usb} with serial {serial}, and {} the same {usb} with no serial and no interface that \
@@ -1199,6 +1204,14 @@ power = "drp"
         let second_last = bench.parts.len() - 2;
         bench.parts[second_last].usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), interface: Some(0), ..Default::default() }));
         assert!(!codes(&check(&bench, &templates(), None)).contains(&"usb-identity-twice"));
+        // VID-only on both, nothing else: still two that cannot be told apart.
+        let n = bench.parts.len();
+        for i in [n - 1, n - 2] {
+            bench.parts[i].usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), ..Default::default() }));
+        }
+        let f = check(&bench, &templates(), None);
+        let clash = f.iter().find(|f| f.code == "usb-identity-twice").expect("VID-only pair flagged");
+        assert!(clash.text.contains("USB vendor 1a86 (no product id)"), "{}", clash.text);
         // One with a serial and one without, same VID:PID: the second matches the first.
         let n = bench.parts.len();
         bench.parts[n - 1].usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), serial: Some("A1".into()), ..Default::default() }));

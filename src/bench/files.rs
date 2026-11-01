@@ -170,7 +170,7 @@ impl Bench {
 
 /// A bench file as TOML holds it: today's shape, and the old keys a legacy
 /// file still carries.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BenchFile {
     pub name: String,
     #[serde(default)]
@@ -597,8 +597,28 @@ pub const MAX_BINDINGS: usize = 32;
 /// or ambiguous to address. Everything else — a cable of the wrong kind, a
 /// full connector — is the checks' business, and a bench that breaks one
 /// still saves, so a legacy file with a problem can be rewritten.
-pub fn check_shape(bench: &Bench) -> Result<(), String> {
+pub fn check_shape(bench: &Bench, templates: &Templates) -> Result<(), String> {
     check_size(bench)?;
+    // A `usb` key is a connector of the part: one its template declares, or
+    // — with the template missing — at least a slug. Anything else names no
+    // connector and is refused before it reaches a file (fix round 3).
+    for part in &bench.parts {
+        let declared = templates.get(&part.template);
+        for connector in part.usb.keys() {
+            let ok = match declared {
+                Some(t) => t.connector(connector).is_some(),
+                None => !connector.is_empty() && slugify(connector) == *connector,
+            };
+            if !ok {
+                return Err(format!(
+                    "part `{}` binds USB functions on `{}`, which is not a connector of `{}`",
+                    part.id,
+                    connector.escape_debug(),
+                    part.template
+                ));
+            }
+        }
+    }
     if slugify(&bench.name).is_empty() {
         return Err("a bench needs a name with at least one letter or digit in it".to_string());
     }
@@ -711,10 +731,11 @@ pub fn bench_toml(file: &BenchFile) -> anyhow::Result<String> {
         if let Some(chip) = &p.chip {
             key(&mut out, "chip", inline(chip)?);
         }
-        for (connector, functions) in &p.usb {
-            let bare = !connector.is_empty() && connector.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-            let name = if bare { connector.clone() } else { inline(connector)? };
-            key(&mut out, &format!("usb.{name}"), inline(functions)?);
+        // The whole map as one inline table: the value serializer quotes
+        // every key it holds correctly, which a key spliced into
+        // `usb.<connector>` by hand did not (fix round 3).
+        if !p.usb.is_empty() {
+            key(&mut out, "usb", inline(&p.usb)?);
         }
     }
     let lists = toml::to_string(&ListsOut { cables: &file.cables, configs: &file.configs, signals: &file.signals })?;
@@ -728,8 +749,14 @@ pub fn bench_toml(file: &BenchFile) -> anyhow::Result<String> {
 /// Writes a bench file through the repo writer (`super::write_in_repo`):
 /// atomically, never through a link, never outside the repo; `Create` fails
 /// on anything already at the path.
+///
+/// **The bytes are read back before they replace anything** (fix round 3):
+/// a writer bug that produced text no load could read, or text that reads
+/// back as a different bench, would otherwise overwrite a good file with one
+/// unreadable from then on. A mismatch leaves the old file untouched.
 pub fn write(repo: &Path, slug: &str, file: &BenchFile, mode: WriteMode) -> Result<(), WriteError> {
     let text = bench_toml(file).map_err(|e| WriteError::Other(format!("{e:#}")))?;
+    super::round_trips(&text, file).map_err(|e| WriteError::Other(format!("{}: {e}", bench_file(slug))))?;
     write_in_repo(repo, &["embarch", "topologies"], &format!("{slug}.toml"), text.as_bytes(), mode).map(|_| ())
 }
 
@@ -806,7 +833,7 @@ port_serial = "FT9ABCDE"
         assert!(!text.contains("[dut]") && !text.contains("[dev-bench]"), "{text}");
         assert!(!text.contains("flip"), "{text}");
         assert!(text.contains("chip = { board = \"wearable-rev6\", chip = \"nRF54L15\" }"), "{text}");
-        assert!(text.contains("usb.usb = { probe = \"001050288460\""), "{text}");
+        assert!(text.contains("usb = { usb = { probe = \"001050288460\""), "{text}");
         assert!(!text.contains("[parts."), "a part's values stay on its own lines: {text}");
         let back = bench_from_file("ble-bench", toml::from_str(&text).unwrap(), None);
         assert!(!back.legacy);
@@ -872,25 +899,25 @@ port_serial = "FT9ABCDE"
     fn a_save_refuses_only_what_makes_the_file_ambiguous() {
         let part = |id: &str| Part { id: id.into(), template: "cy4500".into(), label: None, at: None, role: None, mounted_on: None, flip: false, board: None, chip: None, usb: BTreeMap::new() };
         let mut bench = Bench { slug: String::new(), name: "B".into(), legacy: false, version: None, parts: vec![part("a"), part("b")], cables: vec![], configs: vec![], signals: vec![] };
-        assert!(check_shape(&bench).is_ok());
+        assert!(check_shape(&bench, &templates()).is_ok());
         bench.parts.push(part("a"));
-        assert!(check_shape(&bench).unwrap_err().contains("two parts"));
+        assert!(check_shape(&bench, &templates()).unwrap_err().contains("two parts"));
         bench.parts[2] = part("x.y");
-        assert!(check_shape(&bench).unwrap_err().contains("no `.`"));
+        assert!(check_shape(&bench, &templates()).unwrap_err().contains("no `.`"));
         bench.parts.pop();
         bench.name = "///".into();
-        assert!(check_shape(&bench).unwrap_err().contains("name"));
+        assert!(check_shape(&bench, &templates()).unwrap_err().contains("name"));
         bench.name = "B".into();
         bench.parts = (0..=MAX_PARTS).map(|i| part(&format!("p{i}"))).collect();
-        assert!(check_shape(&bench).unwrap_err().contains("at most 500 parts"));
+        assert!(check_shape(&bench, &templates()).unwrap_err().contains("at most 500 parts"));
         bench.parts = vec![part("a")];
         bench.configs = (0..=MAX_CONFIGS).map(|i| Config { name: format!("c{i}"), cables: vec![] }).collect();
-        assert!(check_shape(&bench).unwrap_err().contains("at most 100 configs"));
+        assert!(check_shape(&bench, &templates()).unwrap_err().contains("at most 100 configs"));
         bench.configs.clear();
         bench.parts[0].usb = (0..=MAX_BINDINGS)
             .map(|i| (format!("u{i}"), BTreeMap::from([(Function::Probe, Binding::Serial(format!("s{i}")))])))
             .collect();
-        assert!(check_shape(&bench).unwrap_err().contains("at most 32 USB functions"));
+        assert!(check_shape(&bench, &templates()).unwrap_err().contains("at most 32 USB functions"));
     }
 
     fn templates() -> Templates {
@@ -947,6 +974,49 @@ cables = [["probe.swd", "swd-dut.swd"]]
         let bench = profile_from_file(two, &t).dev_bench.unwrap();
         assert_eq!(bench.probe_serial, "");
         assert_eq!(bench.probe_note.as_deref(), Some("its SWD leads reach different probes (J1 in config “A”; J2 in config “B”)"));
+    }
+
+    /// Fix round 3, M1: USB keys a hand-spliced `usb.<key>` mangled — a
+    /// newline, a carriage return, both quote kinds — round-trip when the map
+    /// is written whole, a save refuses a key that is no connector of the
+    /// part, and a write whose bytes would not read back as the same bench
+    /// refuses before it replaces anything.
+    #[test]
+    fn hostile_usb_keys_round_trip_are_refused_on_save_and_never_reach_a_file_unread() {
+        let hostile = ["a\nb", "c\rd", "q\"'q", "'''", "\"\"\"", "dot.ted", "sp ace", "ü", "tab\there"];
+        let mut part: Part = serde_json::from_value(json!({ "id": "p", "template": "gone-template" })).unwrap();
+        for k in hostile {
+            part.usb.insert(k.to_string(), BTreeMap::from([(Function::Probe, Binding::Serial(format!("S-{k}")))]));
+        }
+        // (a) the whole map written at once reads back key for key.
+        let file = BenchFile { name: "hostile".into(), parts: Some(vec![part.clone()]), ..BenchFile::default() };
+        let text = bench_toml(&file).unwrap();
+        let back: BenchFile = toml::from_str(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(back, file, "{text}");
+        assert!(crate::bench::round_trips(&text, &file).is_ok());
+
+        // (b) a save refuses each hostile key: not declared by a known
+        // template, not a slug when the template is missing.
+        let bench = Bench { slug: String::new(), name: "hostile".into(), legacy: false, version: None, parts: vec![part], cables: vec![], configs: vec![], signals: vec![] };
+        let e = check_shape(&bench, &templates()).unwrap_err();
+        assert!(e.contains("is not a connector of `gone-template`"), "{e}");
+        let mut known: Part = serde_json::from_value(json!({ "id": "dk", "template": "nrf54l15dk" })).unwrap();
+        known.usb.insert("usb".into(), BTreeMap::from([(Function::Probe, Binding::Serial("J".into()))]));
+        assert!(check_shape(&Bench { parts: vec![known.clone()], ..bench.clone() }, &templates()).is_ok());
+        known.usb.insert("radio2".into(), BTreeMap::new());
+        assert!(check_shape(&Bench { parts: vec![known], ..bench }, &templates()).is_err(), "undeclared, even though a slug");
+
+        // (c) bytes that would not read back as the bench are refused before
+        // the write, and the good file stays as it was.
+        let dir = repo("roundtrip");
+        std::fs::write(profile_path(&dir, "hostile"), LEGACY).unwrap();
+        let other = BenchFile { name: "something else".into(), ..file.clone() };
+        assert!(crate::bench::round_trips(&text, &other).unwrap_err().contains("does not read back"));
+        assert!(crate::bench::round_trips::<BenchFile>("parts = [", &file).unwrap_err().contains("does not parse back"));
+        assert_eq!(std::fs::read_to_string(profile_path(&dir, "hostile")).unwrap(), LEGACY);
+        write(&dir, "hostile", &file, WriteMode::Replace).unwrap();
+        assert_eq!(read_file(&dir, "hostile").unwrap().0, file);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

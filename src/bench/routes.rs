@@ -210,7 +210,7 @@ pub async fn api_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>) -> Re
 /// `GET` now answers it. **Anything already at that path is `409`**,
 /// parseable or not: a new bench never lands on an old one.
 pub async fn api_post_bench(OpenRepo(repo): OpenRepo, Json(bench): Json<Bench>) -> Response {
-    if let Err(e) = files::check_shape(&bench) {
+    if let Err(e) = files::check_shape(&bench, &catalog(Some(&repo)).by_id()) {
         return refuse(StatusCode::BAD_REQUEST, e);
     }
     let slug = crate::topology::slugify(&bench.name);
@@ -238,7 +238,7 @@ pub async fn api_put_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>, J
         Ok(s) => s.to_string(),
         Err(resp) => return *resp,
     };
-    if let Err(e) = files::check_shape(&bench) {
+    if let Err(e) = files::check_shape(&bench, &catalog(Some(&repo)).by_id()) {
         return refuse(StatusCode::BAD_REQUEST, e);
     }
     let Some(version) = bench.version.clone() else {
