@@ -1499,16 +1499,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
-    /// Without a project the built-ins still serve; the repo's routes say how
-    /// to open one.
+    /// Without a project every bench route refuses `409` naming the picker,
+    /// the vocabulary and the built-ins included: an empty list would read as
+    /// "this repo has no benches".
     #[tokio::test]
-    async fn without_a_repo_the_builtins_serve_and_benches_are_refused() {
+    async fn without_a_repo_every_bench_route_refuses_naming_the_picker() {
         let base = serve_app().await;
         let http = reqwest::Client::new();
-        let parts: serde_json::Value = http.get(format!("{base}/api/bench/parts")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(parts["parts"].as_array().unwrap().len(), 12);
-        let benches = http.get(format!("{base}/api/bench/benches")).send().await.unwrap();
-        assert_eq!(benches.status(), StatusCode::CONFLICT);
-        assert!(benches.text().await.unwrap().contains("Project"));
+        let bench = serde_json::json!({ "name": "B", "parts": [] });
+        let calls = [
+            http.get(format!("{base}/api/bench/vocabulary")),
+            http.get(format!("{base}/api/bench/parts")),
+            http.put(format!("{base}/api/bench/parts/x")).json(&serde_json::json!({})),
+            http.get(format!("{base}/api/bench/benches")),
+            http.get(format!("{base}/api/bench/benches/b")),
+            http.put(format!("{base}/api/bench/benches/b")).json(&bench),
+            http.post(format!("{base}/api/bench/check")).json(&serde_json::json!({ "bench": bench })),
+            http.post(format!("{base}/api/bench/candidates")).json(&serde_json::json!({ "bench": bench, "from": "x" })),
+        ];
+        for call in calls {
+            let resp = call.send().await.unwrap();
+            let what = resp.url().to_string();
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "{what}");
+            assert_eq!(
+                resp.text().await.unwrap(),
+                "no project is open — pick a firmware repo in Project, at the bottom of the sidebar",
+                "{what}"
+            );
+        }
     }
 }

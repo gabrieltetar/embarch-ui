@@ -22,31 +22,41 @@ fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
     (status, text.into()).into_response()
 }
 
-/// The open repo, or the `409` the topology routes answer without one: the
-/// question is unanswerable until a project is open, and the picker at the
-/// foot of the sidebar is the way out.
+/// The open repo, or `409` with the sentence the Atlas and Study Designer
+/// tabs refuse with.
+///
+/// **Every bench route refuses without a project, the vocabulary and the
+/// built-ins included.** Answered with empty lists, a canvas would draw "no
+/// saved benches" — a claim about a repo nobody opened, the unreadable-as-
+/// empty failure spec.md rules out — and a parts bin of built-ins alone would
+/// look like a repo that describes none of its boards.
 fn repo(state: &AppState) -> Result<PathBuf, Box<Response>> {
-    state.study_designer.repo_path().ok_or_else(|| {
-        Box::new(refuse(
-            StatusCode::CONFLICT,
-            "no firmware repo is open, so there are no saved benches or repo parts yet — pick one \
-             in Project, at the bottom of the sidebar",
-        ))
-    })
+    state
+        .study_designer
+        .repo_path()
+        .ok_or_else(|| Box::new(refuse(StatusCode::CONFLICT, NO_PROJECT)))
 }
+
+const NO_PROJECT: &str = "no project is open — pick a firmware repo in Project, at the bottom of the sidebar";
 
 /// `GET /api/bench/vocabulary` — kinds, which kinds join, power roles,
 /// categories, looks and functions, served so the browser restates none.
-pub async fn api_vocabulary() -> Response {
+pub async fn api_vocabulary(State(state): State<AppState>) -> Response {
+    if let Err(resp) = repo(&state) {
+        return *resp;
+    }
     Json(vocabulary_json()).into_response()
 }
 
 /// `GET /api/bench/parts` — the built-ins, then the open repo's
 /// `embarch/parts/*.toml`, with every file that could not be used in
-/// `errors`. Answers without a repo too: the built-ins are the binary's.
+/// `errors`.
 pub async fn api_parts(State(state): State<AppState>) -> Response {
-    let repo = state.study_designer.repo_path();
-    Json(catalog(repo.as_deref())).into_response()
+    let repo = match repo(&state) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    Json(catalog(Some(&repo))).into_response()
 }
 
 /// `PUT /api/bench/parts/{id}` — writes a repo template to
@@ -200,8 +210,8 @@ pub struct CandidatesRequest {
 }
 
 /// The templates the open repo can use, by id.
-fn templates(state: &AppState) -> check::Templates {
-    catalog(state.study_designer.repo_path().as_deref()).by_id()
+fn templates(repo: &std::path::Path) -> check::Templates {
+    catalog(Some(repo)).by_id()
 }
 
 fn config_of<'a>(bench: &'a Bench, name: Option<&str>) -> Result<Option<&'a files::Config>, Box<Response>> {
@@ -216,22 +226,30 @@ fn config_of<'a>(bench: &'a Bench, name: Option<&str>) -> Result<Option<&'a file
 
 /// `POST /api/bench/check` — a bench and a config in, its findings out.
 pub async fn api_check(State(state): State<AppState>, Json(req): Json<CheckRequest>) -> Response {
+    let repo = match repo(&state) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
     let config = match config_of(&req.bench, req.config.as_deref()) {
         Ok(c) => c,
         Err(resp) => return *resp,
     };
-    let findings = check::check(&req.bench, &templates(&state), config);
+    let findings = check::check(&req.bench, &templates(&repo), config);
     Json(json!({ "findings": findings })).into_response()
 }
 
 /// `POST /api/bench/candidates` — one verdict per connector end on the bench
 /// for a cable being laid from `from`, so the browser decides nothing.
 pub async fn api_candidates(State(state): State<AppState>, Json(req): Json<CandidatesRequest>) -> Response {
+    let repo = match repo(&state) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
     let config = match config_of(&req.bench, req.config.as_deref()) {
         Ok(c) => c,
         Err(resp) => return *resp,
     };
-    match check::candidates(&req.bench, &templates(&state), config, &req.from) {
+    match check::candidates(&req.bench, &templates(&repo), config, &req.from) {
         Ok(verdicts) => Json(json!({ "verdicts": verdicts })).into_response(),
         Err(e) => refuse(StatusCode::BAD_REQUEST, e),
     }
