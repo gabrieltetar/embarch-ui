@@ -761,6 +761,18 @@
     "usb": {}
    },
    {
+    "id": "shield2",
+    "template": "x-nucleo-snk1m1",
+    "label": null,
+    "at": null,
+    "role": null,
+    "mounted_on": "shield1",
+    "flip": false,
+    "board": null,
+    "chip": null,
+    "usb": {}
+   },
+   {
     "id": "u1",
     "template": "generic-board",
     "label": null,

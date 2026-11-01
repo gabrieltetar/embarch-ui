@@ -265,6 +265,8 @@ proxy = serve(PROXY_PORT, Proxy)
 iso = tempfile.mkdtemp(prefix="embarch-ui-bench-drive-")
 fw = iso + "/fw"
 os.makedirs(fw + "/.git")
+fw2 = iso + "/fw-two"
+os.makedirs(fw2 + "/.git")
 cfg = iso + "/ui.toml"
 with open(cfg, "w") as f:
     f.write('[core]\nbase_url = "http://127.0.0.1:%d"\ntoken = "%s"\n' % (CORE_PORT, TOKEN))
@@ -413,6 +415,23 @@ try:
                  "return !!p.querySelector('#topology-diagram [data-enroll-role=\"dut\"]') && !!p.querySelector('#probes-pool');"))
     click("#bench-wrap", 0, 200)
     check("a click outside closes it", not panel_open("diagram"))
+    click('[data-topo-panel="signals"]')
+    script("document.getElementById('sig-declare').click();")
+    wait_for("return document.getElementById('sig-dialog').style.display === 'block';", 4)
+    script("document.getElementById('sig-name').value='half-typed';"
+           "document.getElementById('prompt-backdrop').style.display='block'; document.getElementById('prompt-dialog').style.display='block';")
+    key("")
+    check("M1: Esc with Core's prompt over the signal dialog closes neither, and keeps what was typed",
+          script("return document.getElementById('sig-dialog').style.display === 'block' &&"
+                 " document.getElementById('prompt-dialog').style.display === 'block' &&"
+                 " document.getElementById('sig-name').value === 'half-typed';") and panel_open("signals"))
+    script("document.getElementById('prompt-dialog').style.display='none'; document.getElementById('prompt-backdrop').style.display='none';")
+    key("")
+    check("with the prompt gone, Esc closes the signal dialog and leaves its panel",
+          script("return document.getElementById('sig-dialog').style.display !== 'block';") and panel_open("signals"))
+    check("L4: and focus goes back to the panel's first control",
+          script("return document.activeElement === document.getElementById('sig-declare');"))
+    key("")
 
     # --- every look --------------------------------------------------------
     looks = dict(script("return Array.from(document.querySelectorAll('#bench-svg [data-part]')).map(function(g){"
@@ -613,6 +632,11 @@ try:
     click("#topo-report")
     check("which reopens the last report without a new pass", panel_open("validate") and
           "sniffer" in script("return document.getElementById('topo-validate-report').textContent;"))
+    script("document.getElementById('topo-validate').click();")
+    check("L3: a new Validate pass starts with the last pass's error cleared",
+          script("var e=document.getElementById('topo-validate-error'); return e.style.display === 'none' && e.textContent === '';"))
+    wait_for("return !document.getElementById('topo-validate').disabled &&"
+             " document.getElementById('topo-validate-report').textContent.indexOf('Role') >= 0;", 10)
     key("")
     click('[data-topo-panel="diagram"]')
     script("document.querySelector('[data-board-role=\"dut\"] text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
@@ -641,6 +665,8 @@ try:
     key("")
     check("Esc over Save as\u2026 closes the dialog, not the Saved benches panel under it",
           script("return document.getElementById('topo-save-dialog').style.display !== 'block';") and panel_open("saved"))
+    check("and focus lands on the panel's first control, not a field the dialog hid",
+          script("return document.activeElement === document.getElementById('topo-profile-picker');"))
     FX["benches"]["benches"].append({"slug": "bench-a", "name": "bench a", "legacy": False})
     FX["bench/bench-a"] = dict(FX["bench/ble-dev-bench"], slug="bench-a", name="bench a", legacy=False)
     seen = SEEN["benches"]
@@ -671,6 +697,8 @@ try:
     check("the desk banner's review opens the Saved benches panel, where its errors and report land",
           panel_open("saved") and "no-such-bench" in (said or ""), said)
     key("")
+    check("L5: a panel opened from code returns focus to its own bar button when it closes",
+          not panel_open("saved") and script("return document.activeElement === document.querySelector('.topo-bar [data-topo-panel=\"saved\"]');"))
 
     # --- pan, zoom, fit ----------------------------------------------------
     vb = lambda: [float(v) for v in script("return document.getElementById('bench-svg').getAttribute('viewBox');").split()]
@@ -729,12 +757,38 @@ try:
     check("Fit reaches a bench tens of thousands of units across", fitbox[0] and fitbox[1], fitbox)
     script("document.dispatchEvent(new CustomEvent('embarch:verdicts',{detail:{roles:{dut:{status:'pass',text:'\u25cf validated just now'}},boards:{}}}));")
     pill = script("var v=document.querySelector('#bench-svg [data-verdict=\"shield1\"] rect'), s=document.querySelector('#bench-svg [data-part=\"shield1\"] .bn-body'),"
-                  " b=document.querySelector('#bench-svg [data-part=\"base1\"] .bn-body');"
-                  "return v ? [+v.getAttribute('y') + (+v.getAttribute('height')), +s.getAttribute('y'), +b.getAttribute('y')] : null;")
-    check("a mounted part's verdict sits above it, off its base's title band", pill and pill[0] <= pill[1] < pill[2], pill)
+                  " t=document.querySelector('#bench-svg [data-part=\"shield2\"] .bn-body'), b=document.querySelector('#bench-svg [data-part=\"base1\"] .bn-body');"
+                  "var parts=document.querySelectorAll('#bench-svg [data-part]'), last=parts[parts.length-1];"
+                  "return v ? [+v.getAttribute('y') + (+v.getAttribute('height')), +t.getAttribute('y'), +s.getAttribute('y'), +b.getAttribute('y'),"
+                  " !!(last.compareDocumentPosition(v.parentNode) & Node.DOCUMENT_POSITION_FOLLOWING)] : null;")
+    check("L6: a mounted part's verdict sits above the top of its stack, drawn after every part",
+          pill and pill[0] <= pill[1] < pill[2] < pill[3] and pill[4], pill)
     grid = script("return ['u1','u5','u6','u12'].map(function(k){var r=document.querySelector('#bench-svg [data-part=\"'+k+'\"] .bn-body');return [+r.getAttribute('x'), +r.getAttribute('y')];});")
     check("parts with no position wrap into a grid under the rest",
           grid[0][1] == grid[1][1] and grid[2][1] > grid[0][1] and grid[2][0] == grid[0][0] and grid[3][1] > grid[2][1], grid)
+
+    # --- a project switch drops the last report -----------------------------
+    check("the Report button is there before the switch", script("return !document.getElementById('topo-report').hidden;"))
+    script("document.getElementById('project-button').click();")
+    time.sleep(0.4)
+    script("document.getElementById('project-path').value=arguments[0]; document.getElementById('project-open').click();", [fw2])
+    wait_for("return document.getElementById('topo-report').hidden;", 8)
+    check("L2: after a project switch the Report button, the report and its error are gone",
+          script("var r=document.getElementById('topo-validate-report'), e=document.getElementById('topo-validate-error');"
+                 "return document.getElementById('topo-report').hidden && r.textContent === '' && e.textContent === '' && e.style.display === 'none';"))
+    script("var d=document.getElementById('project-dialog'); if (d && d.style.display==='block') document.getElementById('project-cancel').click();")
+    wait_for("return !!document.querySelector('#bench-svg [data-part]');", 8)
+
+    # --- another tab -------------------------------------------------------
+    click('[data-topo-panel="signals"]')
+    script("document.querySelector('.nav-item[data-tab=\"debug\"]').click();")
+    check("L7: leaving the Topology tab closes its panel", script("return document.getElementById('topo-panel-signals').hidden;"))
+    script("document.getElementById('topo-panel-signals').hidden = false;")
+    key("")
+    check("L7: and Esc on another tab leaves Topology alone",
+          not script("return document.getElementById('topo-panel-signals').hidden;"))
+    script("document.getElementById('topo-panel-signals').hidden = true;"
+           "document.querySelector('.nav-item[data-tab=\"topology\"]').click();")
 
     # --- phone width -------------------------------------------------------
     pick_bench("pd-bench-drp")

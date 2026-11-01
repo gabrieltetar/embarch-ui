@@ -688,14 +688,33 @@
     return found;
   }
 
-  function verdictSVG(p, g, deco) {
+  // The part and everything mounted on it, however high the stack goes.
+  function stackFrom(p) {
+    var out = [p];
+    for (var i = 0; i < out.length && out.length < 64; i++) {
+      carriedBy(out[i]).forEach(function (q) { if (out.indexOf(q) < 0) out.push(q); });
+    }
+    return out;
+  }
+
+  // Drawn after every part, so no part covers a verdict. Under the part,
+  // unless it sits on a base: then above the top of its stack, so the pill
+  // covers neither the base's title band nor a shield above it — one pill a
+  // row higher for each part above that carries one too.
+  function verdictSVG(p) {
     var v = verdictOf(p);
     if (!v) return "";
+    var g = geom(p);
     var text = cut(v.text, (g.w + 80) / 6.4);
-    var w = text.length * 6.4 + 16, x = g.x + g.w / 2 - w / 2;
-    // Under the part, unless it sits on a base: then above it, so the pill
-    // never covers the base's title band.
-    var y = mountedBase(p) ? g.y - 24 : g.y + g.h + 6 + (deco.below || 0);
+    var w = text.length * 6.4 + 16, x = g.x + g.w / 2 - w / 2, y;
+    if (mountedBase(p)) {
+      var stack = stackFrom(p);
+      var top = Math.min.apply(null, stack.map(function (q) { return geom(q).y; }));
+      var above = stack.filter(function (q) { return q !== p && verdictOf(q); }).length;
+      y = top - 24 - above * 22;
+    } else {
+      y = g.y + g.h + 6 + ((cache && cache.below[p.key]) || 0);
+    }
     var status = /^[a-z]+$/.test(String(v.status)) ? v.status : "other";
     return '<g class="bn-verdict bn-v-' + status + '" data-verdict="' + esc(p.key) + '">' + rect("", x, y, w, 18, 9) +
       '<text x="' + f(g.x + g.w / 2) + '" y="' + f(y + 12.5) + '" text-anchor="middle">' + esc(text) + "</text></g>";
@@ -740,13 +759,13 @@
       s += labelSVG(c, pos, g, free, deco);
       if (live) s += '<circle class="bn-livering" data-live="' + esc(live) + '" cx="' + f(pos.x) + '" cy="' + f(pos.y) + '" r="11"/>';
     });
-    s += verdictSVG(p, g, deco);
+    if (cache) cache.below[p.key] = deco.below || 0;
     return s + "</g>";
   }
 
   function render() {
     if (!bench || !model) return;
-    cache = { vis: dict(), geo: dict() };
+    cache = { vis: dict(), geo: dict(), below: dict() };
     var s = '<defs><pattern id="bench-dots" width="24" height="24" patternUnits="userSpaceOnUse">' +
       '<circle class="bn-grid-dot" cx="1" cy="1" r="1"/></pattern></defs>' +
       '<rect id="bench-grid" fill="url(#bench-dots)" x="0" y="0" width="10" height="10"/>';
@@ -769,6 +788,7 @@
       return n;
     };
     model.order.slice().sort(function (a, b) { return depth(a) - depth(b); }).forEach(function (p) { s += partSVG(p); });
+    model.order.forEach(function (p) { s += verdictSVG(p); });
     svg.innerHTML = s;
     setViewBox();
     applyLive();
@@ -1112,7 +1132,7 @@
     if (!model || !model.order.length) return;
     var r = wrapSize();
     if (r.w < 20 || r.h < 20) return;   // a hidden tab has no size yet; the resize observer fits it later
-    cache = cache || { vis: dict(), geo: dict() };
+    cache = cache || { vis: dict(), geo: dict(), below: dict() };
     var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     model.order.forEach(function (p) {
       var g = geom(p);

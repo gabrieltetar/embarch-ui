@@ -32,6 +32,7 @@
     // 2026-11-01): the bench canvas takes the space and the wheel zooms it.
     const content = document.querySelector(".content");
     if (content) content.classList.toggle("topo-on", name === "topology");
+    if (name !== "topology") hideTopoPanels();
     const title = document.querySelector(`.nav-item[data-tab="${name}"] .nav-label`);
     const topbarTitle = document.querySelector(".topbar-title");
     if (title && topbarTitle) {
@@ -5513,6 +5514,7 @@
     // The Atlas tab (atlas.js) reads files in the open project and reloads on a switch.
     if (before !== projectState.path) {
       document.dispatchEvent(new CustomEvent("embarch:project", { detail: { path: projectState.path } }));
+      if (before !== undefined) dropValidateReport();
     }
 
     renderShellDesk();
@@ -6590,6 +6592,7 @@
     const report = topoEl("topo-validate-report");
     const button = topoEl("topo-validate");
     if (!report) return;
+    showError(topoEl("topo-validate-error"), null);
     report.style.display = "block";
     report.innerHTML = '<p class="placeholder-note">validating — each role is a live probe attach…</p>';
     if (button) button.disabled = true;
@@ -7079,10 +7082,39 @@
   // Opening one moves focus into it; closing one with focus inside returns
   // focus to the button that opened it (a press outside keeps the focus the
   // press gives).
-  let topoPanelButton = null;
+  //
+  // The opener is whatever button the click came from; a panel opened from
+  // code (the desk banner, a `?board=` link) has none, and an opener that is
+  // hidden or disabled by the time the panel closes (Validate, mid-pass) is no
+  // place for focus. Then focus goes to the panel's own bar button, or for
+  // the report the Validate button when it is enabled.
+  let topoOpenerNext = null;
+  let topoOpener = null;    // { name, el }
+
+  function usableControl(el) {
+    return !!el && !el.disabled && !el.hidden && el.getClientRects().length > 0;
+  }
+
+  function focusFirstIn(panel) {
+    const first = panel.querySelector(
+      "button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea, a[href], [tabindex]:not([tabindex='-1'])"
+    );
+    (usableControl(first) ? first : panel).focus({ preventScroll: true });
+  }
+
+  function returnFocusFrom(name) {
+    const candidates = [
+      topoOpener && topoOpener.name === name ? topoOpener.el : null,
+      document.querySelector('.topo-bar [data-topo-panel="' + name + '"]'),
+      name === "validate" ? document.getElementById("topo-validate") : null,
+    ];
+    const target = candidates.find(usableControl);
+    if (target) target.focus({ preventScroll: true });
+  }
 
   function openTopoPanel(name) {
     const was = document.querySelector(".topo-panel:not([hidden])");
+    const wasName = was ? was.id.replace("topo-panel-", "") : null;
     const focusInside = !!was && was.contains(document.activeElement);
     let shown = null;
     document.querySelectorAll(".topo-panel").forEach(function (p) {
@@ -7095,17 +7127,40 @@
       b.setAttribute("aria-expanded", on ? "true" : "false");
     });
     if (shown) {
-      const first = shown.querySelector(
-        "button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea, a[href], [tabindex]:not([tabindex='-1'])"
-      );
-      (first || shown).focus({ preventScroll: true });
-    } else if (focusInside && topoPanelButton) {
-      topoPanelButton.focus({ preventScroll: true });
+      topoOpener = { name: name, el: topoOpenerNext };
+      focusFirstIn(shown);
+    } else if (focusInside && wasName) {
+      returnFocusFrom(wasName);
     }
+    topoOpenerNext = null;
   }
 
   function closeTopoPanels() {
     openTopoPanel(null);
+  }
+
+  // Leaving the tab: the panels close without moving focus anywhere.
+  function hideTopoPanels() {
+    document.querySelectorAll(".topo-panel").forEach(function (p) { p.hidden = true; });
+    document.querySelectorAll("[data-topo-panel]").forEach(function (b) {
+      b.classList.remove("is-open");
+      b.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  // A project switch: the last report described the bench of the repo that
+  // was open, so its Report button, its report and its error go.
+  function dropValidateReport() {
+    const reopen = topoEl("topo-report");
+    if (reopen) reopen.hidden = true;
+    const report = topoEl("topo-validate-report");
+    if (report) {
+      report.innerHTML = "";
+      report.style.display = "none";
+    }
+    showError(topoEl("topo-validate-error"), null);
+    const panel = document.getElementById("topo-panel-validate");
+    if (panel && !panel.hidden) closeTopoPanels();
   }
 
   function topoPanelOpen() {
@@ -7139,19 +7194,30 @@
       const btn = ev.target.closest("[data-topo-panel]");
       if (!btn) return;
       const name = btn.getAttribute("data-topo-panel");
-      topoPanelButton = btn;
-      if (btn.classList.contains("is-open")) closeTopoPanels();
-      else openTopoPanel(name);
+      if (btn.classList.contains("is-open")) {
+        closeTopoPanels();
+      } else {
+        topoOpenerNext = btn;
+        openTopoPanel(name);
+      }
     });
     const validate = document.getElementById("topo-validate");
     if (validate) {
       validate.addEventListener("click", function () {
-        topoPanelButton = validate;
+        topoOpenerNext = validate;
         openTopoPanel("validate");
       });
     }
     document.addEventListener("keydown", function (ev) {
       if (ev.key !== "Escape") return;
+      if (!document.querySelector('.tab-panel.active[data-tab="topology"]')) return;
+      // Another dialog over the tab — Core's operator prompt first — owns Esc,
+      // or nothing does; a Topology dialog under it must keep what was typed.
+      const mine = TOPO_DIALOGS.map(function (pair) { return pair[0]; });
+      const foreign = Array.from(document.querySelectorAll("#prompt-dialog, .dialog, .desk-dialog")).some(function (d) {
+        return mine.indexOf(d.id) < 0 && dialogShown(d);
+      });
+      if (foreign) return;
       const open = TOPO_DIALOGS.find(function (pair) {
         const d = document.getElementById(pair[0]);
         return d && dialogShown(d);
@@ -7160,9 +7226,12 @@
         const cancel = document.getElementById(open[1]);
         if (cancel) cancel.click();
         ev.preventDefault();
+        // Back into the panel the dialog came from, never a field it hid.
+        const panel = document.querySelector(".topo-panel:not([hidden])");
+        if (panel) focusFirstIn(panel);
         return;
       }
-      if (!topoPanelOpen() || aDialogIsOpen()) return;
+      if (!topoPanelOpen()) return;
       closeTopoPanels();
     });
     document.addEventListener("pointerdown", function (ev) {
