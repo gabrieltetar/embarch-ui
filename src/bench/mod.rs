@@ -293,6 +293,10 @@ impl Connector {
     }
 }
 
+/// The most connectors one template may list: far past any part, and a bound
+/// on what a repo file can make every check cost.
+pub const MAX_CONNECTORS: usize = 64;
+
 /// The width a template gets when it states none: the generic board's.
 fn default_width() -> u32 {
     180
@@ -345,6 +349,9 @@ impl PartTemplate {
         if self.label.trim().is_empty() {
             return Err(format!("part `{}` has no label", self.id));
         }
+        if self.connectors.len() > MAX_CONNECTORS {
+            return Err(format!("part `{}` has {} connectors; a template holds at most {MAX_CONNECTORS}", self.id, self.connectors.len()));
+        }
         if self.hub && !self.connectors.is_empty() {
             return Err(format!(
                 "part `{}` is a hub, and a hub has no connectors of its own: every cable that \
@@ -352,7 +359,7 @@ impl PartTemplate {
                 self.id
             ));
         }
-        let mut seen: Vec<&str> = Vec::new();
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for c in &self.connectors {
             if c.id.is_empty() || c.id.contains('.') || c.id.chars().any(char::is_whitespace) {
                 return Err(format!(
@@ -361,10 +368,9 @@ impl PartTemplate {
                     c.id
                 ));
             }
-            if seen.contains(&c.id.as_str()) {
+            if !seen.insert(&c.id) {
                 return Err(format!("connector `{}` is listed twice", c.id));
             }
-            seen.push(&c.id);
             if c.max_cables == 0 {
                 return Err(format!("connector `{}` has max_cables 0", c.id));
             }
@@ -663,26 +669,14 @@ pub fn write_in_repo(repo: &Path, dirs: &[&str], file_name: &str, bytes: &[u8], 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     let other = |what: &str, e: std::io::Error| WriteError::Other(format!("{what}: {e}"));
-    if file_name.is_empty() || file_name.contains(['/', '\\']) || file_name.starts_with('.') {
-        return Err(WriteError::Other(format!("`{file_name}` is not a plain file name")));
-    }
-    let root = repo.canonicalize().map_err(|e| other(&format!("the repo {}", repo.display()), e))?;
-    let dir = dirs.iter().fold(repo.to_path_buf(), |p, d| p.join(d));
-    let inside = |p: &Path| -> Result<(), WriteError> {
-        let resolved = p.canonicalize().map_err(|e| other(&format!("resolving {}", p.display()), e))?;
-        if resolved.starts_with(&root) {
-            Ok(())
-        } else {
-            Err(WriteError::Other(format!("{} resolves outside the repo, to {}; nothing was written", p.display(), resolved.display())))
-        }
-    };
+    let (root, dir) = repo_dir(repo, dirs, file_name)?;
     let mut existing = dir.as_path();
     while !existing.try_exists().map_err(|e| other(&format!("checking {}", existing.display()), e))? {
         existing = existing.parent().unwrap_or(repo);
     }
-    inside(existing)?;
+    inside(&root, existing)?;
     std::fs::create_dir_all(&dir).map_err(|e| other(&format!("creating {}", dir.display()), e))?;
-    inside(&dir)?;
+    inside(&root, &dir)?;
 
     let target = dir.join(file_name);
     let tmp = dir.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
@@ -705,6 +699,56 @@ pub fn write_in_repo(repo: &Path, dirs: &[&str], file_name: &str, bytes: &[u8], 
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(WriteError::Exists),
         Err(e) => Err(other(&format!("writing {}", target.display()), e)),
     }
+}
+
+/// The resolved repo root and the (unresolved) directory `dirs` names in it,
+/// after refusing a file name that is not plain.
+fn repo_dir(repo: &Path, dirs: &[&str], file_name: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), WriteError> {
+    if file_name.is_empty() || file_name.contains(['/', '\\']) || file_name.starts_with('.') {
+        return Err(WriteError::Other(format!("`{file_name}` is not a plain file name")));
+    }
+    let root = repo
+        .canonicalize()
+        .map_err(|e| WriteError::Other(format!("the repo {}: {e}", repo.display())))?;
+    Ok((root, dirs.iter().fold(repo.to_path_buf(), |p, d| p.join(d))))
+}
+
+/// Refuses a path that resolves outside the resolved repo root.
+fn inside(root: &Path, p: &Path) -> Result<(), WriteError> {
+    let resolved = p
+        .canonicalize()
+        .map_err(|e| WriteError::Other(format!("resolving {}: {e}", p.display())))?;
+    if resolved.starts_with(root) {
+        Ok(())
+    } else {
+        Err(WriteError::Other(format!(
+            "{} resolves outside the repo, to {}; nothing was changed",
+            p.display(),
+            resolved.display()
+        )))
+    }
+}
+
+/// Removes `<repo>/<dirs…>/<file_name>` with [`write_in_repo`]'s rule: the
+/// directory must resolve inside the repo, so a linked `embarch/topologies`
+/// cannot get a file outside the checkout deleted. A link at the file itself
+/// is removed as a link, never followed.
+pub fn remove_in_repo(repo: &Path, dirs: &[&str], file_name: &str) -> Result<(), WriteError> {
+    let (root, dir) = repo_dir(repo, dirs, file_name)?;
+    inside(&root, &dir)?;
+    std::fs::remove_file(dir.join(file_name))
+        .map_err(|e| WriteError::Other(format!("removing {}: {e}", dir.join(file_name).display())))
+}
+
+/// Held across every check-then-write of a repo file — the bench editor's
+/// saves and the old Topology save and delete alike — so no write in this
+/// process lands between another's check and its write.
+static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes [`WRITES`]. A poisoned lock is taken anyway: it guards no data, only
+/// an ordering, and a panic mid-write left nothing to protect.
+pub(crate) fn hold_writes() -> std::sync::MutexGuard<'static, ()> {
+    WRITES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A connector as a repo template's file writes it: no empty `functions`,
@@ -906,5 +950,7 @@ mod tests {
         assert!(with("passthrough = [[\"a\", \"z\"]]\n[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"usb-c\"\nside = \"left\"\n").unwrap_err().contains("`z`"));
         assert!(with("hub = true\n[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"usb-c\"\nside = \"left\"\n").unwrap_err().contains("hub"));
         assert!(parse_template("id = \"Not A Slug\"\nlabel = \"X\"\ncategory = \"board\"\nlook = \"board\"\n").unwrap_err().contains("not a slug"));
+        let many: String = (0..=MAX_CONNECTORS).map(|i| format!("[[connectors]]\nid = \"c{i}\"\nlabel = \"C\"\nkind = \"swd\"\nside = \"left\"\n")).collect();
+        assert!(with(&many).unwrap_err().contains("at most 64"));
     }
 }

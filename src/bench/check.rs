@@ -299,38 +299,104 @@ struct Identity {
     pid: Option<u16>,
 }
 
-impl Identity {
-    /// Whether two identities could be one physical device — or two that
-    /// nothing can tell apart, which is as bad for a binding.
-    fn same_device(&self, other: &Identity) -> bool {
-        match (&self.serial, &other.serial) {
-            (Some(a), Some(b)) => a == b,
-            _ => {
-                let compatible = |a: Option<u8>, b: Option<u8>| a.is_none() || b.is_none() || a == b;
-                self.vid.is_some()
-                    && self.vid == other.vid
-                    && self.pid == other.pid
-                    && compatible(self.interface, other.interface)
-            }
+/// The first two identities from different parts seen under one key, so
+/// "is there one from another part?" is answered without a pair scan.
+#[derive(Default)]
+struct TwoParts<'i> {
+    first: Option<&'i Identity>,
+    second: Option<&'i Identity>,
+}
+
+impl<'i> TwoParts<'i> {
+    fn add(&mut self, id: &'i Identity) {
+        match self.first {
+            None => self.first = Some(id),
+            Some(f) if f.part != id.part && self.second.is_none() => self.second = Some(id),
+            _ => {}
+        }
+    }
+
+    fn other_than(&self, part: &str) -> Option<&'i Identity> {
+        match self.first {
+            Some(f) if f.part != part => Some(f),
+            _ => self.second.filter(|s| s.part != part),
         }
     }
 }
 
-/// The sentence for two bindings [`Identity::same_device`] matched.
+/// One USB device bound on two parts, or two that cannot be told apart, as
+/// findings — **without comparing every pair**: one finding per serial bound
+/// on more than one part, and per serial-less identity, the first identity on
+/// another part a port matching it would also match (same VID:PID, an
+/// interface that does not differ).
+fn identity_clashes(ctx: &Ctx, ids: &[Identity]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut by_serial: BTreeMap<&str, Vec<&Identity>> = BTreeMap::new();
+    for id in ids {
+        if let Some(serial) = id.serial.as_deref() {
+            let on = by_serial.entry(serial).or_default();
+            if !on.iter().any(|o| o.part == id.part) {
+                on.push(id);
+            }
+        }
+    }
+    for (serial, on) in by_serial.iter().filter(|(_, on)| on.len() > 1) {
+        let ends: Vec<String> = on.iter().map(|i| i.end.clone()).collect();
+        out.push(finding(Level::Error, "usb-identity-twice",
+            format!("One USB device (USB serial {serial}) is bound on {}; a device is on one part.", names(ctx, &ends)),
+            on.iter().map(|i| i.part.clone()).collect(), vec![]));
+    }
+
+    #[derive(Default)]
+    struct Bucket<'i> {
+        any: TwoParts<'i>,
+        by_interface: BTreeMap<Option<u8>, TwoParts<'i>>,
+    }
+    let mut buckets: BTreeMap<(u16, u16), Bucket> = BTreeMap::new();
+    for id in ids {
+        if let (Some(vid), Some(pid)) = (id.vid, id.pid) {
+            let b = buckets.entry((vid, pid)).or_default();
+            b.any.add(id);
+            b.by_interface.entry(id.interface).or_default().add(id);
+        }
+    }
+    let mut reported: BTreeSet<(String, String)> = BTreeSet::new();
+    for id in ids.iter().filter(|i| i.serial.is_none()) {
+        let (Some(vid), Some(pid)) = (id.vid, id.pid) else { continue };
+        let b = &buckets[&(vid, pid)];
+        let other = match id.interface {
+            None => b.any.other_than(&id.part),
+            Some(i) => b
+                .by_interface
+                .get(&Some(i))
+                .and_then(|t| t.other_than(&id.part))
+                .or_else(|| b.by_interface.get(&None).and_then(|t| t.other_than(&id.part))),
+        };
+        let Some(other) = other else { continue };
+        let key = if id.part < other.part { (id.part.clone(), other.part.clone()) } else { (other.part.clone(), id.part.clone()) };
+        if reported.insert(key) {
+            out.push(finding(Level::Error, "usb-identity-twice", identity_clash_text(ctx, id, other), vec![id.part.clone(), other.part.clone()], vec![]));
+        }
+    }
+    out
+}
+
+/// The sentence for a serial-less identity `a` that a port matching `b`
+/// would also match.
 fn identity_clash_text(ctx: &Ctx, a: &Identity, b: &Identity) -> String {
-    match (&a.serial, &b.serial) {
-        (Some(s), Some(_)) => format!(
-            "One USB device (USB serial {s}) is bound on {} and on {}; a device is on one part.",
+    let usb = format!("USB {:04x}:{:04x}", a.vid.unwrap_or_default(), a.pid.unwrap_or_default());
+    match &b.serial {
+        Some(serial) => format!(
+            "{} binds {usb} with serial {serial}, and {} the same {usb} with no serial and no interface that \
+             differs, so a port matching the second also matches the first; give it its serial or an interface.",
+            ctx.name(&b.end),
+            ctx.name(&a.end)
+        ),
+        None => format!(
+            "{} and {} both bind {usb} with no serial and no interface that differs, so the two cannot be told \
+             apart; give one a serial or an interface.",
             ctx.name(&a.end),
             ctx.name(&b.end)
-        ),
-        _ => format!(
-            "{} and {} both bind USB {:04x}:{:04x} with no serial and no interface that differs, so the two \
-             cannot be told apart; give one a serial or an interface.",
-            ctx.name(&a.end),
-            ctx.name(&b.end),
-            a.vid.unwrap_or_default(),
-            a.pid.unwrap_or_default()
         ),
     }
 }
@@ -599,19 +665,7 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
         }
         all_ids.extend(ids);
     }
-    let mut reported: BTreeSet<(String, String)> = BTreeSet::new();
-    for (i, a) in all_ids.iter().enumerate() {
-        for b in &all_ids[i + 1..] {
-            if a.part == b.part || !a.same_device(b) {
-                continue;
-            }
-            let key = if a.part < b.part { (a.part.clone(), b.part.clone()) } else { (b.part.clone(), a.part.clone()) };
-            if !reported.insert(key) {
-                continue;
-            }
-            out.push(finding(Level::Error, "usb-identity-twice", identity_clash_text(&ctx, a, b), vec![a.part.clone(), b.part.clone()], vec![]));
-        }
-    }
+    out.extend(identity_clashes(&ctx, &all_ids));
 
     // ---- cables ----
     for w in &wiring.wires {
@@ -1145,6 +1199,16 @@ power = "drp"
         let second_last = bench.parts.len() - 2;
         bench.parts[second_last].usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), interface: Some(0), ..Default::default() }));
         assert!(!codes(&check(&bench, &templates(), None)).contains(&"usb-identity-twice"));
+        // One with a serial and one without, same VID:PID: the second matches the first.
+        let n = bench.parts.len();
+        bench.parts[n - 1].usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), serial: Some("A1".into()), ..Default::default() }));
+        bench.parts[n - 2].usb.get_mut("usb").unwrap().insert(Function::Vcom, Binding::Port(PortBinding { vid: Some(0x1a86), pid: Some(0x7523), ..Default::default() }));
+        let f = check(&bench, &templates(), None);
+        let clash = f.iter().find(|f| f.code == "usb-identity-twice").unwrap();
+        assert_eq!(
+            clash.text,
+            "ch2 · USB binds USB 1a86:7523 with serial A1, and ch1 · USB the same USB 1a86:7523 with no serial and no interface that differs, so a port matching the second also matches the first; give it its serial or an interface."
+        );
     }
 
     #[test]

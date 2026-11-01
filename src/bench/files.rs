@@ -84,12 +84,14 @@ pub struct Part {
     /// builds for, never a unit.
     #[serde(default)]
     pub board: Option<String>,
-    /// The chip a legacy file recorded for this role, kept when the file is
-    /// converted. **Only a fallback**: apply and enrol look the chip up from
-    /// the board type first, and use this when nothing answers (decision 48,
-    /// "looked up, never typed"). Written only when present.
+    /// The chip a legacy file recorded for this role, **with the board it was
+    /// recorded for**, kept when the file is converted. Only a fallback: apply
+    /// and enrol look the chip up from the board type first, and use this when
+    /// nothing answers (decision 48, "looked up, never typed") — and only
+    /// while `board` still equals `chip.board`, so a chip never outlives its
+    /// board. Written only when present.
     #[serde(default)]
-    pub chip: Option<String>,
+    pub chip: Option<RecordedChip>,
     /// Connector id → function → the identity it is bound to.
     #[serde(default)]
     pub usb: BTreeMap<String, BTreeMap<Function, Binding>>,
@@ -109,6 +111,14 @@ impl Part {
             _ => None,
         })
     }
+}
+
+/// A recorded chip and the board it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedChip {
+    #[serde(default)]
+    pub board: String,
+    pub chip: String,
 }
 
 /// A bench-level cable: one end is this machine, and it is shared by every
@@ -249,7 +259,9 @@ fn legacy_part(id: &str, role: Role, binding: &RoleBinding) -> (Part, Option<Cab
         mounted_on: None,
         flip: false,
         board: (!board.is_empty()).then(|| board.to_string()),
-        chip: Some(binding.chip.trim().to_string()).filter(|c| !c.is_empty()),
+        chip: Some(binding.chip.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .map(|chip| RecordedChip { board: board.to_string(), chip }),
         usb,
     };
     let cable = connector.map(|c| Cable { from: format!("{id}.{c}"), to: LEGACY_HUB.to_string() });
@@ -318,12 +330,16 @@ pub fn file_from_bench(bench: &Bench, saved_at_utc_ms: u64) -> BenchFile {
 }
 
 /// The probe serial a part is reached by: its own, else the one on the far
-/// end of an SWD lead from it — a debug probe cabled to the board — looked for
-/// in the bench-level cables and then each config in order (fix round 1: a
-/// role whose probe is a separate pod was proposed nothing).
-fn reached_probe(part: &Part, parts: &[Part], cables: &[Cable], configs: &[Config], templates: &Templates) -> Option<String> {
+/// end of an SWD lead from it — a debug probe cabled to the board — in the
+/// bench-level cables or any config (fix round 1: a role whose probe is a
+/// separate pod was proposed nothing).
+///
+/// **Leads that reach different probes in different configs are not
+/// guessed between** (fix round 2): `Err` names them, and nothing is
+/// proposed — which config is live is phase 4's record, not this file's.
+fn reached_probe(part: &Part, parts: &[Part], cables: &[Cable], configs: &[Config], templates: &Templates) -> Result<Option<String>, String> {
     if let Some(own) = part.probe_serial() {
-        return Some(own.to_string());
+        return Ok(Some(own.to_string()));
     }
     let swd = |p: &Part, connector: &str| {
         templates
@@ -331,39 +347,63 @@ fn reached_probe(part: &Part, parts: &[Part], cables: &[Cable], configs: &[Confi
             .and_then(|t| t.connector(connector))
             .is_some_and(|c| c.kind == Kind::Swd)
     };
-    let pairs = cables
-        .iter()
-        .map(|c| (c.from.as_str(), c.to.as_str()))
-        .chain(configs.iter().flat_map(|cfg| cfg.cables.iter().map(|[a, b]| (a.as_str(), b.as_str()))));
-    for (a, b) in pairs {
-        for (near, far) in [(a, b), (b, a)] {
-            let (Some((np, nc)), Some((fp, fc))) = (near.split_once('.'), far.split_once('.')) else { continue };
-            if np != part.id || !swd(part, nc) {
-                continue;
-            }
-            let Some(other) = parts.iter().find(|p| p.id == fp) else { continue };
-            if swd(other, fc) {
-                if let Some(serial) = other.probe_serial() {
-                    return Some(serial.to_string());
+    let scopes = std::iter::once(("the bench level".to_string(), cables.iter().map(|c| (c.from.as_str(), c.to.as_str())).collect::<Vec<_>>()))
+        .chain(configs.iter().map(|cfg| (format!("config “{}”", cfg.name), cfg.cables.iter().map(|[a, b]| (a.as_str(), b.as_str())).collect())));
+    // serial → where it was reached, in first-seen order
+    let mut reached: Vec<(String, Vec<String>)> = Vec::new();
+    for (scope, pairs) in scopes {
+        for (a, b) in pairs {
+            for (near, far) in [(a, b), (b, a)] {
+                let (Some((np, nc)), Some((fp, fc))) = (near.split_once('.'), far.split_once('.')) else { continue };
+                if np != part.id || !swd(part, nc) {
+                    continue;
+                }
+                let Some(other) = parts.iter().find(|p| p.id == fp) else { continue };
+                if !swd(other, fc) {
+                    continue;
+                }
+                let Some(serial) = other.probe_serial() else { continue };
+                match reached.iter_mut().find(|(s, _)| s == serial) {
+                    Some((_, wheres)) if !wheres.contains(&scope) => wheres.push(scope.clone()),
+                    Some(_) => {}
+                    None => reached.push((serial.to_string(), vec![scope.clone()])),
                 }
             }
         }
     }
-    None
+    match reached.as_slice() {
+        [] => Ok(None),
+        [(serial, _)] => Ok(Some(serial.clone())),
+        several => Err(format!(
+            "its SWD leads reach different probes ({})",
+            several
+                .iter()
+                .map(|(serial, wheres)| format!("{serial} in {}", wheres.join(" and ")))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+    }
 }
 
 /// A role's binding, derived from the part holding it, for the topology
 /// routes that still read `dut`/`dev-bench`.
 ///
-/// **The chip is the one the part recorded, if any** — a fallback only: the
-/// apply route looks the chip up the way the role picker does and uses this
-/// when nothing answers (decision 48).
+/// **The chip is the one the part recorded, with the board it was recorded
+/// for** — a fallback only: the apply route looks the chip up the way the
+/// role picker does and uses this when nothing answers and the role still
+/// holds that board (decision 48).
 fn role_binding(file: &BenchFile, parts: &[Part], role: Role, templates: &Templates) -> Option<RoleBinding> {
     let part = parts.iter().find(|p| p.role == Some(role))?;
+    let (probe_serial, probe_note) = match reached_probe(part, parts, &file.cables, &file.configs, templates) {
+        Ok(serial) => (serial.unwrap_or_default(), None),
+        Err(note) => (String::new(), Some(note)),
+    };
     let mut binding = RoleBinding {
         board: part.board.clone().unwrap_or_default(),
-        chip: part.chip.clone().unwrap_or_default(),
-        probe_serial: reached_probe(part, parts, &file.cables, &file.configs, templates).unwrap_or_default(),
+        chip: part.chip.as_ref().map(|c| c.chip.clone()).unwrap_or_default(),
+        chip_board: part.chip.as_ref().map(|c| c.board.clone()),
+        probe_serial,
+        probe_note,
         ..RoleBinding::default()
     };
     if role == Role::DevBench {
@@ -549,6 +589,9 @@ pub fn guard_old_shape(repo: &Path, slug: &str) -> Result<(), String> {
 /// check request costs.
 pub const MAX_PARTS: usize = 500;
 pub const MAX_CABLES: usize = 2000;
+pub const MAX_CONFIGS: usize = 100;
+/// The most USB bindings (function → identity) on one part.
+pub const MAX_BINDINGS: usize = 32;
 
 /// What a save refuses: only what would make the file unreadable as a bench
 /// or ambiguous to address. Everything else — a cable of the wrong kind, a
@@ -559,7 +602,7 @@ pub fn check_shape(bench: &Bench) -> Result<(), String> {
     if slugify(&bench.name).is_empty() {
         return Err("a bench needs a name with at least one letter or digit in it".to_string());
     }
-    let mut ids: Vec<&str> = Vec::new();
+    let mut ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for part in &bench.parts {
         if part.id.is_empty() || part.id.contains('.') || part.id.chars().any(char::is_whitespace) {
             return Err(format!(
@@ -567,20 +610,18 @@ pub fn check_shape(bench: &Bench) -> Result<(), String> {
                 part.id
             ));
         }
-        if ids.contains(&part.id.as_str()) {
+        if !ids.insert(&part.id) {
             return Err(format!("two parts have the id `{}`", part.id));
         }
-        ids.push(&part.id);
     }
-    let mut names: Vec<&str> = Vec::new();
+    let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for config in &bench.configs {
         if config.name.trim().is_empty() {
             return Err("a config needs a name".to_string());
         }
-        if names.contains(&config.name.as_str()) {
+        if !names.insert(&config.name) {
             return Err(format!("two configs are named `{}`", config.name));
         }
-        names.push(&config.name);
     }
     Ok(())
 }
@@ -594,42 +635,19 @@ pub fn check_size(bench: &Bench) -> Result<(), String> {
     if longest > MAX_CABLES {
         return Err(format!("a bench or config holds at most {MAX_CABLES} cables; one here has {longest}"));
     }
+    if bench.configs.len() > MAX_CONFIGS {
+        return Err(format!("a bench holds at most {MAX_CONFIGS} configs; this one has {}", bench.configs.len()));
+    }
+    if let Some(p) = bench.parts.iter().find(|p| p.usb.values().map(BTreeMap::len).sum::<usize>() > MAX_BINDINGS) {
+        return Err(format!("a part binds at most {MAX_BINDINGS} USB functions; `{}` binds more", p.id));
+    }
     Ok(())
 }
 
-/// A part as the file writes it: the JSON's fields in the same order, less
-/// the defaults a hand-written file would leave out (`flip = false`, an empty
-/// `usb`, every `None`).
+/// The lists after the parts, as the file writes them; each left out when
+/// empty.
 #[derive(Serialize)]
-struct PartOut<'a> {
-    id: &'a str,
-    template: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: &'a Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    at: &'a Option<[i32; 2]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: &'a Option<Role>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mounted_on: &'a Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    flip: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    board: &'a Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chip: &'a Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    usb: &'a BTreeMap<String, BTreeMap<Function, Binding>>,
-}
-
-/// The new shape as the file writes it, in reading order. `parts` is always
-/// written, even empty, because its presence is what makes the file the new
-/// shape; the other lists are left out when empty.
-#[derive(Serialize)]
-struct BenchFileOut<'a> {
-    name: &'a str,
-    saved_at_utc_ms: u64,
-    parts: Vec<PartOut<'a>>,
+struct ListsOut<'a> {
     #[serde(skip_serializing_if = "<[Cable]>::is_empty")]
     cables: &'a [Cable],
     #[serde(skip_serializing_if = "<[Config]>::is_empty")]
@@ -638,33 +656,73 @@ struct BenchFileOut<'a> {
     signals: &'a [SignalLink],
 }
 
-/// The file's TOML. A legacy file's old keys are never written: a file is
-/// only ever saved in the new shape.
+/// One value as inline TOML: `"x"`, `[20, 110]`, `{ board = "…", chip = "…" }`.
+fn inline<T: Serialize + ?Sized>(value: &T) -> anyhow::Result<String> {
+    let mut out = String::new();
+    value.serialize(toml::ser::ValueSerializer::new(&mut out))?;
+    Ok(out)
+}
+
+/// The file's TOML, in reading order. A legacy file's old keys are never
+/// written: a file is only ever saved in the new shape.
+///
+/// **Each part is written by hand, key by key, as inline values**, so a
+/// recorded chip reads `chip = { board = "…", chip = "…" }` and a part's USB
+/// bindings stay on its own lines instead of trailing it as `[parts.usb.…]`
+/// tables; the defaults a hand-written file leaves out (`flip = false`, an
+/// empty `usb`, every `None`) are left out. `parts` is always written, even
+/// empty, because its presence is what makes the file the new shape.
 pub fn bench_toml(file: &BenchFile) -> anyhow::Result<String> {
+    fn key(out: &mut String, k: &str, v: String) {
+        out.push_str(k);
+        out.push_str(" = ");
+        out.push_str(&v);
+        out.push('\n');
+    }
+    let mut out = String::new();
+    key(&mut out, "name", inline(&file.name)?);
+    key(&mut out, "saved_at_utc_ms", inline(&file.saved_at_utc_ms)?);
     let parts = file.parts.as_deref().unwrap_or_default();
-    let out = BenchFileOut {
-        name: &file.name,
-        saved_at_utc_ms: file.saved_at_utc_ms,
-        parts: parts
-            .iter()
-            .map(|p| PartOut {
-                id: &p.id,
-                template: &p.template,
-                label: &p.label,
-                at: &p.at,
-                role: &p.role,
-                mounted_on: &p.mounted_on,
-                flip: p.flip,
-                board: &p.board,
-                chip: &p.chip,
-                usb: &p.usb,
-            })
-            .collect(),
-        cables: &file.cables,
-        configs: &file.configs,
-        signals: &file.signals,
-    };
-    Ok(toml::to_string(&out)?)
+    if parts.is_empty() {
+        key(&mut out, "parts", "[]".to_string());
+    }
+    for p in parts {
+        out.push_str("\n[[parts]]\n");
+        key(&mut out, "id", inline(&p.id)?);
+        key(&mut out, "template", inline(&p.template)?);
+        if let Some(label) = &p.label {
+            key(&mut out, "label", inline(label)?);
+        }
+        if let Some(at) = &p.at {
+            key(&mut out, "at", inline(at)?);
+        }
+        if let Some(role) = &p.role {
+            key(&mut out, "role", inline(role)?);
+        }
+        if let Some(base) = &p.mounted_on {
+            key(&mut out, "mounted_on", inline(base)?);
+        }
+        if p.flip {
+            key(&mut out, "flip", "true".to_string());
+        }
+        if let Some(board) = &p.board {
+            key(&mut out, "board", inline(board)?);
+        }
+        if let Some(chip) = &p.chip {
+            key(&mut out, "chip", inline(chip)?);
+        }
+        for (connector, functions) in &p.usb {
+            let bare = !connector.is_empty() && connector.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            let name = if bare { connector.clone() } else { inline(connector)? };
+            key(&mut out, &format!("usb.{name}"), inline(functions)?);
+        }
+    }
+    let lists = toml::to_string(&ListsOut { cables: &file.cables, configs: &file.configs, signals: &file.signals })?;
+    if !lists.is_empty() {
+        out.push('\n');
+        out.push_str(&lists);
+    }
+    Ok(out)
 }
 
 /// Writes a bench file through the repo writer (`super::write_in_repo`):
@@ -724,7 +782,11 @@ port_serial = "FT9ABCDE"
             Binding::Port(PortBinding { serial: Some("D607104".into()), interface: Some(2), ..Default::default() })
         );
         assert_eq!(part("dut").probe_serial(), Some("001057729826"));
-        assert_eq!(dev.chip.as_deref(), Some("nRF54L15"), "the recorded chip is kept as the fallback");
+        assert_eq!(
+            dev.chip,
+            Some(RecordedChip { board: "nrf54l15dk/nrf54l15/cpuapp".into(), chip: "nRF54L15".into() }),
+            "the recorded chip is kept as the fallback, with the board it was recorded for"
+        );
         assert_eq!(
             bench.cables,
             [
@@ -743,7 +805,9 @@ port_serial = "FT9ABCDE"
         let text = bench_toml(&file_from_bench(&bench, 1)).unwrap();
         assert!(!text.contains("[dut]") && !text.contains("[dev-bench]"), "{text}");
         assert!(!text.contains("flip"), "{text}");
-        assert_eq!(text.matches("chip = \"nRF54L15\"").count(), 2, "{text}");
+        assert!(text.contains("chip = { board = \"wearable-rev6\", chip = \"nRF54L15\" }"), "{text}");
+        assert!(text.contains("usb.usb = { probe = \"001050288460\""), "{text}");
+        assert!(!text.contains("[parts."), "a part's values stay on its own lines: {text}");
         let back = bench_from_file("ble-bench", toml::from_str(&text).unwrap(), None);
         assert!(!back.legacy);
         assert_eq!(back.parts, bench.parts);
@@ -819,6 +883,14 @@ port_serial = "FT9ABCDE"
         bench.name = "B".into();
         bench.parts = (0..=MAX_PARTS).map(|i| part(&format!("p{i}"))).collect();
         assert!(check_shape(&bench).unwrap_err().contains("at most 500 parts"));
+        bench.parts = vec![part("a")];
+        bench.configs = (0..=MAX_CONFIGS).map(|i| Config { name: format!("c{i}"), cables: vec![] }).collect();
+        assert!(check_shape(&bench).unwrap_err().contains("at most 100 configs"));
+        bench.configs.clear();
+        bench.parts[0].usb = (0..=MAX_BINDINGS)
+            .map(|i| (format!("u{i}"), BTreeMap::from([(Function::Probe, Binding::Serial(format!("s{i}")))])))
+            .collect();
+        assert!(check_shape(&bench).unwrap_err().contains("at most 32 USB functions"));
     }
 
     fn templates() -> Templates {
@@ -861,9 +933,33 @@ cables = [["probe.swd", "swd-dut.swd"]]
         )
         .unwrap();
         t.insert(pd.id.clone(), pd);
+        let mut two = file.clone();
         let profile = profile_from_file(file, &t);
         assert_eq!(profile.dev_bench.unwrap().probe_serial, "J1", "reached over the SWD lead in config A");
-        assert_eq!(profile.dut.unwrap().probe_serial, "", "no probe on its part and no lead: empty, and apply says so");
+        let dut = profile.dut.unwrap();
+        assert_eq!((dut.probe_serial.as_str(), dut.probe_note.as_deref()), ("", None), "no probe on its part and no lead");
+
+        // A second config leading to another probe is not guessed between.
+        let parts = two.parts.as_mut().unwrap();
+        parts.push(Part { id: "probe2".into(), template: "debug-probe".into(), ..parts[1].clone() });
+        parts.last_mut().unwrap().usb = BTreeMap::from([("usb".into(), BTreeMap::from([(Function::Probe, Binding::Serial("J2".into()))]))]);
+        two.configs.push(Config { name: "B".into(), cables: vec![["probe2.swd".into(), "swd-dut.swd".into()]] });
+        let bench = profile_from_file(two, &t).dev_bench.unwrap();
+        assert_eq!(bench.probe_serial, "");
+        assert_eq!(bench.probe_note.as_deref(), Some("its SWD leads reach different probes (J1 in config “A”; J2 in config “B”)"));
+    }
+
+    #[test]
+    fn a_recorded_chip_travels_with_its_board() {
+        let legacy: BenchFile = toml::from_str(LEGACY).unwrap();
+        let mut bench = bench_from_file("b", legacy, None);
+        let dut = bench.parts.iter_mut().find(|p| p.id == "dut").unwrap();
+        dut.board = Some("plank".into());
+        let file: BenchFile = toml::from_str(&bench_toml(&file_from_bench(&bench, 1)).unwrap()).unwrap();
+        let binding = profile_from_file(file, &templates()).dut.unwrap();
+        assert_eq!(binding.board, "plank");
+        assert_eq!(binding.chip, "nRF54L15");
+        assert_eq!(binding.chip_board.as_deref(), Some("wearable-rev6"), "apply sees it was for another board");
     }
 
     fn repo(tag: &str) -> std::path::PathBuf {

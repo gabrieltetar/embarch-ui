@@ -513,6 +513,18 @@ pub struct RoleBinding {
     pub link_port_serial: Option<String>,
     #[serde(default)]
     pub link_port_interface: Option<u8>,
+    /// The board `chip` was recorded for, when the binding came from a bench
+    /// the editor saved (`bench::files`). **The recorded chip is a fallback
+    /// only while the role still holds that board**: a chip outliving its
+    /// board would enrol the new board as the old silicon. `None` in an old
+    /// file, whose chip belongs to its own `board`. Never written.
+    #[serde(default, skip_serializing)]
+    pub chip_board: Option<String>,
+    /// Why `probe_serial` is empty when it is not simply unbound — the part's
+    /// SWD leads reach different probes in different configs — for the apply
+    /// report's row. Never written.
+    #[serde(default, skip_serializing)]
+    pub probe_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1603,6 +1615,7 @@ pub async fn api_save_profile(
             probe_serial: b.probe_serial.clone().unwrap_or_default(),
             link_port_serial: b.link_port_serial.clone(),
             link_port_interface: b.link_port_interface,
+            ..RoleBinding::default()
         })
     };
 
@@ -1619,6 +1632,9 @@ pub async fn api_save_profile(
     // shape from the snapshot, which knows nothing of parts, cables or
     // configs; writing it over a file that has them would drop every one
     // silently.
+    // Held across the guard and the write, the same lock the bench editor's
+    // saves take, so this cannot land between its check and its write.
+    let _held = crate::bench::hold_writes();
     if let Err(why) = crate::bench::files::guard_old_shape(&repo, &slug) {
         return (StatusCode::CONFLICT, why).into_response();
     }
@@ -1664,14 +1680,16 @@ pub async fn api_delete_profile(
     if !path.exists() {
         return (StatusCode::NOT_FOUND, format!("no saved topology '{slug}'")).into_response();
     }
-    // The same guard the save has: a bench the editor wrote, or a file that
-    // does not parse and might be one, is not deleted from the old tab.
+    // The same guard and lock the save has: a bench the editor wrote, or a
+    // file that does not parse and might be one, is not deleted from the old
+    // tab — and the removal never follows a link out of the repo.
+    let _held = crate::bench::hold_writes();
     if let Err(why) = crate::bench::files::guard_old_shape(&repo, &slug) {
         return (StatusCode::CONFLICT, why).into_response();
     }
-    match std::fs::remove_file(&path) {
+    match crate::bench::remove_in_repo(&repo, &["embarch", "topologies"], &format!("{slug}.toml")) {
         Ok(()) => Json(json!({ "removed": slug, "profiles": list_profiles(&repo) })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 
@@ -1773,7 +1791,12 @@ pub async fn api_apply_profile(
         let chip = if binding.board.is_empty() {
             Ok(binding.chip.clone())
         } else {
-            pick_chip(lookup_chip(&state, role, &binding.board).await, &binding.chip)
+            pick_chip(
+                lookup_chip(&state, role, &binding.board).await,
+                &binding.chip,
+                binding.chip_board.as_deref(),
+                &binding.board,
+            )
         };
         if !binding.board.is_empty() {
             match &chip {
@@ -1796,17 +1819,31 @@ pub async fn api_apply_profile(
                 })),
             }
         }
-        // **Never a silent skip** (fix round 1): a role whose part, or the
-        // part an SWD lead reaches, binds no probe says so.
+        // **Never a silent skip, and never a proposal that can only fail**
+        // (fix rounds 1 and 2): a role whose part, or the part an SWD lead
+        // reaches, binds no probe says so; so does one whose leads reach two
+        // probes; and an enrolment with no chip to attach as is not offered.
+        let not_proposed = |why: String| json!({ "what": format!("{role} probe"), "ok": false, "detail": why });
         if binding.probe_serial.is_empty() {
-            applied.push(json!({
-                "what": format!("{role} probe"),
-                "ok": false,
-                "detail": format!("{role}: no probe on its part — not proposed"),
+            applied.push(not_proposed(match &binding.probe_note {
+                Some(note) => format!("{role}: {note} — not proposed"),
+                None => format!("{role}: no probe on its part — not proposed"),
             }));
             continue;
         }
-        let chip = chip.unwrap_or_default();
+        let chip = match chip {
+            Ok(chip) if !chip.is_empty() => chip,
+            Ok(_) => {
+                applied.push(not_proposed(format!(
+                    "{role}: no board type and no recorded chip, so nothing to attach the probe as — not proposed"
+                )));
+                continue;
+            }
+            Err(why) => {
+                applied.push(not_proposed(format!("{role}: not proposed — {}", no_chip_sentence(&binding.board, &why))));
+                continue;
+            }
+        };
         let current = snapshot.enrolled.iter().find(|b| b.role == role);
         let already = current
             .is_some_and(|b| b.probe_serial.as_deref() == Some(binding.probe_serial.as_str()));
@@ -1847,12 +1884,18 @@ pub async fn api_apply_profile(
 
 /// The chip a saved role uses: the lookup when it answers, **the chip the
 /// file recorded only when it does not** — decision 48's "looked up, never
-/// typed", with a bench saved before a catalog row existed still loading.
-fn pick_chip(looked_up: Result<String, String>, recorded: &str) -> Result<String, String> {
+/// typed", with a bench saved before a catalog row existed still loading —
+/// and only while the role holds the board it was recorded for
+/// (`recorded_for`; `None` is an old file's chip, which is its own board's).
+fn pick_chip(looked_up: Result<String, String>, recorded: &str, recorded_for: Option<&str>, board: &str) -> Result<String, String> {
+    let recorded = recorded.trim();
     match looked_up {
         Ok(chip) => Ok(chip),
-        Err(_) if !recorded.trim().is_empty() => Ok(recorded.trim().to_string()),
-        Err(why) => Err(why),
+        Err(why) if recorded.is_empty() => Err(why),
+        Err(why) => match recorded_for {
+            Some(other) if other != board => Err(format!("{why} (recorded chip was for {other}, not used)")),
+            _ => Ok(recorded.to_string()),
+        },
     }
 }
 
@@ -1957,9 +2000,15 @@ mod tests {
 
     #[test]
     fn a_looked_up_chip_wins_and_a_recorded_one_is_only_the_fallback() {
-        assert_eq!(pick_chip(Ok("nRF54L15".into()), "STM32G0B1VE"), Ok("nRF54L15".into()));
-        assert_eq!(pick_chip(Err("not a row".into()), "STM32G0B1VE"), Ok("STM32G0B1VE".into()));
-        assert_eq!(pick_chip(Err("not a row".into()), " "), Err("not a row".into()));
+        assert_eq!(pick_chip(Ok("nRF54L15".into()), "STM32G0B1VE", None, "b"), Ok("nRF54L15".into()));
+        assert_eq!(pick_chip(Err("not a row".into()), "STM32G0B1VE", None, "b"), Ok("STM32G0B1VE".into()));
+        assert_eq!(pick_chip(Err("not a row".into()), "STM32G0B1VE", Some("b"), "b"), Ok("STM32G0B1VE".into()));
+        assert_eq!(
+            pick_chip(Err("not a row".into()), "nRF54L15", Some("wearable-rev6"), "plank"),
+            Err("not a row (recorded chip was for wearable-rev6, not used)".into()),
+            "a chip never outlives the board it was recorded for"
+        );
+        assert_eq!(pick_chip(Err("not a row".into()), " ", None, "b"), Err("not a row".into()));
     }
 
     #[test]
@@ -2007,6 +2056,7 @@ chip = "STM32F407VG"
                 probe_serial: "001050288460".to_string(),
                 link_port_serial: Some("D607104".to_string()),
                 link_port_interface: Some(2),
+                ..RoleBinding::default()
             }),
             signals: Vec::new(),
         };

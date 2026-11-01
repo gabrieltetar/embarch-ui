@@ -1508,7 +1508,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pd.toml"),
-            "name = \"pd\"\n\n[[parts]]\nid = \"host\"\ntemplate = \"this-machine\"\n\n[[parts]]\nid = \"dev-bench\"\ntemplate = \"nrf54l15dk\"\nrole = \"dev-bench\"\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\nusb.usb = { probe = \"001050288460\", vcom = 2 }\n\n[[parts]]\nid = \"dut\"\ntemplate = \"generic-board\"\nrole = \"dut\"\nboard = \"plank\"\nchip = \"STM32G0B1VE\"\n",
+            "name = \"pd\"\n\n[[parts]]\nid = \"host\"\ntemplate = \"this-machine\"\n\n[[parts]]\nid = \"dev-bench\"\ntemplate = \"nrf54l15dk\"\nrole = \"dev-bench\"\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\nusb.usb = { probe = \"001050288460\", vcom = 2 }\n\n[[parts]]\nid = \"dut\"\ntemplate = \"generic-board\"\nrole = \"dut\"\nboard = \"plank\"\nchip = { board = \"plank\", chip = \"STM32G0B1VE\" }\n",
         )
         .unwrap();
         let base = serve_app_with_repo(&repo).await;
@@ -1541,7 +1541,47 @@ mod tests {
             .unwrap();
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
         assert!(refused.text().await.unwrap().contains("it is not a row in embarch/boards.toml"), "the refusal says why");
+
+        // Fix round 2: a chip recorded for another board is not used, and an
+        // enrolment with no chip — or whose SWD leads reach two probes — is not
+        // proposed; each says why.
+        std::fs::create_dir_all(repo.join("embarch/parts")).unwrap();
+        std::fs::write(
+            repo.join("embarch/parts/swd-board.toml"),
+            "id = \"swd-board\"\nlabel = \"SWD board\"\ncategory = \"board\"\nlook = \"board\"\n[[connectors]]\nid = \"swd\"\nlabel = \"SWD\"\nkind = \"swd\"\nside = \"left\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pd2.toml"),
+            "name = \"pd2\"\n\n[[parts]]\nid = \"host\"\ntemplate = \"this-machine\"\n\n[[parts]]\nid = \"p1\"\ntemplate = \"debug-probe\"\nusb.usb = { probe = \"J1\" }\n\n[[parts]]\nid = \"p2\"\ntemplate = \"debug-probe\"\nusb.usb = { probe = \"J2\" }\n\n[[parts]]\nid = \"bench\"\ntemplate = \"swd-board\"\nrole = \"dev-bench\"\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\n\n[[parts]]\nid = \"dut\"\ntemplate = \"generic-board\"\nrole = \"dut\"\nboard = \"plank\"\nchip = { board = \"wearable-rev6\", chip = \"nRF54L15\" }\nusb.usb = { probe = \"X1\" }\n\n[[configs]]\nname = \"A\"\ncables = [[\"p1.swd\", \"bench.swd\"]]\n\n[[configs]]\nname = \"B\"\ncables = [[\"p2.swd\", \"bench.swd\"]]\n",
+        )
+        .unwrap();
+        let report: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd2/apply")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(report["proposals"], serde_json::json!([]), "{report}");
+        let detail = |what: &str| report["applied"].as_array().unwrap().iter().find(|a| a["what"] == what).map(|a| a["detail"].as_str().unwrap().to_string()).unwrap_or_default();
+        assert_eq!(detail("dev-bench probe"), "dev-bench: its SWD leads reach different probes (J1 in config “A”; J2 in config “B”) — not proposed");
+        assert!(detail("dut board").contains("(recorded chip was for wearable-rev6, not used)"), "{report}");
+        assert!(detail("dut probe").starts_with("dut: not proposed — 'plank' has no chip"), "{report}");
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Fix round 2: the old Delete never follows a linked
+    /// `embarch/topologies` out of the repo.
+    #[tokio::test]
+    async fn the_old_delete_never_removes_a_file_outside_the_repo() {
+        let base_dir = bench_repo("delete-link");
+        let repo = base_dir.join("repo");
+        let outside = base_dir.join("outside");
+        std::fs::create_dir_all(repo.join("embarch")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("x.toml"), "name = \"x\"\n").unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("embarch/topologies")).unwrap();
+        let base = serve_app_with_repo(&repo).await;
+        let resp = reqwest::Client::new().delete(format!("{base}/api/topology/profiles/x")).send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.text().await.unwrap().contains("outside the repo"));
+        assert!(outside.join("x.toml").exists());
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 
     /// Parts: `POST` creates once, `PUT` names the version it read, and a

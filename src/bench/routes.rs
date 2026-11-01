@@ -12,7 +12,6 @@
 //! a new bench cannot land on an old one.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
@@ -23,8 +22,8 @@ use serde_json::json;
 
 use super::files::{self, Bench, LoadError};
 use super::{
-    builtin_clash, builtins, catalog, check, parse_template, parts_dir, template_toml, version_of, vocabulary_json,
-    write_in_repo, PartTemplate, WriteError, WriteMode,
+    builtin_clash, builtins, catalog, check, hold_writes, parse_template, parts_dir, template_toml, version_of,
+    vocabulary_json, write_in_repo, PartTemplate, WriteError, WriteMode,
 };
 use crate::topology::now_utc_ms;
 use crate::AppState;
@@ -56,10 +55,6 @@ impl FromRequestParts<AppState> for OpenRepo {
             .ok_or_else(|| refuse(StatusCode::CONFLICT, NO_PROJECT))
     }
 }
-
-/// Held across every read-compare-write of a repo file, so two saves of one
-/// file in this process cannot both pass the version check.
-static WRITES: Mutex<()> = Mutex::new(());
 
 fn write_refusal(what: &str, e: WriteError) -> Response {
     match e {
@@ -118,7 +113,7 @@ pub async fn api_post_part(OpenRepo(repo): OpenRepo, Json(body): Json<serde_json
         Ok(t) => t,
         Err(resp) => return *resp,
     };
-    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let _held = hold_writes();
     if let Err(resp) = write_template(&repo, &template, WriteMode::Create) {
         return *resp;
     }
@@ -145,7 +140,7 @@ pub async fn api_put_part(OpenRepo(repo): OpenRepo, Path(id): Path<String>, Json
     let Some(version) = version else {
         return refuse(StatusCode::BAD_REQUEST, "an update names the `version` it read; create a new part with POST /api/bench/parts");
     };
-    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let _held = hold_writes();
     let path = parts_dir(&repo).join(format!("{id}.toml"));
     let current = match std::fs::read(&path) {
         Ok(b) => b,
@@ -219,7 +214,7 @@ pub async fn api_post_bench(OpenRepo(repo): OpenRepo, Json(bench): Json<Bench>) 
         return refuse(StatusCode::BAD_REQUEST, e);
     }
     let slug = crate::topology::slugify(&bench.name);
-    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let _held = hold_writes();
     let file = files::file_from_bench(&bench, now_utc_ms());
     if let Err(e) = files::write(&repo, &slug, &file, WriteMode::Create) {
         return write_refusal(&files::bench_file(&slug), e);
@@ -261,7 +256,7 @@ pub async fn api_put_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>, J
             ),
         );
     }
-    let _held = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let _held = hold_writes();
     match files::read_file(&repo, &slug) {
         Ok((_, current)) if current == version => {}
         Ok(_) => {
