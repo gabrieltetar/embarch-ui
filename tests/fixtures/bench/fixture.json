@@ -1,0 +1,968 @@
+{
+ "_comment": "The bench routes' JSON for drive_bench.py, keyed by route; shapes follow the bench editor's JSON contract (embarch-bench-editor-proposal.md, Files).",
+ "/api/bench/vocabulary": {
+  "kinds": [
+   "usb-c",
+   "usb-host",
+   "banana",
+   "terminal",
+   "swd",
+   "pin-header",
+   "radio",
+   "stack-socket",
+   "stack-plug"
+  ],
+  "joins": [
+   [
+    "usb-c",
+    "usb-c"
+   ],
+   [
+    "banana",
+    "banana"
+   ],
+   [
+    "banana",
+    "terminal"
+   ],
+   [
+    "terminal",
+    "terminal"
+   ],
+   [
+    "swd",
+    "swd"
+   ],
+   [
+    "pin-header",
+    "pin-header"
+   ],
+   [
+    "radio",
+    "radio"
+   ]
+  ],
+  "hub_kind": "usb-host",
+  "power": {
+   "providers": [
+    "source",
+    "supply",
+    "out"
+   ],
+   "consumers": [
+    "sink",
+    "load",
+    "in"
+   ],
+   "either": [
+    "drp"
+   ],
+   "pass": [
+    "pass"
+   ]
+  },
+  "categories": [
+   "computer",
+   "board",
+   "shield",
+   "instrument",
+   "analyzer",
+   "probe",
+   "adapter"
+  ],
+  "looks": [
+   "monitor",
+   "nucleo64",
+   "shield",
+   "devkit",
+   "power-board",
+   "instrument",
+   "analyzer",
+   "pod",
+   "breakout",
+   "board"
+  ],
+  "functions": [
+   "probe",
+   "vcom",
+   "scpi",
+   "bootload-app",
+   "bootload-bootloader"
+  ]
+ },
+ "/api/bench/parts": {
+  "parts": [
+   {
+    "id": "this-machine",
+    "label": "This machine",
+    "subtitle": "embarch-core host",
+    "category": "computer",
+    "look": "monitor",
+    "source": "builtin",
+    "hub": true,
+    "width": 190,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [],
+    "passthrough": []
+   },
+   {
+    "id": "nucleo-g0b1re",
+    "label": "NUCLEO-G0B1RE",
+    "subtitle": "Nucleo-64",
+    "category": "board",
+    "look": "nucleo64",
+    "source": "builtin",
+    "hub": false,
+    "width": 200,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "stlink",
+      "label": "ST-LINK USB",
+      "kind": "usb-host",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": [
+       {
+        "function": "probe"
+       },
+       {
+        "function": "vcom",
+        "interface": 1
+       }
+      ]
+     },
+     {
+      "id": "arduino",
+      "label": "Arduino headers",
+      "kind": "stack-socket",
+      "side": "top",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "x-nucleo-drp1m1",
+    "label": "X-NUCLEO-DRP1M1",
+    "subtitle": "shield, dual role",
+    "category": "shield",
+    "look": "shield",
+    "source": "builtin",
+    "hub": false,
+    "width": 200,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "usb-c",
+      "label": "USB-C",
+      "kind": "usb-c",
+      "side": "right",
+      "power": "drp",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "cn2",
+      "label": "CN2 sink out",
+      "kind": "terminal",
+      "side": "right",
+      "power": "out",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "cn3",
+      "label": "CN3 source in",
+      "kind": "terminal",
+      "side": "right",
+      "power": "in",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "arduino",
+      "label": "Arduino plug",
+      "kind": "stack-plug",
+      "side": "top",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "cy4500",
+    "label": "CY4500",
+    "subtitle": "PD analyzer, inline",
+    "category": "analyzer",
+    "look": "analyzer",
+    "source": "builtin",
+    "hub": false,
+    "width": 184,
+    "min_height": 132,
+    "rows_top": 72,
+    "connectors": [
+     {
+      "id": "in",
+      "label": "USB-C",
+      "kind": "usb-c",
+      "side": "left",
+      "power": "pass",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "usb",
+      "label": "USB",
+      "kind": "usb-host",
+      "side": "top",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "out",
+      "label": "USB-C",
+      "kind": "usb-c",
+      "side": "right",
+      "power": "pass",
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": [
+     [
+      "in",
+      "out"
+     ]
+    ]
+   },
+   {
+    "id": "dc-eload",
+    "label": "DC e-load",
+    "subtitle": "SCPI over USB serial",
+    "category": "instrument",
+    "look": "instrument",
+    "source": "builtin",
+    "hub": false,
+    "width": 170,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "in",
+      "label": "+/- in",
+      "kind": "banana",
+      "side": "left",
+      "power": "load",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "usb",
+      "label": "USB",
+      "kind": "usb-host",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": [
+       {
+        "function": "scpi",
+        "baud": 9600
+       }
+      ]
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "bench-supply",
+    "label": "Bench supply",
+    "subtitle": "5 V, current-limited",
+    "category": "instrument",
+    "look": "instrument",
+    "source": "builtin",
+    "hub": false,
+    "width": 170,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "out",
+      "label": "+/- out",
+      "kind": "banana",
+      "side": "right",
+      "power": "supply",
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "debug-probe",
+    "label": "Debug probe",
+    "subtitle": "SWD probe",
+    "category": "probe",
+    "look": "pod",
+    "source": "builtin",
+    "hub": false,
+    "width": 160,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "usb",
+      "label": "USB",
+      "kind": "usb-host",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": [
+       {
+        "function": "probe"
+       }
+      ]
+     },
+     {
+      "id": "swd",
+      "label": "SWD",
+      "kind": "swd",
+      "side": "right",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "nrf54l15dk",
+    "label": "nRF54L15DK",
+    "subtitle": "development kit",
+    "category": "board",
+    "look": "devkit",
+    "source": "builtin",
+    "hub": false,
+    "width": 180,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "usb",
+      "label": "J-Link USB",
+      "kind": "usb-host",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": [
+       {
+        "function": "probe"
+       },
+       {
+        "function": "vcom",
+        "interface": 2
+       }
+      ]
+     },
+     {
+      "id": "radio",
+      "label": "BLE",
+      "kind": "radio",
+      "side": "right",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "usb-c-breakout",
+    "label": "USB-C breakout",
+    "subtitle": "USB-C to banana",
+    "category": "adapter",
+    "look": "breakout",
+    "source": "builtin",
+    "hub": false,
+    "width": 170,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "usb-c",
+      "label": "USB-C",
+      "kind": "usb-c",
+      "side": "left",
+      "power": "pass",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "vbus",
+      "label": "VBUS / GND",
+      "kind": "banana",
+      "side": "right",
+      "power": "pass",
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": [
+     [
+      "usb-c",
+      "vbus"
+     ]
+    ]
+   },
+   {
+    "id": "generic-board",
+    "label": "Board",
+    "subtitle": "a board",
+    "category": "board",
+    "look": "board",
+    "source": "builtin",
+    "hub": false,
+    "width": 180,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "usb",
+      "label": "USB",
+      "kind": "usb-host",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": [
+       {
+        "function": "probe"
+       }
+      ]
+     },
+     {
+      "id": "usb-c-1",
+      "label": "USB-C 1",
+      "kind": "usb-c",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "usb-c-2",
+      "label": "USB-C 2",
+      "kind": "usb-c",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "hdr",
+      "label": "Header",
+      "kind": "pin-header",
+      "side": "right",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "pd-charger",
+    "label": "PD charger board",
+    "subtitle": "example DUT part",
+    "category": "board",
+    "look": "power-board",
+    "source": "repo",
+    "hub": false,
+    "width": 190,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "swd",
+      "label": "SWD",
+      "kind": "swd",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "usb-c-1",
+      "label": "USB-C 1",
+      "kind": "usb-c",
+      "side": "left",
+      "power": "source",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "usb-c-2",
+      "label": "USB-C 2",
+      "kind": "usb-c",
+      "side": "left",
+      "power": "drp",
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "dc-in",
+      "label": "DC in",
+      "kind": "terminal",
+      "side": "left",
+      "power": "in",
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   },
+   {
+    "id": "odd-widget",
+    "label": "Odd widget",
+    "subtitle": "an unknown look",
+    "category": "board",
+    "look": "fancy",
+    "source": "repo",
+    "hub": false,
+    "width": 170,
+    "min_height": null,
+    "rows_top": null,
+    "connectors": [
+     {
+      "id": "usb",
+      "label": "USB",
+      "kind": "usb-host",
+      "side": "left",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     },
+     {
+      "id": "lvds",
+      "label": "LVDS",
+      "kind": "lvds",
+      "side": "right",
+      "power": null,
+      "max_cables": 1,
+      "functions": []
+     }
+    ],
+    "passthrough": []
+   }
+  ],
+  "errors": [
+   {
+    "file": "embarch/parts/bad.toml",
+    "error": "line 3: unknown kind `usbc`"
+   }
+  ]
+ },
+ "/api/bench/benches": {
+  "benches": [
+   {
+    "slug": "pd-bench-drp",
+    "name": "PD bench · DRP",
+    "legacy": false
+   },
+   {
+    "slug": "ble-dev-bench",
+    "name": "BLE dev bench",
+    "legacy": true
+   }
+  ],
+  "errors": [
+   {
+    "file": "embarch/topologies/broken.toml",
+    "error": "expected `]` at line 9"
+   }
+  ]
+ },
+ "/api/bench/benches/pd-bench-drp": {
+  "slug": "pd-bench-drp",
+  "name": "PD bench · DRP",
+  "legacy": false,
+  "parts": [
+   {
+    "id": "host",
+    "template": "this-machine",
+    "label": null,
+    "at": [
+     20,
+     150
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "probe",
+    "template": "debug-probe",
+    "label": null,
+    "at": [
+     300,
+     20
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {
+     "usb": {
+      "probe": "000683009999"
+     }
+    }
+   },
+   {
+    "id": "partner",
+    "template": "nucleo-g0b1re",
+    "label": "pd-bench",
+    "at": [
+     300,
+     330
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {
+     "stlink": {
+      "probe": "0671FF3833554B3043164817",
+      "vcom": 1
+     }
+    }
+   },
+   {
+    "id": "drp",
+    "template": "x-nucleo-drp1m1",
+    "label": null,
+    "at": null,
+    "role": null,
+    "mounted_on": "partner",
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "psu",
+    "template": "bench-supply",
+    "label": null,
+    "at": [
+     300,
+     560
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "cy4500",
+    "template": "cy4500",
+    "label": null,
+    "at": [
+     620,
+     150
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "eload",
+    "template": "dc-eload",
+    "label": "eload",
+    "at": [
+     620,
+     420
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "dut",
+    "template": "pd-charger",
+    "label": "DUT",
+    "at": [
+     920,
+     150
+    ],
+    "role": "dut",
+    "mounted_on": null,
+    "flip": false,
+    "board": "nrf54l15dk/nrf54l15/cpuapp",
+    "usb": {}
+   },
+   {
+    "id": "breakout",
+    "template": "usb-c-breakout",
+    "label": null,
+    "at": [
+     920,
+     420
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "devkit",
+    "template": "nrf54l15dk",
+    "label": null,
+    "at": [
+     920,
+     600
+    ],
+    "role": "dev-bench",
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {
+     "usb": {
+      "probe": "000683001234",
+      "vcom": 2
+     }
+    }
+   },
+   {
+    "id": "aux",
+    "template": "generic-board",
+    "label": "aux board",
+    "at": [
+     620,
+     640
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "odd",
+    "template": "odd-widget",
+    "label": null,
+    "at": [
+     300,
+     720
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "ghost",
+    "template": "gone-part",
+    "label": "old fixture",
+    "at": [
+     20,
+     560
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   }
+  ],
+  "cables": [
+   {
+    "from": "probe.usb",
+    "to": "host"
+   },
+   {
+    "from": "partner.stlink",
+    "to": "host"
+   },
+   {
+    "from": "cy4500.usb",
+    "to": "host"
+   },
+   {
+    "from": "eload.usb",
+    "to": "host"
+   },
+   {
+    "from": "devkit.usb",
+    "to": "host"
+   },
+   {
+    "from": "aux.usb",
+    "to": "host"
+   },
+   {
+    "from": "odd.usb",
+    "to": "host"
+   }
+  ],
+  "configs": [
+   {
+    "name": "A · DUT sources",
+    "cables": [
+     [
+      "probe.swd",
+      "dut.swd"
+     ],
+     [
+      "dut.usb-c-1",
+      "cy4500.in"
+     ],
+     [
+      "cy4500.out",
+      "drp.usb-c"
+     ],
+     [
+      "drp.cn2",
+      "eload.in"
+     ],
+     [
+      "ghost.j1",
+      "aux.usb-c-2"
+     ]
+    ]
+   },
+   {
+    "name": "B · port 2, bench sources",
+    "cables": [
+     [
+      "probe.swd",
+      "dut.swd"
+     ],
+     [
+      "dut.usb-c-2",
+      "cy4500.in"
+     ],
+     [
+      "cy4500.out",
+      "drp.usb-c"
+     ],
+     [
+      "psu.out",
+      "drp.cn3"
+     ],
+     [
+      "breakout.usb-c",
+      "aux.usb-c-1"
+     ],
+     [
+      "breakout.vbus",
+      "eload.in"
+     ],
+     [
+      "aux.hdr",
+      "nowhere.pin"
+     ]
+    ]
+   },
+   {
+    "name": "C · no analyzer",
+    "cables": [
+     [
+      "probe.swd",
+      "dut.swd"
+     ],
+     [
+      "dut.usb-c-1",
+      "drp.usb-c"
+     ]
+    ]
+   }
+  ],
+  "signals": []
+ },
+ "/api/bench/benches/ble-dev-bench": {
+  "slug": "ble-dev-bench",
+  "name": "BLE dev bench",
+  "legacy": true,
+  "parts": [
+   {
+    "id": "host",
+    "template": "this-machine",
+    "label": null,
+    "at": [
+     20,
+     110
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "dev-bench",
+    "template": "nrf54l15dk",
+    "label": null,
+    "at": [
+     330,
+     110
+    ],
+    "role": "dev-bench",
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "usb": {}
+   },
+   {
+    "id": "dut",
+    "template": "nrf54l15dk",
+    "label": null,
+    "at": [
+     700,
+     110
+    ],
+    "role": "dut",
+    "mounted_on": null,
+    "flip": true,
+    "board": "nrf54l15dk/nrf54l15/cpuapp",
+    "usb": {}
+   }
+  ],
+  "cables": [
+   {
+    "from": "dev-bench.usb",
+    "to": "host"
+   },
+   {
+    "from": "dut.usb",
+    "to": "host"
+   }
+  ],
+  "configs": [
+   {
+    "name": "default",
+    "cables": [
+     [
+      "dev-bench.radio",
+      "dut.radio"
+     ]
+    ]
+   }
+  ],
+  "signals": []
+ }
+}

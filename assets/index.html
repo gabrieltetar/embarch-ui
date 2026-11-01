@@ -194,6 +194,47 @@
             <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
           </div>
         </div>
+
+        <!-- The bench canvas (embarch-bench-editor-proposal.md, phase 2): a
+             saved bench drawn as the hardware on the shelf, read-only, from
+             the UI server's /api/bench/* routes. bench.js draws all of it;
+             this is the frame. It sits beside the diagram above until the
+             editor replaces that diagram. -->
+        <div class="card bench-card" id="bench-card" style="margin-bottom:16px;">
+          <div class="sd-toolbar">
+            <div class="card-title" style="margin:0;">Bench canvas</div>
+            <div class="sd-toolbar-actions">
+              <select id="bench-pick" class="sd-input mono" style="min-width:210px;" title="A saved bench" hidden></select>
+            </div>
+          </div>
+          <p id="bench-path" class="placeholder-note mono" style="margin:8px 0 0;" hidden></p>
+          <p id="bench-state" class="placeholder-note bench-state">reading&hellip;</p>
+          <div id="bench-body" hidden>
+            <div class="bench-main">
+              <div class="bench-wrap" id="bench-wrap">
+                <svg id="bench-svg" aria-label="Bench canvas"></svg>
+                <div class="bench-tools">
+                  <button type="button" class="btn" id="bench-zoom-out" title="Zoom out">&minus;</button>
+                  <button type="button" class="btn" id="bench-zoom-in" title="Zoom in">+</button>
+                  <button type="button" class="btn" id="bench-fit" title="Fit the bench">Fit</button>
+                </div>
+                <div class="bench-legend" aria-hidden="true">
+                  <span><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" class="bench-legend-line"/></svg>to this machine, every config</span>
+                  <span><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" class="bench-legend-line bench-legend-cfg"/></svg>this config</span>
+                  <span><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-glow"/><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-line"/></svg>probe enumerated now</span>
+                </div>
+                <div class="bench-hint">hover a part for its free connectors &middot; click to inspect &middot; drag empty space to pan &middot; wheel zooms</div>
+              </div>
+              <aside class="bench-inspector" id="bench-inspector" aria-label="Selection"></aside>
+            </div>
+            <div class="bench-config-row" id="bench-config-row" hidden>
+              <span class="bench-config-label">Config</span>
+              <div class="bench-configs" id="bench-configs" role="tablist" aria-label="Configs"></div>
+            </div>
+          </div>
+          <ul class="bench-notes" id="bench-notes" hidden></ul>
+        </div>
+
         <div class="card" style="margin-bottom:16px;">
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">DUT signals</div>
@@ -1141,5 +1182,6 @@
 <script src="/app.js"></script>
 <script src="/atlas.js"></script>
 <script src="/desk.js"></script>
+<script src="/bench.js"></script>
 </body>
 </html>

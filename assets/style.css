@@ -2132,3 +2132,187 @@ table.data-table {
 .prompt-text { font-size: 2rem; line-height: 1.3; font-weight: 600; margin: 12px 0 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .prompt-countdown { font-size: 1.25rem; font-variant-numeric: tabular-nums; }
 .prompt-countdown.prompt-urgent { color: var(--danger, #c0392b); font-weight: 700; }
+
+/* ---------------------------------------------------------------- Bench canvas
+ * A saved bench drawn as the hardware on the shelf (bench.js; the bench
+ * editor's phase 2). The --bn-* tokens are the shelf: board copper, a case,
+ * an instrument panel, a screen, an LCD, a knob and jacks, in both themes.
+ * A connector's kind picks its colour through `data-kind`; a kind with no
+ * rule here keeps the neutral one. */
+:root {
+  --bn-pcb: oklch(34% 0.07 160);
+  --bn-pcb-edge: oklch(46% 0.08 160);
+  --bn-pcb-trace: oklch(44% 0.09 160);
+  --bn-pcb-2: oklch(33% 0.07 255);
+  --bn-pcb-2-edge: oklch(46% 0.08 255);
+  --bn-silk: oklch(95% 0.01 160);
+  --bn-silk-dim: oklch(82% 0.03 160);
+  --bn-case: oklch(23% 0.008 250);
+  --bn-case-edge: oklch(38% 0.01 250);
+  --bn-on-case: oklch(93% 0.005 250);
+  --bn-instr: oklch(33% 0.008 250);
+  --bn-instr-edge: oklch(46% 0.01 250);
+  --bn-screen: oklch(13% 0.02 230);
+  --bn-screen-text: oklch(84% 0.1 200);
+  --bn-lcd: oklch(34% 0.07 130);
+  --bn-lcd-text: oklch(90% 0.13 130);
+  --bn-knob: oklch(18% 0.005 250);
+  --bn-knob-mark: oklch(92% 0 0);
+  --bn-jack-red: oklch(60% 0.2 25);
+  --bn-jack-black: oklch(16% 0 0);
+  --bn-shadow: oklch(0% 0 0 / 0.35);
+  --bn-grid-dot: oklch(30% 0.014 250);
+  --bn-swd: oklch(75% 0.09 300);
+}
+:root[data-theme="light"] {
+  --bn-pcb: oklch(46% 0.09 160);
+  --bn-pcb-edge: oklch(36% 0.08 160);
+  --bn-pcb-trace: oklch(58% 0.1 160);
+  --bn-pcb-2: oklch(46% 0.09 255);
+  --bn-pcb-2-edge: oklch(36% 0.08 255);
+  --bn-silk: oklch(98% 0.01 160);
+  --bn-silk-dim: oklch(90% 0.03 160);
+  --bn-case: oklch(30% 0.01 250);
+  --bn-case-edge: oklch(20% 0.01 250);
+  --bn-on-case: oklch(96% 0.005 250);
+  --bn-instr: oklch(91% 0.006 250);
+  --bn-instr-edge: oklch(70% 0.01 250);
+  --bn-screen: oklch(24% 0.02 230);
+  --bn-screen-text: oklch(86% 0.1 200);
+  --bn-lcd: oklch(82% 0.09 130);
+  --bn-lcd-text: oklch(30% 0.08 130);
+  --bn-knob: oklch(28% 0.005 250);
+  --bn-knob-mark: oklch(97% 0 0);
+  --bn-jack-red: oklch(56% 0.2 25);
+  --bn-jack-black: oklch(22% 0 0);
+  --bn-shadow: oklch(0% 0 0 / 0.13);
+  --bn-grid-dot: oklch(86% 0.008 250);
+  --bn-swd: oklch(50% 0.12 300);
+}
+.bench-card [hidden] { display: none !important; }
+.bench-state { margin: 8px 0 0; }
+.bench-main { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 12px; margin-top: 12px; }
+.bench-wrap { position: relative; height: 560px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-canvas); overflow: hidden; }
+#bench-svg { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+.bench-tools { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; }
+.bench-tools .btn { padding: 4px 10px; min-width: 32px; justify-content: center; font-family: var(--font-mono); }
+.bench-legend { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 3px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font: 11px var(--font-mono); color: var(--text-secondary); pointer-events: none; }
+.bench-legend span { display: flex; align-items: center; gap: 6px; }
+.bench-legend svg { flex: none; }
+.bench-legend-line { stroke: var(--text-secondary); stroke-width: 2.4; }
+.bench-legend-cfg { stroke-dasharray: 7 5; }
+.bench-legend-glow { stroke: var(--success); stroke-width: 9; opacity: 0.3; }
+.bench-hint { position: absolute; bottom: 8px; left: 12px; right: 12px; font: 11px var(--font-mono); color: var(--text-tertiary); pointer-events: none; }
+.bench-inspector { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg-surface-2); font-size: 12.5px; min-width: 0; align-self: start; display: flex; flex-direction: column; gap: 8px; }
+.bench-config-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.bench-config-label { font: 600 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
+.bench-configs { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.bench-cfg { border: 1px solid var(--border); background: var(--bg-surface); border-radius: 8px; padding: 5px 10px; color: var(--text-secondary); font: 12.5px var(--font-ui); cursor: pointer; }
+.bench-cfg:hover { border-color: var(--border-strong); }
+.bench-cfg[aria-selected="true"] { border-color: var(--accent); color: var(--text-primary); background: var(--bg-surface-2); }
+.bench-notes { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font: 12px var(--font-mono); color: var(--warning); }
+@media (max-width: 900px) {
+  .bench-main { grid-template-columns: minmax(0, 1fr); }
+  .bench-wrap { height: 62vh; }
+  .bench-legend { display: none; }
+}
+
+/* the inspector */
+.bn-ins-title { font-size: 14px; font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
+.bn-ins-meta { color: var(--text-tertiary); font: 11.5px var(--font-mono); overflow-wrap: anywhere; }
+.bn-muted { color: var(--text-tertiary); margin: 0; }
+.bn-kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; align-items: baseline; }
+.bn-kv dt { color: var(--text-tertiary); font-size: 12px; }
+.bn-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.bn-conns { width: 100%; border-collapse: collapse; font: 11.5px var(--font-mono); }
+.bn-conns td { padding: 3px 4px; border-top: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.bn-conns td:nth-child(2), .bn-conns td:last-child { color: var(--text-secondary); }
+.bn-k { color: var(--text-secondary); }
+.bn-k[data-kind="usb-c"] { color: var(--accent); }
+.bn-k[data-kind="usb-host"] { color: var(--info); }
+.bn-k[data-kind="banana"], .bn-k[data-kind="terminal"] { color: var(--warning); }
+.bn-k[data-kind="swd"], .bn-k[data-kind="pin-header"] { color: var(--bn-swd); }
+.bn-usb { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font-size: 12px; overflow-wrap: anywhere; }
+.bn-usb .mono, .bn-kv .mono { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-secondary); }
+.bn-enum { display: none; font: 600 10.5px var(--font-mono); color: var(--success); background: var(--success-soft-bg); border-radius: 99px; padding: 0 7px; }
+.bn-live .bn-enum, .bn-live > .bn-enum { display: inline; }
+.bn-missing-text { color: var(--danger) !important; }
+
+/* the drawing */
+#bench-svg .bn-grid-dot { fill: var(--bn-grid-dot); }
+#bench-svg [data-kind] { color: var(--text-secondary); }
+#bench-svg [data-kind="usb-c"] { color: var(--accent); }
+#bench-svg [data-kind="usb-host"] { color: var(--info); }
+#bench-svg [data-kind="banana"], #bench-svg [data-kind="terminal"] { color: var(--warning); }
+#bench-svg [data-kind="swd"], #bench-svg [data-kind="pin-header"] { color: var(--bn-swd); }
+#bench-svg [data-kind="radio"] { color: var(--text-tertiary); }
+.bn-cable { fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; pointer-events: none; }
+.bn-cable.bn-cfg { stroke-dasharray: 7 5; }
+.bn-cable[data-kind="radio"] { stroke-dasharray: 2 6; }
+.bn-cable.bn-sel { stroke-width: 4.2; }
+.bn-cable-hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; }
+.bn-glow { fill: none; stroke: var(--success); stroke-width: 10; stroke-linecap: round; opacity: 0; pointer-events: none; }
+.bn-livering { fill: none; stroke: var(--success); stroke-width: 2; opacity: 0; pointer-events: none; }
+.bn-glow.bn-live { opacity: 0.3; animation: bn-breathe 2.4s ease-in-out infinite; }
+.bn-livering.bn-live { opacity: 0.6; animation: bn-breathe 2.4s ease-in-out infinite; }
+@keyframes bn-breathe { 0%, 100% { opacity: 0.2; } 50% { opacity: 0.5; } }
+@media (prefers-reduced-motion: reduce) { .bn-glow.bn-live, .bn-livering.bn-live { animation: none; } }
+
+.bn-part { cursor: pointer; }
+.bn-body { stroke-width: 1.4; }
+.bn-part.bn-sel .bn-body { stroke: var(--accent); stroke-width: 2.4; }
+.bn-body-missing { stroke: var(--danger) !important; stroke-dasharray: 6 4; }
+.bn-shadow { fill: var(--bn-shadow); }
+.bn-pcb { fill: var(--bn-pcb); stroke: var(--bn-pcb-edge); }
+.bn-pcb-2 { fill: var(--bn-pcb-2); stroke: var(--bn-pcb-2-edge); }
+.bn-case { fill: var(--bn-case); stroke: var(--bn-case-edge); }
+.bn-bezel { fill: none; stroke: var(--bn-case-edge); stroke-width: 1; pointer-events: none; }
+.bn-instr { fill: var(--bn-instr); stroke: var(--bn-instr-edge); }
+.bn-screen { fill: var(--bn-screen); stroke: var(--bn-case-edge); }
+.bn-hole { fill: var(--bg-canvas); stroke: var(--bn-pcb-edge); stroke-width: 1; }
+.bn-trace { stroke: var(--bn-pcb-trace); stroke-width: 2; pointer-events: none; }
+.bn-perf { stroke: var(--bn-silk-dim); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.7; }
+.bn-pinrow rect, .bn-pins rect { fill: var(--bn-knob); }
+.bn-ic { fill: var(--bn-knob); }
+.bn-ic-pin { stroke: var(--bn-silk-dim); stroke-width: 1.2; }
+.bn-cap, .bn-coil { fill: var(--bn-knob); stroke: var(--bn-silk-dim); stroke-width: 1; }
+.bn-antenna-trace { fill: none; stroke: var(--bn-pcb-trace); stroke-width: 2; }
+.bn-led { fill: var(--success); }
+.bn-foot { fill: var(--bn-knob); }
+.bn-knob { fill: var(--bn-knob); stroke: var(--bn-instr-edge); stroke-width: 1.5; }
+.bn-knob-mark { stroke: var(--bn-knob-mark); stroke-width: 2; stroke-linecap: round; }
+.bn-key { fill: var(--bn-instr-edge); }
+.bn-lcd { fill: var(--bn-lcd); }
+.bn-lcd-text { fill: var(--bn-lcd-text); font: 600 10px var(--font-mono); letter-spacing: 0.08em; pointer-events: none; }
+
+.bn-name { fill: var(--text-primary); font: 600 13px var(--font-ui); pointer-events: none; }
+.bn-sub { fill: var(--text-tertiary); font: 11px var(--font-mono); pointer-events: none; }
+.bn-name.bn-silk { fill: var(--bn-silk); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em; }
+.bn-sub.bn-silk { fill: var(--bn-silk-dim); }
+.bn-name.bn-screen-text { fill: var(--bn-screen-text); }
+.bn-sub.bn-screen-text { fill: var(--bn-screen-text); opacity: 0.7; }
+.bn-name.bn-on-case { fill: var(--bn-on-case); }
+.bn-sub.bn-on-case { fill: var(--bn-on-case); opacity: 0.65; }
+.bn-role rect { fill: var(--bg-surface); stroke: var(--accent); stroke-width: 1; }
+.bn-role text { fill: var(--accent); font: 600 10px var(--font-mono); letter-spacing: 0.05em; pointer-events: none; }
+
+.bn-port { cursor: pointer; }
+.bn-hit { fill: transparent; }
+.bn-dot { fill: var(--bg-canvas); stroke: currentColor; stroke-width: 1.8; }
+g.bn-dot rect { fill: currentColor; stroke: none; }
+.bn-port.bn-wired .bn-dot { fill: currentColor; }
+.bn-port.bn-free .bn-dot { stroke-dasharray: 2.5 2.5; fill: var(--bg-surface-2); }
+.bn-port.bn-free g.bn-dot rect { fill: none; stroke: currentColor; stroke-width: 1; }
+.bn-port-missing .bn-dot { stroke: var(--danger) !important; fill: var(--danger-soft-bg) !important; stroke-dasharray: 2 2; }
+.bn-jack { fill: var(--bg-canvas); pointer-events: none; }
+.bn-jack-red { fill: var(--bn-jack-red); pointer-events: none; }
+.bn-jack-black { fill: var(--bn-jack-black); stroke: var(--bn-instr-edge); pointer-events: none; }
+.bn-screw { fill: var(--bn-silk-dim); stroke: var(--bn-knob); stroke-width: 0.8; pointer-events: none; }
+.bn-antenna { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; pointer-events: none; }
+.bn-clabel { fill: var(--text-secondary); font: 11px var(--font-mono); pointer-events: none; }
+.bn-clabel.bn-silk { fill: var(--bn-silk-dim); }
+.bn-clabel.bn-screen-text { fill: var(--bn-screen-text); opacity: 0.85; }
+.bn-clabel.bn-on-case { fill: var(--bn-on-case); opacity: 0.8; }
+.bn-clabel.bn-free { font-style: italic; opacity: 0.75; }
+.bn-clabel.bn-outside { fill: var(--text-secondary); opacity: 1; }
+.bn-missing-text.bn-clabel, .bn-sub.bn-missing-text { fill: var(--danger); }

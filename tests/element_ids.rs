@@ -48,6 +48,8 @@ const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_JS: &str = include_str!("../assets/app.js");
 /// The Atlas tab's map, served beside `app.js` and held to the same two rules.
 const ATLAS_JS: &str = include_str!("../assets/atlas.js");
+/// The Topology tab's bench canvas, a file of its own and held to the same two rules.
+const BENCH_JS: &str = include_str!("../assets/bench.js");
 
 /// Every `id="..."` attribute value in `src`, in source order — used
 /// against both `index.html` (real HTML) and `app.js` (the markup it
@@ -112,6 +114,7 @@ fn no_element_id_is_declared_twice() {
         .into_iter()
         .chain(declared_ids(APP_JS))
         .chain(declared_ids(ATLAS_JS))
+        .chain(declared_ids(BENCH_JS))
     {
         *counts.entry(id).or_insert(0) += 1;
     }
@@ -143,6 +146,7 @@ fn every_looked_up_element_id_is_declared_somewhere() {
         .into_iter()
         .chain(declared_ids(APP_JS))
         .chain(declared_ids(ATLAS_JS))
+        .chain(declared_ids(BENCH_JS))
         .collect();
 
     let mut lookups: Vec<(String, &'static str)> = Vec::new();
@@ -151,8 +155,10 @@ fn every_looked_up_element_id_is_declared_somewhere() {
             lookups.push((id, fn_name));
         }
     }
-    for id in literal_calls(ATLAS_JS, "getElementById") {
-        lookups.push((id, "getElementById"));
+    for js in [ATLAS_JS, BENCH_JS] {
+        for id in literal_calls(js, "getElementById") {
+            lookups.push((id, "getElementById"));
+        }
     }
     // Canary, same reasoning as above: app.js has well over 100 literal
     // lookup call sites today across the four call forms.

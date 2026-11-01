@@ -207,3 +207,24 @@ directories: the page proxies to the real desk and writes the recents list, and
 a click on "Open project" there posts to both.
 
 `drive_prompt.py` (ui/101) renders the operator-prompt modal (decision 69): `stub_core.py` serves a host study with a `pending_prompt` once `POST /_stub/prompt/start` is called (a control surface on the stub's own port, no token). Needs `EMBARCH_STUB_PORT` set to the stub's port (default 4901) as well as the two address variables.
+
+`drive_bench.py` drives the Topology tab's bench canvas (`assets/bench.js`, the
+bench editor's read-only phase). The bench routes are served from
+`tests/fixtures/bench/fixture.json` — one answer per `GET /api/bench/*`, keyed
+by route — through a proxy the script puts in front of the real binary;
+everything else, `/events` included, passes through, so the live glow reads the
+UI's own poll of the script's stub Core. It checks that every look is drawn
+(an unknown look as a board, a missing template as a board that says so),
+that hovering a part reveals its free connectors without moving a wired one,
+that this machine has one port per cable, that the config tabs switch the
+dashed cables, that a snapshot lights and puts out a glow without rebuilding
+the canvas or dropping the selection, pan, zoom and fit, and that a server
+answering `404` on the bench routes gets one quiet line. It uses four ports:
+`EMBARCH_UI_PORT` and the three after it (desk, proxy, stub Core);
+`EMBARCH_BENCH_SHOTS=<dir>` also saves the card in each theme.
+
+```sh
+cargo build --release
+geckodriver --port 4444 &
+python3 tests/browser/drive_bench.py
+```

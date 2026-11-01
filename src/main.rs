@@ -82,6 +82,8 @@ const APP_JS: &str = include_str!("../assets/app.js");
 /// five tabs, and the map is the one view that is mostly drawing code.
 const ATLAS_JS: &str = include_str!("../assets/atlas.js");
 const DESK_JS: &str = include_str!("../assets/desk.js");
+/// The Topology tab's bench canvas, a file of its own like the Atlas map.
+const BENCH_JS: &str = include_str!("../assets/bench.js");
 /// The EmbArch mark, served as the browser tab icon. 64 px: a tab renders it
 /// at 16 CSS px, which is 32 physical on a 2x display, and 64 covers 4x. The
 /// GIMP master and the full-size export live beside it in `assets/brand/`.
@@ -274,6 +276,7 @@ fn app(state: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/atlas.js", get(atlas_js))
         .route("/desk.js", get(desk_js))
+        .route("/bench.js", get(bench_js))
         .route("/api/desk-events", get(desk::events))
         .route("/api/desk/{*rest}", axum::routing::any(desk::proxy))
         .route("/favicon.png", get(favicon_png))
@@ -573,6 +576,10 @@ async fn desk_js(headers: header::HeaderMap) -> Response {
 
 async fn atlas_js(headers: header::HeaderMap) -> Response {
     revalidating_asset(&headers, "text/javascript; charset=utf-8", ATLAS_JS.as_bytes())
+}
+
+async fn bench_js(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/javascript; charset=utf-8", BENCH_JS.as_bytes())
 }
 
 async fn favicon_svg() -> impl IntoResponse {

@@ -862,6 +862,9 @@
     latestSnapshot = snapshot;
     renderStatusChip(snapshot);
     renderTopology(snapshot);
+    // The bench canvas (bench.js) is a file of its own and glows from the
+    // same snapshot; it hears it here rather than opening a second stream.
+    document.dispatchEvent(new CustomEvent("embarch:snapshot", { detail: snapshot }));
   }
 
   // Suite-wide SSE convergence (decision 6): one
