@@ -1,0 +1,22 @@
+# A stand-alone debug probe. Generic: a USB link to this machine carrying the
+# probe, and an SWD lead to the target. No model is described, so no other
+# connector is claimed.
+id = "debug-probe"
+label = "Debug probe"
+subtitle = "SWD probe"
+category = "probe"
+look = "pod"
+width = 160
+
+[[connectors]]
+id = "usb"
+label = "USB"
+kind = "usb-host"
+side = "left"
+functions = [{ function = "probe" }]
+
+[[connectors]]
+id = "swd"
+label = "SWD"
+kind = "swd"
+side = "right"

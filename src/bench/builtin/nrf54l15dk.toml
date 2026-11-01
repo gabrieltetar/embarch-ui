@@ -1,0 +1,25 @@
+# Nordic nRF54L15 DK, the BLE dev bench's board. Its debugger USB carries the
+# probe and two VCOMs; `zephyr,console` is VCOM1 at USB interface 2
+# (embarch-core interfaces/topology.md, the `/dev-bench/link` row).
+#
+# Only the radio is listed besides the USB: this suite's docs name no other
+# connector on the DK that a bench cables.
+id = "nrf54l15dk"
+label = "nRF54L15 DK"
+subtitle = "Nordic DK"
+category = "board"
+look = "devkit"
+width = 190
+
+[[connectors]]
+id = "usb"
+label = "Debugger USB"
+kind = "usb-host"
+side = "left"
+functions = [{ function = "probe" }, { function = "vcom", interface = 2 }]
+
+[[connectors]]
+id = "radio"
+label = "Radio"
+kind = "radio"
+side = "right"

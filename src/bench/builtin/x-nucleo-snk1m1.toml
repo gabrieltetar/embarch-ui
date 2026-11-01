@@ -1,0 +1,32 @@
+# X-NUCLEO-SNK1M1, the sink PD shield (embarch-dev-bench pd-bench/README.md):
+# a USB-C port and a VBUS output an electronic load goes on.
+#
+# The README does not name the output's physical type, so it carries the
+# generic two-wire kind `terminal`. Correct it from the shield's manual if it
+# differs.
+id = "x-nucleo-snk1m1"
+label = "X-NUCLEO-SNK1M1"
+subtitle = "PD shield, sink"
+category = "shield"
+look = "shield"
+width = 200
+
+[[connectors]]
+id = "usb-c"
+label = "USB-C"
+kind = "usb-c"
+side = "right"
+power = "sink"
+
+[[connectors]]
+id = "out"
+label = "VBUS out"
+kind = "terminal"
+side = "right"
+power = "out"
+
+[[connectors]]
+id = "stack"
+label = "Nucleo headers"
+kind = "stack-plug"
+side = "top"

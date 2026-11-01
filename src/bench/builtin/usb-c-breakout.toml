@@ -1,0 +1,23 @@
+# A USB-C breakout bringing VBUS and GND out to banana jacks: one bus between
+# its two sides. Generic: no model is described.
+id = "usb-c-breakout"
+label = "USB-C breakout"
+subtitle = "USB-C to banana"
+category = "adapter"
+look = "breakout"
+width = 170
+passthrough = [["usb-c", "banana"]]
+
+[[connectors]]
+id = "usb-c"
+label = "USB-C"
+kind = "usb-c"
+side = "left"
+power = "pass"
+
+[[connectors]]
+id = "banana"
+label = "VBUS / GND"
+kind = "banana"
+side = "right"
+power = "pass"

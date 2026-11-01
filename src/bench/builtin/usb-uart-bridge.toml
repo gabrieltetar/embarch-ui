@@ -1,0 +1,21 @@
+# A USB-UART bridge (an FTDI or CH340 cable, a bridge board). Generic: a USB
+# link to this machine carrying one VCOM, and the UART pins.
+id = "usb-uart-bridge"
+label = "USB-UART bridge"
+subtitle = "a VCOM on pins"
+category = "adapter"
+look = "pod"
+width = 160
+
+[[connectors]]
+id = "usb"
+label = "USB"
+kind = "usb-host"
+side = "left"
+functions = [{ function = "vcom" }]
+
+[[connectors]]
+id = "pins"
+label = "UART pins"
+kind = "pin-header"
+side = "right"

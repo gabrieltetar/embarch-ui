@@ -1,0 +1,25 @@
+# NUCLEO-G0B1RE, the PD bench's base board (embarch-dev-bench pd-bench/README.md,
+# "Hardware"): powered from the ST-LINK USB, which also carries the shell on the
+# ST-LINK VCOM (USART2). The README states no USB interface for that VCOM, so
+# none is claimed here; the binding on a bench names it.
+id = "nucleo-g0b1re"
+label = "NUCLEO-G0B1RE"
+subtitle = "Nucleo-64"
+category = "board"
+look = "nucleo64"
+width = 200
+
+[[connectors]]
+id = "stlink"
+label = "ST-LINK USB"
+kind = "usb-host"
+side = "left"
+functions = [{ function = "probe" }, { function = "vcom" }]
+
+# Where an X-NUCLEO shield sits (the README's shields plug onto the Nucleo-64
+# headers). Never cabled: a shield joins through `mounted_on`.
+[[connectors]]
+id = "stack"
+label = "Shield headers"
+kind = "stack-socket"
+side = "top"

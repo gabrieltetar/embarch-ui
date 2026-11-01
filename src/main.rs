@@ -11,6 +11,7 @@
 //! for the full architecture.
 
 mod atlas;
+mod bench;
 mod config;
 mod desk;
 mod firmware_build;
@@ -318,6 +319,22 @@ fn app(state: AppState) -> Router {
             "/api/topology/profiles/{slug}/apply",
             post(topology::api_apply_profile),
         )
+        // ---- The bench editor: templates, benches, checks ---------------
+        //
+        // Files and pure functions only (`bench`): the vocabulary and the
+        // built-in parts come from the binary, the repo's parts and benches
+        // from `embarch/parts/` and `embarch/topologies/`, and no route here
+        // calls Core. A bench goes live through the apply route above.
+        .route("/api/bench/vocabulary", get(bench::routes::api_vocabulary))
+        .route("/api/bench/parts", get(bench::routes::api_parts))
+        .route("/api/bench/parts/{id}", axum::routing::put(bench::routes::api_put_part))
+        .route("/api/bench/benches", get(bench::routes::api_benches))
+        .route(
+            "/api/bench/benches/{slug}",
+            get(bench::routes::api_bench).put(bench::routes::api_put_bench),
+        )
+        .route("/api/bench/check", post(bench::routes::api_check))
+        .route("/api/bench/candidates", post(bench::routes::api_candidates))
         // ---- Live Study -------------------------------------------------
         .route("/api/live/events", get(live_study::api_live_events))
         .route("/api/live/run", post(live_study::api_live_run))
@@ -1119,6 +1136,15 @@ mod tests {
     }
 
     async fn serve_app_over(core_url: &str) -> String {
+        serve_app_in(core_url, None).await
+    }
+
+    /// The real router with `repo` open as the project.
+    async fn serve_app_with_repo(repo: &std::path::Path) -> String {
+        serve_app_in("http://127.0.0.1:1", Some(repo.to_path_buf())).await
+    }
+
+    async fn serve_app_in(core_url: &str, repo: Option<std::path::PathBuf>) -> String {
         let core_config: embarch_core_client::CoreConfig =
             toml::from_str(&format!("base_url = \"{core_url}\"\ntoken = \"x\"\n")).unwrap();
         let core = Arc::new(CoreClient::new(&core_config).unwrap());
@@ -1129,7 +1155,10 @@ mod tests {
             snapshot_rx,
             core: core.clone(),
             poke: Arc::new(Notify::new()),
-            study_designer: StudyDesigner::new(None, core.clone()),
+            study_designer: StudyDesigner::new(
+                repo.map(|firmware_repo_path| config::StudyDesignerConfig { firmware_repo_path }),
+                core.clone(),
+            ),
             logs_rx,
             api_logs_rx,
             trace_cache: Arc::new(tokio::sync::Mutex::new(None)),
@@ -1338,5 +1367,148 @@ mod tests {
             .unwrap();
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
         assert_eq!(seen.lock().unwrap().len(), before);
+    }
+
+    fn bench_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ebm-routes-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The bench editor's routes on a repo with nothing in it: the built-ins
+    /// and the vocabulary are the binary's, and there are no benches.
+    #[tokio::test]
+    async fn the_bench_routes_answer_an_empty_repo() {
+        let repo = bench_repo("empty");
+        let base = serve_app_with_repo(&repo).await;
+        let http = reqwest::Client::new();
+        let get = |path: &str| http.get(format!("{base}{path}")).send();
+        let vocab: serde_json::Value = get("/api/bench/vocabulary").await.unwrap().json().await.unwrap();
+        assert_eq!(vocab["hub_kind"], "usb-host");
+        let parts: serde_json::Value = get("/api/bench/parts").await.unwrap().json().await.unwrap();
+        assert_eq!(parts["parts"].as_array().unwrap().len(), 12);
+        assert_eq!(parts["errors"], serde_json::json!([]));
+        let benches: serde_json::Value = get("/api/bench/benches").await.unwrap().json().await.unwrap();
+        assert_eq!(benches, serde_json::json!({ "benches": [], "errors": [] }));
+        let missing = get("/api/bench/benches/nope").await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A file `POST /api/topology/profiles` wrote loads as parts, is not
+    /// rewritten by being read, saves in the new shape, and still lists and
+    /// refuses an old-style overwrite through the topology routes.
+    #[tokio::test]
+    async fn a_legacy_bench_loads_as_parts_and_saves_in_the_new_shape() {
+        let repo = bench_repo("legacy");
+        let dir = repo.join("embarch").join("topologies");
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = "name = \"BLE bench\"\nsaved_at_utc_ms = 1755000000000\n\n[dut]\nboard = \"wearable-rev6\"\nchip = \"nRF54L15\"\nprobe_serial = \"001057729826\"\n\n[dev-bench]\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\nchip = \"nRF54L15\"\nprobe_serial = \"001050288460\"\nlink_port_serial = \"D607104\"\nlink_port_interface = 2\n";
+        std::fs::write(dir.join("ble-bench.toml"), legacy).unwrap();
+        std::fs::write(dir.join("broken.toml"), "name = \n").unwrap();
+        let base = serve_app_with_repo(&repo).await;
+        let http = reqwest::Client::new();
+
+        let list: serde_json::Value = http.get(format!("{base}/api/bench/benches")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(list["benches"], serde_json::json!([{ "slug": "ble-bench", "name": "BLE bench", "legacy": true }]));
+        assert_eq!(list["errors"][0]["file"], "embarch/topologies/broken.toml");
+
+        let bench: serde_json::Value = http.get(format!("{base}/api/bench/benches/ble-bench")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(bench["legacy"], true);
+        assert_eq!(bench["parts"].as_array().unwrap().len(), 3);
+        assert_eq!(bench["cables"][1], serde_json::json!({ "from": "dut.usb", "to": "host" }));
+        assert_eq!(std::fs::read_to_string(dir.join("ble-bench.toml")).unwrap(), legacy, "reading never rewrites");
+
+        let check: serde_json::Value = http
+            .post(format!("{base}/api/bench/check"))
+            .json(&serde_json::json!({ "bench": bench, "config": null }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(check, serde_json::json!({ "findings": [] }));
+        let cands: serde_json::Value = http
+            .post(format!("{base}/api/bench/candidates"))
+            .json(&serde_json::json!({ "bench": bench, "config": null, "from": "host" }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(cands["verdicts"]["dut.usb"]["fit"], "refused");
+        assert_eq!(cands["verdicts"]["dev-bench.radio"], serde_json::json!({ "fit": "hidden" }));
+        let bad = http
+            .post(format!("{base}/api/bench/check"))
+            .json(&serde_json::json!({ "bench": bench, "config": "nope" }))
+            .send().await.unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        let saved = http.put(format!("{base}/api/bench/benches/ble-bench")).json(&bench).send().await.unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved: serde_json::Value = saved.json().await.unwrap();
+        assert_eq!(saved["legacy"], false);
+        assert_eq!(saved["parts"], bench["parts"]);
+        let text = std::fs::read_to_string(dir.join("ble-bench.toml")).unwrap();
+        assert!(text.contains("[[parts]]") && !text.contains("[dut]"), "{text}");
+
+        // The topology routes read the same file, roles derived from the parts.
+        let profiles: serde_json::Value = http.get(format!("{base}/api/topology/profiles")).send().await.unwrap().json().await.unwrap();
+        let row = profiles["profiles"].as_array().unwrap().iter().find(|p| p["slug"] == "ble-bench").unwrap().clone();
+        assert_eq!(row["dev_bench"]["link_port_interface"], 2);
+        assert_eq!(row["dut"]["probe_serial"], "001057729826");
+        let overwrite = http
+            .post(format!("{base}/api/topology/profiles"))
+            .json(&serde_json::json!({ "name": "BLE bench" }))
+            .send().await.unwrap();
+        assert_eq!(overwrite.status(), StatusCode::CONFLICT);
+
+        // Renaming is refused; a new name at a free path creates a new bench.
+        let mut renamed = bench.clone();
+        renamed["name"] = serde_json::json!("Other bench");
+        let refused = http.put(format!("{base}/api/bench/benches/ble-bench")).json(&renamed).send().await.unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let created: serde_json::Value = http.put(format!("{base}/api/bench/benches/new")).json(&renamed).send().await.unwrap().json().await.unwrap();
+        assert_eq!(created["slug"], "other-bench");
+        assert!(dir.join("other-bench.toml").exists());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// `PUT /api/bench/parts/{id}` writes a repo template, refuses a
+    /// built-in's id naming it, and serves the result.
+    #[tokio::test]
+    async fn a_repo_part_is_written_and_a_builtin_id_is_refused() {
+        let repo = bench_repo("parts");
+        let base = serve_app_with_repo(&repo).await;
+        let http = reqwest::Client::new();
+        let part = serde_json::json!({
+            "id": "pd-charger", "label": "PD charger", "subtitle": null, "category": "board", "look": "power-board",
+            "source": "repo", "hub": false, "width": 190, "min_height": null, "rows_top": null,
+            "connectors": [{ "id": "usb-c-1", "label": "USB-C 1", "kind": "usb-c", "side": "left", "power": "source", "max_cables": 1, "functions": [] }],
+            "passthrough": []
+        });
+        let ok = http.put(format!("{base}/api/bench/parts/pd-charger")).json(&part).send().await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body: serde_json::Value = ok.json().await.unwrap();
+        let served = body["parts"].as_array().unwrap().iter().find(|p| p["id"] == "pd-charger").unwrap().clone();
+        assert_eq!(served["source"], "repo");
+        assert!(repo.join("embarch/parts/pd-charger.toml").exists());
+        let mut clash = part.clone();
+        clash["id"] = serde_json::json!("cy4500");
+        let refused = http.put(format!("{base}/api/bench/parts/cy4500")).json(&clash).send().await.unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert!(refused.text().await.unwrap().contains("built-in part `cy4500` (CY4500)"));
+        let mismatch = http.put(format!("{base}/api/bench/parts/other")).json(&part).send().await.unwrap();
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Without a project the built-ins still serve; the repo's routes say how
+    /// to open one.
+    #[tokio::test]
+    async fn without_a_repo_the_builtins_serve_and_benches_are_refused() {
+        let base = serve_app().await;
+        let http = reqwest::Client::new();
+        let parts: serde_json::Value = http.get(format!("{base}/api/bench/parts")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(parts["parts"].as_array().unwrap().len(), 12);
+        let benches = http.get(format!("{base}/api/bench/benches")).send().await.unwrap();
+        assert_eq!(benches.status(), StatusCode::CONFLICT);
+        assert!(benches.text().await.unwrap().contains("Project"));
     }
 }

@@ -1,0 +1,33 @@
+# A CY4500-class PD analyzer, generic by the owner's choice (bench editor
+# proposal, "Files"): two USB-C in line, one bus between them, and a USB link
+# to this machine that declares nothing. No colour and no plug or receptacle
+# claim: those differ between the CY4500 and the CY4500-EPR.
+id = "cy4500"
+label = "CY4500"
+subtitle = "PD analyzer, inline"
+category = "analyzer"
+look = "analyzer"
+width = 184
+min_height = 132
+rows_top = 72
+passthrough = [["in", "out"]]
+
+[[connectors]]
+id = "in"
+label = "USB-C"
+kind = "usb-c"
+side = "left"
+power = "pass"
+
+[[connectors]]
+id = "usb"
+label = "USB"
+kind = "usb-host"
+side = "top"
+
+[[connectors]]
+id = "out"
+label = "USB-C"
+kind = "usb-c"
+side = "right"
+power = "pass"

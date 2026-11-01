@@ -1,0 +1,15 @@
+# A bench power supply. Generic: one banana output pair. No remote link is
+# claimed; a supply this suite drives over SCPI would be its own template.
+id = "bench-supply"
+label = "Bench supply"
+subtitle = "current-limited"
+category = "instrument"
+look = "instrument"
+width = 170
+
+[[connectors]]
+id = "out"
+label = "+/- out"
+kind = "banana"
+side = "right"
+power = "supply"

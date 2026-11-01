@@ -1,0 +1,34 @@
+# An electronic load driven over SCPI on a USB serial line. Its line facts are
+# the defaults the first instrument taught (embarch-topology decision 49, the
+# ET54-series preset in embarch-api decision 97): 9600 baud, LF out because the
+# load ignores CR alone, CR LF back, 200 ms between commands, and a set answered
+# `Rexecu success` or `Rexecu err`. Defaults only: a bench's declaration may
+# override each one.
+id = "scpi-load"
+label = "Electronic load"
+subtitle = "SCPI over USB serial"
+category = "instrument"
+look = "instrument"
+width = 170
+
+[[connectors]]
+id = "in"
+label = "+/- in"
+kind = "banana"
+side = "left"
+power = "load"
+
+[[connectors]]
+id = "usb"
+label = "USB"
+kind = "usb-host"
+side = "left"
+
+[[connectors.functions]]
+function = "scpi"
+baud = 9600
+write_terminator = "\n"
+read_terminator = "\r\n"
+min_interval_ms = 200
+ack_ok = "Rexecu success"
+ack_err = "Rexecu err"

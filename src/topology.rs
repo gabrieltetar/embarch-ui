@@ -138,7 +138,7 @@ fn boards_path(repo: &Path) -> PathBuf {
     repo.join("embarch").join("boards.toml")
 }
 
-fn topologies_dir(repo: &Path) -> PathBuf {
+pub(crate) fn topologies_dir(repo: &Path) -> PathBuf {
     repo.join("embarch").join("topologies")
 }
 
@@ -486,7 +486,7 @@ pub struct Profile {
 /// A profile file name. Lowercase, and every run of anything else collapsed
 /// to one hyphen, so a name a human typed cannot reach outside
 /// `embarch/topologies/` — the file name is derived, never taken from input.
-fn slugify(name: &str) -> String {
+pub(crate) fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut pending_dash = false;
     for ch in name.trim().chars() {
@@ -503,16 +503,22 @@ fn slugify(name: &str) -> String {
     out
 }
 
-fn profile_path(repo: &Path, slug: &str) -> PathBuf {
+pub(crate) fn profile_path(repo: &Path, slug: &str) -> PathBuf {
     topologies_dir(repo).join(format!("{slug}.toml"))
 }
 
+/// A saved bench as a profile. **Both shapes load**: a file the bench editor
+/// wrote has `[[parts]]` and no `dut`/`dev-bench` keys, and its role bindings
+/// are derived from the parts holding the roles (`bench::files`), so listing
+/// and applying keep working on the same files.
 fn load_profile(repo: &Path, slug: &str) -> anyhow::Result<Profile> {
-    let path = profile_path(repo, slug);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-    toml::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))
+    let file = crate::bench::files::read_file(repo, slug).map_err(|e| match e {
+        crate::bench::files::LoadError::Missing => {
+            anyhow::anyhow!("failed to read {}: no such file", profile_path(repo, slug).display())
+        }
+        other => anyhow::anyhow!("{other}"),
+    })?;
+    Ok(crate::bench::files::profile_from_file(file))
 }
 
 /// Every profile in the project, newest first. **A file that will not parse
@@ -556,7 +562,7 @@ fn list_profiles(repo: &Path) -> Vec<serde_json::Value> {
     rows.into_iter().map(|(_, v)| v).collect()
 }
 
-fn now_utc_ms() -> u64 {
+pub(crate) fn now_utc_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1557,6 +1563,23 @@ pub async fn api_save_profile(
         signals: snapshot.signals.clone(),
     };
 
+    // **A bench the editor saved is not overwritten from here.** This save
+    // writes the old shape from the snapshot, which knows nothing of parts,
+    // cables or configs; writing it over a file that has them would drop
+    // every one silently.
+    if let Ok(existing) = crate::bench::files::read_file(&repo, &slug) {
+        if existing.parts.is_some() {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "the saved bench '{slug}' has parts and cables, which saving from the role \
+                     snapshot would drop — save it under another name"
+                ),
+            )
+                .into_response();
+        }
+    }
+
     let dir = topologies_dir(&repo);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return (StatusCode::BAD_REQUEST, format!("failed to create {}: {e}", dir.display()))
@@ -1691,19 +1714,41 @@ pub async fn api_apply_profile(
         // (decision 45), so a loaded bench describes itself immediately;
         // only the probe binding below, which is an identity claim, waits
         // for a human.
-        if !binding.board.is_empty() && !binding.chip.is_empty() {
-            match state.core.set_role_board(role, &binding.board, &binding.chip).await {
-                Ok(_) => applied.push(json!({
-                    "what": format!("{role} board"),
-                    "ok": true,
-                    "detail": format!("{} ({})", binding.board, binding.chip),
-                })),
-                Err(e) => applied.push(json!({
-                    "what": format!("{role} board"),
-                    "ok": false,
-                    "detail": format!("{e:#}"),
-                })),
+        //
+        // **A bench the editor saved records no chip** — a part carries none,
+        // because a chip is looked up from the board type, never typed
+        // (decision 48) — so it is looked up here the way the role picker
+        // does, and a board nothing can answer for is reported, not skipped.
+        let chip = if binding.chip.is_empty() && !binding.board.is_empty() {
+            role_board_chip(&state, role, &binding.board).await
+        } else {
+            Some(binding.chip.clone())
+        };
+        match chip {
+            Some(chip) if !binding.board.is_empty() && !chip.is_empty() => {
+                match state.core.set_role_board(role, &binding.board, &chip).await {
+                    Ok(_) => applied.push(json!({
+                        "what": format!("{role} board"),
+                        "ok": true,
+                        "detail": format!("{} ({})", binding.board, chip),
+                    })),
+                    Err(e) => applied.push(json!({
+                        "what": format!("{role} board"),
+                        "ok": false,
+                        "detail": format!("{e:#}"),
+                    })),
+                }
             }
+            None => applied.push(json!({
+                "what": format!("{role} board"),
+                "ok": false,
+                "detail": format!(
+                    "'{}' has no chip: embarch/boards.toml states none and this repo's target scan \
+                     reports no one SoC for it — set the chip on its row in Board types",
+                    binding.board
+                ),
+            })),
+            Some(_) => {}
         }
         if binding.probe_serial.is_empty() {
             continue;
@@ -1744,6 +1789,18 @@ pub async fn api_apply_profile(
         "proposals": proposals,
     }))
     .into_response()
+}
+
+/// The chip a role's board type attaches as, for a binding that records
+/// none: a supported dev-bench board's own, else the catalog's or the scan's
+/// ([`chip_for_board`]).
+async fn role_board_chip(state: &AppState, role: &str, board: &str) -> Option<String> {
+    if role == "dev-bench" {
+        if let Some((_, _, chip)) = SUPPORTED_DEV_BENCH_BOARDS.iter().find(|(b, _, _)| *b == board) {
+            return Some((*chip).to_string());
+        }
+    }
+    chip_for_board(state, board).await
 }
 
 #[cfg(test)]

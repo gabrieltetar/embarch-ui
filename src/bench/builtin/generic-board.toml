@@ -1,0 +1,16 @@
+# The stand-in for a DUT, or any board a repo has not described: a USB link to
+# this machine carrying the probe and a VCOM, and nothing else claimed. A repo
+# describes its own board in embarch/parts/<id>.toml.
+id = "generic-board"
+label = "Board"
+subtitle = "not described by this repo"
+category = "board"
+look = "board"
+width = 180
+
+[[connectors]]
+id = "usb"
+label = "USB"
+kind = "usb-host"
+side = "left"
+functions = [{ function = "probe" }, { function = "vcom" }]

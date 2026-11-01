@@ -1,0 +1,12 @@
+# The computer embarch-core runs on. A hub: it has no ports of its own, and
+# every cable that reaches it is a port named by what it carries, because Core
+# finds a device by its USB serial and interface, never by the physical port
+# (bench editor proposal, "The model").
+id = "this-machine"
+label = "This machine"
+subtitle = "embarch-core host"
+category = "computer"
+look = "monitor"
+hub = true
+width = 190
+min_height = 132

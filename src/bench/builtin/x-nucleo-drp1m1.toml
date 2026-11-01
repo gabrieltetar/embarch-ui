@@ -1,0 +1,41 @@
+# X-NUCLEO-DRP1M1, the dual-role PD shield (embarch-dev-bench pd-bench/README.md,
+# "X-NUCLEO-DRP1M1"; embarch-dev-bench decision 49): a USB-C port, a provider
+# path from CN3 (a 5 V bench supply) and a consumer path to CN2 (the electronic
+# load). It sources only what CN3 gives it.
+#
+# The README gives CN2 and CN3 as two-pin power connectors (pin 1 supply, pin 2
+# GND, UM2891 Fig. 9) but not their physical type, so they carry the generic
+# two-wire kind `terminal`. Correct the kind from UM2891 if it differs.
+id = "x-nucleo-drp1m1"
+label = "X-NUCLEO-DRP1M1"
+subtitle = "PD shield, dual role"
+category = "shield"
+look = "shield"
+width = 200
+
+[[connectors]]
+id = "usb-c"
+label = "USB-C"
+kind = "usb-c"
+side = "right"
+power = "drp"
+
+[[connectors]]
+id = "cn2"
+label = "CN2 consumer out"
+kind = "terminal"
+side = "right"
+power = "out"
+
+[[connectors]]
+id = "cn3"
+label = "CN3 provider in"
+kind = "terminal"
+side = "right"
+power = "in"
+
+[[connectors]]
+id = "stack"
+label = "Nucleo headers"
+kind = "stack-plug"
+side = "top"
