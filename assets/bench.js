@@ -68,7 +68,7 @@
   var sel = null;            // { kind: "part" | "cable", id }
   var hoverPart = null;
   var verdicts = { roles: dict(), boards: dict() };
-  var snap = { seen: false, known: false, probes: dict(), ports: [] };
+  var snap = { seen: false, known: false, portsKnown: false, portsError: null, probes: dict(), ports: [] };
   var view = { x: 0, y: 0, k: 1 };
   var fitted = false;
   var pan = null;
@@ -144,14 +144,22 @@
   }
 
   // Enumerated now, by the latest snapshot: a probe among its probes, anything
-  // else among its serial ports by serial (and interface, when the binding
-  // gives one). Nothing is inferred from anything else.
+  // else among its serial ports — by serial (and interface, when the binding
+  // gives one), or for a bridge with no serial by vid and pid, and then only
+  // when exactly one port answers: two is ambiguous, so no glow. Ports are
+  // known only when Core listed them; nothing is inferred from anything else.
   function bindingLive(fn, b, devSerial) {
     if (!snap.known) return false;
+    var iface = bindingInterface(b);
+    if (fn !== "probe" && !snap.portsKnown) return false;
+    if (fn !== "probe" && b && typeof b === "object" && b.serial == null && b.vid != null && b.pid != null) {
+      return snap.ports.filter(function (pt) {
+        return pt && pt.vendor_id === b.vid && pt.product_id === b.pid && (iface == null || pt.interface === iface);
+      }).length === 1;
+    }
     var serial = bindingSerial(b, devSerial);
     if (!serial) return false;
     if (fn === "probe") return !!snap.probes[serial];
-    var iface = bindingInterface(b);
     return snap.ports.some(function (pt) {
       return pt && String(pt.serial_number) === serial && (iface == null || pt.interface === iface);
     });
@@ -684,7 +692,10 @@
     var v = verdictOf(p);
     if (!v) return "";
     var text = cut(v.text, (g.w + 80) / 6.4);
-    var w = text.length * 6.4 + 16, x = g.x + g.w / 2 - w / 2, y = g.y + g.h + 6 + (deco.below || 0);
+    var w = text.length * 6.4 + 16, x = g.x + g.w / 2 - w / 2;
+    // Under the part, unless it sits on a base: then above it, so the pill
+    // never covers the base's title band.
+    var y = mountedBase(p) ? g.y - 24 : g.y + g.h + 6 + (deco.below || 0);
     var status = /^[a-z]+$/.test(String(v.status)) ? v.status : "other";
     return '<g class="bn-verdict bn-v-' + status + '" data-verdict="' + esc(p.key) + '">' + rect("", x, y, w, 18, 9) +
       '<text x="' + f(g.x + g.w / 2) + '" y="' + f(y + 12.5) + '" text-anchor="middle">' + esc(text) + "</text></g>";
@@ -793,16 +804,23 @@
     insEl.querySelectorAll("[data-live-binding]").forEach(function (el) {
       el.classList.toggle("bn-live", !!sets.bindings[el.getAttribute("data-live-binding")]);
     });
-    // Core not answering is not "nothing plugged in": say so, glows off.
-    liveEl.hidden = !snap.seen || snap.known || !model;
-    liveEl.textContent = "Core is not answering: what is plugged in is unknown";
+    // Core not answering, or not listing its serial ports, is not "nothing
+    // plugged in": say so, and those glows stay off.
+    var line = !snap.seen || !model ? ""
+      : !snap.known ? "Core is not answering: what is plugged in is unknown"
+      : !snap.portsKnown ? "Core did not list its serial ports: which are plugged in is unknown" : "";
+    liveEl.hidden = !line;
+    liveEl.textContent = line;
+    liveEl.title = line && snap.known && snap.portsError ? String(snap.portsError) : "";
   }
 
   document.addEventListener("embarch:snapshot", function (ev) {
     var s = ev.detail || {};
     var probes = dict();
     (s.probes || []).forEach(function (p) { if (p && p.serial_number) probes[String(p.serial_number)] = true; });
-    snap = { seen: true, known: !!s.core_reachable, probes: probes, ports: s.serial_ports || [] };
+    var known = !!s.core_reachable;
+    snap = { seen: true, known: known, portsKnown: known && !s.serial_ports_error, portsError: s.serial_ports_error || null,
+             probes: probes, ports: s.serial_ports || [] };
     applyLive();
   });
 
@@ -984,7 +1002,11 @@
     try { localStorage.setItem(BENCH_KEY, slug); } catch (_) { /* per-viewer only */ }
   }
 
-  function loadAll() {
+  // `keep`: a reload of the same repo's list (a save or delete on the Saved
+  // benches panel), which keeps the zoom, config and selection of the bench
+  // on screen when it is still listed. A project switch keeps nothing.
+  function loadAll(keep) {
+    keep = keep === true;
     var seq = ++loadSeq;
     ++benchSeq;   // a bench still loading from before this answers into nothing
     Promise.all([api(ROUTE_VOCAB), api(ROUTE_PARTS), api(ROUTE_BENCHES)]).then(function (res) {
@@ -1015,7 +1037,7 @@
       var want = onScreen || remembered();
       var slug = benchList.some(function (b) { return b.slug === want; }) ? want : benchList[0].slug;
       picker.value = slug;
-      loadBench(slug);
+      loadBench(slug, keep && slug === onScreen);
     }).catch(function (e) {
       if (seq !== loadSeq) return;
       if (e && e.status === 404) showUnavailable();
@@ -1023,14 +1045,23 @@
     });
   }
 
-  function loadBench(slug) {
+  function loadBench(slug, keep) {
     var seq = ++benchSeq;
+    var cfgName = currentConfig() ? currentConfig().name : null;
     api(ROUTE_BENCHES + "/" + encodeURIComponent(slug)).then(function (b) {
       if (seq !== benchSeq) return;
+      keep = !!keep && !!bench && bench.slug === slug;
       bench = b || {};
-      cfgIx = 0; sel = null; hoverPart = null; fitted = false;
+      hoverPart = null;
+      if (keep) {
+        var at = (bench.configs || []).map(function (c) { return c && c.name; }).indexOf(cfgName);
+        cfgIx = at < 0 ? 0 : at;
+      } else {
+        cfgIx = 0; sel = null; fitted = false;
+      }
       remember(slug);
       buildModel();
+      if (sel && !(sel.kind === "part" ? model.parts[sel.id] : cableById(sel.id))) sel = null;
       showState("", false);
       pathEl.hidden = false;
       pathEl.textContent = "embarch/topologies/" + (bench.slug || slug) + ".toml" +
@@ -1040,7 +1071,7 @@
       render();
       renderInspector();
       renderNotes();
-      fit();
+      if (!keep) fit();
     }).catch(function (e) {
       if (seq !== benchSeq) return;
       showFailure(e, true);
@@ -1183,7 +1214,7 @@
   // A project switch reloads — the parts and benches are the open repo's — and
   // so does a save or delete on the Saved benches panel, which writes the same
   // files. A load already in flight is discarded by its sequence number.
-  document.addEventListener("embarch:project", loadAll);
-  document.addEventListener("embarch:benches-changed", loadAll);
-  loadAll();
+  document.addEventListener("embarch:project", function () { loadAll(false); });
+  document.addEventListener("embarch:benches-changed", function () { loadAll(true); });
+  loadAll(false);
 })();

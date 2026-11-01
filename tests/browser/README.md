@@ -210,7 +210,8 @@ a click on "Open project" there posts to both.
 
 `drive_bench.py` drives the Topology tab as the bench canvas fills it
 (`assets/bench.js`, the bench editor's read-only phase): the bar, the panels
-over the canvas (Esc, their button, a click outside), and the canvas itself.
+over the canvas (Esc, their button, a click outside; Esc over a dialog closes
+the dialog first; focus moves in and back), and the canvas itself.
 The bench routes are served through a proxy the script puts in front of the
 real binary, from `tests/fixtures/bench/catalog.json` — the vocabulary and the
 built-ins exactly as this build serves them, rewritten with
@@ -224,7 +225,9 @@ unreadable template as an outline that says which), hovering reveals free
 connectors without moving a wired one, this machine's ports and their names,
 config tabs and a selection that follows its cable, a glow a snapshot lights
 and puts out without rebuilding the canvas (probes and serial ports, by
-interface), Core not answering, Validate's verdicts under the parts, the
+interface, a serial-less bridge by vid and pid when one port alone matches),
+Core not answering or not listing its ports, Validate's verdicts under the
+parts and the Report button that reopens them, the desk banner's review, the
 Saved benches panel and the canvas agreeing, pan, zoom, fit, a huge bench,
 odd ids, phone width, and a server with no bench routes. It uses four ports:
 `EMBARCH_UI_PORT` and the three after it (desk, proxy, stub Core);

@@ -172,6 +172,7 @@
             <span id="bench-path" class="topo-bar-path mono" hidden></span>
             <span class="topo-bar-spacer"></span>
             <button id="topo-validate" class="btn btn-primary">Validate topology</button>
+            <button type="button" class="btn topo-menu-btn" id="topo-report" data-topo-panel="validate" aria-expanded="false" aria-controls="topo-panel-validate" title="The last Validate topology report" hidden>Report</button>
             <div class="topo-menu" role="group" aria-label="Panels">
               <button type="button" class="btn topo-menu-btn" data-topo-panel="signals" aria-expanded="false" aria-controls="topo-panel-signals">Signals</button>
               <button type="button" class="btn topo-menu-btn" data-topo-panel="boards" aria-expanded="false" aria-controls="topo-panel-boards">Board types</button>
@@ -212,7 +213,7 @@
               <ul class="bench-notes" id="bench-notes" hidden></ul>
             </div>
 
-            <div class="card topo-panel" id="topo-panel-signals" role="region" aria-label="Signals" hidden>
+            <div tabindex="-1" class="card topo-panel" id="topo-panel-signals" role="region" aria-label="Signals" hidden>
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">DUT signals</div>
             <div class="sd-toolbar-actions">
@@ -242,7 +243,7 @@
                  the same sense Zephyr means by a board. No probe serial here on
                  purpose: a probe is moved between boards, so which probe serves
                  a role is a separate binding, made on the old diagram. -->
-            <div class="card topo-panel" id="topo-panel-boards" role="region" aria-label="Board types" hidden>
+            <div tabindex="-1" class="card topo-panel" id="topo-panel-boards" role="region" aria-label="Board types" hidden>
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">Board types in this project</div>
             <div class="sd-toolbar-actions">
@@ -260,7 +261,7 @@
 
             <!-- decision 44: the saved-bench picker, the same shape the
                  saved-study picker has on Live Study. -->
-            <div class="card topo-panel" id="topo-panel-saved" role="region" aria-label="Saved benches" hidden>
+            <div tabindex="-1" class="card topo-panel" id="topo-panel-saved" role="region" aria-label="Saved benches" hidden>
               <div class="sd-toolbar">
                 <div class="card-title" style="margin:0;">Bench &mdash; <span id="topo-profile-name" class="mono">unsaved</span></div>
                 <div class="sd-toolbar-actions">
@@ -278,12 +279,13 @@
             <!-- Validate topology replaced the alert list (decision 44): it
                  answers "is the bench in front of me what this tab says it
                  is", now, check by check. Its report opens here. -->
-            <div class="card topo-panel" id="topo-panel-validate" role="region" aria-label="Validate topology" hidden>
+            <div tabindex="-1" class="card topo-panel" id="topo-panel-validate" role="region" aria-label="Validate topology" hidden>
               <div class="card-title" style="margin:0 0 4px;">Validate topology</div>
+              <div id="topo-validate-error" class="sd-error" style="display:none; margin-top:8px;"></div>
               <div id="topo-validate-report" style="display:none; margin-top:8px;"></div>
             </div>
 
-            <div class="card topo-panel" id="topo-panel-diagram" role="region" aria-label="Old diagram" hidden>
+            <div tabindex="-1" class="card topo-panel" id="topo-panel-diagram" role="region" aria-label="Old diagram" hidden>
               <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
               <div class="topo-enroll-strip">
                 <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the Dev bench or DUT box above, or click a probe then a box</div>

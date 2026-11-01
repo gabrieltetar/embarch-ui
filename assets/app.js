@@ -5676,6 +5676,8 @@
           "A study is running on the bench: " + running.map(function (x) { return x.study_name || x.study_id; }).join(", ") +
           ".\n(A flash or bootload in progress is not reported here.)\nLoad the desk's bench anyway?")) return;
         showTab("topology");
+        // The load's report and its errors are on the Saved benches panel.
+        openTopoPanel("saved");
         await loadProfiles();
         var picker = topoEl("topo-profile-picker");
         var has = picker && Array.prototype.some.call(picker.options, function (o) { return o.value === desk.bench; });
@@ -6537,12 +6539,13 @@
       return;
     }
     const resp = await fetch("/api/enrolled/" + encodeURIComponent(role), { method: "DELETE" });
+    // Its only control is on the Validate report, so that is where it answers.
     if (!resp.ok) {
       const text = await resp.text();
-      showError(topoEl("topo-profile-error"), resp.status + " " + text);
+      showError(topoEl("topo-validate-error"), resp.status + " " + text);
       return;
     }
-    showError(topoEl("topo-profile-error"), null);
+    showError(topoEl("topo-validate-error"), null);
     dropRoleStatus(role);
   }
 
@@ -6615,6 +6618,8 @@
       });
       if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
       publishVerdicts();
+      const reopen = topoEl("topo-report");
+      if (reopen) reopen.hidden = false;
       const head =
         '<div class="topo-check-summary">' +
         // The server's own verdict, never `ok`, which is only "nothing failed":
@@ -7070,15 +7075,33 @@
   // or a pointer press outside closes it — outside meaning neither the panel,
   // a panel button, Validate, nor a dialog a panel opened (the signal, board
   // and enrol dialogs sit above it and must not close what they belong to).
+  //
+  // Opening one moves focus into it; closing one with focus inside returns
+  // focus to the button that opened it (a press outside keeps the focus the
+  // press gives).
+  let topoPanelButton = null;
+
   function openTopoPanel(name) {
+    const was = document.querySelector(".topo-panel:not([hidden])");
+    const focusInside = !!was && was.contains(document.activeElement);
+    let shown = null;
     document.querySelectorAll(".topo-panel").forEach(function (p) {
       p.hidden = p.id !== "topo-panel-" + name;
+      if (!p.hidden) shown = p;
     });
     document.querySelectorAll("[data-topo-panel]").forEach(function (b) {
       const on = b.getAttribute("data-topo-panel") === name;
       b.classList.toggle("is-open", on);
       b.setAttribute("aria-expanded", on ? "true" : "false");
     });
+    if (shown) {
+      const first = shown.querySelector(
+        "button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea, a[href], [tabindex]:not([tabindex='-1'])"
+      );
+      (first || shown).focus({ preventScroll: true });
+    } else if (focusInside && topoPanelButton) {
+      topoPanelButton.focus({ preventScroll: true });
+    }
   }
 
   function closeTopoPanels() {
@@ -7089,11 +7112,25 @@
     return Array.from(document.querySelectorAll(".topo-panel")).some(function (p) { return !p.hidden; });
   }
 
-  function aDialogIsOpen() {
-    return Array.from(document.querySelectorAll(".dialog, .desk-dialog")).some(function (d) {
-      return d.offsetParent !== null;
-    });
+  // A dialog here is fixed-position, so `offsetParent` is always null: shown
+  // means displayed, or not hidden and laid out.
+  function dialogShown(d) {
+    return d.style.display === "block" || (!d.hidden && d.style.display !== "none" && d.getClientRects().length > 0);
   }
+
+  function aDialogIsOpen() {
+    return Array.from(document.querySelectorAll(".dialog, .desk-dialog")).some(dialogShown);
+  }
+
+  // The Topology tab's dialogs, each of which Esc closes the way its Cancel
+  // does — the topmost thing first, so a panel under a dialog stays open.
+  const TOPO_DIALOGS = [
+    ["sig-dialog", "sig-cancel"],
+    ["assign-dialog", "assign-cancel"],
+    ["board-dialog", "board-cancel"],
+    ["role-board-dialog", "role-board-cancel"],
+    ["topo-save-dialog", "topo-save-cancel"],
+  ];
 
   function initTopologyPanels() {
     const bar = document.getElementById("topo-bar");
@@ -7102,13 +7139,30 @@
       const btn = ev.target.closest("[data-topo-panel]");
       if (!btn) return;
       const name = btn.getAttribute("data-topo-panel");
+      topoPanelButton = btn;
       if (btn.classList.contains("is-open")) closeTopoPanels();
       else openTopoPanel(name);
     });
     const validate = document.getElementById("topo-validate");
-    if (validate) validate.addEventListener("click", function () { openTopoPanel("validate"); });
+    if (validate) {
+      validate.addEventListener("click", function () {
+        topoPanelButton = validate;
+        openTopoPanel("validate");
+      });
+    }
     document.addEventListener("keydown", function (ev) {
-      if (ev.key !== "Escape" || !topoPanelOpen() || aDialogIsOpen()) return;
+      if (ev.key !== "Escape") return;
+      const open = TOPO_DIALOGS.find(function (pair) {
+        const d = document.getElementById(pair[0]);
+        return d && dialogShown(d);
+      });
+      if (open) {
+        const cancel = document.getElementById(open[1]);
+        if (cancel) cancel.click();
+        ev.preventDefault();
+        return;
+      }
+      if (!topoPanelOpen() || aDialogIsOpen()) return;
       closeTopoPanels();
     });
     document.addEventListener("pointerdown", function (ev) {

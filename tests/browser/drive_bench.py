@@ -80,7 +80,9 @@ ENROLLED = [
     {"probe_serial": PARTNER, "role": "", "name": "pd-bench", "chip": "STM32G0B1RETx",
      "hardware_id": "ee:ff", "confirmed_at_utc_ms": NOW_MS, "link_serial": None},
 ]
-CORE = {"up": True}
+ENROLLED.append({"probe_serial": "ZZZ999", "role": "sniffer", "name": "", "chip": "nRF52840",
+                 "hardware_id": "11:22", "confirmed_at_utc_ms": NOW_MS, "link_serial": None})
+CORE = {"up": True, "ports_fail": False}
 MODE = {"bench": "fixture"}
 SEEN = {"benches": 0}
 
@@ -116,6 +118,8 @@ class Core(BaseHTTPRequestHandler):
         answers = {"/status": {"status": "ok", "probes": PROBES, "study_designer_schema_version": 1},
                    "/probes/enrolled": ENROLLED, "/signals": [], "/serial-ports": SERIAL_PORTS, "/alerts": [],
                    "/studies": [], "/logs/recent": {"lines": []}}
+        if path == "/serial-ports" and CORE["ports_fail"]:
+            return self._send(500, b"serial enumeration failed in the stub", "text/plain")
         if path in answers:
             return self._send(200, answers[path])
         return self._send(404, b"not found in the stub", "text/plain")
@@ -142,6 +146,8 @@ class Core(BaseHTTPRequestHandler):
         global ENROLLED
         if path.startswith("/probes/enrolled/"):
             role = path.rsplit("/", 1)[1]
+            if role == "sniffer":
+                return self._send(500, b"the stub will not clear sniffer", "text/plain")
             ENROLLED = [b for b in ENROLLED if b["role"] != role]
             return self._send(204, b"", "text/plain")
         return self._send(404, b"not found in the stub", "text/plain")
@@ -380,7 +386,7 @@ try:
           lay["pageScroll"] <= 0 and lay["contentScroll"] <= 0, lay)
     check("and the canvas takes the space under the bar", lay["wrapH"] > lay["vh"] * 0.6 and lay["wrapTop"] >= lay["barBottom"] - 1, lay)
     bar = script("var b=document.getElementById('topo-bar'); return [!!b.querySelector('#bench-pick'), !!b.querySelector('#topo-validate'),"
-                 " Array.from(b.querySelectorAll('[data-topo-panel]')).map(function(x){return x.textContent;})];")
+                 " Array.from(b.querySelectorAll('.topo-menu [data-topo-panel]')).map(function(x){return x.textContent;})];")
     check("the bar holds the bench picker, Validate topology and one button per panel",
           bar == [True, True, ["Signals", "Board types", "Saved benches", "Old diagram"]], bar)
     check("every panel starts closed", not any(panel_open(n) for n in ["signals", "boards", "saved", "diagram", "validate"]))
@@ -394,8 +400,11 @@ try:
     click('[data-topo-panel="signals"]')
     check("its own button closes it", not panel_open("signals"))
     click('[data-topo-panel="boards"]')
+    check("opening a panel moves focus into it",
+          script("return document.getElementById('topo-panel-boards').contains(document.activeElement);"))
     key("")
-    check("Esc closes it", not panel_open("boards"))
+    check("Esc closes it, and focus goes back to its button", not panel_open("boards") and
+          script("return document.activeElement === document.querySelector('[data-topo-panel=\"boards\"]');"))
     click('[data-topo-panel="saved"]')
     click('[data-topo-panel="diagram"]')
     check("one panel at a time", panel_open("diagram") and not panel_open("saved"))
@@ -463,7 +472,7 @@ try:
     hub = script("return Array.from(document.querySelectorAll('#bench-svg [data-part=\"host\"] .bn-clabel')).map(function(t){return t.textContent;});")
     check("this machine has one port per cable, named by what it carries, top to bottom",
           hub == ["Debug probe → DUT", "CY4500", "pd-bench", "eload", "nRF54L15 DK",
-                  "aux board · USB", "aux board · UART", "Odd widget"], hub)
+                  "aux board · USB", "aux board · UART", "Odd widget", "USB-UART bridge"], hub)
 
     # --- bench-level solid, config dashed; config tabs ---------------------
     cfgs = PD["configs"]
@@ -548,6 +557,27 @@ try:
         script("document.documentElement.setAttribute('data-theme','light');")
         shots.append(shot("bench-tab-light.png"))
         script("document.documentElement.setAttribute('data-theme','dark');")
+    BRIDGE = "return !!document.querySelector('#bench-svg [data-live=\"bridge.usb\"].bn-live');"
+    ch340 = {"port_name": "COM20", "detected_by": "enumerated", "vendor_id": 6790, "product_id": 29987,
+             "serial_number": None, "product": None, "interface": None}
+    check("a bridge with no serial is not lit before its port appears", not script(BRIDGE))
+    SERIAL_PORTS.append(dict(ch340))
+    check("a vid/pid binding glows when exactly one port has that vid and pid", wait_for(BRIDGE, 14))
+    SERIAL_PORTS.append(dict(ch340, port_name="COM21"))
+    check("and goes out when two do: which one is ambiguous", wait_for("return !(function(){" + BRIDGE + "})();", 14))
+    SERIAL_PORTS.pop()
+    SERIAL_PORTS.pop()
+    CORE["ports_fail"] = True
+    portline = wait_for("var s=document.getElementById('bench-live-state'); return !s.hidden ? s.textContent : '';", 14)
+    check("a serial-port list Core could not read leaves port glows unknown, and says so",
+          "serial ports" in (portline or "") and not script("return !!document.querySelector('#bench-svg [data-live=\"eload.usb\"].bn-live');"),
+          portline)
+    check("while probe glows, from a list Core did read, stay lit",
+          script("return !!document.querySelector('#bench-svg [data-live=\"devkit.usb\"].bn-live');"))
+    CORE["ports_fail"] = False
+    check("and the eload lights again once the list is back",
+          wait_for("return document.getElementById('bench-live-state').hidden &&"
+                   " !!document.querySelector('#bench-svg [data-live=\"eload.usb\"].bn-live');", 14))
     SERIAL_PORTS.pop()
     PROBES.pop()
     dark = wait_for("return !document.querySelector('#bench-svg [data-live=\"partner.stlink\"].bn-live') &&"
@@ -574,8 +604,22 @@ try:
           vd and "bn-v-fail" in vd[0] and "failed" in vd[1], vd)
     check("a dev bench Core re-read passes", vk and "bn-v-pass" in vk[0] and "validated" in vk[1], vk)
     check("and a bench board's lands on the part bound to its probe", vp and "bn-v-pass" in vp[0], vp)
+    script("window.confirm=function(){return true}; document.querySelector('#topo-validate-report [data-unenroll-role=\"sniffer\"]').click();")
+    err = wait_for("var e=document.getElementById('topo-validate-error'); return e.offsetParent !== null ? e.textContent : '';", 6)
+    check("a leftover role's clear that fails says so on the Validate panel, where its control is",
+          "500" in (err or "") and panel_open("validate"), err)
+    key("")
+    check("the bar keeps a Report button once a pass has run", script("return !document.getElementById('topo-report').hidden;"))
+    click("#topo-report")
+    check("which reopens the last report without a new pass", panel_open("validate") and
+          "sniffer" in script("return document.getElementById('topo-validate-report').textContent;"))
     key("")
     click('[data-topo-panel="diagram"]')
+    script("document.querySelector('[data-board-role=\"dut\"] text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    wait_for("return document.getElementById('role-board-dialog').style.display === 'block';", 5)
+    key("")
+    check("Esc over the board-type dialog closes the dialog, not the Old diagram panel under it",
+          script("return document.getElementById('role-board-dialog').style.display !== 'block';") and panel_open("diagram"))
     script("document.querySelector('[data-board-role=\"dut\"] text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
     wait_for("return document.getElementById('role-board-dialog').style.display === 'block';", 5)
     script("window.confirm=function(){return true}; document.getElementById('role-board-retract').click();")
@@ -584,7 +628,19 @@ try:
     key("")
 
     # --- the Saved benches panel and the canvas read the same files ---------
+    pick_config(1)
+    click('#bench-svg [data-part="partner"] .bn-body')
+    script("document.getElementById('bench-zoom-in').click();")
+    held = script("return [document.getElementById('bench-svg').getAttribute('viewBox'),"
+                  " document.querySelector('#bench-configs [aria-selected=\"true\"]').getAttribute('data-cfg')];")
     click('[data-topo-panel="saved"]')
+    script("document.getElementById('topo-profile-save').click();")
+    wait_for("return document.getElementById('topo-save-dialog').style.display === 'block';", 4)
+    if SHOTS:
+        shots.append(shot("bench-tab-dialog-over-panel.png"))
+    key("")
+    check("Esc over Save as\u2026 closes the dialog, not the Saved benches panel under it",
+          script("return document.getElementById('topo-save-dialog').style.display !== 'block';") and panel_open("saved"))
     FX["benches"]["benches"].append({"slug": "bench-a", "name": "bench a", "legacy": False})
     FX["bench/bench-a"] = dict(FX["bench/ble-dev-bench"], slug="bench-a", name="bench a", legacy=False)
     seen = SEEN["benches"]
@@ -594,11 +650,26 @@ try:
     listed = wait_for("return Array.from(document.getElementById('bench-pick').options).some(function(o){return o.value==='bench-a';});", 8)
     check("a bench saved from the Saved benches panel appears in the canvas's picker", listed and SEEN["benches"] > seen, SEEN)
     check("and the bench on screen stays the one that was", script("return document.getElementById('bench-pick').value;") == "pd-bench-drp")
+    check("with its zoom, its config and its selection",
+          script("return [document.getElementById('bench-svg').getAttribute('viewBox'),"
+                 " document.querySelector('#bench-configs [aria-selected=\"true\"]').getAttribute('data-cfg')];") == held
+          and script("return !!document.querySelector('#bench-svg [data-part=\"partner\"].bn-sel');"), held)
     FX["benches"]["benches"] = [r for r in FX["benches"]["benches"] if r["slug"] != "bench-a"]
     script("window.confirm=function(){return true}; var s=document.getElementById('topo-profile-picker'); s.value='bench-a';"
            "document.getElementById('topo-profile-delete').click();")
     unlisted = wait_for("return !Array.from(document.getElementById('bench-pick').options).some(function(o){return o.value==='bench-a';});", 8)
     check("and one deleted there leaves it", unlisted)
+    key("")
+    pick_config(0)
+
+    # --- the desk's bench, reviewed from the banner -------------------------
+    script("document.dispatchEvent(new CustomEvent('embarch:desk',{detail:{desk:{id:'drive-a',name:'drive a',firmware_repos:[arguments[0]]}}}));"
+           "document.dispatchEvent(new CustomEvent('embarch:desk',{detail:{desk:{id:'drive-b',name:'drive b',bench:'no-such-bench',firmware_repos:[arguments[0]]}}}));", [fw])
+    wait_for("var b=document.getElementById('desk-bench-review'); return !!b;", 6)
+    script("document.getElementById('desk-bench-review').click();")
+    said = wait_for("var e=document.getElementById('topo-profile-error'); return e.offsetParent !== null ? e.textContent : '';", 8)
+    check("the desk banner's review opens the Saved benches panel, where its errors and report land",
+          panel_open("saved") and "no-such-bench" in (said or ""), said)
     key("")
 
     # --- pan, zoom, fit ----------------------------------------------------
@@ -656,6 +727,11 @@ try:
                     "function inside(r){var x=+r.getAttribute('x'), y=+r.getAttribute('y');return x>=v[0]&&y>=v[1]&&x+(+r.getAttribute('width'))<=v[0]+v[2]&&y+(+r.getAttribute('height'))<=v[1]+v[3];}"
                     "return [inside(f), inside(h), v];")
     check("Fit reaches a bench tens of thousands of units across", fitbox[0] and fitbox[1], fitbox)
+    script("document.dispatchEvent(new CustomEvent('embarch:verdicts',{detail:{roles:{dut:{status:'pass',text:'\u25cf validated just now'}},boards:{}}}));")
+    pill = script("var v=document.querySelector('#bench-svg [data-verdict=\"shield1\"] rect'), s=document.querySelector('#bench-svg [data-part=\"shield1\"] .bn-body'),"
+                  " b=document.querySelector('#bench-svg [data-part=\"base1\"] .bn-body');"
+                  "return v ? [+v.getAttribute('y') + (+v.getAttribute('height')), +s.getAttribute('y'), +b.getAttribute('y')] : null;")
+    check("a mounted part's verdict sits above it, off its base's title band", pill and pill[0] <= pill[1] < pill[2], pill)
     grid = script("return ['u1','u5','u6','u12'].map(function(k){var r=document.querySelector('#bench-svg [data-part=\"'+k+'\"] .bn-body');return [+r.getAttribute('x'), +r.getAttribute('y')];});")
     check("parts with no position wrap into a grid under the rest",
           grid[0][1] == grid[1][1] and grid[2][1] > grid[0][1] and grid[2][0] == grid[0][0] and grid[3][1] > grid[2][1], grid)

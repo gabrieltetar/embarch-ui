@@ -2206,6 +2206,7 @@ table.data-table {
 .topo-stage { position: relative; flex: 1; min-height: 0; min-width: 0; }
 .topo-panel { position: absolute; top: 8px; right: 12px; z-index: 6; width: min(820px, calc(100% - 24px)); max-height: calc(100% - 16px); overflow: auto; box-shadow: 0 10px 34px oklch(0% 0 0 / 0.35); }
 .topo-panel .topo-check-log { max-width: 100%; }
+.topo-panel:focus { outline: none; }
 
 .bench-card { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; }
 .bench-state { margin: 0; padding: 14px 16px; }

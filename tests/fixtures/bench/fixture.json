@@ -434,6 +434,28 @@
     "board": null,
     "chip": null,
     "usb": {}
+   },
+   {
+    "id": "bridge",
+    "template": "usb-uart-bridge",
+    "label": null,
+    "at": [
+     620,
+     820
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "chip": null,
+    "usb": {
+     "usb": {
+      "vcom": {
+       "vid": 6790,
+       "pid": 29987
+      }
+     }
+    }
    }
   ],
   "cables": [
@@ -467,6 +489,10 @@
    },
    {
     "from": "odd.usb",
+    "to": "host"
+   },
+   {
+    "from": "bridge.usb",
     "to": "host"
    }
   ],
@@ -702,6 +728,33 @@
     ],
     "role": null,
     "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "chip": null,
+    "usb": {}
+   },
+   {
+    "id": "base1",
+    "template": "nucleo-g0b1re",
+    "label": null,
+    "at": [
+     300,
+     400
+    ],
+    "role": null,
+    "mounted_on": null,
+    "flip": false,
+    "board": null,
+    "chip": null,
+    "usb": {}
+   },
+   {
+    "id": "shield1",
+    "template": "x-nucleo-snk1m1",
+    "label": null,
+    "at": null,
+    "role": "dut",
+    "mounted_on": "base1",
     "flip": false,
     "board": null,
     "chip": null,

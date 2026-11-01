@@ -52,8 +52,10 @@ fn the_drive_fixture_is_the_contracts_shape() {
         t.check()?;
         Ok(t)
     };
+    let mut templates = catalog(None).by_id();
     for t in fx["repo_parts"].as_array().unwrap() {
-        template(t).unwrap_or_else(|e| panic!("repo part {}: {e}", t["id"]));
+        let t = template(t).unwrap_or_else(|e| panic!("repo part {}: {e}", t["id"]));
+        templates.insert(t.id.clone(), t);
     }
     for t in fx["newer_parts"].as_array().unwrap() {
         assert!(template(t).is_err(), "{} is meant to be outside this build's vocabulary", t["id"]);
@@ -67,6 +69,14 @@ fn the_drive_fixture_is_the_contracts_shape() {
         assert_eq!(bench.slug, slug);
         assert_eq!(bench.legacy, row["legacy"].as_bool().unwrap());
         assert!(bench.version.is_some(), "a served bench carries its version");
+        // A bench a save would accept, but for the one hand-edited file
+        // whose duplicate part id the page must still draw.
+        let shape = files::check_shape(&bench, &templates);
+        if slug == "edge-ids" {
+            assert!(shape.is_err(), "edge-ids is meant to be a file no save would write");
+        } else {
+            shape.unwrap_or_else(|e| panic!("bench {slug}: {e}"));
+        }
     }
 }
 
