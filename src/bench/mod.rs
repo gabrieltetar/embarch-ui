@@ -1015,10 +1015,53 @@ mod tests {
         );
     }
 
+    /// The fields a struct declares to serde, in order: what its derived
+    /// `Deserialize` hands `deserialize_struct`, recorded by a deserializer
+    /// that reads nothing else — the struct's own list, never one kept here.
+    fn declared_fields<T: serde::de::DeserializeOwned>() -> Vec<&'static str> {
+        #[derive(Debug)]
+        struct Fields(Vec<&'static str>);
+        impl std::fmt::Display for Fields {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "{:?}", self.0)
+            }
+        }
+        impl std::error::Error for Fields {}
+        impl serde::de::Error for Fields {
+            fn custom<T: std::fmt::Display>(_: T) -> Self {
+                Fields(Vec::new())
+            }
+        }
+        struct Recorder;
+        impl<'de> serde::Deserializer<'de> for Recorder {
+            type Error = Fields;
+            fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Fields> {
+                Err(Fields(Vec::new()))
+            }
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Fields> {
+                Err(Fields(fields.to_vec()))
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf option unit
+                unit_struct newtype_struct seq tuple tuple_struct map enum identifier ignored_any
+            }
+        }
+        match T::deserialize(Recorder) {
+            Err(Fields(fields)) if !fields.is_empty() => fields,
+            _ => panic!("{} is not a struct serde lists fields for", std::any::type_name::<T>()),
+        }
+    }
+
     /// Every field a template can hold, set: built by struct literal, so a
     /// field added to any of the three structs does not compile here until it
-    /// is set too — and then the two tests below fail until the vocabulary
-    /// serves it.
+    /// is written in, and [`the_helper_sets_every_declared_field`] fails until
+    /// it is written in with a value — then the two tests after it fail until
+    /// the vocabulary serves it.
     fn every_field_set() -> PartTemplate {
         let entry = FunctionEntry {
             function: Function::Scpi,
@@ -1054,17 +1097,43 @@ mod tests {
         }
     }
 
+    /// The helper leaves nothing out: each of the three objects it builds
+    /// serializes exactly its struct's declared fields, none of them null or
+    /// an empty list. A field left `None` is skipped (a function entry) or
+    /// null (the rest), and either fails here — so the drift tests below see
+    /// every field the structs have.
+    #[test]
+    fn the_helper_sets_every_declared_field() {
+        let t = serde_json::to_value(every_field_set()).unwrap();
+        let objects = [
+            ("PartTemplate", &t, declared_fields::<PartTemplate>()),
+            ("Connector", &t["connectors"][0], declared_fields::<Connector>()),
+            ("FunctionEntry", &t["connectors"][0]["functions"][0], declared_fields::<FunctionEntry>()),
+        ];
+        for (name, object, declared) in objects {
+            let map = object.as_object().unwrap_or_else(|| panic!("{name} is not an object"));
+            let keys: std::collections::BTreeSet<&str> = map.keys().map(String::as_str).collect();
+            let declared: std::collections::BTreeSet<&str> = declared.into_iter().collect();
+            assert_eq!(keys, declared, "{name}: every declared field is serialized, set");
+            for (k, v) in map {
+                assert!(!v.is_null(), "{name}.{k} is None in every_field_set: give it a value");
+                assert!(v.as_array().is_none_or(|a| !a.is_empty()), "{name}.{k} is empty in every_field_set: give it an item");
+            }
+        }
+    }
+
     /// A function entry's fields are exactly `function`, `interface` and the
-    /// served line facts: a fact the struct gains and [`LINE_FACTS`] lacks
-    /// would be dropped by the editor from every file it saves.
+    /// served line facts — the struct's own declared list, so a fact the
+    /// struct gains and [`LINE_FACTS`] lacks fails here, where the editor
+    /// would otherwise drop it from every file it saves.
     #[test]
     fn the_served_line_facts_are_every_line_fact_field() {
-        let t = serde_json::to_value(every_field_set()).unwrap();
-        let entry = t["connectors"][0]["functions"][0].as_object().unwrap().clone();
-        let keys: std::collections::BTreeSet<&str> = entry.keys().map(String::as_str).collect();
+        let declared: std::collections::BTreeSet<&str> = declared_fields::<FunctionEntry>().into_iter().collect();
         let mut want: std::collections::BTreeSet<&str> = ["function", "interface"].into();
         want.extend(LINE_FACTS.iter().map(|f| f.name));
-        assert_eq!(keys, want);
+        assert_eq!(declared, want);
+        let t = serde_json::to_value(every_field_set()).unwrap();
+        let entry = &t["connectors"][0]["functions"][0];
         for f in LINE_FACTS {
             assert_eq!(entry[f.name].is_number(), f.numeric, "{} is served as numeric = {}", f.name, f.numeric);
         }

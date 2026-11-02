@@ -124,6 +124,7 @@
       '</div>' +
       '<div class="sd-row-actions pe-actions">' +
         '<button type="button" id="part-reload" class="btn" hidden>Reload from disk</button>' +
+        '<button type="button" id="part-save-new" class="btn" hidden>Save as new</button>' +
         '<button type="button" id="part-fresh" class="btn" hidden>Start a fresh template under this id&hellip;</button>' +
         '<span class="pe-spacer"></span>' +
         '<button type="button" id="part-cancel" class="btn">Cancel</button>' +
@@ -171,6 +172,7 @@
     result: document.getElementById("part-result"),
     hint: document.getElementById("part-hint"),
     reload: document.getElementById("part-reload"),
+    saveNew: document.getElementById("part-save-new"),
     fresh: document.getElementById("part-fresh"),
     cancel: document.getElementById("part-cancel"),
     copy: document.getElementById("part-copy"),
@@ -571,6 +573,7 @@
     el.copy.hidden = m !== "builtin";
     el.fresh.hidden = !(m === "error" && !st.confirming && freshAllowed());
     el.reload.hidden = !(m === "missing" || m === "failed");
+    el.saveNew.hidden = !(m === "edit" && st.gone && !st.stale);
     el.cancel.textContent = m === "new" || m === "edit" ? "Cancel" : "Close";
     el.save.disabled = saving || !!st.stale;
     renderProblem();
@@ -734,7 +737,7 @@
   // the Save it disabled is enabled here, not by that answer.
   function reset(mode, id) {
     st = { mode: mode, id: id, version: null, fresh: null, from: null, error: null, confirming: false, failure: null,
-           discarding: false, then: null, back: null, stale: false };
+           discarding: false, then: null, back: null, stale: false, gone: false };
     saving = false;
     el.save.disabled = false;
     dlg.removeAttribute("data-busy");
@@ -865,6 +868,8 @@
     showResult("");
     showHint("");
     el.reload.hidden = true;
+    st.gone = false;
+    el.saveNew.hidden = true;
     api(put ? "PUT" : "POST", route, body).then(function () {
       onSaved(body.id, !put, seq === openSeq);
     }).catch(function (e) {
@@ -876,6 +881,12 @@
       if (put && code === "version-changed") {
         el.reload.hidden = false;
         showHint("Reload from disk replaces what is in this dialog with the file as it is now.");
+      } else if (put && e && e.status === 404) {
+        // The file was removed on disk since it was read: the draft can only
+        // be created again, never updated.
+        st.gone = true;
+        el.saveNew.hidden = false;
+        showHint(PARTS_DIR + st.id + ".toml was removed on disk after it was read. Save as new writes this draft there again.");
       } else if (!put && st.fresh && code === "exists") {
         showHint(PARTS_DIR + draft.id + ".toml is still there and will not load: remove it or fix it by hand, then Save again.");
       }
@@ -1022,6 +1033,15 @@
   el.discardNo.addEventListener("click", keepEditing);
   el.copy.addEventListener("click", copyBuiltin);
   el.reload.addEventListener("click", function () { open(st.id); });
+  // A draft whose file was removed on disk becomes a new part and is created.
+  el.saveNew.addEventListener("click", function () {
+    if (st.mode !== "edit" || !st.gone || saving) return;
+    st.mode = "new";
+    st.version = null;
+    st.gone = false;
+    render();
+    save();
+  });
   el.fresh.addEventListener("click", function () {
     st.confirming = true;
     render();
@@ -1064,6 +1084,7 @@
     st.stale = true;
     showHint("");
     el.reload.hidden = true;
+    el.saveNew.hidden = true;
     render();
   });
 

@@ -770,6 +770,27 @@ try:
           and tomllib.loads(path.read_text()).get("subtitle") == "saved while closing"
           and script("return document.getElementById('part-saved-text').textContent") == "Saved embarch/parts/usb-c-meter.toml")
 
+    # ---- a part file removed on disk since the editor read it ---------------------------
+    check("editing the part again", open_editor("usb-c-meter") == "edit")
+    type_into("#part-subtitle", "after the file went")
+    path.unlink()
+    click("#part-save")
+    settled()
+    status, text, word = http_full("PUT", "/api/bench/parts/usb-c-meter", script("return window.__sent[window.__sent.length - 1].body"))
+    check("the server answers a removed file 404", status == 404, (status, text))
+    check("the dialog shows that verbatim, says the file was removed on disk, and offers Save as new, not Reload",
+          result() == text and visible("#part-save-new") and not visible("#part-reload")
+          and "removed on disk" in script("return document.getElementById('part-hint').textContent"), (result(), text))
+    n2 = changed()
+    click("#part-save-new")
+    check("Save as new creates the part from the draft and closes",
+          wait_for("return document.getElementById('part-dialog').style.display === 'none'") is True, result())
+    sent = script("return window.__sent[window.__sent.length - 1]")
+    check("as a POST naming no version", sent["method"] == "POST" and sent["url"].endswith("/api/bench/parts") and "version" not in sent["body"], sent)
+    check("its file is back with the draft in it, announced as created",
+          path.is_file() and tomllib.loads(path.read_text()).get("subtitle") == "after the file went" and changed() == n2 + 1
+          and script("return document.getElementById('part-saved-text').textContent") == "Created embarch/parts/usb-c-meter.toml")
+
     # ---- phone width ------------------------------------------------------------------
     wd("POST", S + "/window/rect", {"width": 400, "height": 860})
     open_editor("usb-c-meter")
