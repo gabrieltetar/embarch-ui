@@ -462,6 +462,9 @@
     ]
   },
   "vocabulary": {
+    "bench_board_categories": [
+      "board"
+    ],
     "categories": [
       "computer",
       "board",
@@ -471,6 +474,62 @@
       "probe",
       "adapter"
     ],
+    "config_name": {
+      "max_bytes": 96,
+      "refused": [
+        [
+          0,
+          31
+        ],
+        [
+          127,
+          159
+        ],
+        [
+          8206,
+          8207
+        ],
+        [
+          8232,
+          8238
+        ],
+        [
+          8294,
+          8297
+        ]
+      ],
+      "refused_at_ends": [
+        [
+          32,
+          32
+        ],
+        [
+          160,
+          160
+        ],
+        [
+          5760,
+          5760
+        ],
+        [
+          8192,
+          8202
+        ],
+        [
+          8239,
+          8239
+        ],
+        [
+          8287,
+          8287
+        ],
+        [
+          12288,
+          12288
+        ]
+      ],
+      "rule": "a config name is 1 to 96 bytes on one line, with no control character, line or paragraph separator or bidi format character, and no space at either end, because a host study's Prompt names it by exact name (embarch-study-designer decision 88)"
+    },
     "functions": [
       "probe",
       "vcom",

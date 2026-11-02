@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use embarch_core_client::SignalLink;
+use embarch_study_designer::limits::MAX_HOST_NAME_LEN;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::check::Templates;
@@ -602,6 +603,97 @@ pub const MAX_CONFIGS: usize = 100;
 /// The most USB bindings (function → identity) on one part.
 pub const MAX_BINDINGS: usize = 32;
 
+/// What a config name may be, in one sentence: refused on save in these
+/// words and served in the vocabulary, so the browser's dialog says the
+/// server's sentence and restates no limit.
+pub fn config_name_rule() -> String {
+    format!(
+        "a config name is 1 to {MAX_HOST_NAME_LEN} bytes on one line, with no control character, line or paragraph \
+         separator or bidi format character, and no space at either end, because a host study's Prompt names it by \
+         exact name (embarch-study-designer decision 88)"
+    )
+}
+
+/// A config name's shape: **the shape a host study's `Prompt.bench_config`
+/// may have**, judged by study-designer's own validation of a one-step study
+/// naming it, never by a copy of its rule. A study names a config by exact
+/// name, so a config holds only names a study can write.
+pub fn check_config_name(name: &str) -> Result<(), String> {
+    use embarch_study_designer::{HostAction, HostStep, HostStudy, HostStudyError};
+    const PROBE: &str = "config";
+    let study = HostStudy {
+        name: PROBE.into(),
+        steps: vec![HostStep {
+            name: PROBE.into(),
+            action: HostAction::Prompt { text: PROBE.into(), bench_config: Some(name.to_string()) },
+            timeout_ms: 1,
+            continue_on_fail: false,
+            delay_before_ms: 0,
+        }],
+        teardown: vec![],
+        streams: vec![],
+        line_counts: vec![],
+    };
+    match study.validate() {
+        Ok(()) => Ok(()),
+        Err(HostStudyError::BlankField { .. } | HostStudyError::FieldTooLong { .. } | HostStudyError::BadBenchConfig { .. }) => {
+            let shown: String = name.chars().take(40).collect::<String>().escape_debug().to_string();
+            let more = if name.chars().count() > 40 { "…" } else { "" };
+            Err(format!("config `{shown}{more}` cannot be saved: {}", config_name_rule()))
+        }
+        // Only the name varies, so nothing else in the probe study can fail;
+        // a refusal about it would be this file's bug, said rather than hidden.
+        Err(e) => Err(format!("config `{}` could not be checked: {e:?}", name.escape_debug())),
+    }
+}
+
+/// The characters refused anywhere in a config name: a control character,
+/// U+2028 and U+2029, and the bidi format characters. **A mirror** of
+/// study-designer's rule, whose predicate is private; served so the browser
+/// restates nothing, and held to [`check_config_name`] code point by code
+/// point by a test.
+fn refused_in_config_name(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// The characters refused at either end of a config name (Unicode
+/// whitespace, what `str::trim` takes off), beside those refused anywhere.
+fn refused_at_config_name_end(c: char) -> bool {
+    c.is_whitespace()
+}
+
+/// Every code point `keep` holds, as inclusive `[first, last]` runs.
+fn code_point_runs(keep: impl Fn(char) -> bool) -> Vec<[u32; 2]> {
+    let mut out: Vec<[u32; 2]> = Vec::new();
+    for c in (0..=char::MAX as u32).filter_map(char::from_u32).filter(|&c| keep(c)) {
+        let cp = c as u32;
+        match out.last_mut() {
+            Some(run) if run[1] + 1 == cp => run[1] = cp,
+            _ => out.push([cp, cp]),
+        }
+    }
+    out
+}
+
+/// `config_name` in `GET /api/bench/vocabulary`: the most bytes a config name
+/// holds (UTF-8), the code point runs refused anywhere in it and those refused
+/// only at its ends, and the rule's sentence — what [`check_config_name`]
+/// refuses, so the browser's config dialog decides with the server's data and
+/// says the server's words. Worked out once: it walks every code point.
+pub fn config_name_vocabulary() -> serde_json::Value {
+    static SERVED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    SERVED
+        .get_or_init(|| {
+            serde_json::json!({
+                "max_bytes": MAX_HOST_NAME_LEN,
+                "refused": code_point_runs(refused_in_config_name),
+                "refused_at_ends": code_point_runs(|c| !refused_in_config_name(c) && refused_at_config_name_end(c)),
+                "rule": config_name_rule(),
+            })
+        })
+        .clone()
+}
+
 /// What a save refuses: only what would make the file unreadable as a bench
 /// or ambiguous to address. Everything else — a cable of the wrong kind, a
 /// full connector — is the checks' business, and a bench that breaks one
@@ -645,9 +737,7 @@ pub fn check_shape(bench: &Bench, templates: &Templates) -> Result<(), String> {
     }
     let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for config in &bench.configs {
-        if config.name.trim().is_empty() {
-            return Err("a config needs a name".to_string());
-        }
+        check_config_name(&config.name)?;
         if !names.insert(&config.name) {
             return Err(format!("two configs are named `{}`", config.name));
         }
@@ -931,6 +1021,57 @@ port_serial = "FT9ABCDE"
 
     fn templates() -> Templates {
         builtins().into_iter().map(|t| (t.id.clone(), t)).collect()
+    }
+
+    /// A config name is refused on save when a host study could not name it
+    /// (study-designer decision 88), in the served rule's words, and a name
+    /// a study can write saves.
+    #[test]
+    fn a_config_name_a_host_study_cannot_write_is_refused_on_save() {
+        let mut bench = Bench { slug: String::new(), name: "B".into(), legacy: false, version: None, parts: vec![], cables: vec![], configs: vec![], signals: vec![] };
+        let long = "c".repeat(MAX_HOST_NAME_LEN + 1);
+        for bad in ["", "  ", " A", "A ", "A\tB", "A\u{2028}B", "A\u{202E}B", long.as_str()] {
+            bench.configs = vec![Config { name: bad.into(), cables: vec![] }];
+            let said = check_shape(&bench, &templates()).unwrap_err();
+            assert!(said.ends_with(&config_name_rule()) && said.starts_with("config `"), "{bad:?}: {said}");
+        }
+        for good in ["A", "A · DUT sources", "pd analyzer, in line \u{e9}", &long[1..]] {
+            bench.configs = vec![Config { name: good.into(), cables: vec![] }];
+            assert!(check_shape(&bench, &templates()).is_ok(), "{good:?}");
+        }
+        bench.configs = vec![Config { name: "A".into(), cables: vec![] }, Config { name: "A".into(), cables: vec![] }];
+        assert!(check_shape(&bench, &templates()).unwrap_err().contains("two configs are named `A`"));
+    }
+
+    /// **The served rule is study-designer's, code point by code point.** The
+    /// browser judges a name from `config_name`'s runs and byte cap; every
+    /// character, in the middle of a name and at each end, is judged here by
+    /// the served data and by [`check_config_name`] (study-designer's own
+    /// validation), and they must agree — so a character study-designer
+    /// starts or stops refusing fails `cargo test` instead of letting the
+    /// dialog accept a name the save then refuses.
+    #[test]
+    fn the_served_config_name_rule_is_study_designers_for_every_code_point() {
+        let served = config_name_vocabulary();
+        let runs = |key: &str| -> Vec<[u32; 2]> { serde_json::from_value(served[key].clone()).unwrap() };
+        let (anywhere, ends) = (runs("refused"), runs("refused_at_ends"));
+        let within = |runs: &[[u32; 2]], c: char| runs.iter().any(|r| (r[0]..=r[1]).contains(&(c as u32)));
+        let mut checked = 0usize;
+        for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+            let inner = !within(&anywhere, c);
+            let edge = inner && !within(&ends, c);
+            assert_eq!(check_config_name(&format!("a{c}a")).is_ok(), inner, "U+{:04X} inside a name", c as u32);
+            assert_eq!(check_config_name(&format!("{c}a")).is_ok(), edge, "U+{:04X} first", c as u32);
+            assert_eq!(check_config_name(&format!("a{c}")).is_ok(), edge, "U+{:04X} last", c as u32);
+            checked += 1;
+        }
+        assert_eq!(checked, 0x110000 - 0x800, "every scalar value, the surrogates excepted");
+        // The byte cap is the served one, counted in UTF-8 bytes.
+        let max = served["max_bytes"].as_u64().unwrap() as usize;
+        assert!(check_config_name(&"é".repeat(max / 2)).is_ok());
+        assert!(check_config_name(&format!("{}é", "a".repeat(max - 1))).is_err(), "one byte over, in a two-byte character");
+        assert!(check_config_name("").is_err());
+        assert_eq!(served["rule"], config_name_rule());
     }
 
     #[test]

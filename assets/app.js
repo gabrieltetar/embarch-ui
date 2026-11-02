@@ -10211,6 +10211,15 @@
   var pmCurrent = null; // { study_id, prompt_id, step_name, text, deadlineAt (performance.now), resolved }
   var pmTimer = null;
   var pmQueue = [];
+  // A step naming a bench config (`embarch-core` decision 107, the bench
+  // editor's phase 5): what the live bench lookup found for the prompt on
+  // screen, the config each run picked for a name its bench lacks (an inline
+  // study keeps the pick for that run), and a mark that failed after its
+  // modal had gone, said on the next one.
+  var pmBench = null;
+  var pmBenchSeq = 0;
+  var pmPicks = {};
+  var pmCarry = "";
 
   function pmEl(id) {
     return document.getElementById(id);
@@ -10282,11 +10291,18 @@
       deadlineAt: performance.now() + (p.remaining_ms || 0),
       resolved: false,
     };
-    // The config a step names is shown as text until the bench editor draws the change (phase 5).
+    // The config a step names, as the study wrote it; the section under the
+    // text draws the change on the live bench, or says why it cannot.
     pmEl("prompt-step").textContent = "Step '" + (p.step_name || "") + "'" +
       (p.bench_config ? " \u2014 bench config '" + p.bench_config + "'" : "");
     pmEl("prompt-text").textContent = p.text || "";
     pmEl("prompt-result").style.display = "none";
+    if (pmCarry) {
+      pmEl("prompt-result").textContent = pmCarry;
+      pmEl("prompt-result").style.display = "";
+      pmCarry = "";
+    }
+    pmBenchShow(p);
     pmEl("prompt-open-live").setAttribute("href", "#live-study?study=" + encodeURIComponent(p.study_id));
     pmSetButtons(true);
     pmEl("prompt-backdrop").style.display = "";
@@ -10344,7 +10360,13 @@
     if (!pmCurrent || pmCurrent.study_id !== study_id || pmCurrent.prompt_id !== r.prompt_id || pmCurrent.resolved) return;
     var by = r.answered_by;
     if (r.answer === "confirmed" || r.answer === "cancelled") {
-      if (by === "ui" && pmCurrent.answeredHere) return pmHide();
+      if (by === "ui" && pmCurrent.answeredHere) {
+        // The answer stands either way; the modal stays only to say how the
+        // bench mark went — and gives way at once to the next prompt.
+        if (pmCurrent.marking) { pmCurrent.closeWhenMarked = true; return pmSettle(pmCurrent); }
+        if (pmCurrent.markFailed) return pmSettle(pmCurrent);
+        return pmHide();
+      }
       pmEnded("Already " + r.answer + (by ? " from " + by : "") + ".");
     } else if (r.answer === "timed_out") {
       pmEnded("The prompt timed out before anyone answered.");
@@ -10392,6 +10414,8 @@
         // than leave two live-looking buttons.
         pmEl("prompt-result").textContent = "Sent: " + answer + ".";
         pmEl("prompt-result").style.display = "";
+        // Then, and only then, the bench: the answer never waits on it.
+        if (answer === "confirmed") pmBenchConfirmed(cur);
         return;
       }
       cur.answeredHere = false;
@@ -10414,7 +10438,256 @@
     }
   }
 
+  /* ---- The bench a prompt names (phase 5) --------------------------------
+   *
+   * When the step names a config and this repo holds the machine's live
+   * bench, the section under the text draws the change from the live config
+   * — the part-to-part cables to unplug and to plug, by part and connector
+   * label — and Confirm, once its answer has reached Core, records that
+   * config live (`POST /api/bench/live/config`, no Core call). A config the
+   * bench lacks offers the bench's configs to pick, or the text alone. No
+   * live bench, another repo's, or one that cannot be read: the text, and
+   * one line why. **The lookup never holds the answer**: Confirm is live from
+   * the first frame, and a lookup still on its way acts once it lands.
+   */
+  function pmKey(o) { return o.study_id + ":" + o.prompt_id; }
+
+  function pmBenchJson(route) {
+    return fetch(route, { headers: { Accept: "application/json" } }).then(function (r) {
+      return r.text().then(function (t) {
+        if (!r.ok) {
+          var e = new Error(t || "HTTP " + r.status);
+          e.status = r.status;
+          e.code = r.headers.get("x-embarch-refusal");
+          throw e;
+        }
+        return t ? JSON.parse(t) : null;
+      });
+    });
+  }
+
+  function pmRepoName(path) {
+    var parts = String(path || "").split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : String(path || "another repo");
+  }
+
+  function pmBenchShow(p) {
+    var box = pmEl("prompt-bench");
+    var b = { seq: ++pmBenchSeq, key: pmKey(p), study_id: p.study_id, name: p.bench_config || null, state: "loading",
+              slug: null, from: null, fromMissing: false, bench: null, catalog: null, pick: null, confirmed: null };
+    pmBench = b;
+    if (pmCurrent && pmKey(pmCurrent) === b.key) pmCurrent.bench = b;
+    if (!b.name) { box.hidden = true; return; }
+    box.hidden = false;
+    pmBenchRender(b);
+    pmBenchJson("/api/bench/live").then(function (r) {
+      var live = r && r.live;
+      if (r && r.superseded) return pmBenchWhy(b, "this repo's bench is not the machine's live one — " + pmRepoName(r.superseded.repo) + " · " + r.superseded.slug + " went live after it");
+      if (!live) return pmBenchWhy(b, "no bench is live in this repo, so there is no wiring to draw the change on");
+      if (live.missing) return pmBenchWhy(b, "the live bench's file, embarch/topologies/" + live.slug + ".toml, is not there any more");
+      if (live.unparseable) return pmBenchWhy(b, "the live bench's file, embarch/topologies/" + live.slug + ".toml, does not parse");
+      b.slug = live.slug;
+      b.from = live.config == null ? null : live.config;
+      b.fromMissing = !!live.config_missing;
+      return Promise.all([
+        pmBenchJson("/api/bench/benches/" + encodeURIComponent(live.slug)),
+        pmBenchJson("/api/bench/parts").catch(function () { return null; }),
+      ]).then(function (res) {
+        b.bench = res[0] || {};
+        b.catalog = res[1];
+        var names = (b.bench.configs || []).map(function (c) { return c && c.name; });
+        if (names.indexOf(b.name) >= 0) {
+          b.state = "has";
+        } else {
+          b.state = "missing";
+          var kept = pmPicks[b.study_id + "\u0000" + b.name];
+          b.pick = kept && names.indexOf(kept) >= 0 ? kept : null;
+          b.kept = !!b.pick;
+        }
+        pmBenchRender(b);
+        pmBenchLanded(b);
+      });
+    }).catch(function (e) {
+      if (e && e.code === "no-project") return pmBenchWhy(b, "no project is open, so there is no live bench to draw from");
+      pmBenchWhy(b, "which bench is live could not be read: " + (e && e.message ? e.message : String(e)));
+    });
+  }
+
+  function pmBenchWhy(b, why) {
+    b.state = "none";
+    b.why = why;
+    pmBenchRender(b);
+    pmBenchLanded(b);
+  }
+
+  // Drawn only while it is the prompt on screen; a later lookup's answer
+  // never lands on another prompt.
+  function pmBenchRender(b) {
+    if (pmBench !== b || !pmCurrent || pmKey(pmCurrent) !== b.key) return;
+    var head = pmEl("prompt-bench-head"), svg = pmEl("prompt-bench-svg"), lists = pmEl("prompt-bench-lists"), pick = pmEl("prompt-bench-pick");
+    var eb = window.embarchBench;
+    head.textContent = "";
+    lists.textContent = "";
+    svg.setAttribute("hidden", "");
+    // The radios stay while the same lookup is on screen, so a pick keeps its focus.
+    if (b.state !== "missing" || pick.getAttribute("data-for") !== String(b.seq)) {
+      pick.hidden = true;
+      pick.textContent = "";
+      pick.removeAttribute("data-for");
+    }
+    pmEl("prompt-bench").setAttribute("data-state", b.state);
+    var line = function (strong, rest) {
+      var s = document.createElement("span");
+      s.textContent = strong;
+      head.appendChild(s);
+      if (rest) {
+        var w = document.createElement("span");
+        w.className = "prompt-bench-why";
+        w.textContent = rest;
+        head.appendChild(w);
+      }
+    };
+    if (b.state === "loading") { line("Bench config " + b.name, " \u2014 reading the live bench\u2026"); return; }
+    if (b.state === "none") { line("Bench config " + b.name, " \u2014 the text alone: " + b.why + "."); return; }
+    var target = b.state === "has" ? b.name : b.pick;
+    if (b.state === "missing") {
+      line("Config " + b.name + " isn't on this bench", " (" + b.slug + ")" + (b.kept ? " \u2014 " + b.pick + " was picked for it earlier in this run" : "") +
+        ". Pick the config to wire, or go on with the text alone.");
+      var names = (b.bench.configs || []).map(function (c) { return c && c.name; }).filter(function (n) { return n != null; });
+      if (pick.getAttribute("data-for") !== String(b.seq)) names.concat([null]).forEach(function (n) {
+        var lab = document.createElement("label"), r = document.createElement("input"), t = document.createElement("span");
+        r.type = "radio";
+        r.name = "prompt-bench-pick";
+        r.value = n == null ? "" : n;
+        r.checked = n == null ? !b.pick : b.pick === n;
+        r.setAttribute("data-pick", n == null ? "" : n);
+        t.textContent = n == null ? "Text only \u2014 leave which config is live as it is" : n + (n === b.from && !b.fromMissing ? " (live now)" : "");
+        lab.appendChild(r);
+        lab.appendChild(t);
+        pick.appendChild(lab);
+      });
+      pick.setAttribute("data-for", String(b.seq));
+      pick.hidden = false;
+      if (!target) return;
+    } else if (b.from === b.name && !b.fromMissing) {
+      line("The bench is wired as config " + b.name + " already", " (" + b.slug + "): nothing to re-cable.");
+    } else {
+      line("Re-cable " + b.slug + " to config " + b.name,
+        b.fromMissing ? " \u2014 the live config " + b.from + " is not on the bench any more, so what to unplug cannot be told: wire " + b.name + " as drawn."
+          : b.from == null ? " \u2014 no config is live, so every cable of " + b.name + " is to plug." : " from config " + b.from + ".");
+    }
+    if (!eb || typeof eb.configChange !== "function") return;
+    var from = b.fromMissing ? null : b.from;
+    var ch = eb.configChange(b.bench, from, target, b.catalog);
+    var list = function (cls, title, rows) {
+      var d = document.createElement("div"), h = document.createElement("h4"), ul = document.createElement("ul");
+      d.className = "prompt-bench-list " + cls;
+      h.textContent = title + " \u00b7 " + rows.length;
+      d.appendChild(h);
+      rows.forEach(function (r) {
+        var li = document.createElement("li");
+        li.textContent = r.a.part + (r.a.connector ? " \u00b7 " + r.a.connector : "") + "  \u2194  " + r.b.part + (r.b.connector ? " \u00b7 " + r.b.connector : "");
+        ul.appendChild(li);
+      });
+      if (!rows.length) {
+        var none = document.createElement("li");
+        none.className = "placeholder-note";
+        none.textContent = "nothing";
+        ul.appendChild(none);
+      }
+      d.appendChild(ul);
+      lists.appendChild(d);
+    };
+    if (b.state === "missing" && b.from === target && !b.fromMissing) {
+      var same = document.createElement("p");
+      same.className = "placeholder-note";
+      same.textContent = target + " is the live wiring already: nothing to re-cable.";
+      lists.appendChild(same);
+    } else {
+      list("prompt-unplug", "Unplug", ch.unplug);
+      list("prompt-plug", "Plug", ch.plug);
+    }
+    if (typeof eb.previewChange === "function" && eb.previewChange(svg, b.bench, from, target, b.catalog)) svg.removeAttribute("hidden");
+  }
+
+  // The lookup landed; a Confirm pressed before it marks now.
+  function pmBenchLanded(b) {
+    if (b.confirmed) pmBenchMark(b.confirmed, b);
+  }
+
+  function pmBenchConfirmed(cur) {
+    var b = cur.bench;
+    if (!b || b.key !== pmKey(cur) || !b.name) return;
+    if (b.state === "loading") { b.confirmed = cur; return; }
+    pmBenchMark(cur, b);
+  }
+
+  // **Confirm marks the config the bench is now wired as**: the one the step
+  // names when the bench has it, the pick when it lacks it (kept for the
+  // run), none for the text alone. Record-only — Core was told the answer,
+  // and is told nothing about cables. A failed mark is said; the answer stands.
+  function pmBenchMark(cur, b) {
+    var target = b.state === "has" ? b.name : b.state === "missing" ? b.pick : null;
+    if (b.state === "missing" && b.pick) pmPicks[b.study_id + "\u0000" + b.name] = b.pick;
+    if (!target || (target === b.from && !b.fromMissing)) return;
+    cur.marking = true;
+    var here = function () { return pmCurrent === cur; };
+    var say = function (t) {
+      if (!here()) return;
+      pmEl("prompt-result").textContent = t;
+      pmEl("prompt-result").style.display = "";
+    };
+    say("Confirmed. Marking config " + target + " live on " + b.slug + "\u2026");
+    fetch("/api/bench/live/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: b.slug, config: target }),
+    }).then(function (r) {
+      return r.text().then(function (t) { if (!r.ok) throw new Error(t || "HTTP " + r.status); });
+    }).then(function () {
+      cur.marking = false;
+      document.dispatchEvent(new CustomEvent("embarch:live-changed", { detail: { slug: b.slug, config: target, source: "prompt" } }));
+      say("Confirmed. Config " + target + " is marked live on " + b.slug + " \u2014 recorded here, nothing sent to embarch-core.");
+      if (cur.closeWhenMarked && here()) pmHide();
+    }, function (e) {
+      cur.marking = false;
+      var text = "Confirmed \u2014 the answer stands. Config " + target + " was not marked live: " + (e && e.message ? e.message : String(e));
+      cur.markFailed = text;
+      if (here()) {
+        say(text);
+        if (cur.closeWhenMarked) pmSettle(cur);
+      } else {
+        pmCarry = "The last prompt was confirmed; config " + target + " was not marked live: " + (e && e.message ? e.message : String(e));
+      }
+    });
+  }
+
+  // Answered here, and the bench mark still on its way or failed: the modal
+  // stays with Close, saying so, and counts as ended, so the next prompt
+  // replaces it at once.
+  function pmSettle(cur) {
+    cur.resolved = true;
+    if (pmTimer) clearInterval(pmTimer);
+    pmTimer = null;
+    pmEl("prompt-countdown").textContent = "";
+    if (cur.markFailed) {
+      pmEl("prompt-result").textContent = cur.markFailed;
+      pmEl("prompt-result").style.display = "";
+    }
+    pmSetButtons(false);
+    pmEl("prompt-close").focus();
+    var next = pmQueue.shift();
+    if (next) pmShow(next);
+  }
+
   function initPromptModal() {
+    pmEl("prompt-bench-pick").addEventListener("change", function (e) {
+      var r = e.target;
+      if (!r || r.name !== "prompt-bench-pick" || !pmBench || pmBench.state !== "missing") return;
+      pmBench.pick = r.value || null;
+      pmBench.kept = false;
+      pmBenchRender(pmBench);
+    });
     pmEl("prompt-confirm").addEventListener("click", function () { pmAnswer("confirmed"); });
     pmEl("prompt-cancel").addEventListener("click", function () { pmAnswer("cancelled"); });
     pmEl("prompt-close").addEventListener("click", pmHide);

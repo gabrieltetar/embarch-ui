@@ -105,6 +105,18 @@ vocabulary! {
     }
 }
 
+impl Category {
+    /// Whether a role-less part of this category that reaches a probe is a
+    /// **bench board** (`embarch-topology` decision 41) — enrolled with no
+    /// role, its chip looked up from its `board`. A probe pod, an analyzer or
+    /// an instrument is not, even with a probe bound. Served as
+    /// `bench_board_categories`, so the inspector offers a board type on
+    /// exactly the parts a make-live would propose.
+    pub fn is_bench_board(self) -> bool {
+        self == Category::Board
+    }
+}
+
 vocabulary! {
     /// Which drawing a part gets: the thing you would look for on a shelf.
     Look {
@@ -210,8 +222,9 @@ fn powers_of(class: PowerClass) -> Vec<&'static str> {
 /// Besides the word lists, the rules between fields that a part editor has
 /// to follow to offer only what a save accepts: which kinds take a power
 /// role (`power_kinds`), and which functions take an interface or line facts
-/// — the same predicates [`PartTemplate::check`] applies — and under
-/// `template`, the limits a template file is held to.
+/// — the same predicates [`PartTemplate::check`] applies — under
+/// `template`, the limits a template file is held to, and under
+/// `config_name`, what a config name may be ([`files::check_config_name`]).
 pub fn vocabulary_json() -> serde_json::Value {
     fn words<T: Copy>(all: &[T], text: fn(T) -> &'static str) -> Vec<&'static str> {
         all.iter().map(|&w| text(w)).collect()
@@ -232,6 +245,7 @@ pub fn vocabulary_json() -> serde_json::Value {
             "pass": powers_of(PowerClass::Pass),
         },
         "categories": words(Category::ALL, Category::as_str),
+        "bench_board_categories": Category::ALL.iter().copied().filter(|c| c.is_bench_board()).map(Category::as_str).collect::<Vec<_>>(),
         "looks": words(Look::ALL, Look::as_str),
         "functions": words(Function::ALL, Function::as_str),
         // What a part's `role` may hold, so the editor's role picker offers
@@ -240,6 +254,9 @@ pub fn vocabulary_json() -> serde_json::Value {
         "interface_functions": functions_where(Function::takes_interface),
         "line_functions": functions_where(Function::takes_line_facts),
         "template": template_limits(),
+        // What a config name may be (phase 5): a host study names a config by
+        // exact name, so the shape is study-designer's, served whole.
+        "config_name": files::config_name_vocabulary(),
     })
 }
 
@@ -994,6 +1011,7 @@ mod tests {
         assert_eq!(v["looks"][3], "devkit");
         assert_eq!(v["functions"], json!(["probe", "vcom", "scpi", "bootload-app", "bootload-bootloader"]));
         assert_eq!(v["roles"], json!(["dut", "dev-bench"]));
+        assert_eq!(v["bench_board_categories"], json!(["board"]));
         assert_eq!(v["sides"], json!(["left", "right", "top"]));
         assert_eq!(v["power_kinds"], json!(["usb-c", "banana", "terminal"]));
         assert_eq!(v["interface_functions"], json!(["vcom", "bootload-app", "bootload-bootloader"]));

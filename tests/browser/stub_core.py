@@ -135,6 +135,7 @@ def running_rail():
 # drive's own control surface). Then it is `running` with a `pending_prompt`,
 # its event stream carries `PromptPending`/`PromptResolved`, and
 # `POST /study/<id>/prompt` answers it (or returns 409 in `conflict` mode).
+# `start` takes an optional `bench_config`, carried on the pending prompt.
 PROMPTING = "a1" * 16
 PROMPT = {"on": False, "pending": None, "frames": [], "answers": [], "conflict": False}
 PROMPT_LOCK = threading.Lock()
@@ -144,13 +145,17 @@ def _prompt_frame(obj):
     PROMPT["frames"].append(b"data: " + json.dumps(obj).encode() + b"\n\n")
 
 
-def prompt_open(prompt_id, text, deadline_in_ms):
+def prompt_open(prompt_id, text, deadline_in_ms, bench_config=None):
     now = int(time.time() * 1000)
     with PROMPT_LOCK:
         PROMPT["on"] = True
         PROMPT["pending"] = {"prompt_id": prompt_id, "list": "Steps", "step_index": 2,
                              "step_name": "swap the cable", "text": text,
                              "opened_utc_ms": now, "deadline_utc_ms": now + deadline_in_ms}
+        # The bench configuration a step names (`embarch-core` decision 107):
+        # present only when the drive asks, as Core leaves it out for None.
+        if bench_config is not None:
+            PROMPT["pending"]["bench_config"] = bench_config
         _prompt_frame(dict(PROMPT["pending"], kind="PromptPending", study_id=PROMPTING))
 
 
@@ -272,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
             op = path.rsplit("/", 1)[1]
             if op == "start":
                 prompt_open(body.get("prompt_id", 1), body.get("text", "Move the probe to J4, then confirm"),
-                            body.get("deadline_in_ms", 120000))
+                            body.get("deadline_in_ms", 120000), body.get("bench_config"))
             elif op == "resolve":
                 prompt_resolve(body["prompt_id"], body["answer"], body.get("answered_by"))
             elif op == "conflict":

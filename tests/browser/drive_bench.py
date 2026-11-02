@@ -769,7 +769,9 @@ try:
     # --- the legacy bench: a binding in table form, matched by interface ---
     pick_bench("ble-dev-bench")
     check("a legacy file says how it was laid out", "no [[parts]]" in script("return document.getElementById('bench-path').textContent;"))
-    check("a bench with no configs shows no config tabs", script("return document.getElementById('bench-config-row').hidden;"))
+    check("a bench with no configs shows no config tabs, only + Config", script(
+        "return !document.querySelector('#bench-configs [data-cfg]') && !document.getElementById('bench-cfg-add').hidden &&"
+        " document.getElementById('bench-cfg-rename').hidden && document.getElementById('bench-cfg-delete').hidden;"))
     click('#bench-svg [data-part="dev-bench"] .bn-body')
     ins = script(INSPECTOR) or ""
     check("its dev-bench link reads as a serial and an interface", "D607104 · interface 2" in ins and "object Object" not in ins, ins)

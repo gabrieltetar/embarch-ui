@@ -235,9 +235,16 @@
                      connector clicked) onto a usb-host connector. A row under
                      the canvas, so it never covers a part. -->
                 <div class="bench-tray" id="bench-tray" aria-label="Plugged in, on no part" hidden></div>
+                <!-- Config slots (phase 5): the tabs, and adding, renaming and
+                     deleting a config, each a bench edit that Save writes. -->
                 <div class="bench-foot" id="bench-config-row" hidden>
                   <span class="bench-config-label">Config</span>
                   <div class="bench-configs" id="bench-configs" role="tablist" aria-label="Configs"></div>
+                  <button type="button" class="btn btn-tiny" id="bench-cfg-add" title="Add a config: empty, or a copy of the one on screen">+ Config</button>
+                  <span class="bench-cfg-tools">
+                    <button type="button" class="btn btn-tiny" id="bench-cfg-rename" hidden>Rename</button>
+                    <button type="button" class="btn btn-tiny btn-icon-danger" id="bench-cfg-delete" hidden>Delete</button>
+                  </span>
                 </div>
               </div>
               <ul class="bench-notes" id="bench-notes" hidden></ul>
@@ -850,6 +857,7 @@
         <div class="card-title" id="bench-dialog-title"></div>
         <p id="bench-dialog-text" class="bench-dialog-text"></p>
         <label class="sd-field" id="bench-dialog-field" hidden><span id="bench-dialog-label">Name</span><input id="bench-dialog-input" type="text" class="sd-input mono" spellcheck="false" /></label>
+        <label class="bench-dialog-check" id="bench-dialog-check" hidden><input type="checkbox" id="bench-dialog-check-input" /> <span id="bench-dialog-check-label"></span></label>
         <div id="bench-dialog-choices" class="bench-dialog-choices" hidden></div>
         <p id="bench-dialog-error" class="sd-error" hidden></p>
         <div class="sd-row-actions" style="margin-top:16px;">
@@ -1197,6 +1205,16 @@
   <div class="card-title" id="prompt-heading">A study is waiting for you</div>
   <div id="prompt-step" class="prompt-step"></div>
   <div id="prompt-text" class="prompt-text"></div>
+  <!-- A step that names a bench config (phase 5): the change from the live
+       config drawn and listed, or the pick when the live bench lacks it, or
+       one line why there is nothing to draw. Filled by app.js; never holds
+       the answer back. -->
+  <div id="prompt-bench" class="prompt-bench" hidden>
+    <div id="prompt-bench-head" class="prompt-bench-head"></div>
+    <div id="prompt-bench-pick" class="prompt-bench-pick" role="radiogroup" aria-label="Which config to wire" hidden></div>
+    <svg id="prompt-bench-svg" class="prompt-bench-svg" aria-label="The bench change" hidden></svg>
+    <div id="prompt-bench-lists" class="prompt-bench-lists"></div>
+  </div>
   <div id="prompt-countdown" class="prompt-countdown"></div>
   <p id="prompt-result" class="placeholder-note" style="display:none;"></p>
   <div class="sd-row-actions" style="margin-top:20px;">

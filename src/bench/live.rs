@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use super::check::Templates;
 use super::files::{self, Bench, Binding, Config, LoadError, Part};
 use super::routes::{path_slug, refuse, refuse_as, OpenRepo};
-use super::{catalog, Catalog, Category, Function, Kind, Role};
+use super::{catalog, Catalog, Function, Kind, Role};
 use crate::topology::{
     apply_link, apply_role, declare_signals, lookup_chip, no_chip_sentence, now_utc_ms, pick_chip, profile_path, recorded_chip, role_chip,
     write_role_board, BoardWrite, LinkOutcome, RoleBinding,
@@ -213,6 +213,33 @@ pub fn take_machine(path: &Path, repo: &Path, slug: &str, config: Option<&str>) 
     })
 }
 
+/// The config this repo's live bench is wired as, **and nothing else**: the
+/// entry's config (its `since` moved only when the config changes), the
+/// machine's when it points at this repo's bench, and the mark a takeover
+/// left on another repo's entry. Refused when the entry is gone or names
+/// another bench by the time the record is written.
+pub fn set_live_config(path: &Path, repo: &Path, slug: &str, config: Option<&str>) -> Result<LiveRecord, String> {
+    let key = repo_key(repo);
+    update_records(path, |r| {
+        let entry = r.repos.get_mut(&key).filter(|e| e.slug == slug).ok_or_else(|| format!("`{slug}` is no longer this repo's live bench"))?;
+        if entry.config.as_deref() != config {
+            entry.config = config.map(str::to_string);
+            entry.since_utc_ms = now_utc_ms();
+        }
+        let record = entry.clone();
+        if let Some(m) = r.machine.as_mut().filter(|m| m.repo == key && m.slug == slug) {
+            m.config = record.config.clone();
+            m.since_utc_ms = record.since_utc_ms;
+        }
+        for other in r.repos.values_mut() {
+            if let Some(mark) = other.superseded_by.as_mut().filter(|s| s.repo == key && s.slug == slug) {
+                mark.config = record.config.clone();
+            }
+        }
+        Ok(record)
+    })?
+}
+
 /// Clears this repo's entry, and the machine's **only when it points here**.
 pub fn clear_record(path: &Path, repo: &Path) -> Result<(), String> {
     let key = repo_key(repo);
@@ -356,7 +383,7 @@ fn instrument_name(part: &Part) -> String {
 /// decision 41); a probe pod, an analyzer or an instrument is not, even with
 /// a probe bound.
 fn is_bench_board(part: &Part, templates: &Templates) -> bool {
-    part.role.is_none() && templates.get(&part.template).is_some_and(|t| t.category == Category::Board)
+    part.role.is_none() && templates.get(&part.template).is_some_and(|t| t.category.is_bench_board())
 }
 
 /// Each binding of `function` on a connector the part's template says
@@ -1065,6 +1092,94 @@ pub async fn api_clear_live(State(state): State<AppState>, OpenRepo(repo): OpenR
     };
     match clear_record(path, &repo) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// A key that must be present and may be `null`: `Some(None)` for `null`,
+/// `None` (by `default`) for absent.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LiveConfigRequest {
+    /// The config to record as the live wiring, or `null` for the
+    /// bench-level cables alone. **Required**.
+    #[serde(default, deserialize_with = "present")]
+    pub config: Option<Option<String>>,
+    /// The bench the caller believes is live: when given, a record naming
+    /// another bench is `409 not-live` rather than a config set on it.
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+/// `POST /api/bench/live/config` — **records which config the live bench is
+/// wired as, and calls nothing in Core** (owner, 2026-11-01: switching
+/// configs never calls Core; a config is a named set of part-to-part
+/// cables, which declare nothing). Answers the record as `GET` does.
+///
+/// The config must be in the bench **as saved**. Refused `409`: no record,
+/// its file gone, or `slug` naming another bench (`not-live`); another repo
+/// holding the machine (`superseded`); the file broken (`unparseable`); the
+/// config not in it (`config-missing`). A rename of the live config on the
+/// canvas lands here after its save; a prompt naming a config marks it here
+/// once it is answered. Under the same lock as a make-live, a retract and a
+/// clear, with every check made after taking it. Declaring again is still
+/// an explicit make-live or a write-through.
+pub async fn api_live_config(State(state): State<AppState>, OpenRepo(repo): OpenRepo, Json(req): Json<LiveConfigRequest>) -> Response {
+    let Some(config) = req.config else {
+        return refuse(StatusCode::BAD_REQUEST, "a config change names `config`: a config of the live bench, or null for its bench-level cables alone");
+    };
+    let path = match record_path(&state) {
+        Ok(p) => p.to_path_buf(),
+        Err(resp) => return *resp,
+    };
+    let _live = state.bench_live_lock.lock().await;
+    let records = {
+        let _held = RECORD.lock().unwrap_or_else(|e| e.into_inner());
+        read_records(&path)
+    };
+    let records = match records {
+        Ok(r) => r,
+        Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let key = repo_key(&repo);
+    let Some(record) = records.repos.get(&key) else {
+        return refuse_as(StatusCode::CONFLICT, "not-live", "no bench is live in this repo, so no config is recorded as its wiring; make a bench live first");
+    };
+    if let Some(slug) = req.slug.as_deref().filter(|s| *s != record.slug) {
+        return refuse_as(
+            StatusCode::CONFLICT,
+            "not-live",
+            format!("`{slug}` is not this repo's live bench (`{}` is), so its config is not recorded", record.slug),
+        );
+    }
+    if let Some(s) = superseded(&records, &key) {
+        return *superseded_refusal(&s, "make it live explicitly to take the machine back, then pick its config");
+    }
+    let bench = match files::load(&repo, &record.slug) {
+        Ok(b) => b,
+        Err(LoadError::Missing) => {
+            return refuse_as(
+                StatusCode::CONFLICT,
+                "not-live",
+                format!("the live bench `{}` is not on disk any more, so none of its configs can be recorded; make a bench live again", record.slug),
+            )
+        }
+        Err(LoadError::Unparseable(e)) => return refuse_as(StatusCode::CONFLICT, "unparseable", format!("{e} — fix it by hand, then pick its config")),
+        Err(LoadError::Unreadable(e)) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    if let Some(name) = config.as_deref().filter(|n| bench.config(n).is_none()) {
+        return refuse_as(
+            StatusCode::CONFLICT,
+            "config-missing",
+            format!("`{}` as saved has no config named `{name}`; save the bench first, or pick a config it has", record.slug),
+        );
+    }
+    let slug = record.slug.clone();
+    match set_live_config(&path, &repo, &slug, config.as_deref()).and_then(|r| view(&repo, &r)) {
+        Ok(live) => Json(serde_json::json!({ "live": live, "superseded": null })).into_response(),
         Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

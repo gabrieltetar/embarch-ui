@@ -146,6 +146,7 @@ ENROLL_DELAY = [0.0]
 LIVE_POSTS = []
 RETRACTS = []
 LIVE_DELETES = []
+CONFIG_SETS = []
 
 
 class Core(BaseHTTPRequestHandler):
@@ -278,6 +279,21 @@ class Proxy(BaseHTTPRequestHandler):
             STATE["live"] = None
             STATE["superseded"] = None
             self._send(204, b"", "text/plain")
+            return True
+        if path == "/api/bench/live/config" and self.command == "POST":
+            # Phase 5's record-only config change: no Core call, the record's
+            # config moved, answered as GET answers.
+            CONFIG_SETS.append(data)
+            if STATE["delay_live"]:
+                time.sleep(STATE["delay_live"])
+            rec = STATE["live"]
+            if not rec or rec["slug"] != data.get("slug", rec["slug"]):
+                self._send(*refusal("not-live", "no bench is live in this repo"))
+            elif STATE["superseded"]:
+                self._send(*refusal("superseded", "another repo holds this machine"))
+            else:
+                STATE["live"] = dict(rec, config=data.get("config"), config_missing=False)
+                self._send(200, {"live": STATE["live"], "superseded": None})
             return True
         if path == "/api/bench/live/retract" and self.command == "POST":
             RETRACTS.append(data)
@@ -799,8 +815,20 @@ try:
         check("switching to config B on the live bench calls no route, and the A tab stays the live wiring",
               len(LIVE_POSTS) == posts and script("return document.querySelector('#bench-configs [data-live-config]').textContent;") == "A", b2)
         check("the bar offers to make B the live wiring instead, as its own click", b2["make"] == "Make B live", b2)
+        # Phase 5: making another config of the live bench live is record-only.
+        writes, sets = list(CORE_WRITES), len(CONFIG_SETS)
+        click("#bench-make-live")
+        moved = wait_for("return document.getElementById('bench-live').textContent === 'live \u00b7 B';", 6)
+        check("Make B live records B through the record-only route: no make-live, nothing sent to Core",
+              bool(moved) and CONFIG_SETS[sets:] == [{"slug": "live-bench", "config": "B"}] and len(LIVE_POSTS) == posts and CORE_WRITES == writes,
+              [CONFIG_SETS[sets:], LIVE_POSTS[posts:], CORE_WRITES[len(writes):]])
+        check("the live dot moves to B, and the report from A says its buttons act no more", script(
+            "return document.querySelector('#bench-configs [data-live-config]').textContent;") == "B" and "config B is live now" in report_text(), report_text()[:200])
         script("document.querySelector('#bench-configs [data-cfg=\"0\"]').click();")
         settle()
+        click("#bench-make-live")
+        wait_for("return document.getElementById('bench-live').textContent === 'live \u00b7 A';", 6)
+        check("and Make A live takes it back the same way", CONFIG_SETS[-1] == {"slug": "live-bench", "config": "A"} and len(LIVE_POSTS) == posts, CONFIG_SETS[-1:])
 
         # --- a write on its way holds the report's buttons; a late Retract still lands ------------------
         click("#bench-live-btn")
@@ -923,6 +951,9 @@ try:
         STATE["live"] = dict(STATE["live"], config_missing=False)
 
         # --- a project switch while a make-live is on its way ----------------------------------------
+        # Not live, so the button is an explicit make-live (another config
+        # of the live bench would be record-only, phase 5).
+        STATE["live"] = None
         open_page()
         on_bench("live-bench")
         listen()
@@ -938,6 +969,22 @@ try:
         STATE["delay_live"] = 0.0
         check("a make-live answer that lands after a project switch is dropped: no event, no report opened over the new repo",
               len(events("embarch:live-changed")) == before and not panel_open("live"), events("embarch:live-changed"))
+        on_bench("live-bench")
+        # The same for a record-only config change (phase 5): live is B now.
+        open_page()
+        on_bench("live-bench")
+        listen()
+        wait_for("return document.getElementById('bench-live').textContent === 'live \u00b7 B';", 6)
+        STATE["delay_live"] = 1.5
+        before = len(events("embarch:live-changed"))
+        click("#bench-make-live")
+        time.sleep(0.2)
+        script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: arguments[0]}}));", [str(fw)])
+        time.sleep(2.5)
+        STATE["delay_live"] = 0.0
+        check("a record-only config change answered after a project switch is dropped too: no event, no notice over the new repo",
+              len(events("embarch:live-changed")) == before and CONFIG_SETS[-1:] == [{"slug": "live-bench", "config": "A"}] and
+              "recorded here" not in notice(), [events("embarch:live-changed"), notice()])
         on_bench("live-bench")
 
         # --- a 409 on make live offers Reload ------------------------------------------------------

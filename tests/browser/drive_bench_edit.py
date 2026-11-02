@@ -1055,10 +1055,19 @@ try:
     check("and a bench switch asks, naming the part editor's template", "part editor" in (asked or ""), asked)
     script("document.getElementById('bench-dialog-ok').click();")
     check("Discard tells the part editor to drop its draft", on_bench("other-bench") and script("return window.__partsDiscarded === true;"))
+    # The bench switch's leave lands whole — the stub's discard called, the
+    # load settled, no dialog left — before the real part editor is put back
+    # and opened: a leave still landing would discard the real draft.
+    wait_for("return window.__partsDiscarded === true && window.embarchBench.settled() &&"
+             " document.getElementById('bench-dialog').style.display !== 'block' && document.getElementById('bench-dirty').hidden;", 6)
+    settle()
     script("if (window.__parts) window.embarchParts = window.__parts; else delete window.embarchParts;")
     # The real part editor open on a changed draft: the leave's dialog draws over it.
     script("document.dispatchEvent(new CustomEvent('embarch:edit-part', {detail: {id: null}}));")
-    wait_for("return document.getElementById('part-dialog').style.display !== 'none' && !!document.getElementById('part-label');", 4)
+    # Typed into only once its read has landed: a draft typed while the
+    # dialog says "reading…" is replaced by the fresh one that read builds.
+    wait_for("var d=document.getElementById('part-dialog'); return d.style.display !== 'none' && d.getAttribute('data-mode') === 'new' &&"
+             " !!document.getElementById('part-label') && document.getElementById('part-label').offsetParent !== null;", 6)
     script("var l=document.getElementById('part-label'); l.value='Trial pod'; l.dispatchEvent(new Event('input', {bubbles:true}));")
     check("the real part editor counts its changed draft as unsaved", script("return window.embarchParts.unsaved() && window.embarchBench.unsaved();"))
     script("location.hash = '#desk';")
@@ -1094,7 +1103,7 @@ try:
     # --- the automatic config A -------------------------------------------------------
     pick_bench("loose-bench")
     on_bench("loose-bench")
-    check("a bench with no config shows no config tabs", script("return document.getElementById('bench-config-row').hidden;"))
+    check("a bench with no config shows no config tabs", script("return !document.querySelector('#bench-configs [data-cfg]');"))
     select_part("dut")
     click(conn("dut", "usb-c-1"))
     wait_for("var e=document.querySelector(arguments[0]); return !!e && e.classList.contains('bn-ok');", 6, [conn("an", "in")])

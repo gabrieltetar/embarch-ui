@@ -362,3 +362,47 @@ cargo build --release
 geckodriver --port 4444 &
 python3 tests/browser/drive_bench_live.py
 ```
+
+Phase 5 added config slots to the same stub: Make B live on the live bench
+records B through `POST /api/bench/live/config` with no make-live and nothing
+sent to Core, and its answer is dropped after a project switch like a
+make-live's.
+
+`drive_bench_configs.py` drives config slots (the bench editor's phase 5) with
+every route the real binary's, over a stub Core that records what it is sent:
++ Config (the first free letter offered, a copy of the config on screen or
+empty), a name refused in the dialog in the vocabulary's own sentence and a
+name the bench has refused, undo and redo, Rename and Delete, Save writing
+them; Make live, then Make <config> live on the live bench recording the
+config and sending Core nothing; a save that renames the live config moving
+the record to the new name before it declares the bench, and one that deletes
+it leaving the bar saying the config is gone, Make <config> live the way out;
+a bench board picking a board type from the project's catalog in the
+inspector (an analyzer is offered none), proposed on the save's write-through
+and confirmed with no role and its label as the name; a bench with no config
+keeping the row; a file holding a name a host study cannot write refused on
+Save in the server's words. Three ports from `EMBARCH_UI_PORT` (the UI, the
+stub Core at +2, an unused desk port at +3); `EMBARCH_BENCH_SHOTS=<dir>` saves
+the config row and the add dialog in both themes.
+
+`drive_prompt_bench.py` drives the operator prompt naming a bench config
+(phase 5, decision 69's modal): `stub_core.py`'s prompting study started with
+a `bench_config`, the UI's real bench and live routes on a scratch repo, and a
+proxy that can slow `GET /api/bench/live` and refuse the record-only route.
+The live bench having the config draws the change (the canvas's renderer) and
+lists the cables to unplug and to plug by part and connector label, and
+Confirm answers, then records the config live; lacking it offers the bench's
+configs and the text alone, a pick drawn and recorded, kept for the next
+prompt of the run; no live bench, another repo's or an unreadable record is
+the text alone and one line why. A slow lookup never holds the answer, a
+refused mark is said while the answer stands, and a prompt naming no config
+shows no bench section. Ports: `EMBARCH_UI_PORT`, the proxy at +1,
+`stub_core.py` at +2; `EMBARCH_BENCH_SHOTS=<dir>` saves the change and the pick
+in both themes.
+
+```sh
+cargo build --release
+geckodriver --port 4444 &
+python3 tests/browser/drive_bench_configs.py
+python3 tests/browser/drive_prompt_bench.py
+```

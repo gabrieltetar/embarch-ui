@@ -51,6 +51,9 @@
   var pathEl = document.getElementById("bench-path");
   var cfgRow = document.getElementById("bench-config-row");
   var cfgEl = document.getElementById("bench-configs");
+  var cfgAddBtn = document.getElementById("bench-cfg-add");
+  var cfgRenameBtn = document.getElementById("bench-cfg-rename");
+  var cfgDeleteBtn = document.getElementById("bench-cfg-delete");
   var insEl = document.getElementById("bench-inspector");
   var notesEl = document.getElementById("bench-notes");
   var liveEl = document.getElementById("bench-live-state");
@@ -89,6 +92,9 @@
     label: document.getElementById("bench-dialog-label"),
     input: document.getElementById("bench-dialog-input"),
     choices: document.getElementById("bench-dialog-choices"),
+    check: document.getElementById("bench-dialog-check"),
+    checkInput: document.getElementById("bench-dialog-check-input"),
+    checkLabel: document.getElementById("bench-dialog-check-label"),
     error: document.getElementById("bench-dialog-error"),
     ok: document.getElementById("bench-dialog-ok"),
     cancel: document.getElementById("bench-dialog-cancel")
@@ -102,6 +108,7 @@
   var ROUTE_PICKERS = "/api/topology/pickers";
   var ROUTE_LIVE = "/api/bench/live";
   var ROUTE_RETRACT = "/api/bench/live/retract";
+  var ROUTE_LIVE_CONFIG = "/api/bench/live/config";
   var ROUTE_ENROLL = "/api/enroll";
   var BENCH_KEY = "embarch-ui.bench";
   var NEW_BENCH = "+new";       // the picker's "New bench…": no slug has a `+`
@@ -152,7 +159,11 @@
   var loadSeq = 0, benchSeq = 0;
 
   var saved = null;          // the bench's content as last read or saved, canonical JSON
-  var undoStack = [], redoStack = [];
+  var undoStack = [], redoStack = [];   // { c: the content, o: cfgOrigin } before each edit
+  // Each config on screen's name in the file as last read or saved, or null
+  // for one added since: a rename is told from a delete and an add by it,
+  // so a save of the live bench can carry the live record to the new name.
+  var cfgOrigin = [];
   var laying = null;         // a cable being laid: { from, partKey, connId, mode, verdicts, … }
   var laySeq = 0;
   var drag = null;           // a part being moved: { key, before, moved, mounts, snap, why, … }
@@ -1601,7 +1612,7 @@
   // read again the next time a role part is inspected — now, if one is.
   document.addEventListener("embarch:boards-changed", function () {
     pickers = null; pickersError = null; pickersAsked = false;
-    if (selPart() && selPart().inst.role) renderInspector();
+    if (selPart() && (selPart().inst.role || benchBoard(selPart()))) renderInspector();
     if (linkBoard != null && model) loadPickers();   // a link waiting on the labels reads them again
   });
 
@@ -1609,6 +1620,18 @@
     return (c.revision ? "rev " + c.revision : "no revision") + " · " + (c.variant ? "variant " + c.variant : "no variant");
   }
 
+  // A role-less part a make-live would enrol as a bench board (`embarch-
+  // topology` decision 41) when it reaches a probe: its category is one the
+  // vocabulary serves as a bench board's. Its chip is looked up from its
+  // board type, so the inspector offers one, as for a role.
+  function benchBoard(p) {
+    var cats = (vocab && vocab.bench_board_categories) || [];
+    return !p.inst.role && !p.missing && cats.indexOf(p.tpl.category) >= 0;
+  }
+
+  // **A bench board picks from the project's catalog**, the DUT's list (the
+  // repo's own board types, each with the chip a make-live looks up), and
+  // writes only the part's `board`: a bench edit, never Core.
   function boardEditor(p) {
     var role = p.inst.role, current = p.inst.board || "";
     if (!pickers && !pickersError) {
@@ -1618,15 +1641,16 @@
     if (pickersError) {
       return '<span>Board type</span><span class="sd-error">' + esc(current || "none") + " · the board types could not be read: " + esc(pickersError) + "</span>";
     }
-    var list = (pickers && pickers[role]) || [];
+    var list = (pickers && pickers[role || "dut"]) || [];
     var opts = ['<option value="">none</option>'].concat(list.map(function (o) {
       return '<option value="' + esc(o.board) + '"' + (o.board === current ? " selected" : "") + ">" + esc(o.label || o.board) +
         (o.chip ? " — " + esc(o.chip) : " — no chip: set it in Board types") + "</option>";
     }));
     if (current && !list.some(function (o) { return o.board === current; })) {
-      opts.push('<option value="' + esc(current) + '" selected>' + esc(current) + " (not offered for " + esc(role) + ")</option>");
+      opts.push('<option value="' + esc(current) + '" selected>' + esc(current) + " (not offered for " + esc(role || "a bench board") + ")</option>");
     }
-    var h = '<span>Board type</span><select class="sd-input mono" data-ed="board">' + opts.join("") + "</select>";
+    var h = '<span>Board type</span><select class="sd-input mono" data-ed="board"' +
+      (role ? "" : ' title="The board type a make-live looks this bench board\'s chip up from, to propose its enrolment"') + ">" + opts.join("") + "</select>";
     // **A combination is the DUT's** (decision 47): a dev-bench board builds
     // the one pairing the suite supports, so it is offered none — and the
     // pin preselected is the DUT row's.
@@ -1697,7 +1721,7 @@
       '" placeholder="' + esc(p.missing ? p.inst.template : p.tpl.label) + '"/>';
     if (!p.tpl.hub) {
       h += '<span>Role</span><select class="sd-input mono" data-ed="role">' + roleOptions(p.inst.role || "") + "</select>";
-      if (p.inst.role) h += boardEditor(p);
+      if (p.inst.role || benchBoard(p)) h += boardEditor(p);
     }
     h += "</div>";
     h += '<div class="bn-ed-actions"><button type="button" class="btn" data-act="flip" title="Draw its left connectors on the right (F)">Flip</button>' +
@@ -1843,7 +1867,15 @@
         (wired ? ' data-live-config title="The live wiring: the config this bench was made live with"' : "") + ">" +
         (wired ? '<span class="bench-cfg-dot" aria-hidden="true"></span>' : "") + esc(c && c.name) + "</button>";
     }).join("");
-    cfgRow.hidden = !cfgs.length;
+    // The row is the configs' editor too (phase 5), so it stays while a bench
+    // is on screen, with no tab when the bench has no config yet.
+    cfgRow.hidden = !bench || !model;
+    cfgRenameBtn.hidden = cfgDeleteBtn.hidden = !cfgs.length;
+    var cur = currentConfig();
+    if (cur) {
+      cfgRenameBtn.title = "Rename config " + cur.name + " (a bench edit: Save writes it)";
+      cfgDeleteBtn.title = "Delete config " + cur.name + " and its cables (a bench edit: undo brings it back)";
+    }
     refit();
   }
 
@@ -1924,7 +1956,7 @@
     benchLoads++;
     bench = null; model = null; sel = null; hoverPart = null;
     laying = null; drag = null; trayArm = null; trayDrag = null; trayHover = null;
-    saved = null; undoStack = []; redoStack = []; findings = []; checkState = "idle";
+    saved = null; undoStack = []; redoStack = []; cfgOrigin = []; findings = []; checkState = "idle";
     clearTimeout(checkTimer);
     svg.innerHTML = "";
     bodyEl.hidden = true;
@@ -2088,6 +2120,7 @@
       }
       // Undo reaches back to this load, and no further.
       saved = snapshotContent();
+      resetOrigin();
       undoStack = [];
       redoStack = [];
       benchLoads++;
@@ -2156,6 +2189,12 @@
     bench.signals = c.signals;
   }
   function isDirty() { return !!bench && saved != null && snapshotContent() !== saved; }
+  function configNames(b) { return ((b && b.configs) || []).map(function (c) { return c && c.name; }); }
+  // The configs on screen are the file's, each under its own name.
+  function resetOrigin() { cfgOrigin = configNames(bench); }
+  // What undo and redo keep: the content, and which saved config each is.
+  function undoEntry() { return { c: snapshotContent(), o: cfgOrigin.slice() }; }
+  function restoreEntry(e) { restoreContent(e.c); cfgOrigin = e.o.slice(); }
   // The bench as the routes take it: the file's shape, field for field.
   function benchBody() {
     var c = contentOf(bench);
@@ -2172,9 +2211,10 @@
     // when the edit turns out to change nothing, and then drawn ended.
     var had = !!(laying || drag || trayArm);
     cancelTransient();
-    var before = snapshotContent();
+    var before = undoEntry();
     fn();
-    if (snapshotContent() === before) {
+    if (snapshotContent() === before.c) {
+      cfgOrigin = before.o;
       if (had) { render(); renderTray(); }
       return false;
     }
@@ -2212,16 +2252,16 @@
     if (!bench || !undoStack.length) return;
     cancelTransient();
     notice("", "info");
-    redoStack.push(snapshotContent());
-    restoreContent(undoStack.pop());
+    redoStack.push(undoEntry());
+    restoreEntry(undoStack.pop());
     changed();
   }
   function redo() {
     if (!bench || !redoStack.length) return;
     cancelTransient();
     notice("", "info");
-    undoStack.push(snapshotContent());
-    restoreContent(redoStack.pop());
+    undoStack.push(undoEntry());
+    restoreEntry(redoStack.pop());
     changed();
   }
 
@@ -2312,6 +2352,7 @@
       }
       if (!(bench.configs || []).length) {
         bench.configs = [{ name: AUTO_CONFIG, cables: [] }];
+        cfgOrigin = [null];
         cfgIx = 0;
         created = true;
       }
@@ -2323,6 +2364,110 @@
     if (made) select({ kind: "cable", id: made.id });
     notice(created ? "This bench had no config, so the cable went into a new config, " + AUTO_CONFIG + "." : "", "info");
   }
+
+  // ---------------------------------------------------------------- config slots
+  // Phase 5: a config is a named set of part-to-part cables, added, renamed
+  // and deleted from the config row as bench edits — undoable, written by
+  // Save. **Renaming or deleting one is never refused** (owner, 2026-11-01):
+  // a host study names a config by name, and the name is resolved when a
+  // study needs it. A name's shape is the server's: the vocabulary serves
+  // what a host study may write and the sentence a save refuses it in.
+  function inRuns(runs, cp) {
+    return (runs || []).some(function (r) { return r && cp >= r[0] && cp <= r[1]; });
+  }
+  function nameProblem(raw, exceptIx) {
+    var rule = vocab && vocab.config_name;
+    var cps = Array.from(raw, function (ch) { return ch.codePointAt(0); });
+    if (rule) {
+      var bytes = typeof TextEncoder === "function" ? new TextEncoder().encode(raw).length : raw.length;
+      if (!cps.length || bytes > rule.max_bytes || cps.some(function (cp) { return inRuns(rule.refused, cp); }) ||
+          inRuns(rule.refused_at_ends, cps[0]) || inRuns(rule.refused_at_ends, cps[cps.length - 1])) {
+        return rule.rule ? rule.rule.charAt(0).toUpperCase() + rule.rule.slice(1) + "." : "That name is refused.";
+      }
+    } else if (!cps.length) {
+      return "A config needs a name.";
+    }
+    var taken = ((bench && bench.configs) || []).some(function (c, i) { return i !== exceptIx && c && c.name === raw; });
+    return taken ? "This bench already has a config named " + raw + "." : null;
+  }
+  // The first single letter no config on the bench is called, else `config-<n>`.
+  function freeConfigName() {
+    var names = configNames(bench);
+    for (var i = 0; i < 26; i++) {
+      var l = String.fromCharCode(65 + i);
+      if (names.indexOf(l) < 0) return l;
+    }
+    for (var n = 27; ; n++) if (names.indexOf("config-" + n) < 0) return "config-" + n;
+  }
+  function liveConfigHere() {
+    return !!live && !live.missing && !!bench && live.slug === bench.slug ? live.config : null;
+  }
+  function addConfig() {
+    if (!bench || !model) return;
+    var cur = currentConfig(), made = null;
+    dialog({
+      title: "New config",
+      text: "A config is a set of part-to-part cables; cables to this machine are every config's. Save writes it to embarch/topologies/" + bench.slug + ".toml.",
+      input: { label: "Name", value: freeConfigName(), placeholder: "B" },
+      check: cur ? { label: "Copy the cables of " + cur.name, checked: false } : null,
+      ok: "Add",
+      onOk: function (value) {
+        var problem = nameProblem(String(value == null ? "" : value), -1);
+        if (problem) return problem;
+        made = { name: String(value), copy: !!(cur && dlg.checkInput.checked) };
+        return null;
+      }
+    }).then(function (ok) {
+      if (!ok || !made || !bench) return;
+      var from = currentConfig();
+      var cables = made.copy && from ? (from.cables || []).map(function (pair) { return [pair[0], pair[1]]; }) : [];
+      edit(function () {
+        bench.configs = (bench.configs || []).concat([{ name: made.name, cables: cables }]);
+        cfgOrigin = cfgOrigin.concat([null]);
+        cfgIx = bench.configs.length - 1;
+      });
+      notice("Config " + made.name + " added" + (made.copy && from ? ", a copy of " + from.name + "'s cables" : ", empty") + " — Save writes it", "info");
+    });
+  }
+  function renameConfig() {
+    var cur = currentConfig(), at = cfgIx;
+    if (!bench || !cur) return;
+    var to = null, was = cur.name, wired = liveConfigHere() === was;
+    dialog({
+      title: "Rename config " + was,
+      text: wired ? "It is the live wiring: once the save lands, the live record follows it to the new name, and nothing is sent to Core."
+        : "A host study names a config by name: one naming " + was + " is asked about when it runs.",
+      input: { label: "Name", value: was, placeholder: was },
+      ok: "Rename",
+      onOk: function (value) {
+        var v = String(value == null ? "" : value);
+        if (v === was) { to = null; return null; }
+        var problem = nameProblem(v, at);
+        if (problem) return problem;
+        to = v;
+        return null;
+      }
+    }).then(function (ok) {
+      if (!ok || to == null || !bench || !bench.configs || !bench.configs[at] || bench.configs[at].name !== was) return;
+      edit(function () { bench.configs[at].name = to; });
+      notice("Config " + was + " is " + to + " now" + (wired ? "; the live record follows when it is saved" : "") + " — Save writes it", "info");
+    });
+  }
+  function deleteConfig() {
+    var cur = currentConfig(), at = cfgIx;
+    if (!bench || !cur) return;
+    var was = cur.name, wired = liveConfigHere() === was;
+    edit(function () {
+      bench.configs = bench.configs.filter(function (_, i) { return i !== at; });
+      cfgOrigin = cfgOrigin.filter(function (_, i) { return i !== at; });
+      cfgIx = Math.max(0, Math.min(at, bench.configs.length - 1));
+    });
+    notice("Config " + was + " deleted with its cables" + (wired ? "; it is the live wiring, so once saved the live record names a config the bench lacks" : "") +
+      " — undo brings it back", wired ? "error" : "info");
+  }
+  cfgAddBtn.addEventListener("click", addConfig);
+  cfgRenameBtn.addEventListener("click", renameConfig);
+  cfgDeleteBtn.addEventListener("click", deleteConfig);
 
   function deleteSelection() {
     if (!sel || !model) return;
@@ -2432,7 +2577,7 @@
   function startDrag(p, e) {
     var w = toWorld(e), g = geom(p);
     drag = { key: p.key, sx: e.clientX, sy: e.clientY, ox: w.x - g.x, oy: w.y - g.y, moved: false,
-             before: snapshotContent(), mounts: null, snap: null, why: null, x: null, y: null, seq: ++dragSeq };
+             before: undoEntry(), mounts: null, snap: null, why: null, x: null, y: null, seq: ++dragSeq };
   }
 
   // Where its stack plug may go, asked once when a drag starts, with the part
@@ -2513,7 +2658,7 @@
     if (!d.moved) { render(); return; }
     var p = model.parts[d.key], base = d.snap ? model.parts[d.snap] : null;
     if (p && base) { p.inst.mounted_on = base.id; p.inst.at = null; }
-    if (snapshotContent() !== d.before) { undoStack.push(d.before); redoStack = []; }
+    if (snapshotContent() !== d.before.c) { undoStack.push(d.before); redoStack = []; }
     if (p && base) notice(name(p) + " is stacked on " + name(base), "ok");
     else if (!d.unasked) notice("", "info");
     changed();
@@ -2623,8 +2768,8 @@
   });
 
   // ---------------------------------------------------------------- the dialog
-  // One dialog for the editor: a new bench's name, which port function a
-  // dropped port is, unsaved changes, a file changed on disk. Resolves with
+  // One dialog for the editor: a new bench's name, a config's name, which
+  // port function a dropped port is, unsaved changes, a file changed on disk. Resolves with
   // the input or the choice, `true` for OK, and null for Cancel.
   function dialog(o) {
     if (dlgState) closeDialog(null);
@@ -2639,6 +2784,10 @@
         dlg.input.value = o.input.value || "";
         dlg.input.placeholder = o.input.placeholder || "";
       }
+      // A checkbox under the field, read by the caller's onOk.
+      dlg.check.hidden = !o.check;
+      dlg.checkInput.checked = !!(o.check && o.check.checked);
+      dlg.checkLabel.textContent = o.check ? o.check.label || "" : "";
       var choices = o.choices || [];
       dlg.choices.innerHTML = choices.map(function (c) {
         return '<button type="button" class="btn" data-choice="' + esc(c.value) + '">' + esc(c.label) + "</button>";
@@ -2655,6 +2804,7 @@
       dlg.box.style.display = "block";
       var first = o.input ? dlg.input : choices.length ? dlg.choices.querySelector("button") : dlg.cancel;
       first.focus();
+      if (o.input && o.input.select) dlg.input.select();
     });
   }
   function closeDialog(value) {
@@ -2768,6 +2918,7 @@
     if (!bench || saved == null || !isDirty()) return;
     cancelTransient();
     restoreContent(saved);
+    resetOrigin();
     undoStack = [];
     redoStack = [];
     buildModel();
@@ -2776,6 +2927,24 @@
   }
 
   // ---------------------------------------------------------------- saving
+  // A save landed: every config's origin — on screen, and in each undo and
+  // redo step — now names the file's new spelling (a config the save
+  // dropped is a new one if undo brings it back). Answers what it did to
+  // the live config, when this bench is the live one: renamed (the record
+  // follows it), deleted (no config of that name is left), or nothing.
+  function carryOrigins(sentOrigin, sentNames, oldNames, slug) {
+    var map = dict(), known = sentOrigin.length === sentNames.length;
+    if (known) sentOrigin.forEach(function (o, i) { if (o != null) map[o] = sentNames[i]; });
+    var follow = function (o) { return o != null && hasOwn(map, o) ? map[o] : null; };
+    cfgOrigin = cfgOrigin.map(follow);
+    undoStack.concat(redoStack).forEach(function (e) { e.o = e.o.map(follow); });
+    var was = live && !live.missing && !live.unparseable && !superseded && live.slug === slug ? live.config : null;
+    if (!known || was == null || oldNames.indexOf(was) < 0) return null;
+    if (hasOwn(map, was) && map[was] !== was) return { from: was, renamed: map[was] };
+    if (!hasOwn(map, was) && sentNames.indexOf(was) < 0) return { from: was, deleted: true };
+    return null;
+  }
+
   // Resolves true once the file says what is on screen. `quiet`: the caller
   // goes on (Save and make live), so the live bench is not re-applied here.
   function save(quiet) {
@@ -2787,6 +2956,9 @@
     saving = true;
     renderDirty();
     var sent = snapshotContent(), slug = bench.slug, mine = benchLoads;
+    // Which saved config each sent one is, and the names the file had: what
+    // the save does to the live config is told from them once it lands.
+    var sentOrigin = cfgOrigin.slice(), sentNames = configNames(bench), oldNames = configNames(JSON.parse(saved));
     // The answer is about the bench it was sent for. A project switch that
     // could not ask (a desk opened elsewhere) may have replaced it by the
     // time it lands: then it is dropped whole — no version adopted, no 409
@@ -2801,9 +2973,10 @@
       if (gone()) { renderDirty(); return; }
       bench.version = b.version;
       bench.legacy = !!b.legacy;
+      var fate = carryOrigins(sentOrigin, sentNames, oldNames, slug);
       // The file as it now reads is the working copy, unless the bench was
       // edited while the save was on its way.
-      if (snapshotContent() === sent) restoreContent(canon(contentOf(b)));
+      if (snapshotContent() === sent) { restoreContent(canon(contentOf(b))); resetOrigin(); }
       saved = canon(contentOf(b));
       renderPath();
       changed();
@@ -2813,8 +2986,27 @@
       // **Write-through** (owner): the live bench's file is what Core was
       // told, so a save of it is declared again — as a write-through, which
       // never takes the machine. While another repo holds it, or the live
-      // config is gone, the save is said as saved and not declared.
-      if (!quiet && isLiveBench()) writeThrough("Saved, and declared again", "Saved, not declared");
+      // config is gone, the save is said as saved and not declared. **A save
+      // that renamed the live config carries the record to the new name
+      // first** (record-only, no Core call), then declares; one that deleted
+      // it leaves the record naming a config the bench lacks, which the bar
+      // says once the record is read again.
+      if (!quiet && fate && fate.renamed != null) {
+        var renamedTo = fate.renamed;
+        setLiveConfig(slug, renamedTo).then(function (ok) {
+          if (ok) notice("Saved; the live record follows the rename to " + renamedTo + " — declaring the bench again", "ok");
+          if (ok) writeThrough("Saved; the live record follows the rename to " + renamedTo + ", and declared again", "Saved, not declared");
+          else {
+            wt = { ok: false, text: "saved, not declared", title: "Saved, not declared: the live record still names " + fate.from };
+            renderLiveBar();
+          }
+        });
+      } else if (!quiet && fate && fate.deleted) {
+        wt = { ok: false, text: "saved, not declared", title: "Saved, not declared: the live config " + fate.from + " is not on the bench any more — make one of its configs live" };
+        notice(wt.title, "error");
+        renderLiveBar();
+        readLive();
+      } else if (!quiet && isLiveBench()) writeThrough("Saved, and declared again", "Saved, not declared");
       else if (!quiet && live && !live.missing && live.slug === slug && (superseded || live.config_missing)) {
         var notWhy = superseded ? "superseded by " + repoName(superseded.repo) + " · " + superseded.slug : "the live config " + live.config + " is gone";
         wt = { ok: false, text: "saved, not declared", title: "Saved, not declared: " + notWhy };
@@ -2993,12 +3185,14 @@
     liveEl2.textContent = text;
     liveEl2.title = title;
     if (liveState === "error") return;
-    var dirty = isDirty(), cfg = cfgName(), live_here = isLiveBench();
+    var dirty = isDirty(), cfg = cfgName(), live_here = isLiveBench(), pick = recordOnlyPick();
     if (!live_here || cfg !== live.config) {
       var verb = dirty ? "Save and make " : "Make ";
-      setBtn(makeLiveBtn, true, verb + (live_here && cfg != null ? cfg + " " : "") + "live",
+      setBtn(makeLiveBtn, true, verb + (pick ? (cfg != null ? cfg + " " : "no config ") : "") + "live",
         superseded && here ? "Take the machine back: declare this bench and record it live here" + (dirty ? " — saved first" : "")
-          : live_here ? "Declare this bench again, wired as config " + cfg + ", and record that config as the live wiring"
+          : pick ? "Record " + (cfg != null ? "config " + cfg : "no config, the bench-level cables alone,") + " as the live wiring: " +
+            "switching configs sends Core nothing" + (dirty ? " (the save itself is declared, as every save of the live bench is)" : "") +
+            "; Declare again re-applies"
           : "Declare what this bench says to Core and record it live on this machine" + (dirty ? " — saved first" : ""));
     }
     makeLiveBtn.disabled = liveBusy || saving;
@@ -3016,14 +3210,74 @@
     }
   }
 
+  // The bench on screen is this repo's live one, holding the machine, and
+  // the tab on screen is another config than the record's (or the record's
+  // is gone): **making it live is record-only** (owner, 2026-11-01:
+  // switching configs never calls Core). Declare again re-applies.
+  function recordOnlyPick() {
+    return !!live && !!bench && !!model && live.slug === bench.slug && !live.missing && !live.unparseable && !superseded &&
+      liveState === "known" && cfgName() !== live.config;
+  }
+
   // Saved first when edits are on screen, then declared with the version the
   // save answered; the config is the tab on screen. An explicit make-live
-  // takes the machine.
+  // takes the machine. On the live bench, another config is recorded, not
+  // declared: a save of the live bench is still declared after the record
+  // names the new config, so the write-through and the record agree.
   function makeLive() {
     if (!bench || !model || liveBusy) return;
-    var cfg = cfgName();
-    save(true).then(function (ok) { if (ok) goLive({ slug: bench.slug, config: cfg, explicit: true }); });
+    var cfg = cfgName(), slug = bench.slug;
+    if (recordOnlyPick()) {
+      var wrote = isDirty();
+      save(true).then(function (ok) {
+        if (!ok) return;
+        setLiveConfig(slug, cfg).then(function (done) {
+          if (done && wrote) { writeThrough("Saved, and declared again", "Saved, not declared"); return; }
+          if (done) { notice((cfg != null ? "Config " + cfg : "No config") + " is the live wiring now — recorded here, nothing sent to Core; Declare again re-applies", "ok"); return; }
+          if (wrote) {
+            wt = { ok: false, text: "saved, not declared", title: "Saved, not declared: the config was not recorded live" };
+            renderLiveBar();
+          }
+        });
+      });
+      return;
+    }
+    save(true).then(function (ok) { if (ok) goLive({ slug: slug, config: cfg, explicit: true }); });
   }
+
+  // Records which config the live bench is wired as: `POST
+  // /api/bench/live/config`, which calls nothing in Core. A write like a
+  // make-live (counted, sequenced, dropped after a project switch). Resolves
+  // whether the record now names it.
+  function setLiveConfig(slug, config) {
+    var w = writeBegun();
+    renderLiveBar();
+    return send("POST", ROUTE_LIVE_CONFIG, { slug: slug, config: config == null ? null : config }).then(function (r) {
+      if (!writeSettled(w)) return false;
+      readDropped = false;
+      live = (r && r.live) || null;
+      superseded = (r && r.superseded) || null;
+      liveState = "known";
+      renderLiveBar();
+      renderConfigs();
+      renderLiveReport();
+      document.dispatchEvent(new CustomEvent("embarch:live-changed", { detail: { slug: slug, config: config == null ? null : config } }));
+      return true;
+    }, function (e) {
+      if (!writeSettled(w)) return false;
+      readDropped = false;
+      if (w.shows === benchShows) notice("Not recorded live: " + errText(e), "error");
+      renderLiveBar();
+      readLive();
+      return false;
+    });
+  }
+
+  // A surface outside the canvas changed the record — the operator prompt
+  // marking the config a study asked for: read it again.
+  document.addEventListener("embarch:live-changed", function (ev) {
+    if (ev && ev.detail && ev.detail.source === "prompt") readLive();
+  });
 
   // A re-apply nobody clicked Make live for: after a Save of the live bench,
   // after a Confirm, and Declare again. `fail` is how its caller says a
@@ -3841,8 +4095,111 @@
     svgEl.innerHTML = body;
   }
 
+  // ---------------------------------------------------------------- a config change, for the operator prompt
+  // What re-cabling a bench from one config to another takes, and a drawing
+  // of it with the canvas's renderer — for app.js's operator prompt, when a
+  // host study's Prompt names a config of the live bench (phase 5). Both are
+  // pure: they touch nothing the canvas holds. `b` is a bench as `GET
+  // /api/bench/benches/{slug}` answers it; `catalog` is `GET /api/bench/parts`'
+  // answer, or null for the catalog the canvas read.
+  function catalogMap(catalog) {
+    if (!catalog) return templates;
+    var m = dict();
+    ((catalog && catalog.parts) || []).forEach(function (t) { if (t && t.id != null) m[t.id] = t; });
+    return m;
+  }
+  // A config's part-to-part cables, [] for no config, null for one the bench lacks.
+  function cfgCables(b, nameOf) {
+    if (nameOf == null) return [];
+    var c = ((b && b.configs) || []).filter(function (x) { return x && x.name === nameOf; })[0];
+    return c ? (c.cables || []).filter(function (p) { return Array.isArray(p) && p.length === 2; }) : null;
+  }
+  // The cables to unplug (in `from`, not in `to`) and to plug (the reverse),
+  // each end named by its part's label and its connector's — the id added
+  // when two parts, or two connectors on one, would read the same — and how
+  // many stay.
+  function configChange(b, from, to, catalog) {
+    var tpls = catalogMap(catalog), insts = dict(), seen = dict();
+    ((b && b.parts) || []).forEach(function (inst) {
+      if (inst && inst.id != null && !hasOwn(insts, String(inst.id))) insts[String(inst.id)] = inst;
+    });
+    var display = function (inst, pid) {
+      var t = inst && hasOwn(tpls, inst.template) ? tpls[inst.template] : null;
+      return String((inst && inst.label) || (t && t.label) || (inst && inst.template) || pid);
+    };
+    Object.keys(insts).forEach(function (pid) { var n = display(insts[pid], pid); seen[n] = (seen[n] || 0) + 1; });
+    var endText = function (end) {
+      var s = String(end == null ? "" : end), dot = s.indexOf(".");
+      var pid = dot < 0 ? s : s.slice(0, dot), cid = dot < 0 ? "" : s.slice(dot + 1);
+      var inst = hasOwn(insts, pid) ? insts[pid] : null;
+      var t = inst && hasOwn(tpls, inst.template) ? tpls[inst.template] : null;
+      var n = display(inst, pid);
+      var conns = t ? (t.connectors || []).filter(function (x) { return !!x; }) : [];
+      var c = conns.filter(function (x) { return x.id === cid; })[0];
+      var label = c ? String(c.label || c.id) : cid;
+      // Two connectors on one part under one label (the CY4500's two USB-C) are told apart by id.
+      if (c && conns.filter(function (x) { return String(x.label || x.id) === label; }).length > 1) label += " (" + cid + ")";
+      return { part: seen[n] > 1 ? n + " (" + pid + ")" : n, connector: label, end: s };
+    };
+    var a = cfgCables(b, from), z = cfgCables(b, to) || [], inA = dict(), inZ = dict();
+    (a || []).forEach(function (p) { inA[endsKey(p[0], p[1])] = true; });
+    z.forEach(function (p) { inZ[endsKey(p[0], p[1])] = true; });
+    var pair = function (p) { return { a: endText(p[0]), b: endText(p[1]) }; };
+    return {
+      from: from == null ? null : from,
+      to: to,
+      fromKnown: a !== null,
+      unplug: (a || []).filter(function (p) { return !inZ[endsKey(p[0], p[1])]; }).map(pair),
+      plug: z.filter(function (p) { return !inA[endsKey(p[0], p[1])]; }).map(pair),
+      keep: z.filter(function (p) { return inA[endsKey(p[0], p[1])]; }).length
+    };
+  }
+  // The bench drawn into `svgEl` with both configs' cables: those to plug
+  // and to unplug over the parts, marked by `data-change`, the ones that
+  // stay and the bench-level ones under them. False when nothing was drawn.
+  function previewChange(svgEl, b, from, to, catalog) {
+    if (!svgEl || !b) return false;
+    var a = cfgCables(b, from) || [], z = cfgCables(b, to) || [], kind = dict(), union = [], had = dict();
+    a.forEach(function (p) { kind[endsKey(p[0], p[1])] = "unplug"; });
+    z.forEach(function (p) { var k = endsKey(p[0], p[1]); kind[k] = kind[k] === "unplug" || kind[k] === "keep" ? "keep" : "plug"; });
+    a.concat(z).forEach(function (p) { var k = endsKey(p[0], p[1]); if (!had[k]) { had[k] = true; union.push(p); } });
+    var temp = { slug: b.slug, name: b.name, parts: b.parts || [], cables: b.cables || [], configs: [{ name: "~change", cables: union }], signals: [] };
+    var keep = [bench, model, cache, cfgIx, sel, hoverPart, laying, drag, trayArm, trayDrag, trayHover, previewing, templates, linkBoard];
+    var under = "", over = "", parts = "", box = null;
+    try {
+      bench = temp; cfgIx = 0; sel = null; hoverPart = null; laying = null; drag = null;
+      trayArm = null; trayDrag = null; trayHover = null; previewing = false; linkBoard = null;
+      templates = catalogMap(catalog);
+      buildModel();
+      cache = { vis: dict(), geo: dict(), below: dict() };
+      model.cables.forEach(function (cb) {
+        var d = cablePath(connPos(cb.a.part, cb.a.conn), connPos(cb.b.part, cb.b.conn));
+        var k = cb.level === "config" ? kind[endsKey(cb.from, cb.to)] || "keep" : "bench";
+        var path = '<path class="bn-cable bn-change-' + k + '" data-change="' + k + '" data-ends="' + esc(endsKey(cb.from, cb.to)) + '" d="' + d + '"/>';
+        if (k === "plug" || k === "unplug") over += path; else under += path;
+      });
+      var depth = function (p) { var n = 0, q = p; while (q && mountedBase(q) && n < 8) { q = mountedBase(q); n++; } return n; };
+      model.order.slice().sort(function (x, y) { return depth(x) - depth(y); }).forEach(function (p) {
+        parts += partSVG(p);
+        var g = geom(p), below = (cache.below[p.key] || 0);
+        var r = { x0: g.x - 60, y0: g.y - 20, x1: g.x + g.w + 60, y1: g.y + g.h + below + 20 };
+        box = box ? { x0: Math.min(box.x0, r.x0), y0: Math.min(box.y0, r.y0), x1: Math.max(box.x1, r.x1), y1: Math.max(box.y1, r.y1) } : r;
+      });
+    } finally {
+      bench = keep[0]; model = keep[1]; cache = keep[2]; cfgIx = keep[3]; sel = keep[4]; hoverPart = keep[5]; laying = keep[6];
+      drag = keep[7]; trayArm = keep[8]; trayDrag = keep[9]; trayHover = keep[10]; previewing = keep[11]; templates = keep[12]; linkBoard = keep[13];
+    }
+    if (!box) return false;
+    svgEl.classList.add("bn-svg");
+    svgEl.setAttribute("viewBox", f(box.x0) + " " + f(box.y0) + " " + f(box.x1 - box.x0) + " " + f(box.y1 - box.y0));
+    svgEl.innerHTML = under + parts + over;
+    return true;
+  }
+
   window.embarchBench = {
     previewTemplate: previewTemplate,
+    configChange: configChange,
+    previewChange: previewChange,
     unsaved: function () { return isDirty() || partsUnsaved(); },
     confirmLeave: confirmLeave,
     leaveDone: leaveDone,
