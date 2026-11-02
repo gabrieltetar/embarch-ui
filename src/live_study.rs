@@ -2182,6 +2182,7 @@ mod tests {
             step_index: 2,
             step_name: "swap the cable".to_string(),
             text: "Move the probe to J4, then confirm".to_string(),
+            bench_config: None,
             opened_utc_ms: 1_000,
             deadline_utc_ms: deadline,
         }
