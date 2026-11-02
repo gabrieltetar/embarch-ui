@@ -549,37 +549,53 @@ try:
     check("and it came from Core's SoC table, not from a string in the browser",
           "nrf54l15" in RESOLVED, RESOLVED)
     script("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]'); s.value='plank'; s.dispatchEvent(new Event('change',{bubbles:true}));")
-    combos = wait_for("var n=document.querySelector('#bench-inspector .bn-ed-note'); return n ? n.textContent : '';", 6)
-    check("the inspector names the combinations the scan found, not revisions × variants",
-          (combos or "").count("rev ") == 3, combos)
-    check("each one by its revision and its variant (decision 49)", "rev 1 · no variant" in (combos or ""), combos)
-    check("the combination Zephyr does not back is not offered", "rev 1 · variant ns" not in (combos or ""), combos)
+    # **Decision 47's pin, on the canvas**: the role part's "Build as" offers
+    # the combinations the repo's own scan backs, never a cross product and
+    # never free text, and writes only the pin to embarch/boards.toml.
+    combos = wait_for("var s=document.querySelector('#bench-inspector [data-pin=\"plank\"]');"
+                      "return s ? Array.from(s.options).filter(function(o){return !o.disabled;}).map(function(o){return [o.value, o.textContent, o.title];}) : null;", 8)
+    labels = [c[1] for c in (combos or [])]
+    check("the DUT part's Build as offers the combinations the scan found, not revisions × variants", len(labels) == 3, labels)
+    check("each one by its revision and its variant, and stops there (decision 49)", "rev 1 · no variant" in labels, labels)
+    check("the west qualifier is on the option's tooltip, not in the line", combos and combos[0][2] == "plank@1/nrf54l15/cpuapp", combos)
+    check("the combination Zephyr does not back is not offered", "rev 1 · variant ns" not in labels, labels)
     script("document.getElementById('bench-save').click();")
     time.sleep(0.8)
-    # The role route still answers what the deleted picker sent: one gesture,
-    # two owners — the board type to Core, the combination to the project's
-    # own file, and Core never told about a revision.
-    ui_post("/api/topology/roles/dut/board", {"board": "plank", "chip": "", "revision": "2", "variant": "ns"})
-    check("the role route tells Core the board type and nothing about the combination",
-          BOARD_WRITES[-1] == {"role": "dut", "board": "plank", "chip": "nRF54L15"},
-          BOARD_WRITES[-1])
-    with open(REPO + "/embarch/boards.toml") as f:
-        catalog = f.read()
-    plank = catalog.split('name = "plank"')[-1]
-    check("and records the combination on the board in the project's own file",
-          'revision = "2"' in plank and 'variant = "ns"' in plank, plank)
+    writes = len(BOARD_WRITES)
+    pick = next((c[0] for c in combos or [] if c[1] == "rev 2 · variant ns"), None)
+    script("var s=document.querySelector('#bench-inspector [data-pin=\"plank\"]'); s.value=arguments[0]; s.dispatchEvent(new Event('change',{bubbles:true}));", [pick])
+    pinned = None
+    for _ in range(30):
+        with open(REPO + "/embarch/boards.toml") as f:
+            catalog = f.read()
+        plank = catalog.split('name = "plank"')[-1]
+        if 'revision = "2"' in plank and 'variant = "ns"' in plank:
+            pinned = plank
+            break
+        time.sleep(0.2)
+    check("picking one records the combination on the board in the project's own file", pinned is not None, plank)
+    check("and tells Core nothing — the board type reaches Core when the bench is made live, never a revision",
+          len(BOARD_WRITES) == writes, BOARD_WRITES[writes:])
+    check("the bench file is untouched by it", not script("return !document.getElementById('bench-dirty').hidden;"))
     panel("boards")
-    script("document.getElementById('board-rescan').click();")   # re-reads the catalog the route just pinned
     wait_for("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');", 8)
     check("the list marks the combination a build would use now",
           script("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');"))
-    # The other end of decision 48: a board type nothing can answer for is
-    # refused *here*, with the one thing a human can do about it, rather than
-    # reaching Core and coming back as a relayed `502 … 400 Bad Request`.
-    status, text = ui_post_status("/api/topology/roles/dut/board",
-                                  {"board": "nothing-here", "chip": ""})
-    check("a board type with no chip anywhere is refused here, not by Core",
-          status == 400 and "Board types" in text, (status, text))
+    check("and the inspector's Build as shows that pin", script(
+        "var s=document.querySelector('#bench-inspector [data-pin=\"plank\"]'); return s ? s.selectedOptions[0].textContent : null;") == "rev 2 · variant ns")
+    # The other end of decision 48, in the page: a board type nothing can
+    # answer a chip for says so where it is picked, and names where to fix it.
+    script("document.getElementById('board-add').click();")
+    time.sleep(0.3)
+    script("document.getElementById('board-name').value='nothing-here';"
+           "document.getElementById('board-chip').value='';"
+           "document.getElementById('board-build-target').value='';"
+           "document.getElementById('board-save').click();")
+    time.sleep(1.0)
+    script("var b=document.querySelector('[data-topo-panel=\"boards\"]'); if (b.classList.contains('is-open')) b.click();")
+    no_chip = board_options("dut", texts=True)
+    check("a board type with no chip anywhere says so in the picker, naming Board types",
+          any(t.startswith("nothing-here") and "no chip" in t and "Board types" in t for t in (no_chip or [])), no_chip)
 
     # --- a probe onto a role part: the tray ---------------------------------------
     # Decision 43's three properties, on the tray's drop targets now: the
@@ -603,9 +619,13 @@ try:
     check("the drop is allowed over that connector", allowed is True, allowed)
     check("which is marked as the one under the pointer",
           script("return !!document.querySelector('#bench-svg [data-part=\"dut\"] .bn-tray-ok.bn-target');"))
-    time.sleep(6)
-    check("and stays marked through the snapshot that lands meanwhile",
-          script("return !!document.querySelector('#bench-svg [data-part=\"dut\"] .bn-tray-ok.bn-target');"))
+    old_node = script("window.__dropNode = document.querySelector('#bench-svg [data-part=\"dut\"] .bn-tray-ok.bn-target'); return !!window.__dropNode;")
+    # A rebuild under the stationary pointer (Validate's verdicts redraw the
+    # canvas): the mark is state, drawn again on the new node.
+    script("document.dispatchEvent(new CustomEvent('embarch:verdicts', {detail: {roles: {}, boards: {}, pass: 'drag-rebuild'}}));")
+    time.sleep(6)   # and the snapshot that lands meanwhile toggles classes only
+    check("and stays marked through a rebuild of the canvas under it, and the snapshot that lands meanwhile",
+          old_node and script("var n=document.querySelector('#bench-svg [data-part=\"dut\"] .bn-tray-ok.bn-target'); return !!n && n !== window.__dropNode;"))
     gap = script("var s=document.getElementById('bench-svg').getBoundingClientRect(); var x=s.left+8, y=s.top+s.height-40, at=document.elementFromPoint(x,y);"
                  "var ev=new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:window.__dt,clientX:x,clientY:y}); at.dispatchEvent(ev); return ev.defaultPrevented;")
     check("bare canvas between the parts does not take the drop", gap is False, gap)
@@ -668,22 +688,20 @@ try:
     check("and the picker offers it",
           "bench a" in script("return document.getElementById('topo-profile-picker').textContent;"))
 
-    script("document.getElementById('topo-profile-load').click();")
-    time.sleep(1.5)
-    applied = script("return document.getElementById('topo-apply-report').textContent;")
-    check("loading re-declares the signals straight away",
-          "signal outpost" in applied and "applied" in applied, applied[:300])
-    check("and the board types, which claim nothing about silicon",
-          "board" in applied and BOARD_WRITES[-1]["role"] in ("dut", "dev-bench"),
-          [applied[:300], BOARD_WRITES[-1:]])
-    check("and proposes each enrolment rather than performing it",
-          script("return document.querySelectorAll('[data-proposal-role]').length;") >= 1,
-          applied[:400])
-    before = len(POSTED)
-    script("document.querySelector('[data-proposal-role=\"dut\"]').click();")
-    time.sleep(1.2)
-    check("confirming a proposal runs the ordinary enrolment",
-          len(POSTED) == before + 1 and POSTED[-1]["role"] == "dut", POSTED[-1:])
+    # **Open shows the bench on the canvas; nothing is declared** (phase 4:
+    # making a bench live replaced the old apply, and the human presses it).
+    signals_before, boards_before, posted_before = len(SIGNAL_POSTS), len(BOARD_WRITES), len(POSTED)
+    script("document.getElementById('topo-profile-picker').value='bench-a';"
+           "document.getElementById('topo-profile-load').click();")
+    opened = wait_for("return document.getElementById('bench-path').textContent.indexOf('bench-a.toml') >= 0 && !!document.querySelector('#bench-svg [data-part]');", 8)
+    check("Open shows the saved bench on the canvas, its Saved benches panel closed",
+          bool(opened) and script("return document.getElementById('topo-panel-saved').hidden;"))
+    check("and says Make live is what declares it", "Make live" in script("var n=document.getElementById('bench-notice'); return n.hidden ? '' : n.textContent;"))
+    time.sleep(0.8)
+    check("opening declared nothing: no signal, no board type, no enrolment reached Core",
+          len(SIGNAL_POSTS) == signals_before and len(BOARD_WRITES) == boards_before and len(POSTED) == posted_before,
+          [SIGNAL_POSTS[signals_before:], BOARD_WRITES[boards_before:], POSTED[posted_before:]])
+    check("the old apply's report is gone from the panel", script("return !document.getElementById('topo-apply-report');"))
 
     # --- retracting a role --------------------------------------------------
     #

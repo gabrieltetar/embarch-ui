@@ -314,28 +314,41 @@ python3 tests/browser/drive_bench_parts.py
 ```
 
 `drive_bench_live.py` drives making a bench live (the bench editor's phase 4,
-browser side): the bar's live state, Make live and Save and make live, the
-live report's rows (applied, failed with Core's text, a proposal confirmed
-through the ordinary enrol and the bench then declared again, a part not
-proposed, leftovers each with its own Retract, one Core refuses), reopening
-the report, config tabs as a view change with the live wiring marked,
-write-through after a Save, a make-live `409`, Stop being live and a record
-whose file is gone. The bench routes are the real binary's on a scratch
-repo; the live routes are answered by a stub in the proxy, from
+browser side): the bar's live state — none, live here, another bench,
+superseded by another repo (one live bench per machine), its config gone,
+its file gone or unparseable, unreadable with Read again — Make live and
+Save and make live (`write_through: false`), the live report's rows (applied,
+failed with Core's text, not sent; a proposal for a role and one for a bench
+board, each confirmed through the ordinary enrol with its fields verbatim
+and the bench then declared again; a part not proposed; leftovers each with
+its own Retract, one Core refuses), focus landing on the report and never on
+a Confirm when it opens by itself, a stale report's buttons disabled,
+write-through after a Save and Declare again (`write_through: true`, shown as
+a bar indicator rather than an opened report, and "saved, not declared" when
+it is refused), a make-live answer dropped after a project switch, config
+tabs as a view change with the live wiring marked, a make-live `409`, and
+Stop being live. The bench routes are the real binary's on a scratch repo;
+the live routes are answered by a stub in the proxy, from
 `coord/p4-contract.md`'s shapes, unless `EMBARCH_LIVE_REAL=1` passes them
-through to the binary's own and runs a shorter flow that holds against any
-Core answer. Four ports: `EMBARCH_UI_PORT` and the three after it (proxy,
-stub Core, an unused desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves the bar
-and the report in both themes.
+through to the binary's own: then the report's rows are the real apply's
+over the stub Core — the probe a proposal would replace named, a plain enrol
+with no moved-role note, a canonical role's Retract reaching Core. Four
+ports: `EMBARCH_UI_PORT` and the three after it (proxy, stub Core, an unused
+desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves the bar and the report in both
+themes.
 
 Phase 4 deleted the old diagram, so `drive_topology.py` checks what it did
 on the canvas instead: role parts drawn with their role, a role part's board
 type picked in the inspector from the served pickers (the combinations the
 scan backs, a chip from Core's SoC table, the bench file written and Core
-not), a probe dropped from the tray onto a role part's usb-host connector
-(decision 43's three properties on the tray's targets), and Validate's
-verdicts on the role parts. `drive_links.py` marks the board's part on the
-canvas for `#topology?board=`.
+not), the build combination pinned from the inspector's scan-backed Build as
+(decision 47, embarch/boards.toml only), a probe dropped from the tray onto a
+role part's usb-host connector (decision 43's three properties on the tray's
+targets, through a rebuild of the canvas), Validate's verdicts on the role
+parts, and Saved benches' Open showing a bench without declaring anything.
+`drive_links.py` marks the board's part on the canvas for
+`#topology?board=` — by role, board type or the board's served label — and
+opens no panel over a part the catalog also lists.
 
 ```sh
 cargo build --release

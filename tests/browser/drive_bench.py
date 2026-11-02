@@ -708,12 +708,33 @@ try:
            "document.dispatchEvent(new CustomEvent('embarch:desk',{detail:{desk:{id:'drive-b',name:'drive b',bench:'no-such-bench',firmware_repos:[arguments[0]]}}}));", [fw])
     wait_for("var b=document.getElementById('desk-bench-review'); return !!b;", 6)
     script("document.getElementById('desk-bench-review').click();")
-    said = wait_for("var e=document.getElementById('topo-profile-error'); return e.offsetParent !== null ? e.textContent : '';", 8)
-    check("the desk banner's review opens the Saved benches panel, where its errors and report land",
-          panel_open("saved") and "no-such-bench" in (said or ""), said)
+    said = wait_for("var n=document.getElementById('bench-notice'); return !n.hidden ? n.textContent : '';", 8)
+    # Phase 4: reviewing the desk's bench opens it on the canvas, with Make
+    # live for the human to press — it declares nothing by itself.
+    check("the desk banner's review says, on the canvas, when this repo has no such bench",
+          "no-such-bench" in (said or "") and "drive b" in (said or "") and not panel_open("saved"), said)
+    other = [x["slug"] for x in FX["benches"]["benches"] if x["slug"] != "pd-bench-drp"][0]
+    script("document.dispatchEvent(new CustomEvent('embarch:desk',{detail:{desk:{id:'drive-c',name:'drive c',bench:arguments[1],firmware_repos:[arguments[0]]}}}));", [fw, other])
+    wait_for("var b=document.getElementById('desk-bench-review'); return !!b;", 6)
+    script("document.getElementById('desk-bench-review').click();")
+    shown = wait_for("return document.getElementById('bench-pick').value === arguments[0] && document.getElementById('bench-path').textContent.indexOf(arguments[0]) >= 0;", 8, [other])
+    check("and opens the desk's bench on the canvas when it has one, saying Make live declares it",
+          bool(shown) and "Make live" in script("var n=document.getElementById('bench-notice'); return n.hidden ? '' : n.textContent;"))
+    pick_bench("pd-bench-drp")
+    # A panel opened from code — a board link naming only a catalog row opens
+    # Board types — gives focus back to its own bar button when it closes.
+    click('[data-topo-panel="boards"]')
+    script("document.getElementById('board-add').click();")
+    wait_for("return document.getElementById('board-dialog').style.display === 'block';", 5)
+    script("document.getElementById('board-name').value='catalog-only'; document.getElementById('board-chip').value='nRF54L15';"
+           "document.getElementById('board-save').click();")
+    wait_for("return document.getElementById('board-catalog-body').textContent.indexOf('catalog-only') >= 0;", 6)
+    key("")
+    script("location.hash = '#topology?board=catalog-only';")
+    wait_for("return !document.getElementById('topo-panel-boards').hidden;", 8)
     key("")
     check("L5: a panel opened from code returns focus to its own bar button when it closes",
-          not panel_open("saved") and script("return document.activeElement === document.querySelector('.topo-bar [data-topo-panel=\"saved\"]');"))
+          not panel_open("boards") and script("return document.activeElement === document.querySelector('.topo-bar [data-topo-panel=\"boards\"]');"))
 
     # --- pan, zoom, fit ----------------------------------------------------
     vb = lambda: [float(v) for v in script("return document.getElementById('bench-svg').getAttribute('viewBox');").split()]

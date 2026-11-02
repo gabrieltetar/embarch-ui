@@ -4,21 +4,24 @@ Phase 4 of embarch-bench-editor-proposal.md, browser side: the bar's live
 state, Make live (and Save and make live), the live report — applied rows,
 proposals each confirmed through the ordinary enrol, rows not proposed, and
 what Core holds that the bench does not name, each with its own Retract —
-write-through after a Save of the live bench, Stop being live, a record whose
-file is gone, and the config tab that is the live wiring.
+write-through after a Save, after a Confirm and from Declare again, Stop
+being live, and the states a record can be in: none, live here, live in
+another bench, superseded by another repo (one live bench per machine),
+its config gone, its file gone or unparseable, and unreadable.
 
 **The bench routes are the real binary's**, on a scratch firmware repo, so a
 Save is a real PUT and the version the browser makes live with is checked
 against the file. **The live routes are stubbed in a proxy** in front of the
-UI, answering the shapes `coord/p4-contract.md` gives, until the server's
-own land; everything else — `/api/enroll` included, which reaches the stub
-Core below — passes through to the real UI.
+UI, answering the shapes `coord/p4-contract.md` gives; everything else —
+`/api/enroll` included, which reaches the stub Core below — passes through.
 
 **EMBARCH_LIVE_REAL=1 passes the live routes through to the binary's own**
-(once they exist) and runs a shorter flow whose checks hold against any
-Core answer: make live, the report's sections, Confirm sending the
-proposal's fields verbatim and the bench declared again, write-through,
-Stop being live.
+and runs a flow whose checks hold against the real apply over the stub Core:
+the report's rows (the DUT's board applied, its probe proposed naming the
+probe it would replace, a bench board proposed, a canonical role left over),
+Confirm sending each proposal's fields verbatim and the bench declared
+again, a plain enrol with no moved-role note, a role's Retract reaching
+Core, write-through, Stop being live.
 
 Ports: geckodriver at EMBARCH_GECKO_PORT; the UI at EMBARCH_UI_PORT, the
 proxy the browser opens at +1, the stub Core at +2 and a desk port nothing
@@ -32,7 +35,7 @@ import base64, http.client, json, os, re, shutil, subprocess, sys, tempfile, thr
 import addr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse
 
 REPO = Path(__file__).resolve().parents[2]
 TOKEN = "stub-token"
@@ -48,11 +51,17 @@ NOW_MS = 1758240000000
 
 DUT_PROBE = "DUTPROBE01"
 OLD_PROBE = "OLDPROBE99"
-PROBES = [{"identifier": "J-Link", "vendor_id": 4966, "product_id": 257, "serial_number": DUT_PROBE}]
-# The DUT role is held today by a board on another probe, so confirming the
-# proposal moves it — and Core says so (decision 61).
+POD_PROBE = "PODPROBE07"
+DEV_PROBE = "DEVPROBE55"
+PROBES = [{"identifier": "J-Link", "vendor_id": 4966, "product_id": 257, "serial_number": DUT_PROBE},
+          {"identifier": "CMSIS-DAP", "vendor_id": 12259, "product_id": 4, "serial_number": POD_PROBE}]
+# The DUT role is held by a board on another probe, so confirming the DUT's
+# proposal displaces it — and Core says so (decision 61). The dev-bench role
+# is held too, and this bench has no part holding it: a leftover.
 ENROLLED = [{"probe_serial": OLD_PROBE, "role": "dut", "name": "old-board", "chip": "nRF54L15",
-             "hardware_id": "11:22", "confirmed_at_utc_ms": NOW_MS, "link_serial": None}]
+             "hardware_id": "11:22", "confirmed_at_utc_ms": NOW_MS, "link_serial": None},
+            {"probe_serial": DEV_PROBE, "role": "dev-bench", "name": "nrf54l15dk/nrf54l15/cpuapp", "chip": "nRF54L15",
+             "hardware_id": "33:44", "confirmed_at_utc_ms": NOW_MS, "link_serial": None}]
 ENROLLS = []
 CORE_WRITES = []
 
@@ -73,12 +82,19 @@ at = [380, 110]
 usb = { usb = { probe = "%s" } }
 
 [[parts]]
-id = "probe"
-template = "debug-probe"
+id = "pod"
+template = "nucleo-g0b1re"
+label = "probe-pod"
+board = "nrf54l15dk/nrf54l15/cpuapp"
 at = [380, 420]
+usb = { stlink = { probe = "%s" } }
 
 [[cables]]
 from = "dut.usb"
+to = "host"
+
+[[cables]]
+from = "pod.stlink"
 to = "host"
 
 [[configs]]
@@ -86,36 +102,41 @@ name = "A"
 
 [[configs]]
 name = "B"
-""" % DUT_PROBE
+""" % (DUT_PROBE, POD_PROBE)
 
 OTHER_BENCH = """name = "other-bench"
 saved_at_utc_ms = 2
-parts = [{ id = "host", template = "this-machine", at = [20, 110] }, { id = "probe", template = "debug-probe", at = [380, 110] }]
+parts = [{ id = "host", template = "this-machine", at = [20, 110] }, { id = "spare", template = "generic-board", at = [380, 110] }]
 """
 
 
 def report_for(slug, config):
     return {
-        "live": {"slug": slug, "config": config, "since_utc_ms": NOW_MS, "missing": False},
+        "live": {"slug": slug, "config": config, "since_utc_ms": NOW_MS, "missing": False, "config_missing": False},
         "applied": [
             {"what": "dut board nrf54l15dk/nrf54l15/cpuapp (nRF54L15)", "route": "PUT /probes/enrolled/dut/board", "ok": True,
              "text": "Core holds the board type in the DUT role"},
             {"what": "signal uart-log", "route": "POST /signals", "ok": False,
              "text": "Core refused: lease held by session 4 (study pd-sweep)"},
+            {"what": "part template embarch/parts/odd.toml", "route": "(not sent)", "ok": False,
+             "text": "the template would not load, so what it declares was not sent"},
         ],
         "proposals": [
             {"kind": "enroll", "role": "dut", "name": "nrf54l15dk/nrf54l15/cpuapp", "chip": "nRF54L15", "probe_serial": DUT_PROBE,
-             "part": "dut", "text": "dut: bind probe %s, reading the board's hardware ID" % DUT_PROBE},
+             "part": "dut", "text": "dut: bind probe %s — displaces old-board on probe %s" % (DUT_PROBE, OLD_PROBE)},
+            {"kind": "enroll", "role": None, "name": "probe-pod", "chip": "nRF54L15", "probe_serial": POD_PROBE,
+             "part": "pod", "text": "probe-pod: enrol as a bench board on probe %s" % POD_PROBE},
         ],
-        "not_proposed": [{"part": "probe", "text": "probe: not proposed — no probe is bound on it"}],
+        "not_proposed": [{"part": "spare", "text": "spare: not proposed — no probe is bound on it"}],
         "leftovers": [
             {"kind": "signal", "id": "old-sig", "text": "signal old-sig is declared in Core and this bench does not name it"},
-            {"kind": "role", "id": "sniffer", "text": "the sniffer role is enrolled and this bench has no part holding it"},
+            {"kind": "role", "id": "dev-bench", "text": "the dev-bench role is enrolled and this bench has no part holding it"},
         ],
     }
 
 
-STATE = {"live": None, "leftovers": [], "refuse_live": None}
+STATE = {"live": None, "superseded": None, "leftovers": [], "refuse_live": None, "delay_live": 0.0, "fail_get": False,
+         "refuse_retract": None}
 LIVE_POSTS = []
 RETRACTS = []
 LIVE_DELETES = []
@@ -136,29 +157,35 @@ class Core(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _ok(self):
+        return self.headers.get("authorization") == "Bearer " + TOKEN
+
+    def _body(self):
+        return json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+
     def do_GET(self):
-        if self.headers.get("authorization") != "Bearer " + TOKEN:
+        if not self._ok():
             return self._send(401, b"unauthorized", "text/plain")
         path = urlparse(self.path).path
         answers = {"/status": {"status": "ok", "probes": PROBES, "study_designer_schema_version": 1},
                    "/probes/enrolled": ENROLLED, "/signals": [], "/serial-ports": [], "/alerts": [],
-                   "/studies": [], "/logs/recent": {"lines": []}}
+                   "/studies": [], "/logs/recent": {"lines": []}, "/instruments": [], "/bootload/ports": None}
         if path in answers:
             return self._send(200, answers[path])
         return self._send(404, b"not found in the stub", "text/plain")
 
     def do_POST(self):
-        if self.headers.get("authorization") != "Bearer " + TOKEN:
+        if not self._ok():
             return self._send(401, b"unauthorized", "text/plain")
         path = urlparse(self.path).path
-        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        body = self._body()
         if path == "/probes/enroll":
             global ENROLLED
             ENROLLS.append(body)
             board = {"probe_serial": body.get("probe_serial") or "", "role": body["role"], "name": body.get("name") or "",
                      "chip": body["chip"], "hardware_id": "ee:ff", "confirmed_at_utc_ms": NOW_MS, "link_serial": None}
-            same = [b for b in ENROLLED if b["role"] == board["role"]]
-            ENROLLED = [b for b in ENROLLED if b not in same] + [board]
+            same = [b for b in ENROLLED if board["role"] and b["role"] == board["role"]]
+            ENROLLED = [b for b in ENROLLED if b not in same and b["probe_serial"] != board["probe_serial"]] + [board]
             if same and same[0]["probe_serial"] != board["probe_serial"]:
                 board["displaced"] = same[0]
             return self._send(200, board)
@@ -166,12 +193,35 @@ class Core(BaseHTTPRequestHandler):
         return self._send(404, b"not found in the stub", "text/plain")
 
     def do_PUT(self):
-        CORE_WRITES.append(("PUT", urlparse(self.path).path))
-        self.rfile.read(int(self.headers.get("content-length") or 0))
+        if not self._ok():
+            return self._send(401, b"unauthorized", "text/plain")
+        path = urlparse(self.path).path
+        body = self._body()
+        CORE_WRITES.append(("PUT", path))
+        m = re.match(r"^/probes/enrolled/([^/]+)/board$", path)
+        if m:
+            row = next((b for b in ENROLLED if b["role"] == m.group(1)), None)
+            if row is None:
+                row = {"probe_serial": None, "role": m.group(1), "name": "", "chip": "", "hardware_id": None,
+                       "confirmed_at_utc_ms": None, "link_serial": None}
+                ENROLLED.append(row)
+            row["name"], row["chip"] = body.get("board", ""), body.get("chip", "")
+            return self._send(200, row)
         return self._send(404, b"not found in the stub", "text/plain")
 
     def do_DELETE(self):
-        CORE_WRITES.append(("DELETE", urlparse(self.path).path))
+        if not self._ok():
+            return self._send(401, b"unauthorized", "text/plain")
+        global ENROLLED
+        path = urlparse(self.path).path
+        CORE_WRITES.append(("DELETE", path))
+        m = re.match(r"^/probes/enrolled/([^/]+)$", path)
+        if m:
+            ENROLLED = [b for b in ENROLLED if b["role"] != m.group(1)]
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         return self._send(404, b"not found in the stub", "text/plain")
 
 
@@ -182,6 +232,10 @@ LISTEN = (b"<script>window.__errs=[];addEventListener('error',function(e){__errs
 def upstream_json(path):
     with urllib.request.urlopen("http://127.0.0.1:%s%s" % (UI_PORT, path), timeout=20) as r:
         return json.loads(r.read().decode())
+
+
+def refusal(code, text):
+    return (409, text.encode(), "text/plain; charset=utf-8", {"x-embarch-refusal": code})
 
 
 class Proxy(BaseHTTPRequestHandler):
@@ -202,26 +256,30 @@ class Proxy(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _live(self):
+    def _live(self, data):
         """Answers a live route and returns True, or returns False for a path that is none."""
         path = urlparse(self.path).path
-        length = int(self.headers.get("content-length") or 0)
-        data = json.loads(self.rfile.read(length) or b"{}") if length else {}
         if path == "/api/bench/live" and self.command == "GET":
-            self._send(200, {"live": STATE["live"]})
+            if STATE["fail_get"]:
+                self._send(500, b"could not tell whether the live bench's file is there", "text/plain")
+            else:
+                self._send(200, {"live": STATE["live"], "superseded": STATE["superseded"]})
             return True
         if path == "/api/bench/live" and self.command == "DELETE":
             LIVE_DELETES.append(True)
             STATE["live"] = None
+            STATE["superseded"] = None
             self._send(204, b"", "text/plain")
             return True
         if path == "/api/bench/live/retract" and self.command == "POST":
             RETRACTS.append(data)
             offered = [x for x in STATE["leftovers"] if x["kind"] == data.get("kind") and x["id"] == data.get("id")]
-            if not offered:
-                self._send(409, b"not a leftover this bench's report offered", "text/plain; charset=utf-8")
-            elif data.get("id") == "sniffer":
-                self._send(200, {"ok": False, "text": "Core refused: the sniffer role is leased by session 4",
+            if STATE["superseded"]:
+                self._send(*refusal("superseded", "another repo holds this machine; nothing was retracted"))
+            elif not offered:
+                self._send(*refusal("not-offered", "not a leftover this bench's report offered"))
+            elif data.get("id") == STATE["refuse_retract"]:
+                self._send(200, {"ok": False, "text": "Core refused: the %s role is leased by session 4" % data.get("id"),
                                  "leftovers": STATE["leftovers"]})
             else:
                 STATE["leftovers"] = [x for x in STATE["leftovers"] if x not in offered]
@@ -230,14 +288,27 @@ class Proxy(BaseHTTPRequestHandler):
         m = re.match(r"^/api/bench/benches/([a-z0-9-]+)/live$", path)
         if m and self.command == "POST":
             slug = m.group(1)
+            if STATE["delay_live"]:
+                time.sleep(STATE["delay_live"])
             current = upstream_json("/api/bench/benches/" + slug).get("version")
             LIVE_POSTS.append({"slug": slug, "body": data, "file_version": current})
-            if STATE["refuse_live"] or data.get("version") != current:
-                self._send(409, ("embarch/topologies/%s.toml changed since it was read; reload it and save again" % slug).encode(),
-                           "text/plain; charset=utf-8", {"x-embarch-refusal": "version-changed"})
+            rec = STATE["live"]
+            if "write_through" not in data:
+                self._send(400, b"write_through is required", "text/plain")
+            elif STATE["refuse_live"] or data.get("version") != current:
+                self._send(*refusal("version-changed", "embarch/topologies/%s.toml changed since it was read; reload it and save again" % slug))
+            elif data["write_through"] and (not rec or rec["slug"] != slug):
+                self._send(*refusal("not-live", "%s is not this repo's live bench" % slug))
+            elif data["write_through"] and STATE["superseded"]:
+                self._send(*refusal("superseded", "another repo holds this machine: %s" % STATE["superseded"]["slug"]))
+            elif data["write_through"] and rec.get("config_missing"):
+                self._send(*refusal("config-missing", "the live config %s is not in %s any more" % (rec["config"], slug)))
+            elif data["write_through"] and data.get("config") != rec["config"]:
+                self._send(*refusal("config-differs", "a write-through names the live config %s" % rec["config"]))
             else:
                 rep = report_for(slug, data.get("config"))
                 STATE["live"] = rep["live"]
+                STATE["superseded"] = None
                 STATE["leftovers"] = rep["leftovers"]
                 self._send(200, rep)
             return True
@@ -246,18 +317,19 @@ class Proxy(BaseHTTPRequestHandler):
     def _forward(self):
         path = urlparse(self.path).path
         live_route = path.startswith("/api/bench/live") or re.match(r"^/api/bench/benches/[^/]+/live$", path)
-        if live_route and not REAL:
-            if not self._live():
-                self._send(404, b"no such live route in the drive's stub", "text/plain")
-            return
         length = int(self.headers.get("content-length") or 0)
         data = self.rfile.read(length) if length else None
-        if live_route and REAL:
-            # The real routes answer; the drive only notes what was asked.
+        if live_route:
             body = json.loads(data or b"{}") if data else {}
+            if not REAL:
+                if not self._live(body):
+                    self._send(404, b"no such live route in the drive's stub", "text/plain")
+                return
+            # The real routes answer; the drive only notes what was asked.
             m = re.match(r"^/api/bench/benches/([a-z0-9-]+)/live$", path)
             if m and self.command == "POST":
-                LIVE_POSTS.append({"slug": m.group(1), "body": body, "file_version": upstream_json("/api/bench/benches/" + m.group(1)).get("version")})
+                LIVE_POSTS.append({"slug": m.group(1), "body": body,
+                                   "file_version": upstream_json("/api/bench/benches/" + m.group(1)).get("version")})
             elif path == "/api/bench/live/retract":
                 RETRACTS.append(body)
             elif path == "/api/bench/live" and self.command == "DELETE":
@@ -366,6 +438,15 @@ def wait_for(js, timeout=10.0, args=None):
     return script(js, args)
 
 
+def until(cond, timeout=10.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.15)
+    return cond()
+
+
 def element(css):
     return rq("POST", b + "/element", {"using": "css selector", "value": css})
 
@@ -377,6 +458,15 @@ def click(css, x=0, y=0):
     rq("DELETE", b + "/actions")
 
 
+def click_row(css):
+    """A button in the report: brought into view in its scrolling panel first (a Space
+    there scrolls it, and smoothly), so the click lands on it and nowhere else."""
+    wait_for("var e=document.querySelector(arguments[0]); return !!e && !e.disabled;", 6, [css])
+    script("var e=document.querySelector(arguments[0]); if (e) e.scrollIntoView({block: 'center', behavior: 'instant'});", [css])
+    settle()
+    click(css)
+
+
 def settle():
     rq("POST", b + "/execute/async", {"script": "var done = arguments[arguments.length - 1];"
                                                 " requestAnimationFrame(function(){ requestAnimationFrame(function(){ done(true); }); });", "args": []})
@@ -386,6 +476,9 @@ def key(value):
     rq("POST", b + "/actions", {"actions": [{"type": "key", "id": "kb", "actions": [
         {"type": "keyDown", "value": value}, {"type": "keyUp", "value": value}]}]})
     rq("DELETE", b + "/actions")
+
+
+ESC = ""
 
 
 def shot(label):
@@ -411,6 +504,11 @@ def both_themes(stem):
         theme("dark")
 
 
+def open_page():
+    rq("POST", b + "/url", {"url": "about:blank"})
+    rq("POST", b + "/url", {"url": PAGE + "/#topology"})
+
+
 def on_bench(slug):
     return wait_for("return document.getElementById('bench-path').textContent.indexOf(arguments[0] + '.toml') >= 0 &&"
                     " !!document.querySelector('#bench-svg [data-part]');", 8, [slug])
@@ -421,8 +519,14 @@ def pick_bench(slug):
 
 
 def bar():
-    return script("var l=document.getElementById('bench-live'), m=document.getElementById('bench-make-live'), s=document.getElementById('bench-stop-live');"
-                  "return {state: l.hidden ? null : l.textContent, cls: l.className, make: m.hidden ? null : m.textContent, stop: !s.hidden};")
+    return script("function t(id){var e=document.getElementById(id); return e.hidden ? null : e.textContent;}"
+                  "return {state: t('bench-live'), cls: document.getElementById('bench-live').className, make: t('bench-make-live'),"
+                  " stop: !document.getElementById('bench-stop-live').hidden, again: !document.getElementById('bench-declare-again').hidden,"
+                  " retry: !document.getElementById('bench-live-retry').hidden, wt: t('bench-live-wt')};")
+
+
+def bar_settled():
+    return wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent;", 8)
 
 
 def panel_open(name):
@@ -430,7 +534,7 @@ def panel_open(name):
 
 
 def report_text():
-    return script("return document.getElementById('bench-live-body').innerText;")
+    return script("return document.getElementById('bench-live-body').innerText;") or ""
 
 
 def notice():
@@ -451,52 +555,103 @@ def file_version(slug):
     return upstream_json("/api/bench/benches/" + slug).get("version")
 
 
+def confirm_buttons():
+    return script("return Array.from(document.querySelectorAll('#bench-live-body [data-live-confirm]')).map(function(b){"
+                  "return [b.getAttribute('data-live-confirm'), b.disabled];});")
+
+
+def events(name):
+    return script("return window.__ev[arguments[0]] || [];", [name])
+
+
+def listen():
+    script("window.__ev={}; ['embarch:live-changed','embarch:role-changed'].forEach(function(n){"
+           " document.addEventListener(n, function(e){ (window.__ev[n] = window.__ev[n] || []).push(e.detail); }); });")
+
+
 def real_flow():
-    st = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent;", 6)
-    check("REAL: the bar reads the binary's live record: no bench is live", st == "not live", bar())
+    check("REAL: the bar reads the binary's live record: no bench is live", bar_settled() == "not live", bar())
     click("#bench-make-live")
-    opened = wait_for("return !document.getElementById('topo-panel-live').hidden;", 15)
-    check("REAL: Make live posts the config on screen and the version the browser read, and the report opens",
-          opened and len(LIVE_POSTS) == 1 and LIVE_POSTS[0]["body"] == {"config": "A", "version": LIVE_POSTS[0]["file_version"]}, LIVE_POSTS)
-    txt = report_text() or ""
-    check("REAL: the report has its sections: applied, proposed, in Core and not on this bench",
-          "Applied" in txt and "Proposed" in txt and "In Core, not on this bench" in txt, txt[:600])
+    opened = wait_for("return !document.getElementById('topo-panel-live').hidden && document.getElementById('bench-live-body').innerText.indexOf('Applied') >= 0;", 15)
+    check("REAL: Make live posts the config on screen, the version read and write_through false, and the report opens",
+          bool(opened) and len(LIVE_POSTS) == 1 and LIVE_POSTS[0]["body"] == {"config": "A", "version": LIVE_POSTS[0]["file_version"], "write_through": False},
+          LIVE_POSTS)
+    txt = report_text()
+    check("REAL: the DUT's board type is an applied row", "dut board" in txt.lower() and "applied" in txt, txt[:700])
+    check("REAL: its probe is proposed, naming the probe it would replace", DUT_PROBE in txt and OLD_PROBE in txt, txt[:900])
+    check("REAL: the probe pod is proposed as a bench board", POD_PROBE in txt and "bench board" in txt, txt[:900])
+    check("REAL: the dev-bench role Core holds and this bench does not is left over, with its Retract",
+          "dev-bench" in txt and script("return !!document.querySelector('#bench-live-body [data-live-retract]');"), txt[-700:])
+    check("REAL: focus is on the report, never on a button in it", script(
+        "var a=document.activeElement; return a && a.id === 'topo-panel-live';"), script("return document.activeElement.outerHTML.slice(0, 80);"))
     b1 = bar()
-    check("REAL: the bar says this bench is live, wired as config A", b1["state"] == "live · A" and b1["stop"], b1)
-    check("REAL: the live record agrees", upstream_json("/api/bench/live").get("live", {}).get("slug") == "live-bench")
-    prop = script("var b=document.querySelector('#bench-live-body [data-live-confirm]'); return b ? b.getAttribute('data-live-confirm') : null;")
-    check("REAL: the DUT's bound probe comes back as a proposal to confirm", prop is not None, txt[:800])
-    if prop is not None:
+    check("REAL: the bar says this bench is live, wired as config A, with Declare again", b1["state"] == "live · A" and b1["stop"] and b1["again"], b1)
+    check("REAL: the record agrees", upstream_json("/api/bench/live").get("live", {}).get("slug") == "live-bench")
+    # Confirm the DUT, then the pod.
+    btns = script("return Array.from(document.querySelectorAll('#bench-live-body .bench-live-row')).map(function(r){"
+                  " var b=r.querySelector('[data-live-confirm]'); return b ? [b.getAttribute('data-live-confirm'), r.innerText] : null;}).filter(Boolean);")
+    dut_i = next((i for i, t in btns if DUT_PROBE in t), None)
+    pod_i = next((i for i, t in btns if POD_PROBE in t), None)
+    if dut_i is not None:
         posts = len(LIVE_POSTS)
-        click('#bench-live-body [data-live-confirm="%s"]' % prop)
-        wait_for("var t=document.getElementById('bench-live-body').innerText; return t.indexOf('declared again') >= 0 || t.indexOf('not enrolled') >= 0;", 15)
-        check("REAL: Confirm enrols the probe with the board type as the name", ENROLLS[-1:] and ENROLLS[-1].get("probe_serial") == DUT_PROBE and
+        click_row('#bench-live-body [data-live-confirm="%s"]' % dut_i)
+        until(lambda: len(LIVE_POSTS) > posts, 15)
+        wait_for("return document.getElementById('bench-live-body').innerText.indexOf('declared again') >= 0;", 10)
+        check("REAL: Confirm enrols the DUT's probe with the board type as the name", ENROLLS[-1:] and ENROLLS[-1].get("probe_serial") == DUT_PROBE and
               ENROLLS[-1].get("name") == "nrf54l15dk/nrf54l15/cpuapp" and ENROLLS[-1].get("role") == "dut", ENROLLS)
-        check("REAL: and the live bench is declared again", len(LIVE_POSTS) == posts + 1, LIVE_POSTS[-1:])
-    key("\ue00c")
+        check("REAL: and declares the bench again, as a write-through", len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"].get("write_through") is True,
+              LIVE_POSTS[-1:])
+        check("REAL: the report says what the enrol moved", "displaced" in report_text() and OLD_PROBE in report_text(), report_text()[:500])
+    else:
+        check("REAL: the DUT's proposal has a Confirm", False, btns)
+    btns = script("return Array.from(document.querySelectorAll('#bench-live-body .bench-live-row')).map(function(r){"
+                  " var b=r.querySelector('[data-live-confirm]'); return b ? [b.getAttribute('data-live-confirm'), r.innerText] : null;}).filter(Boolean);")
+    pod_i = next((i for i, t in btns if POD_PROBE in t), None)
+    if pod_i is not None:
+        posts = len(LIVE_POSTS)
+        click_row('#bench-live-body [data-live-confirm="%s"]' % pod_i)
+        until(lambda: len(LIVE_POSTS) > posts, 15)
+        said = wait_for("var s=document.querySelector('#bench-live-body .topo-check-summary'); return s && s.innerText.indexOf('probe-pod') >= 0 ? s.innerText : '';", 10)
+        check("REAL: a bench board is enrolled with no role and its label as the name", ENROLLS[-1:] and ENROLLS[-1].get("role") == "" and
+              ENROLLS[-1].get("probe_serial") == POD_PROBE and ENROLLS[-1].get("name") == "probe-pod", ENROLLS[-1:])
+        check("REAL: a plain enrol shows no moved-role note", bool(said) and "displaced" not in said and "vacated" not in said, said)
+    else:
+        check("REAL: the bench board's proposal has a Confirm", False, btns)
+    # Retract the dev-bench role.
+    lefts = script("return Array.from(document.querySelectorAll('#bench-live-body [data-live-retract]')).map(function(b){"
+                   " return [b.getAttribute('data-live-retract'), b.closest('.bench-live-row').innerText];});")
+    dev_i = next((i for i, t in lefts if "dev-bench" in t), None)
+    if dev_i is not None:
+        click_row('#bench-live-body [data-live-retract="%s"]' % dev_i)
+        until(lambda: ("DELETE", "/probes/enrolled/dev-bench") in CORE_WRITES, 10)
+        check("REAL: retracting the canonical role reaches Core", ("DELETE", "/probes/enrolled/dev-bench") in CORE_WRITES, CORE_WRITES)
+        check("REAL: and only that one", RETRACTS == [{"kind": "role", "id": "dev-bench"}], RETRACTS)
+    else:
+        check("REAL: the dev-bench leftover has a Retract", False, lefts)
+    key(ESC)
     posts = len(LIVE_POSTS)
-    flip("probe")
+    flip("spare" if script("return !!document.querySelector('#bench-svg [data-part=\"spare\"]');") else "pod")
     click("#bench-save")
-    wait_for("return document.getElementById('bench-dirty').hidden;", 8)
-    wait_for("return arguments[0] < window.__liveEvents.length;", 10, [script("return window.__liveEvents.length;") - 1])
-    time.sleep(1.0)
-    check("REAL: saving the live bench declares it again with the new version",
-          len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"]["version"] == file_version("live-bench"), LIVE_POSTS[-1:])
-    key("\ue00c")
+    until(lambda: len(LIVE_POSTS) > posts, 15)
+    check("REAL: saving the live bench declares it again with the new version, as a write-through",
+          len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"]["version"] == file_version("live-bench") and LIVE_POSTS[-1]["body"]["write_through"] is True,
+          LIVE_POSTS[-1:])
+    ind = wait_for("var w=document.getElementById('bench-live-wt'); return !w.hidden ? w.textContent : '';", 8)
+    check("REAL: the write-through says so on the bar, without opening the report", (ind or "").startswith("declared") and not panel_open("live"), ind)
+    wait_for("return !document.getElementById('bench-stop-live').hidden && !document.getElementById('bench-stop-live').disabled;", 8)
     click("#bench-stop-live")
-    check("REAL: Stop being live clears the record", wait_for("return document.getElementById('bench-live').textContent === 'not live';", 8)
-          and upstream_json("/api/bench/live").get("live") is None)
+    stopped = wait_for("return document.getElementById('bench-live').textContent === 'not live';", 8)
+    after = upstream_json("/api/bench/live")
+    check("REAL: Stop being live clears the record", bool(stopped) and after.get("live") is None, [bar(), after, LIVE_DELETES])
     check("REAL: no uncaught JS error or unhandled rejection", script("return window.__errs;") == [], script("return window.__errs;"))
 
 
 shots = []
 try:
     rq("POST", b + "/window/rect", {"width": 1700, "height": 1000})
-    rq("POST", b + "/url", {"url": "about:blank"})
-    rq("POST", b + "/url", {"url": PAGE + "/#topology"})
+    open_page()
     on_bench("live-bench")
-    script("window.__liveEvents=[]; document.addEventListener('embarch:live-changed', function(e){ __liveEvents.push(e.detail); });"
-           "window.__roleEvents=[]; document.addEventListener('embarch:role-changed', function(e){ __roleEvents.push(e.detail); });")
+    listen()
 
     if REAL:
         real_flow()
@@ -508,65 +663,79 @@ try:
         check("the Old diagram panel, its button, its probe pool and its two dialogs are gone", not any(gone.values()), gone)
 
         # --- not live ---------------------------------------------------------------------
-        st = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent;", 6)
-        check("the bar says no bench is live for this repo", st == "not live", bar())
-        check("and offers Make live on the bench on screen", bar()["make"] == "Make live" and not bar()["stop"], bar())
+        check("the bar says no bench is live for this repo", bar_settled() == "not live", bar())
+        check("and offers Make live, nothing else", bar()["make"] == "Make live" and not bar()["stop"] and not bar()["again"], bar())
         check("with no report yet, no Live report button", script("return document.getElementById('bench-live-btn').hidden;"))
 
         # --- make a saved bench live --------------------------------------------------------
         click("#bench-make-live")
         opened = wait_for("return !document.getElementById('topo-panel-live').hidden;", 6)
-        check("Make live posts the bench as saved: the config on screen and the version it read", len(LIVE_POSTS) == 1 and
-              LIVE_POSTS[0]["body"] == {"config": "A", "version": LIVE_POSTS[0]["file_version"]}, LIVE_POSTS)
-        check("and the report opens as a panel", opened and panel_open("live"))
-        txt = report_text() or ""
-        check("an applied row says applied, a failed one says failed with Core's own text",
-              "applied" in txt and "failed" in txt and "lease held by session 4" in txt, txt)
-        check("the proposal is a row with Confirm, saying Confirm reads the probe's hardware ID",
-              script("return !!document.querySelector('#bench-live-body [data-live-confirm=\"0\"]');") and "hardware ID" in txt, txt)
+        check("Make live posts the bench as saved: the config on screen, the version it read, write_through false",
+              len(LIVE_POSTS) == 1 and LIVE_POSTS[0]["body"] == {"config": "A", "version": LIVE_POSTS[0]["file_version"], "write_through": False}, LIVE_POSTS)
+        check("and the report opens as a panel", bool(opened) and panel_open("live"))
+        check("with focus on the report itself, never on a Confirm one Space would press", script(
+            "var a=document.activeElement; return !!a && a.id === 'topo-panel-live' && a.tagName !== 'BUTTON';"),
+            script("return document.activeElement.outerHTML.slice(0, 80);"))
+        key(" ")
+        check("so a Space there enrols nothing", ENROLLS == [], ENROLLS)
+        txt = report_text()
+        check("an applied row says applied, a failed one failed with Core's own text, one not sent says not sent",
+              "applied" in txt and "failed" in txt and "lease held by session 4" in txt and "not sent" in txt, txt)
+        check("each proposal is a row with Confirm, saying Confirm reads the probe's hardware ID",
+              [c[0] for c in confirm_buttons()] == ["0", "1"] and "hardware ID" in txt, txt)
+        check("the DUT's proposal names the probe it would replace", OLD_PROBE in txt)
         check("a part not proposed says why", "not proposed" in txt and "no probe is bound on it" in txt)
-        check("each leftover carries its own Retract, and nothing says it was retracted",
+        check("each leftover carries its own Retract, and nothing was retracted",
               script("return document.querySelectorAll('#bench-live-body [data-live-retract]').length;") == 2 and RETRACTS == [], txt)
         b1 = bar()
-        check("the bar now says this bench is live, wired as config A, and offers Stop being live",
-              b1["state"] == "live · A" and "bench-live-here" in b1["cls"] and b1["stop"] and b1["make"] is None, b1)
+        check("the bar says this bench is live, wired as config A, with Declare again and Stop being live",
+              b1["state"] == "live · A" and "bench-live-here" in b1["cls"] and b1["stop"] and b1["again"] and b1["make"] is None, b1)
         check("the config tab that is the live wiring is marked", script(
             "var t=document.querySelector('#bench-configs [data-live-config]'); return t ? t.textContent : null;") == "A")
-        check("embarch:live-changed says which bench and config", script("return window.__liveEvents;") == [{"slug": "live-bench", "config": "A"}],
-              script("return window.__liveEvents;"))
+        check("embarch:live-changed says which bench and config", events("embarch:live-changed") == [{"slug": "live-bench", "config": "A"}],
+              events("embarch:live-changed"))
+        check("the DUT's board type applied, so its Validate verdict is dropped", {"role": "dut", "probe_serial": None} in events("embarch:role-changed"),
+              events("embarch:role-changed"))
         both_themes("live-report")
         check("making live touched no Core route from the page itself", CORE_WRITES == [], CORE_WRITES)
 
-        # --- Confirm ------------------------------------------------------------------------
+        # --- Confirm, the DUT then a bench board ----------------------------------------------
         posts = len(LIVE_POSTS)
-        click('#bench-live-body [data-live-confirm="0"]')
+        click_row('#bench-live-body [data-live-confirm="0"]')
         done = wait_for("var t=document.getElementById('bench-live-body').innerText; return t.indexOf('declared again') >= 0 ? t : '';", 8)
         check("Confirm runs the ordinary enrol with the proposal's fields verbatim — for a role, its board type as the name (decision 45)",
               ENROLLS == [{"role": "dut", "chip": "nRF54L15", "probe_serial": DUT_PROBE, "name": "nrf54l15dk/nrf54l15/cpuapp"}], ENROLLS)
-        check("then declares the live bench again, with the version and config it is live with",
-              len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"] == {"config": "A", "version": file_version("live-bench")}, LIVE_POSTS[-1:])
+        check("then declares the live bench again as a write-through, never taking the machine",
+              len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"] == {"config": "A", "version": file_version("live-bench"), "write_through": True},
+              LIVE_POSTS[-1:])
         check("and the fresh report says who was enrolled and what the enrol moved", bool(done) and "Enrolled dut" in done and OLD_PROBE in done, done)
-        check("a confirmed enrolment tells the page the role's binding changed", script("return window.__roleEvents;") == [
-            {"role": "dut", "probe_serial": DUT_PROBE}], script("return window.__roleEvents;"))
+        check("the confirmed proposal keeps its enrolled mark, no Confirm, in the report that came back", [c[0] for c in confirm_buttons()] == ["1"],
+              confirm_buttons())
+        click_row('#bench-live-body [data-live-confirm="1"]')
+        said = wait_for("var s=document.querySelector('#bench-live-body .topo-check-summary'); return s && s.innerText.indexOf('probe-pod') >= 0 ? s.innerText : '';", 8)
+        check("a bench-board proposal enrols with no role and its label as the name",
+              ENROLLS[-1] == {"role": "", "chip": "nRF54L15", "probe_serial": POD_PROBE, "name": "probe-pod"}, ENROLLS[-1])
+        check("a plain enrol shows no moved-role note", bool(said) and "displaced" not in said, said)
 
         # --- Retract ------------------------------------------------------------------------
-        click('#bench-live-body [data-live-retract="0"]')
+        STATE["refuse_retract"] = "dev-bench"
+        click_row('#bench-live-body [data-live-retract="0"]')
         wait_for("return document.querySelectorAll('#bench-live-body [data-live-retract]').length === 1;", 6)
         check("Retract sends only the leftover clicked", RETRACTS == [{"kind": "signal", "id": "old-sig"}], RETRACTS)
-        check("and the list comes back from the answer, the signal gone", "old-sig" not in (report_text() or "") and "sniffer" in report_text())
-        click('#bench-live-body [data-live-retract="0"]')
+        check("and the list comes back from the answer, the signal gone", "old-sig" not in report_text() and "dev-bench" in report_text())
+        click_row('#bench-live-body [data-live-retract="0"]')
         refused = wait_for("var t=document.getElementById('bench-live-body').innerText; return t.indexOf('not retracted') >= 0 ? t : '';", 6)
         check("a Retract Core refuses says why on its row, and the leftover stays", "leased by session 4" in (refused or "") and
               script("return document.querySelectorAll('#bench-live-body [data-live-retract]').length;") == 1, refused)
-        check("nothing else was retracted", RETRACTS == [{"kind": "signal", "id": "old-sig"}, {"kind": "role", "id": "sniffer"}], RETRACTS)
+        STATE["refuse_retract"] = None
 
         # --- reopen without a new apply -------------------------------------------------------
-        key("")
+        key(ESC)
         check("Esc closes the report", not panel_open("live"))
         posts = len(LIVE_POSTS)
         click("#bench-live-btn")
         check("the Live report button reopens it without making live again", panel_open("live") and len(LIVE_POSTS) == posts)
-        key("")
+        key(ESC)
 
         # --- switching configs is a view change ---------------------------------------------------
         script("document.querySelector('#bench-configs [data-cfg=\"1\"]').click();")
@@ -578,22 +747,95 @@ try:
         script("document.querySelector('#bench-configs [data-cfg=\"0\"]').click();")
         settle()
 
-        # --- write-through after a Save of the live bench ---------------------------------------
-        flip("probe")
+        # --- write-through after a Save, and Declare again ----------------------------------------
+        flip("spare" if script("return !!document.querySelector('#bench-svg [data-part=\"spare\"]');") else "pod")
         click("#bench-save")
-        wt = wait_for("return document.getElementById('bench-dirty').hidden && !document.getElementById('topo-panel-live').hidden;", 8)
-        check("Saving the live bench declares it again, with the version the save answered, and shows the report",
-              wt and len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"] == {"config": "A", "version": file_version("live-bench")},
+        until(lambda: len(LIVE_POSTS) > posts, 8)
+        ind = wait_for("var w=document.getElementById('bench-live-wt'); return !w.hidden ? w.textContent : '';", 6)
+        check("saving the live bench declares it again, as a write-through with the version the save answered",
+              len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"] == {"config": "A", "version": file_version("live-bench"), "write_through": True},
               LIVE_POSTS[-1:])
-        check("the report says it was declared again after the save", "declared again" in (report_text() or ""), report_text())
-        check("and embarch:live-changed says so", script("return window.__liveEvents.length;") == 3, script("return window.__liveEvents;"))
-        key("")
+        check("without opening the report: the bar says what it declared, a click away", ind == "declared · 2 proposals · 2 failed" and not panel_open("live"), ind)
+        both_themes("live-writethrough")
+        click("#bench-live-wt")
+        check("the indicator opens the report, focus on the report", panel_open("live") and script(
+            "return document.activeElement && document.activeElement.id === 'topo-panel-live';"))
+        check("which says it was declared again after the save", "declared again" in report_text(), report_text()[:200])
+        key(ESC)
+        posts = len(LIVE_POSTS)
+        click("#bench-declare-again")
+        until(lambda: len(LIVE_POSTS) > posts, 8)
+        check("Declare again re-applies without an edit, as a write-through", len(LIVE_POSTS) == posts + 1 and
+              LIVE_POSTS[-1]["body"]["write_through"] is True and LIVE_POSTS[-1]["body"]["config"] == "A", LIVE_POSTS[-1:])
+
+        # --- superseded: another repo took the machine ----------------------------------------
+        STATE["superseded"] = {"repo": "/home/someone/other-fw", "slug": "pd-rig", "config": None}
+        posts = len(LIVE_POSTS)
+        flip("dut")
+        click("#bench-save")
+        nd = wait_for("var w=document.getElementById('bench-live-wt'); return !w.hidden && w.textContent === 'saved, not declared' ? w.title : '';", 8)
+        check("a write-through refused superseded says saved, not declared — on the bar, and it stays", "superseded" in (nd or "") or "another repo" in (nd or ""), nd)
+        check("never as Not made live, never the Reload dialog", "Not made live" not in notice() and
+              script("return document.getElementById('bench-dialog').style.display !== 'block';"), notice())
+        sup = wait_for("var l=document.getElementById('bench-live'); return l.textContent.indexOf('superseded') === 0 ? l.textContent : '';", 6)
+        check("the page reads the record again: superseded by the other repo and its bench", sup == "superseded by other-fw · pd-rig", sup)
+        b3 = bar()
+        check("Make live is the take-back; Declare again is gone", b3["make"] == "Make live" and not b3["again"], b3)
+        click("#bench-live-btn")
+        check("the report it kept is no longer the live one: its buttons act no more",
+              all(c[1] for c in confirm_buttons()) and script("return Array.from(document.querySelectorAll('#bench-live-body [data-live-retract]')).every(function(b){return b.disabled;});"),
+              confirm_buttons())
+        key(ESC)
+        posts2 = len(LIVE_POSTS)
+        flip("dut")
+        click("#bench-save")
+        wait_for("return document.getElementById('bench-dirty').hidden;", 6)
+        time.sleep(0.6)
+        check("while superseded, a save is not sent to Core at all, and says saved, not declared",
+              len(LIVE_POSTS) == posts2 and "not declared" in notice(), [LIVE_POSTS[posts2:], notice()])
+        both_themes("live-superseded")
+        click("#bench-make-live")
+        back = wait_for("return document.getElementById('bench-live').textContent === 'live · A';", 8)
+        check("Make live takes the machine back, as the explicit click it is", bool(back) and LIVE_POSTS[-1]["body"]["write_through"] is False and
+              STATE["superseded"] is None, LIVE_POSTS[-1:])
+        check("and the saved-not-declared mark is gone", bar()["wt"] is None, bar())
+        key(ESC)
+
+        # --- the live config is gone --------------------------------------------------------------
+        STATE["live"] = dict(STATE["live"], config_missing=True)
+        open_page()
+        on_bench("live-bench")
+        listen()
+        cm = wait_for("var l=document.getElementById('bench-live'); return l.textContent.indexOf('gone') >= 0 ? l.textContent : '';", 6)
+        b4 = bar()
+        check("a record whose config is gone says so", cm == "live config A is gone", b4)
+        check("and offers Make live with a config that is there, no Declare again", b4["make"] == "Make live" and not b4["again"] and b4["stop"], b4)
+        STATE["live"] = dict(STATE["live"], config_missing=False)
+
+        # --- a project switch while a make-live is on its way ----------------------------------------
+        open_page()
+        on_bench("live-bench")
+        listen()
+        bar_settled()
+        script("document.querySelector('#bench-configs [data-cfg=\"1\"]').click();")
+        settle()
+        STATE["delay_live"] = 1.5
+        before = len(events("embarch:live-changed"))
+        click("#bench-make-live")
+        time.sleep(0.2)
+        script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: arguments[0]}}));", [str(fw)])
+        time.sleep(2.5)
+        STATE["delay_live"] = 0.0
+        check("a make-live answer that lands after a project switch is dropped: no event, no report opened over the new repo",
+              len(events("embarch:live-changed")) == before and not panel_open("live"), events("embarch:live-changed"))
+        on_bench("live-bench")
 
         # --- a 409 on make live offers Reload ------------------------------------------------------
         pick_bench("other-bench")
         on_bench("other-bench")
-        b3 = bar()
-        check("another bench is not the live one, and says which is", b3["state"] == "live: live-bench" and b3["make"] == "Make live" and not b3["stop"], b3)
+        bar_settled()
+        b5 = bar()
+        check("another bench is not the live one, and says which is", (b5["state"] or "").startswith("live: live-bench") and b5["make"] == "Make live" and not b5["stop"], b5)
         STATE["refuse_live"] = True
         click("#bench-make-live")
         asked = wait_for("return document.getElementById('bench-dialog').style.display === 'block' ? document.getElementById('bench-dialog').innerText : '';", 6)
@@ -603,39 +845,51 @@ try:
         STATE["refuse_live"] = None
 
         # --- save and make live -----------------------------------------------------------------
-        flip("probe")
-        b4 = bar()
-        check("with unsaved edits the button says Save and make live", b4["make"] == "Save and make live", b4)
+        flip("spare")
+        b6 = bar()
+        check("with unsaved edits the button says Save and make live", b6["make"] == "Save and make live", b6)
         before = len(LIVE_POSTS)
         click("#bench-make-live")
         made = wait_for("return document.getElementById('bench-live').className.indexOf('bench-live-here') >= 0;", 8)
         flipped = tomllib.loads((TOPO / "other-bench.toml").read_text())
-        check("it saves first, then makes live with the version that save answered", made and not dirty() and
-              next(p for p in flipped["parts"] if p["id"] == "probe").get("flip") is True and
-              len(LIVE_POSTS) == before + 1 and LIVE_POSTS[-1]["slug"] == "other-bench" and LIVE_POSTS[-1]["body"]["version"] == file_version("other-bench"),
-              LIVE_POSTS[-1:])
+        check("it saves first, then makes live with the version that save answered", bool(made) and not dirty() and
+              next(p for p in flipped["parts"] if p["id"] == "spare").get("flip") is True and
+              len(LIVE_POSTS) == before + 1 and LIVE_POSTS[-1]["slug"] == "other-bench" and LIVE_POSTS[-1]["body"]["version"] == file_version("other-bench") and
+              LIVE_POSTS[-1]["body"]["write_through"] is False, LIVE_POSTS[-1:])
         check("a bench with no config is made live with none", LIVE_POSTS[-1]["body"]["config"] is None and bar()["state"] == "live", bar())
         both_themes("live-bar")
-        key("")
+        key(ESC)
 
         # --- stop being live -------------------------------------------------------------------
         writes = list(CORE_WRITES)
         click("#bench-stop-live")
         stopped = wait_for("return document.getElementById('bench-live').textContent === 'not live';", 6)
-        check("Stop being live clears the record and touches nothing in Core", stopped and LIVE_DELETES == [True] and CORE_WRITES == writes,
+        check("Stop being live clears the record and touches nothing in Core", bool(stopped) and LIVE_DELETES == [True] and CORE_WRITES == writes,
               [LIVE_DELETES, CORE_WRITES])
-        check("embarch:live-changed says no bench is live", script("var e=window.__liveEvents; return e[e.length-1];") == {"slug": None, "config": None})
+        check("embarch:live-changed says no bench is live", events("embarch:live-changed")[-1:] == [{"slug": None, "config": None}])
 
-        # --- a record whose file is gone ---------------------------------------------------------
-        STATE["live"] = {"slug": "gone-bench", "config": None, "since_utc_ms": NOW_MS, "missing": True}
-        rq("POST", b + "/url", {"url": "about:blank"})
-        rq("POST", b + "/url", {"url": PAGE + "/#topology"})
-        on_bench("other-bench")
-        miss = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent.indexOf('gone') >= 0 ? l.textContent : '';", 6)
-        check("a live record naming a file that is gone says so, never guesses", "gone-bench" in (miss or "") and "bench-live-missing" in bar()["cls"], bar())
-        check("and offers to clear it", bar()["stop"] and bar()["make"] == "Make live", bar())
+        # --- a record whose file is gone, or does not parse --------------------------------------
+        for flag, words in (("missing", "its file is gone"), ("unparseable", "its file does not parse")):
+            STATE["live"] = {"slug": "gone-bench", "config": None, "since_utc_ms": NOW_MS, "missing": flag == "missing",
+                             "unparseable": flag == "unparseable", "config_missing": False}
+            open_page()
+            on_bench("other-bench")
+            miss = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent.indexOf('gone-bench') >= 0 ? l.textContent : '';", 6)
+            check("a live record whose file %s says so, never guesses" % ("is gone" if flag == "missing" else "does not parse"),
+                  words in (miss or "") and "bench-live-missing" in bar()["cls"], bar())
+            check("and offers to clear it (%s)" % flag, bar()["stop"] and bar()["make"] == "Make live", bar())
         click("#bench-stop-live")
-        check("which clears it", wait_for("return document.getElementById('bench-live').textContent === 'not live';", 6))
+        check("which clears it", bool(wait_for("return document.getElementById('bench-live').textContent === 'not live';", 6)))
+
+        # --- unreadable: say so, and offer to read again ------------------------------------------
+        STATE["fail_get"] = True
+        open_page()
+        on_bench("other-bench")
+        unk = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent === 'live: unknown';", 6)
+        check("a record that could not be read says unknown, with Read again", bool(unk) and bar()["retry"], bar())
+        STATE["fail_get"] = False
+        click("#bench-live-retry")
+        check("and Read again reads it", bool(wait_for("return document.getElementById('bench-live').textContent === 'not live';", 6)), bar())
 
     check("no uncaught JS error or unhandled rejection, load included", script("return window.__errs;") == [], script("return window.__errs;"))
     if shots:

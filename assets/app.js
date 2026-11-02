@@ -275,6 +275,10 @@
     publishVerdicts();
   }
 
+  // bench.js pinned a board's build combination in embarch/boards.toml:
+  // the list shows the pin.
+  document.addEventListener("embarch:boards-pinned", function () { loadBoardCatalog(); });
+
   // bench.js confirmed an enrolment or retracted a role from the live
   // report: whatever the last Validate said about that role, or that bench
   // board, described the binding before it.
@@ -382,7 +386,10 @@
     if (!body) return;
     const rows = linkBoard != null ? linkedRows() : [];
     const bench = window.embarchBench;
-    const parts = linkBoard != null && bench && typeof bench.markedParts === "function" ? bench.markedParts() : [];
+    // Asked with the board itself: this runs on `embarch:route` before
+    // bench.js has heard the same event.
+    const parts = linkBoard != null && bench && typeof bench.markedParts === "function" ? bench.markedParts(linkBoard) : [];
+    const settled = !!bench && typeof bench.settled === "function" && bench.settled();
     let firstRow = null;
     body.querySelectorAll("tr").forEach((tr) => {
       const edit = tr.querySelector("[data-board-edit]");
@@ -397,14 +404,17 @@
       showRouteNote(null);
       return;
     }
+    // Board types opens only once the canvas has a bench to say it holds no
+    // such part: a link to a board both on a part and in the catalog lands
+    // on the part, never on a panel over it.
     if (firstRow) {
-      if (!linkBoardScrolled) {
+      if (settled && !linkBoardScrolled) {
         linkBoardScrolled = true;
         openTopoPanel("boards");
         firstRow.scrollIntoView({ block: "center" });
       }
       showRouteNote(null);
-    } else if (boardCatalogRead && bench && typeof bench.settled === "function" && bench.settled()) {
+    } else if (boardCatalogRead && settled) {
       showRouteNote("No board " + linkBoard + " here: no part on this bench holds it and this project's board types do not list it.");
     }
   }
@@ -5335,32 +5345,14 @@
       '<button class="btn btn-tiny btn-primary" type="button" id="desk-bench-review">Review it on Topology</button>' +
       '<button class="btn btn-tiny" type="button" id="desk-bench-later">Not now</button>';
     document.getElementById("desk-bench-later").addEventListener("click", hideBenchBanner);
-    document.getElementById("desk-bench-review").addEventListener("click", async function () {
-      try {
-        var running = [];
-        var resp = await fetch("/api/studies");
-        if (resp.ok) {
-          running = ((await resp.json()).studies || []).filter(function (x) { return x.status === "running"; });
-        }
-        if (running.length && !window.confirm(
-          "A study is running on the bench: " + running.map(function (x) { return x.study_name || x.study_id; }).join(", ") +
-          ".\n(A flash or bootload in progress is not reported here.)\nLoad the desk's bench anyway?")) return;
-        showTab("topology");
-        // The load's report and its errors are on the Saved benches panel.
-        openTopoPanel("saved");
-        await loadProfiles();
-        var picker = topoEl("topo-profile-picker");
-        var has = picker && Array.prototype.some.call(picker.options, function (o) { return o.value === desk.bench; });
-        if (!has) {
-          showError(topoEl("topo-profile-error"), "the desk names the saved bench '" + desk.bench + "', which this repo does not have");
-          return;
-        }
-        picker.value = desk.bench;
-        hideBenchBanner();
-        await applyTopology();
-      } catch (e) {
-        showError(topoEl("topo-profile-error"), String(e));
-      }
+    // **Reviewing the desk's bench opens it on the canvas** (phase 4: making a
+    // bench live replaced the old apply): nothing reaches Core until the
+    // human presses Make live there.
+    document.getElementById("desk-bench-review").addEventListener("click", function () {
+      showTab("topology");
+      hideBenchBanner();
+      const bench = window.embarchBench;
+      if (bench && typeof bench.showBench === "function") bench.showBench(desk.bench, "The desk " + desk.name + " uses");
     });
   }
 
@@ -6429,118 +6421,16 @@
     document.dispatchEvent(new CustomEvent("embarch:benches-changed"));
   }
 
-  // **Loading applies two halves and proposes the third.** Signals and the
-  // dev-bench link are declarations, so they go straight in. An enrolment
-  // is an identity claim — a role bound to a probe after a live hardware-ID
-  // read — so each one comes back as a proposal with a button, and pressing
-  // it runs the ordinary enroll. A file on disk is not evidence about what
-  // is plugged in.
-  function proposalHtml(p) {
-    const notes = [];
-    if (p.already_enrolled) notes.push("this role already holds that probe");
-    if (!p.probe_attached) notes.push("that probe is not attached right now");
-    if (p.displaces && p.displaces.probe_serial !== p.probe_serial) {
-      notes.push(
-        "replaces " + (p.displaces.board || "an unnamed board") + " on probe " + p.displaces.probe_serial
-      );
-    }
-    return (
-      '<div class="topo-check">' +
-      '<div class="topo-check-head">' +
-      '<span class="badge badge-neutral">' + escapeHtml(roleLabel(p.role)) + "</span>" +
-      '<span class="topo-check-label mono">' + escapeHtml(p.board || "unnamed board") + "</span>" +
-      '<span style="flex:1;"></span>' +
-      '<button class="btn btn-primary" data-proposal-role="' + escapeHtml(p.role) + '">Enroll</button>' +
-      "</div>" +
-      '<p class="placeholder-note" style="margin:4px 0 0;">chip ' + escapeHtml(p.chip) +
-      " · probe " + escapeHtml(p.probe_serial) +
-      (notes.length ? " · " + escapeHtml(notes.join(" · ")) : "") + "</p>" +
-      "</div>"
-    );
-  }
-
-  let pendingProposals = [];
-
-  async function applyTopology() {
+  // **Open shows a saved bench on the canvas** (phase 4): making it live —
+  // the declarations, the proposals, the leftovers — is the canvas's Make
+  // live, pressed by the human. The old apply route stays on the server for
+  // the API's callers; the page no longer calls it.
+  function openSavedBench() {
     const slug = topoEl("topo-profile-picker").value;
-    const report = topoEl("topo-apply-report");
-    if (!slug || !report) return;
-    report.style.display = "block";
-    report.innerHTML = '<p class="placeholder-note">loading…</p>';
-    const resp = await fetch("/api/topology/profiles/" + encodeURIComponent(slug) + "/apply", {
-      method: "POST",
-    });
-    const text = await resp.text();
-    if (!resp.ok) {
-      report.innerHTML = '<div class="sd-error">' + escapeHtml(resp.status + " " + text) + "</div>";
-      return;
-    }
-    const body = JSON.parse(text);
-    pendingProposals = body.proposals || [];
-    topoEl("topo-profile-name").textContent = body.name;
-    const applied = (body.applied || [])
-      .map(function (a) {
-        const badge = a.ok
-          ? '<span class="badge badge-success">applied</span>'
-          : '<span class="badge badge-warning">not applied</span>';
-        return (
-          '<div class="topo-check"><div class="topo-check-head">' + badge +
-          '<span class="topo-check-label">' + escapeHtml(a.what) + "</span></div>" +
-          '<p class="placeholder-note" style="margin:4px 0 0;">' + escapeHtml(a.detail) + "</p></div>"
-        );
-      })
-      .join("");
-    const proposals = pendingProposals.map(proposalHtml).join("");
-    report.innerHTML =
-      '<div class="topo-check-summary"><span class="badge badge-neutral">loaded ' +
-      escapeHtml(body.name) + "</span> " +
-      '<span class="placeholder-note">the declarations are in; each enrolment is yours to confirm, ' +
-      "because binding a role to a probe reads that chip&rsquo;s live hardware ID</span></div>" +
-      applied +
-      proposals;
-  }
-
-  async function confirmProposal(role) {
-    const p = pendingProposals.find(function (x) {
-      return x.role === role;
-    });
-    if (!p) return;
-    const report = topoEl("topo-apply-report");
-    const resp = await fetch("/api/enroll", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        role: p.role,
-        chip: p.chip,
-        probe_serial: p.probe_serial,
-        name: p.board,
-      }),
-    });
-    const text = await resp.text();
-    if (!resp.ok) {
-      showError(topoEl("topo-profile-error"), resp.status + " " + text);
-      return;
-    }
-    showError(topoEl("topo-profile-error"), null);
-    // dev-bench's link is amended onto its enrolment row, so Core refuses
-    // it while the role is empty — which is exactly the state the apply
-    // step deferred it from. Now that the row exists, declare it.
-    if (p.role === "dev-bench" && (p.link_port_serial || p.link_port_interface !== null)) {
-      await fetch("/api/topology/link", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serial: p.link_port_serial, interface: p.link_port_interface }),
-      });
-    }
-    pendingProposals = pendingProposals.filter(function (x) {
-      return x.role !== role;
-    });
-    if (report) {
-      const remaining = pendingProposals.map(proposalHtml).join("");
-      report.innerHTML =
-        '<div class="topo-check-summary"><span class="badge badge-success">enrolled ' +
-        escapeHtml(roleLabel(role)) + "</span></div>" + remaining;
-    }
+    if (!slug) return;
+    closeTopoPanels();
+    const bench = window.embarchBench;
+    if (bench && typeof bench.showBench === "function") bench.showBench(slug, "Opened from Saved benches");
   }
 
   // --- The Topology tab's panels --------------------------------------------
@@ -6773,17 +6663,9 @@
     const saveConfirm = topoEl("topo-save-confirm");
     if (saveConfirm) saveConfirm.addEventListener("click", saveTopology);
     const load = topoEl("topo-profile-load");
-    if (load) load.addEventListener("click", applyTopology);
+    if (load) load.addEventListener("click", openSavedBench);
     const del = topoEl("topo-profile-delete");
     if (del) del.addEventListener("click", deleteTopology);
-
-    const applyReport = topoEl("topo-apply-report");
-    if (applyReport) {
-      applyReport.addEventListener("click", function (ev) {
-        const btn = ev.target.closest("[data-proposal-role]");
-        if (btn) confirmProposal(btn.getAttribute("data-proposal-role"));
-      });
-    }
 
     // The validate report carries the only control a leftover role has.
     const report = topoEl("topo-validate-report");

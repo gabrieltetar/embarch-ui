@@ -183,7 +183,10 @@
               <!-- Phase 4: which bench is live for this repo (this UI's own
                    record, never the repo's), and the two gestures on it. -->
               <span id="bench-live" class="bench-live" hidden></span>
+              <button type="button" class="btn btn-tiny" id="bench-live-retry" title="Read which bench is live again" hidden>Read again</button>
+              <button type="button" class="btn bench-live-wt" id="bench-live-wt" hidden></button>
               <button type="button" class="btn" id="bench-make-live" hidden>Make live</button>
+              <button type="button" class="btn" id="bench-declare-again" hidden>Declare again</button>
               <button type="button" class="btn" id="bench-stop-live" title="This repo has no live bench after this; Core keeps what it holds" hidden>Stop being live</button>
             </span>
             <span class="topo-bar-spacer"></span>
@@ -293,14 +296,13 @@
                 <div class="card-title" style="margin:0;">Bench &mdash; <span id="topo-profile-name" class="mono">unsaved</span></div>
                 <div class="sd-toolbar-actions">
                   <select id="topo-profile-picker" class="sd-input mono" style="min-width:210px;"><option value="">no project open</option></select>
-                  <button id="topo-profile-load" class="btn" title="Apply this saved topology">Load</button>
+                  <button id="topo-profile-load" class="btn" title="Open this bench on the canvas; Make live there declares it">Open</button>
                   <button id="topo-profile-save" class="btn" title="Save the bench as it stands now">Save as&hellip;</button>
                   <button id="topo-profile-delete" class="btn btn-icon-danger" title="Delete the selected saved topology">&#10005;</button>
                 </div>
               </div>
               <p class="placeholder-note" style="margin:8px 0 0;"><span class="mono">embarch/topologies/</span></p>
               <div id="topo-profile-error" class="sd-error" style="display:none; margin-top:10px;"></div>
-              <div id="topo-apply-report" style="display:none; margin-top:12px;"></div>
             </div>
 
             <!-- Validate topology replaced the alert list (decision 44): it

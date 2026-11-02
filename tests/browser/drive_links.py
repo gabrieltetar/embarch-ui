@@ -116,7 +116,8 @@ def main():
     fw = scratch / "fw"
     (fw / ".git").mkdir(parents=True)
     (fw / "embarch").mkdir()
-    (fw / "embarch" / "boards.toml").write_text('[[boards]]\nname = "plank"\nchip = "nRF54L15"\nbuild_target = "plank/nrf54l15/cpuapp"\n')
+    (fw / "embarch" / "boards.toml").write_text('[[boards]]\nname = "plank"\nchip = "nRF54L15"\nbuild_target = "plank/nrf54l15/cpuapp"\n'
+                                                '[[boards]]\nname = "nrf54l15dk"\nchip = "nRF54L15"\nbuild_target = "nrf54l15dk/nrf54l15/cpuapp"\n')
     # The bench the canvas draws: a DUT part and a dev-bench part, holding the
     # board types the roles hold in Core (phase 4: a link marks the part on
     # the canvas now that the old diagram's role boxes are gone).
@@ -276,11 +277,26 @@ def main():
             check("a rebuild of the canvas keeps the part marked", until("return document.querySelector('#bench-svg [data-part=\"dut\"].bn-link-focus') && true", 5) is True,
                   parts_marked())
             for label, part in (("DUT", "dut"), ("Dev bench", "dev"), ("nrf54l15dk", "dut"),
-                                ("esp32c5_devkitc", "dev"), ("esp32c5_devkitc/esp32c5/hpcore", "dev")):
+                                ("esp32c5_devkitc", "dev"), ("esp32c5_devkitc/esp32c5/hpcore", "dev"),
+                                ("Espressif ESP32-C5-DevKitC", "dev")):
                 hop("#topology?board=" + urllib.parse.quote(label))
                 got = until("var m = document.querySelectorAll('#bench-svg [data-part].bn-link-focus');"
                             " return m.length === 1 && m[0].getAttribute('data-part') === arguments[0]", 10, part)
                 check("#topology?board=%s while open marks the %s part" % (label, part), got is True, parts_marked())
+            # A board both on a part and in the catalog lands on the part: the
+            # Board types panel stays shut over the canvas, on load as on a hop.
+            for way in ("load", "hop"):
+                if way == "load":
+                    go("#topology?board=nrf54l15dk")
+                else:
+                    hop("#topology?board=plank")
+                    until("return !document.getElementById('topo-panel-boards').hidden", 10)
+                    js("var b=document.querySelector('[data-topo-panel=\"boards\"]'); if (b.classList.contains('is-open')) b.click(); return true")
+                    hop("#topology?board=nrf54l15dk")
+                got = until("return document.querySelector('#bench-svg [data-part=\"dut\"].bn-link-focus') && true", 15)
+                time.sleep(1.0)
+                check("#topology?board=nrf54l15dk (%s) marks the DUT part and opens no panel over it, though the catalog lists it too" % way,
+                      got is True and js("return document.getElementById('topo-panel-boards').hidden") is True, parts_marked())
             hop("#topology?board=ghostboard")
             n = until("var n = document.getElementById('route-note'); return !n.hidden && n.textContent", 10)
             check("a board no part holds and no catalog lists: nothing marked, a notice naming it",

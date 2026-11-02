@@ -2525,3 +2525,7 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
 .bench-live-row .topo-check-head { gap: 8px; }
 .bench-live-row.bench-live-failed { border-color: var(--danger); }
 .bench-live-route { font-size: 10.5px; color: var(--text-tertiary); margin-left: 6px; }
+.bench-live.bench-live-superseded { color: var(--warning); border-color: var(--warning); background: var(--warning-soft-bg); }
+.topo-bar .bench-live-wt { padding: 3px 10px; font: 600 11px var(--font-mono); border-radius: 99px; border-color: var(--success); color: var(--success); background: var(--success-soft-bg); }
+.topo-bar .bench-live-wt.bench-live-wt-failed { border-color: var(--warning); color: var(--warning); background: var(--warning-soft-bg); }
+#topo-panel-live:focus { outline: none; }
