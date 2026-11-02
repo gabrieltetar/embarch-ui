@@ -916,9 +916,84 @@ fn full_why(ctx: &Ctx, wiring: &Wiring, end: &str) -> String {
     }
 }
 
+/// Whether `part` sits, directly or up its stack, on the part `on`.
+fn sits_on(ctx: &Ctx, bench: &Bench, part: &Part, on: &str) -> bool {
+    let mut at = part;
+    for _ in 0..=bench.parts.len() {
+        match at.mounted_on.as_deref() {
+            Some(base) if base == on => return true,
+            Some(base) => match ctx.part(base) {
+                Some(next) if next.id != at.id => at = next,
+                _ => return false,
+            },
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Where a part's stack plug may be mounted: one verdict per stack socket on
+/// another part, every other end hidden, so a shield dragged onto a board is
+/// drawn by the server's word like a cable being laid (phase 3).
+///
+/// A socket refuses when its board already carries what its sockets take —
+/// counting every part mounted there but the one being placed, which is
+/// moving — and when its board sits on the part being placed, since a stack
+/// has a board at the bottom (`mount-cycle`). Nothing else is refused here:
+/// a missing socket or plug is a finding, not a verdict.
+fn mount_candidates(ctx: &Ctx, bench: &Bench, placing: &Part) -> BTreeMap<String, Verdict> {
+    let mut verdicts = BTreeMap::new();
+    for part in &bench.parts {
+        let Some(template) = ctx.template(part) else { continue };
+        if template.hub {
+            verdicts.insert(part.id.clone(), Verdict::of(Fit::Hidden));
+            continue;
+        }
+        let room = template
+            .connectors
+            .iter()
+            .filter(|c| c.kind == Kind::StackSocket)
+            .fold(0u32, |sum, c| sum.saturating_add(c.max_cables)) as usize;
+        for c in &template.connectors {
+            let end = format!("{}.{}", part.id, c.id);
+            if c.kind != Kind::StackSocket || part.id == placing.id {
+                verdicts.insert(end, Verdict::of(Fit::Hidden));
+                continue;
+            }
+            let verdict = 'v: {
+                if sits_on(ctx, bench, part, &placing.id) {
+                    break 'v Verdict::refused(format!(
+                        "{} sits on {}; a stack has a board at the bottom",
+                        part.display(),
+                        placing.display()
+                    ));
+                }
+                let carried: Vec<&Part> = bench
+                    .parts
+                    .iter()
+                    .filter(|q| q.id != placing.id && q.mounted_on.as_deref() == Some(part.id.as_str()))
+                    .collect();
+                if carried.len() >= room {
+                    break 'v Verdict::refused(match carried.as_slice() {
+                        [one] => format!("{} already carries {}", part.display(), one.display()),
+                        _ => format!("{} already carries {} parts, the most it takes", part.display(), carried.len()),
+                    });
+                }
+                Verdict::of(Fit::Ok)
+            };
+            verdicts.insert(end, verdict);
+        }
+    }
+    verdicts
+}
+
 /// One verdict for every connector end on the bench, for a cable being laid
 /// from `from`, so the browser decides nothing. `Err` when `from` is not an
 /// end a cable can start at.
+///
+/// **A stack plug lays no cable**: from one, the verdicts are where its part
+/// may be mounted instead ([`mount_candidates`]) — every stack socket on
+/// another part, ok or refused, and everything else hidden.
 pub fn candidates(bench: &Bench, templates: &Templates, config: Option<&Config>, from: &str) -> Result<BTreeMap<String, Verdict>, String> {
     let ctx = Ctx::new(bench, templates);
     let wiring = Wiring::new(bench, config);
@@ -927,6 +1002,11 @@ pub fn candidates(bench: &Bench, templates: &Templates, config: Option<&Config>,
         End::Hub(_) | End::Conn(..) => {}
         End::Unknowable(p) => return Err(format!("`{from}`: {}'s template `{}` is missing, so its connectors are unknown", p.display(), p.template)),
         End::Bad(why) => return Err(why.clone()),
+    }
+    if let End::Conn(placing, c) = &from_end {
+        if c.kind == Kind::StackPlug {
+            return Ok(mount_candidates(&ctx, bench, placing));
+        }
     }
     let buses = Buses::new(&ctx, bench, &wiring);
     let from_full = match &from_end {
@@ -1303,6 +1383,27 @@ power = "drp"
         assert_eq!(v["load.in"].fit, Fit::Ok);
         assert_eq!(v["drp.cn3"].fit, Fit::Ok, "banana joins terminal");
         assert_eq!(v["drp.cn2"].fit, Fit::Refused, "out to supply is two sources");
+    }
+
+    #[test]
+    fn a_stack_plug_is_offered_the_free_stack_sockets() {
+        let mut bench = pd_bench();
+        bench.parts.push(part("nucleo2", "nucleo-g0b1re"));
+        bench.parts.push(part("snk", "x-nucleo-snk1m1"));
+        // From the unmounted sink shield: the partner already carries the DRP.
+        let v = candidates(&bench, &templates(), None, "snk.stack").unwrap();
+        assert_eq!(v["nucleo2.stack"].fit, Fit::Ok);
+        assert_eq!(v["partner.stack"], Verdict::refused("pd-bench already carries drp".into()));
+        assert_eq!(v["drp.stack"].fit, Fit::Hidden, "a plug is no socket");
+        assert_eq!(v["host"].fit, Fit::Hidden);
+        assert!(v.iter().filter(|(k, _)| !k.ends_with(".stack")).all(|(_, v)| v.fit == Fit::Hidden));
+        // The DRP itself, being moved, does not count against its own board.
+        let v = candidates(&bench, &templates(), None, "drp.stack").unwrap();
+        assert_eq!(v["partner.stack"].fit, Fit::Ok);
+        // A board on the shield's own stack would make a ring.
+        bench.parts.iter_mut().find(|p| p.id == "nucleo2").unwrap().mounted_on = Some("snk".into());
+        let v = candidates(&bench, &templates(), None, "snk.stack").unwrap();
+        assert_eq!(v["nucleo2.stack"], Verdict::refused("nucleo2 sits on snk; a stack has a board at the bottom".into()));
     }
 
     #[test]

@@ -239,3 +239,30 @@ cargo build --release
 geckodriver --port 4444 &
 python3 tests/browser/drive_bench.py
 ```
+
+`drive_bench_edit.py` drives editing on the canvas (the bench editor's phase
+3) **against the real bench routes, never fixtures**: it writes a scratch
+firmware repo holding `embarch/topologies/` and `embarch/parts/`, points the
+UI at it with `[study_designer] firmware_repo_path`, and checks the TOML on
+disk after every Save. A stub Core serves the probes and serial ports the
+tray lists, and a pass-through proxy puts the error listener at the top of
+the page. It checks the parts bin (click and drag to place, the next free id,
+`embarch:edit-part` from Edit and New part…, a re-read on
+`embarch:parts-changed`, `previewTemplate` as a pure draw), a cable laid by
+click-then-click and by drag with the server's verdicts drawn (a fit pulsing,
+a refusal red with its sentence beside the pointer, the hub's new-USB slot),
+delete and undo across configs, a shield stacked, refused by full headers and
+lifted, a probe and three port binding forms from the tray, the inspector's
+label, role and flip, the Checks panel and its findings drawn on the parts,
+Save, the `409` after a hand edit and its Reload, the unsaved-changes prompt
+on a bench switch, a tab switch, a project switch and a reload, a new bench
+through `POST`, and the config "A" a first part-to-part cable creates. It
+uses four ports: `EMBARCH_UI_PORT` and the three after it (proxy, stub Core,
+an unused desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves screenshots in both
+themes.
+
+```sh
+cargo build --release
+geckodriver --port 4444 &
+python3 tests/browser/drive_bench_edit.py
+```

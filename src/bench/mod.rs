@@ -210,6 +210,9 @@ pub fn vocabulary_json() -> serde_json::Value {
         "categories": words(Category::ALL, Category::as_str),
         "looks": words(Look::ALL, Look::as_str),
         "functions": words(Function::ALL, Function::as_str),
+        // What a part's `role` may hold, so the editor's role picker offers
+        // the parser's own words (phase 3).
+        "roles": words(Role::ALL, Role::as_str),
     })
 }
 
@@ -911,6 +914,7 @@ mod tests {
         assert_eq!(v["joins"][2], json!(["banana", "terminal"]));
         assert_eq!(v["looks"][3], "devkit");
         assert_eq!(v["functions"], json!(["probe", "vcom", "scpi", "bootload-app", "bootload-bootloader"]));
+        assert_eq!(v["roles"], json!(["dut", "dev-bench"]));
     }
 
     #[test]

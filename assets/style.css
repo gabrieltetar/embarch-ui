@@ -2263,13 +2263,13 @@ table.data-table {
 .bn-missing-text { color: var(--danger) !important; }
 
 /* the drawing */
-#bench-svg .bn-grid-dot { fill: var(--bn-grid-dot); }
-#bench-svg [data-kind] { color: var(--text-secondary); }
-#bench-svg [data-kind="usb-c"] { color: var(--accent); }
-#bench-svg [data-kind="usb-host"] { color: var(--info); }
-#bench-svg [data-kind="banana"], #bench-svg [data-kind="terminal"] { color: var(--warning); }
-#bench-svg [data-kind="swd"], #bench-svg [data-kind="pin-header"] { color: var(--bn-swd); }
-#bench-svg [data-kind="radio"] { color: var(--text-tertiary); }
+.bn-svg .bn-grid-dot { fill: var(--bn-grid-dot); }
+.bn-svg [data-kind] { color: var(--text-secondary); }
+.bn-svg [data-kind="usb-c"] { color: var(--accent); }
+.bn-svg [data-kind="usb-host"] { color: var(--info); }
+.bn-svg [data-kind="banana"], .bn-svg [data-kind="terminal"] { color: var(--warning); }
+.bn-svg [data-kind="swd"], .bn-svg [data-kind="pin-header"] { color: var(--bn-swd); }
+.bn-svg [data-kind="radio"] { color: var(--text-tertiary); }
 .bn-cable { fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; pointer-events: none; }
 .bn-cable.bn-cfg { stroke-dasharray: 7 5; }
 .bn-cable[data-kind="radio"] { stroke-dasharray: 2 6; }
@@ -2349,3 +2349,103 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
 .bn-v-warn rect { fill: var(--warning-soft-bg); stroke: var(--warning); }
 .bn-v-warn text { fill: var(--warning); }
 .bn-usb-conn { font-size: 11.5px; color: var(--text-tertiary); margin-top: 2px; }
+
+/* ===========================================================================
+ * The bench editor (bench.js; the bench editor's phase 3): the bar's Save,
+ * undo and redo, the parts bin, the tray, the Checks panel, and the canvas
+ * while a cable is laid or a part is moved. Every colour is a theme token.
+ * ======================================================================== */
+.bench-edit { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.topo-bar .bench-icon-btn { padding: 6px 9px; font-family: var(--font-mono); min-width: 32px; justify-content: center; }
+.bench-dirty { font: 600 11px var(--font-mono); color: var(--warning); background: var(--warning-soft-bg); border-radius: 99px; padding: 2px 9px; white-space: nowrap; }
+.bench-checks-n { margin-left: 6px; font: 600 11px var(--font-mono); border-radius: 99px; padding: 0 7px; background: var(--bg-surface-2); color: var(--text-secondary); }
+.bench-checks-n:empty { display: none; }
+#bench-checks-btn[data-worst="error"] .bench-checks-n { background: var(--danger-soft-bg); color: var(--danger); }
+#bench-checks-btn[data-worst="warn"] .bench-checks-n { background: var(--warning-soft-bg); color: var(--warning); }
+#bench-checks-btn[data-worst="clean"] .bench-checks-n { background: var(--success-soft-bg); color: var(--success); }
+.bench-checks { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.bench-check { display: flex; gap: 9px; align-items: baseline; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 12.5px; color: var(--text-primary); background: var(--bg-surface); }
+.bench-check:hover, .bench-check:focus-visible { border-color: var(--accent); outline: none; }
+.bench-check-lvl { flex: none; font: 600 10.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; border-radius: 99px; padding: 0 7px; }
+.bench-check-error .bench-check-lvl { color: var(--danger); background: var(--danger-soft-bg); }
+.bench-check-warn .bench-check-lvl { color: var(--warning); background: var(--warning-soft-bg); }
+.bench-check-info .bench-check-lvl { color: var(--text-tertiary); background: var(--bg-surface-2); }
+.bench-check-code { margin-left: auto; flex: none; font: 10.5px var(--font-mono); color: var(--text-tertiary); }
+
+.bench-notice { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5; max-width: min(640px, calc(100% - 340px)); padding: 5px 12px; border-radius: 99px; border: 1px solid var(--border-strong); background: var(--bg-surface); color: var(--text-secondary); font: 12px var(--font-ui); box-shadow: 0 6px 18px oklch(0% 0 0 / 0.25); cursor: pointer; overflow-wrap: anywhere; }
+.bench-notice.bench-notice-error { color: var(--danger); border-color: var(--danger); }
+.bench-notice.bench-notice-ok { color: var(--success); border-color: var(--success); }
+
+.bench-bin { position: absolute; top: 48px; left: 10px; bottom: 54px; width: 238px; z-index: 4; display: flex; flex-direction: column; background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 8px 26px oklch(0% 0 0 / 0.3); }
+.bench-bin-top { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px 4px 12px; }
+.bench-bin-title, .bench-bin-head { font: 600 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
+.bench-bin-head { margin: 8px 2px 0; letter-spacing: 0.04em; text-transform: none; }
+.bench-bin-list { overflow-y: auto; padding: 2px 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.bench-bin-card { position: relative; display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-surface-2); cursor: grab; text-align: left; }
+.bench-bin-card:hover, .bench-bin-card:focus-visible { border-color: var(--accent); outline: none; }
+.bench-bin-name { font-weight: 600; font-size: 12.5px; color: var(--text-primary); padding-right: 40px; }
+.bench-bin-sub { font: 11px var(--font-mono); color: var(--text-tertiary); }
+.bench-bin-card .btn-tiny { position: absolute; top: 6px; right: 6px; }
+.bench-bin-err { font: 11px var(--font-mono); color: var(--danger); overflow-wrap: anywhere; }
+.bench-chips { display: flex; flex-wrap: wrap; gap: 3px; }
+.bench-chip { font: 10px var(--font-mono); padding: 0 5px; border-radius: 4px; border: 1px solid currentColor; color: var(--text-secondary); }
+.bench-chip[data-kind="usb-c"] { color: var(--accent); }
+.bench-chip[data-kind="usb-host"] { color: var(--info); }
+.bench-chip[data-kind="banana"], .bench-chip[data-kind="terminal"] { color: var(--warning); }
+.bench-chip[data-kind="swd"], .bench-chip[data-kind="pin-header"] { color: var(--bn-swd); }
+.bench-bin-new { justify-content: center; border-style: dashed; margin-top: 4px; }
+
+.bench-tray { flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 5px 6px; align-items: center; padding: 6px 14px; border-top: 1px solid var(--border); background: var(--bg-surface); font: 11.5px var(--font-mono); color: var(--text-tertiary); max-height: 7.2em; overflow: auto; }
+.bench-tray-label { font: 600 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); margin-right: 4px; }
+.bench-tray-chip { cursor: grab; border: 1px solid var(--border-strong); background: var(--bg-surface-2); border-radius: 99px; padding: 2px 10px; color: var(--text-primary); user-select: none; -webkit-user-select: none; }
+.bench-tray-chip b { color: var(--info); font-weight: 600; margin-right: 4px; }
+.bench-tray-chip:hover, .bench-tray-chip:focus-visible { border-color: var(--accent); outline: none; }
+.bench-tray-chip.is-armed { border-color: var(--accent); background: var(--accent-soft-bg); }
+.bench-tray-chip.is-dead { cursor: not-allowed; opacity: 0.6; }
+.bench-tray-unknown { color: var(--warning); }
+.bench-tray-none { color: var(--text-tertiary); }
+
+#bench-dialog [hidden] { display: none !important; }
+.bench-dialog-text { margin: 0 0 10px; font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.bench-dialog-choices { display: flex; flex-direction: column; gap: 6px; }
+.bench-dialog-choices .btn { justify-content: flex-start; font-family: var(--font-mono); }
+.btn.bn-danger { border-color: var(--danger); background: var(--danger); color: var(--on-accent); }
+
+/* inspector editing */
+.bn-ed { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; }
+.bn-ed > span { color: var(--text-tertiary); font-size: 12px; }
+.bn-ed .sd-input { padding: 5px 8px; font-size: 12.5px; min-width: 0; width: 100%; }
+.bn-ed-note { grid-column: 1 / -1; font: 11px var(--font-mono); color: var(--text-tertiary); overflow-wrap: anywhere; }
+.bn-ed-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.bn-ed-actions .btn { padding: 4px 10px; font-size: 12px; }
+.bn-unbind { margin-left: auto; padding: 0 6px; font-size: 11px; line-height: 1.6; }
+
+/* the canvas while editing */
+.bn-svg .bn-port.bn-ok { color: var(--accent); }
+.bn-port.bn-ok .bn-hit { fill: var(--accent-soft-bg); stroke: var(--accent); stroke-width: 1.6; animation: bn-pulse 0.9s ease-in-out infinite; }
+.bn-svg .bn-port.bn-refused { color: var(--danger); }
+.bn-port.bn-refused .bn-hit { fill: var(--danger-soft-bg); stroke: var(--danger); stroke-width: 1.4; }
+.bn-port.bn-refused .bn-dot { stroke: var(--danger); }
+.bn-port.bn-source .bn-hit { fill: var(--accent-soft-bg); stroke: var(--accent); stroke-width: 2.4; }
+.bn-port.bn-dim { opacity: 0.35; }
+.bn-port.bn-target .bn-hit { stroke-width: 3; }
+.bn-port.bn-slot .bn-dot { stroke-dasharray: 3 2; }
+@keyframes bn-pulse { 0%, 100% { stroke-width: 1.2; } 50% { stroke-width: 4.2; } }
+@media (prefers-reduced-motion: reduce) { .bn-port.bn-ok .bn-hit { animation: none; stroke-width: 3; } }
+.bn-pending { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-dasharray: 5 4; pointer-events: none; }
+.bn-why rect { fill: var(--bg-surface); stroke: var(--danger); stroke-width: 1.2; }
+.bn-why text { fill: var(--danger); font: 600 11px var(--font-mono); pointer-events: none; }
+.bn-why { pointer-events: none; }
+.bn-snap-ghost { fill: var(--accent-soft-bg); stroke: var(--accent); stroke-width: 1.6; stroke-dasharray: 6 4; pointer-events: none; }
+.bn-snap-text { fill: var(--accent); font: 600 11px var(--font-mono); pointer-events: none; }
+.bn-flag { fill: none; stroke: none; pointer-events: none; }
+.bn-flag.bn-flag-error { stroke: var(--danger); stroke-width: 2.2; stroke-dasharray: 7 4; }
+.bn-flag.bn-flag-warn { stroke: var(--warning); stroke-width: 2; stroke-dasharray: 7 4; }
+.bn-cable.bn-f-error { stroke: var(--danger); }
+.bn-cable.bn-f-warn { stroke: var(--warning); }
+.bn-part.bn-dragging { cursor: grabbing; opacity: 0.92; }
+@media (max-width: 720px) {
+  .bench-tray { padding: 6px 8px; }
+  .bench-bin { left: 6px; right: 6px; width: auto; }
+  .bench-notice { max-width: calc(100% - 24px); }
+}

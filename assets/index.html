@@ -170,9 +170,20 @@
           <div class="topo-bar" id="topo-bar">
             <select id="bench-pick" class="sd-input mono" title="A saved bench, drawn below" hidden></select>
             <span id="bench-path" class="topo-bar-path mono" hidden></span>
+            <!-- Editing (embarch-bench-editor-proposal.md, phase 3): the parts
+                 bin, undo and redo, and an explicit Save of the bench file —
+                 edits stay in the browser until it is pressed. -->
+            <span class="bench-edit" id="bench-edit" hidden>
+              <button type="button" class="btn" id="bench-part-btn" aria-expanded="false" aria-controls="bench-bin" title="The parts bin: drag a part onto the bench, or click one">+ Part</button>
+              <button type="button" class="btn bench-icon-btn" id="bench-undo" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>&#8630;</button>
+              <button type="button" class="btn bench-icon-btn" id="bench-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled>&#8631;</button>
+              <span id="bench-dirty" class="bench-dirty" hidden>unsaved changes</span>
+              <button type="button" class="btn btn-primary" id="bench-save" title="Write the bench file (Ctrl+S)" disabled>Save</button>
+            </span>
             <span class="topo-bar-spacer"></span>
             <button id="topo-validate" class="btn btn-primary">Validate topology</button>
             <button type="button" class="btn topo-menu-btn" id="topo-report" data-topo-panel="validate" aria-expanded="false" aria-controls="topo-panel-validate" title="The last Validate topology report" hidden>Report</button>
+            <button type="button" class="btn topo-menu-btn" id="bench-checks-btn" data-topo-panel="checks" aria-expanded="false" aria-controls="topo-panel-checks" title="What the bench's rule checks say about the bench on screen" hidden>Checks<span id="bench-checks-count" class="bench-checks-n"></span></button>
             <div class="topo-menu" role="group" aria-label="Panels">
               <button type="button" class="btn topo-menu-btn" data-topo-panel="signals" aria-expanded="false" aria-controls="topo-panel-signals">Signals</button>
               <button type="button" class="btn topo-menu-btn" data-topo-panel="boards" aria-expanded="false" aria-controls="topo-panel-boards">Board types</button>
@@ -190,7 +201,7 @@
               <p id="bench-state" class="placeholder-note bench-state">reading&hellip;</p>
               <div id="bench-body" class="bench-body" hidden>
                 <div class="bench-wrap" id="bench-wrap">
-                  <svg id="bench-svg" aria-label="Bench canvas"></svg>
+                  <svg id="bench-svg" class="bn-svg" aria-label="Bench canvas"></svg>
                   <div class="bench-tools">
                     <button type="button" class="btn" id="bench-zoom-out" title="Zoom out">&minus;</button>
                     <button type="button" class="btn" id="bench-zoom-in" title="Zoom in">+</button>
@@ -202,9 +213,19 @@
                     <span><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" class="bench-legend-line bench-legend-cfg"/></svg>this config</span>
                     <span><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-glow"/><line x1="1" y1="6" x2="25" y2="6" class="bench-legend-line"/></svg>enumerated now</span>
                   </div>
-                  <div class="bench-hint">hover a part for its free connectors &middot; click to inspect &middot; drag empty space to pan &middot; wheel zooms</div>
+                  <div class="bench-hint" id="bench-hint">hover a part for its free connectors &middot; click to inspect &middot; drag empty space to pan &middot; wheel zooms</div>
+                  <div class="bench-notice" id="bench-notice" role="status" hidden></div>
+                  <aside class="bench-bin" id="bench-bin" aria-label="Parts bin" hidden>
+                    <div class="bench-bin-top"><span class="bench-bin-title">Parts</span><button type="button" class="btn btn-tiny" id="bench-bin-close" aria-label="Close the parts bin">&times;</button></div>
+                    <div class="bench-bin-list" id="bench-bin-list"></div>
+                  </aside>
                   <aside class="bench-inspector" id="bench-inspector" aria-label="Selection" hidden></aside>
                 </div>
+                <!-- The tray: probes and serial ports Core enumerates that no
+                     part on this bench binds, each dropped (or clicked, then a
+                     connector clicked) onto a usb-host connector. A row under
+                     the canvas, so it never covers a part. -->
+                <div class="bench-tray" id="bench-tray" aria-label="Plugged in, on no part" hidden></div>
                 <div class="bench-foot" id="bench-config-row" hidden>
                   <span class="bench-config-label">Config</span>
                   <div class="bench-configs" id="bench-configs" role="tablist" aria-label="Configs"></div>
@@ -283,6 +304,13 @@
               <div class="card-title" style="margin:0 0 4px;">Validate topology</div>
               <div id="topo-validate-error" class="sd-error" style="display:none; margin-top:8px;"></div>
               <div id="topo-validate-report" style="display:none; margin-top:8px;"></div>
+            </div>
+
+            <!-- The bench's rule checks (POST /api/bench/check), re-run after
+                 every edit: errors and warnings, each selecting what it names. -->
+            <div tabindex="-1" class="card topo-panel" id="topo-panel-checks" role="region" aria-label="Checks" hidden>
+              <div class="card-title" style="margin:0 0 4px;" id="bench-checks-head">Checks</div>
+              <div id="bench-checks-list"></div>
             </div>
 
             <div tabindex="-1" class="card topo-panel" id="topo-panel-diagram" role="region" aria-label="Old diagram" hidden>
@@ -842,6 +870,23 @@
           <span style="flex:1;"></span>
           <button id="topo-save-cancel" class="btn">Cancel</button>
           <button id="topo-save-confirm" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+
+      <!-- The bench editor's one dialog (bench.js): a new bench's name, the
+           port function a dropped serial port is, unsaved changes before
+           leaving, and a file that changed on disk. -->
+      <div id="bench-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
+      <div id="bench-dialog" class="dialog card" role="dialog" aria-modal="true" aria-labelledby="bench-dialog-title" style="display:none; top:28%; width:460px;">
+        <div class="card-title" id="bench-dialog-title"></div>
+        <p id="bench-dialog-text" class="bench-dialog-text"></p>
+        <label class="sd-field" id="bench-dialog-field" hidden><span id="bench-dialog-label">Name</span><input id="bench-dialog-input" type="text" class="sd-input mono" spellcheck="false" /></label>
+        <div id="bench-dialog-choices" class="bench-dialog-choices" hidden></div>
+        <p id="bench-dialog-error" class="sd-error" hidden></p>
+        <div class="sd-row-actions" style="margin-top:16px;">
+          <span style="flex:1;"></span>
+          <button type="button" id="bench-dialog-cancel" class="btn">Cancel</button>
+          <button type="button" id="bench-dialog-ok" class="btn btn-primary">OK</button>
         </div>
       </div>
 

@@ -21,7 +21,34 @@
     }
   }
 
-  function showTab(name) {
+  // **The bench editor's unsaved edits are asked about before they are left**
+  // (owner, 2026-11-01): leaving the Topology tab or switching project with
+  // edits bench.js holds and has not saved opens its in-page dialog first.
+  // Resolves true when there is nothing unsaved, or the human discarded it.
+  function benchLeaveOk(what) {
+    const b = window.embarchBench;
+    if (!b || typeof b.unsaved !== "function" || !b.unsaved()) return Promise.resolve(true);
+    return b.confirmLeave(what);
+  }
+
+  function leavingUnsavedBench(name) {
+    const active = document.querySelector(".tab-panel.active");
+    const b = window.embarchBench;
+    return !!active && active.dataset.tab === "topology" && name !== "topology" &&
+      !!b && typeof b.unsaved === "function" && b.unsaved();
+  }
+
+  // `confirmed`: the bench editor already said its unsaved edits may go.
+  function showTab(name, confirmed) {
+    if (!confirmed && leavingUnsavedBench(name)) {
+      benchLeaveOk("tab").then(function (ok) {
+        if (ok) showTab(name, true);
+        else if ((location.hash || "").replace(/^#/, "").split("?")[0] !== "topology") {
+          try { history.replaceState(null, "", location.pathname + location.search + "#topology"); } catch (_) { /* the address keeps the other tab */ }
+        }
+      });
+      return;
+    }
     document.querySelectorAll(".nav-item").forEach((el) => {
       el.classList.toggle("active", el.dataset.tab === name);
     });
@@ -163,6 +190,17 @@
     window.addEventListener("hashchange", () => {
       const route = routeFromHash();
       if (!route) return;
+      if (leavingUnsavedBench(route.tab)) {
+        benchLeaveOk("tab").then(function (ok) {
+          if (ok) {
+            showTab(route.tab, true);
+            followRouteParams(route);
+          } else {
+            try { history.replaceState(null, "", location.pathname + location.search + "#topology"); } catch (_) { /* the address keeps the other tab */ }
+          }
+        });
+        return;
+      }
       showTab(route.tab);
       followRouteParams(route);
     });
@@ -5606,6 +5644,8 @@
 
   async function openDesk(id) {
     var err = document.getElementById("project-error");
+    // A desk names its repo, so opening one may switch project.
+    if (!(await benchLeaveOk("desk"))) return;
     try {
       var resp = await fetch("/api/desk/open", {
         method: "POST",
@@ -5737,6 +5777,8 @@
     var body = {
       path: path !== undefined ? path : document.getElementById("project-path").value,
     };
+    // A desk switch asked before it got here; a repo picked by hand asks now.
+    if (!forDesk && body.path !== (projectState ? projectState.path : null) && !(await benchLeaveOk("project"))) return;
     var btn = document.getElementById("project-open");
     btn.disabled = true;
     try {
@@ -6666,6 +6708,10 @@
       .join("");
     if (previous) picker.value = previous;
   }
+
+  // The bench editor wrote a bench file: the Saved benches list reads the
+  // same directory.
+  document.addEventListener("embarch:bench-saved", function () { loadProfiles(); });
 
   async function loadProfiles() {
     const err = topoEl("topo-profile-error");

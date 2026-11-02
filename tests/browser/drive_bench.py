@@ -528,8 +528,13 @@ try:
     ins = script(INSPECTOR) or ""
     pos = script("var i=document.getElementById('bench-inspector').getBoundingClientRect(), w=document.getElementById('bench-wrap').getBoundingClientRect();"
                  "return [Math.round(w.right - i.right), Math.round(i.top - w.top)];")
-    check("a selected part opens a read-only inspector floating on the canvas's right",
-          0 <= pos[0] <= 20 and 0 <= pos[1] <= 20 and script("return document.querySelectorAll('#bench-inspector button, #bench-inspector input, #bench-inspector select').length;") == 0, pos)
+    # Phase 3 made the inspector the editor's (drive_bench_edit.py drives it):
+    # its controls are the part's label, role, flip and delete.
+    check("a selected part opens an inspector floating on the canvas's right, holding the part's own controls",
+          0 <= pos[0] <= 20 and 0 <= pos[1] <= 20 and script(
+              "var i=document.getElementById('bench-inspector');"
+              "return !!i.querySelector('[data-ed=\"label\"]') && !!i.querySelector('[data-ed=\"role\"]') &&"
+              " !!i.querySelector('[data-act=\"flip\"]') && !!i.querySelector('[data-act=\"delete\"]');"), pos)
     check("it says the template, role, connectors and what each cable reaches",
           all(t in ins for t in ["pd-bench", "NUCLEO-G0B1RE", "built in", "Role", "ST-LINK USB", "This machine", "X-NUCLEO-DRP1M1"]), ins)
     check("and each binding as text: a serial, an interface on that device",

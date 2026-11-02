@@ -549,6 +549,10 @@
         "supply",
         "out"
       ]
-    }
+    },
+    "roles": [
+      "dut",
+      "dev-bench"
+    ]
   }
 }
