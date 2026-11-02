@@ -66,8 +66,10 @@ fn write_refusal(what: &str, e: WriteError) -> Response {
     }
 }
 
-/// `GET /api/bench/vocabulary` — kinds, which kinds join, power roles,
-/// categories, looks and functions, served so the browser restates none.
+/// `GET /api/bench/vocabulary` — kinds, which kinds join, sides, power roles,
+/// categories, looks and functions, and which kinds take a power role and
+/// which functions take an interface or line facts: served so the browser
+/// restates none, the part editor included.
 pub async fn api_vocabulary(OpenRepo(_): OpenRepo) -> Response {
     Json(vocabulary_json()).into_response()
 }

@@ -1437,6 +1437,81 @@ table.data-table {
   width: min(1180px, 96vw);
 }
 
+/* ---- The part editor (bench-parts.js, the bench editor's phase 3) --------
+ *
+ * One repo part template in a wide dialog: its fields and connectors on the
+ * left, the canvas's own drawing of it on the right, stacked on a narrow
+ * screen. No new tokens and no new components — the dialog is `.dialog`, the
+ * connectors are a `.data-table.sd-table` scrolling inside itself, a function's
+ * facts are `.sd-param` captions over inputs, a refusal is `.sd-error`. */
+.pe-dialog [hidden] { display: none !important; }
+/* Both live outside `.shell` (the dialog on <body>), so they name the face. */
+.pe-dialog, .pe-saved { font-family: var(--font-ui); }
+.pe-badge { font: 600 10.5px var(--font-mono); letter-spacing: 0.05em; text-transform: uppercase; color: var(--accent); background: var(--accent-soft-bg); border-radius: 99px; padding: 2px 9px; }
+.pe-badge-bad { color: var(--danger); background: var(--danger-soft-bg); }
+.pe-path { margin: -8px 0 12px; font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
+.pe-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 18px; align-items: start; }
+.pe-main, .pe-side { min-width: 0; }
+.pe-grid { margin-top: 0; }
+.pe-wide, .pe-nums { grid-column: 1 / -1; }
+.pe-nums { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.pe-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 18px 0 8px; font: 600 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
+.pe-side .pe-head { margin-top: 0; }
+.pe-head .btn { text-transform: none; letter-spacing: 0; }
+.pe-table-wrap { border: 1px solid var(--border); border-radius: 8px; }
+.pe-conns { min-width: 660px; }
+.pe-conns th { padding: 8px 6px; }
+.pe-conns td { padding: 5px 6px; }
+.pe-c-move { width: 64px; white-space: nowrap; }
+.pe-c-move .sd-icon-btn { padding: 2px 6px; }
+.pe-c-move .sd-icon-btn:disabled { opacity: 0.35; cursor: default; }
+.pe-c-max { width: 92px; }
+.pe-c-x { width: 44px; text-align: right; }
+.pe-na { color: var(--text-tertiary); padding: 0 7px; }
+.pe-conn:has(+ .pe-fn-row) td { border-bottom: none; }
+.pe-fn-row > td { padding-top: 0; }
+.pe-fns { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 4px 10px; border-left: 2px solid var(--info); }
+.pe-fns > .btn { align-self: flex-start; }
+.pe-fns-label { font-size: 11px; color: var(--text-tertiary); }
+.pe-none { font-size: 12px; }
+.pe-fn { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: flex-end; }
+.pe-fact { flex: 0 1 112px; }
+/* A fact is captioned with the template TOML's own key, as written there. */
+.pe-fact > span { text-transform: none; letter-spacing: 0; font-family: var(--font-mono); font-size: 10.5px; }
+.pe-dialog input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.pe-fact-fn { flex-basis: 170px; }
+.pe-fact-text { flex-basis: 136px; }
+.pe-fn-x { margin-bottom: 3px; }
+.pe-pass { display: flex; flex-direction: column; gap: 6px; }
+.pe-pass-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pe-pass-row .sd-input { min-width: 140px; padding: 6px 9px; font-size: 12.5px; }
+.pe-pass-join { color: var(--text-tertiary); }
+.pe-empty { margin: 4px 0 0; font-size: 12.5px; }
+.pe-preview { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-canvas); height: 300px; overflow: hidden; }
+.pe-preview-svg { display: block; width: 100%; height: 100%; }
+.pe-preview-note { margin: 8px 0 0; font-size: 12.5px; }
+.pe-problem { border: 1px solid var(--danger); background: var(--danger-soft-bg); border-radius: 9px; padding: 10px 12px; margin: 0 0 12px; }
+.pe-confirm { border-color: var(--warning); background: var(--warning-soft-bg); }
+.pe-confirm .sd-row-actions { margin-top: 10px; }
+.pe-problem-text { margin: 0 0 6px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
+.pe-note { margin: 0; font-size: 12.5px; color: var(--text-secondary); }
+.pe-hint { margin-top: 6px; }
+.pe-result { margin-top: 14px; }
+.pe-actions { margin-top: 16px; }
+.pe-spacer { flex: 1; }
+.pe-ro .sd-input:disabled, .pe-ro .sd-table input:disabled, .pe-ro .sd-table select:disabled { opacity: 0.85; cursor: default; }
+.pe-ro [data-act] { display: none; }
+.pe-saved { position: absolute; left: 50%; bottom: 44px; transform: translateX(-50%); z-index: 4; display: flex; align-items: center; gap: 10px; max-width: calc(100% - 24px); padding: 5px 6px 5px 12px; border: 1px solid var(--success); background: var(--bg-surface); color: var(--success); border-radius: 99px; box-shadow: 0 6px 20px oklch(0% 0 0 / 0.25); font-size: 12px; }
+.pe-saved[hidden] { display: none; }
+.pe-saved > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+  .pe-layout { grid-template-columns: minmax(0, 1fr); }
+  .pe-preview { height: 220px; }
+}
+@media (max-width: 560px) {
+  .pe-nums { grid-template-columns: 1fr 1fr; }
+}
+
 .eap-layout {
   display: flex;
   gap: 14px;

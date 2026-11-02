@@ -50,6 +50,8 @@ const APP_JS: &str = include_str!("../assets/app.js");
 const ATLAS_JS: &str = include_str!("../assets/atlas.js");
 /// The Topology tab's bench canvas, a file of its own and held to the same two rules.
 const BENCH_JS: &str = include_str!("../assets/bench.js");
+/// The part editor, which builds its dialog's markup itself: held to the same two rules.
+const BENCH_PARTS_JS: &str = include_str!("../assets/bench-parts.js");
 
 /// Every `id="..."` attribute value in `src`, in source order — used
 /// against both `index.html` (real HTML) and `app.js` (the markup it
@@ -115,6 +117,7 @@ fn no_element_id_is_declared_twice() {
         .chain(declared_ids(APP_JS))
         .chain(declared_ids(ATLAS_JS))
         .chain(declared_ids(BENCH_JS))
+        .chain(declared_ids(BENCH_PARTS_JS))
     {
         *counts.entry(id).or_insert(0) += 1;
     }
@@ -147,6 +150,7 @@ fn every_looked_up_element_id_is_declared_somewhere() {
         .chain(declared_ids(APP_JS))
         .chain(declared_ids(ATLAS_JS))
         .chain(declared_ids(BENCH_JS))
+        .chain(declared_ids(BENCH_PARTS_JS))
         .collect();
 
     let mut lookups: Vec<(String, &'static str)> = Vec::new();
@@ -155,7 +159,7 @@ fn every_looked_up_element_id_is_declared_somewhere() {
             lookups.push((id, fn_name));
         }
     }
-    for js in [ATLAS_JS, BENCH_JS] {
+    for js in [ATLAS_JS, BENCH_JS, BENCH_PARTS_JS] {
         for id in literal_calls(js, "getElementById") {
             lookups.push((id, "getElementById"));
         }

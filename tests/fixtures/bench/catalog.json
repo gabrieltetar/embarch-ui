@@ -479,6 +479,11 @@
       "bootload-bootloader"
     ],
     "hub_kind": "usb-host",
+    "interface_functions": [
+      "vcom",
+      "bootload-app",
+      "bootload-bootloader"
+    ],
     "joins": [
       [
         "usb-c",
@@ -520,6 +525,9 @@
       "stack-socket",
       "stack-plug"
     ],
+    "line_functions": [
+      "scpi"
+    ],
     "looks": [
       "monitor",
       "nucleo64",
@@ -550,9 +558,19 @@
         "out"
       ]
     },
+    "power_kinds": [
+      "usb-c",
+      "banana",
+      "terminal"
+    ],
     "roles": [
       "dut",
       "dev-bench"
+    ],
+    "sides": [
+      "left",
+      "right",
+      "top"
     ]
   }
 }

@@ -261,8 +261,31 @@ uses four ports: `EMBARCH_UI_PORT` and the three after it (proxy, stub Core,
 an unused desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves screenshots in both
 themes.
 
+`drive_bench_parts.py` drives the part editor (`assets/bench-parts.js`, the
+bench editor's phase 3) against the **real binary** over a scratch firmware
+repo — no fixture proxy, so every file it checks is one the server wrote and
+every refusal it reads is compared with what the same request answers outside
+the browser. It opens the editor the way the canvas's parts bin does, with an
+`embarch:edit-part` event, and checks: a new template's fields and connectors
+offer exactly the served lists (a power role only on a power kind, functions
+only on the hub's kind, an interface and line facts only where the vocabulary
+says), add, move and remove a row, a passthrough pair that follows a renamed
+connector, the file the save writes, an edit's `PUT` naming the version it
+read, a hand edit on disk refused `409` with Reload, a built-in id and an
+unknown kind refused in the server's words, a built-in read-only with Copy to
+this repo, a file in `errors` with a confirmed fresh start the server will not
+create until the file is gone, `embarch:parts-changed` on every save (one still
+out when Esc closes the dialog included), Esc ordering against a panel and
+Core's prompt, and phone width. The preview is the canvas's
+`window.embarchBench.previewTemplate`: with it, a drawing that follows an edit;
+without it, the line saying the canvas did not load. It uses three ports:
+`EMBARCH_UI_PORT` and the two after it (a desk and a Core nothing listens on);
+`EMBARCH_UI_BIN` picks the binary and `EMBARCH_PARTS_SHOTS=<dir>` saves
+screenshots of the dialog in both themes.
+
 ```sh
 cargo build --release
 geckodriver --port 4444 &
 python3 tests/browser/drive_bench_edit.py
+python3 tests/browser/drive_bench_parts.py
 ```

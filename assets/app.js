@@ -7231,6 +7231,7 @@
     ["board-dialog", "board-cancel"],
     ["role-board-dialog", "role-board-cancel"],
     ["topo-save-dialog", "topo-save-cancel"],
+    ["part-dialog", "part-cancel"],   // bench-parts.js builds it
   ];
 
   function initTopologyPanels() {

@@ -84,6 +84,9 @@ const ATLAS_JS: &str = include_str!("../assets/atlas.js");
 const DESK_JS: &str = include_str!("../assets/desk.js");
 /// The Topology tab's bench canvas, a file of its own like the Atlas map.
 const BENCH_JS: &str = include_str!("../assets/bench.js");
+/// The bench editor's part editor: a dialog of its own over the canvas, in a
+/// file of its own so the canvas and the editor change apart.
+const BENCH_PARTS_JS: &str = include_str!("../assets/bench-parts.js");
 /// The EmbArch mark, served as the browser tab icon. 64 px: a tab renders it
 /// at 16 CSS px, which is 32 physical on a 2x display, and 64 covers 4x. The
 /// GIMP master and the full-size export live beside it in `assets/brand/`.
@@ -277,6 +280,7 @@ fn app(state: AppState) -> Router {
         .route("/atlas.js", get(atlas_js))
         .route("/desk.js", get(desk_js))
         .route("/bench.js", get(bench_js))
+        .route("/bench-parts.js", get(bench_parts_js))
         .route("/api/desk-events", get(desk::events))
         .route("/api/desk/{*rest}", axum::routing::any(desk::proxy))
         .route("/favicon.png", get(favicon_png))
@@ -580,6 +584,10 @@ async fn atlas_js(headers: header::HeaderMap) -> Response {
 
 async fn bench_js(headers: header::HeaderMap) -> Response {
     revalidating_asset(&headers, "text/javascript; charset=utf-8", BENCH_JS.as_bytes())
+}
+
+async fn bench_parts_js(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/javascript; charset=utf-8", BENCH_PARTS_JS.as_bytes())
 }
 
 async fn favicon_svg() -> impl IntoResponse {
@@ -1223,6 +1231,25 @@ mod tests {
         let get = |k: header::HeaderName| resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
         assert_eq!(get(header::CONTENT_SECURITY_POLICY).as_deref(), Some("frame-ancestors 'none'"), "{what}: {}", resp.status());
         assert_eq!(get(header::X_FRAME_OPTIONS).as_deref(), Some("DENY"), "{what}: {}", resp.status());
+    }
+
+    /// The part editor is its own script: served beside `bench.js`, loaded
+    /// by the page after it (the editor calls the canvas's preview), and
+    /// revalidated like every other asset.
+    #[tokio::test]
+    async fn the_part_editor_script_is_served_and_loaded_after_the_canvas() {
+        let base = serve_app().await;
+        let http = reqwest::Client::new();
+        let resp = http.get(format!("{base}/bench-parts.js")).send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "text/javascript; charset=utf-8");
+        let etag = resp.headers().get(header::ETAG).unwrap().clone();
+        assert_eq!(resp.text().await.unwrap(), BENCH_PARTS_JS);
+        let again = http.get(format!("{base}/bench-parts.js")).header(header::IF_NONE_MATCH, etag).send().await.unwrap();
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        let canvas = INDEX_HTML.find("<script src=\"/bench.js\">").unwrap();
+        let editor = INDEX_HTML.find("<script src=\"/bench-parts.js\">").unwrap();
+        assert!(editor > canvas, "the editor loads after the canvas it previews with");
     }
 
     /// Desk review r2, finding 3: another site framing the page would make

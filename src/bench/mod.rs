@@ -41,7 +41,7 @@ macro_rules! vocabulary {
             $(#[serde(rename = $text)] $variant),+
         }
 
-        // Not every list is served or matched on (a side is only drawn).
+        // Not every enum uses both of these.
         #[allow(dead_code)]
         impl $name {
             pub const ALL: &'static [$name] = &[$($name::$variant),+];
@@ -163,9 +163,23 @@ pub fn joins(a: Kind, b: Kind) -> bool {
 }
 
 /// The kinds that carry power, and so make up a bus: cables and passthrough
-/// pairs join them into one.
+/// pairs join them into one, and only a connector of one takes a power role.
 pub fn carries_power(kind: Kind) -> bool {
     matches!(kind, Kind::UsbC | Kind::Banana | Kind::Terminal)
+}
+
+impl Function {
+    /// A serial port's functions, which may name the USB interface they are
+    /// on; a probe and an instrument line take none.
+    pub fn takes_interface(self) -> bool {
+        matches!(self, Function::Vcom | Function::BootloadApp | Function::BootloadBootloader)
+    }
+
+    /// An instrument line, the one function with line facts (baud,
+    /// terminators, pacing, acks: `embarch-topology` decision 49).
+    pub fn takes_line_facts(self) -> bool {
+        self == Function::Scpi
+    }
 }
 
 /// What a power role means on a bus.
@@ -193,12 +207,22 @@ fn powers_of(class: PowerClass) -> Vec<&'static str> {
 }
 
 /// `GET /api/bench/vocabulary`'s body.
+///
+/// Besides the word lists, the rules between fields that a part editor has
+/// to follow to offer only what a save accepts: which kinds take a power
+/// role (`power_kinds`), and which functions take an interface or line facts
+/// — the same predicates [`PartTemplate::check`] applies.
 pub fn vocabulary_json() -> serde_json::Value {
     fn words<T: Copy>(all: &[T], text: fn(T) -> &'static str) -> Vec<&'static str> {
         all.iter().map(|&w| text(w)).collect()
     }
+    fn functions_where(keep: fn(Function) -> bool) -> Vec<&'static str> {
+        Function::ALL.iter().copied().filter(|&f| keep(f)).map(Function::as_str).collect()
+    }
     json!({
         "kinds": words(Kind::ALL, Kind::as_str),
+        "power_kinds": Kind::ALL.iter().copied().filter(|&k| carries_power(k)).map(Kind::as_str).collect::<Vec<_>>(),
+        "sides": words(Side::ALL, Side::as_str),
         "joins": JOINS.iter().map(|(a, b)| [a.as_str(), b.as_str()]).collect::<Vec<_>>(),
         "hub_kind": HUB_KIND.as_str(),
         "power": {
@@ -213,6 +237,8 @@ pub fn vocabulary_json() -> serde_json::Value {
         // What a part's `role` may hold, so the editor's role picker offers
         // the parser's own words (phase 3).
         "roles": words(Role::ALL, Role::as_str),
+        "interface_functions": functions_where(Function::takes_interface),
+        "line_functions": functions_where(Function::takes_line_facts),
     })
 }
 
@@ -244,11 +270,7 @@ pub struct FunctionEntry {
 
 impl FunctionEntry {
     fn check(&self, connector: &str) -> Result<(), String> {
-        let interface_ok = matches!(
-            self.function,
-            Function::Vcom | Function::BootloadApp | Function::BootloadBootloader
-        );
-        if self.interface.is_some() && !interface_ok {
+        if self.interface.is_some() && !self.function.takes_interface() {
             return Err(format!(
                 "connector `{connector}`: `{}` takes no interface — only a serial port does",
                 self.function.as_str()
@@ -260,7 +282,7 @@ impl FunctionEntry {
             || self.min_interval_ms.is_some()
             || self.ack_ok.is_some()
             || self.ack_err.is_some();
-        if line_facts && self.function != Function::Scpi {
+        if line_facts && !self.function.takes_line_facts() {
             return Err(format!(
                 "connector `{connector}`: line facts belong to `scpi`, not `{}`",
                 self.function.as_str()
@@ -386,11 +408,14 @@ impl PartTemplate {
                     c.kind.as_str()
                 ));
             }
-            if !c.functions.is_empty() && c.kind != Kind::UsbHost {
+            // A function is what a connector carries to this machine, so only
+            // the kind that joins the hub carries one.
+            if !c.functions.is_empty() && c.kind != HUB_KIND {
                 return Err(format!(
-                    "connector `{}` is `{}`; only a `usb-host` carries functions",
+                    "connector `{}` is `{}`; only a `{}` carries functions",
                     c.id,
-                    c.kind.as_str()
+                    c.kind.as_str(),
+                    HUB_KIND.as_str()
                 ));
             }
             for f in &c.functions {
@@ -915,6 +940,37 @@ mod tests {
         assert_eq!(v["looks"][3], "devkit");
         assert_eq!(v["functions"], json!(["probe", "vcom", "scpi", "bootload-app", "bootload-bootloader"]));
         assert_eq!(v["roles"], json!(["dut", "dev-bench"]));
+        assert_eq!(v["sides"], json!(["left", "right", "top"]));
+        assert_eq!(v["power_kinds"], json!(["usb-c", "banana", "terminal"]));
+        assert_eq!(v["interface_functions"], json!(["vcom", "bootload-app", "bootload-bootloader"]));
+        assert_eq!(v["line_functions"], json!(["scpi"]));
+    }
+
+    /// The editor offers a power role, an interface and line facts only
+    /// where the vocabulary says so; each served list must be exactly what
+    /// the check accepts, or the editor would offer a field a save refuses.
+    #[test]
+    fn the_served_field_rules_are_the_checks_own() {
+        let v = vocabulary_json();
+        let listed = |key: &str, word: &str| v[key].as_array().unwrap().iter().any(|w| w == word);
+        let base = "id = \"x\"\nlabel = \"X\"\ncategory = \"board\"\nlook = \"board\"\n";
+        for kind in Kind::ALL {
+            let t = format!("{base}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"{}\"\nside = \"left\"\npower = \"drp\"\n", kind.as_str());
+            assert_eq!(parse_template(&t).is_ok(), listed("power_kinds", kind.as_str()), "{}", kind.as_str());
+        }
+        let hub = HUB_KIND.as_str();
+        for f in Function::ALL {
+            let with = |facts: &str| {
+                parse_template(&format!(
+                    "{base}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"{hub}\"\nside = \"left\"\nfunctions = [{{ function = \"{}\"{facts} }}]\n",
+                    f.as_str()
+                ))
+                .is_ok()
+            };
+            assert!(with(""), "{}", f.as_str());
+            assert_eq!(with(", interface = 1"), listed("interface_functions", f.as_str()), "{}", f.as_str());
+            assert_eq!(with(", baud = 9600"), listed("line_functions", f.as_str()), "{}", f.as_str());
+        }
     }
 
     #[test]
