@@ -11,9 +11,16 @@
 // from `GET /api/bench/vocabulary`, and so do the rules between fields — which
 // kinds take a power role (`power_kinds`), which kind carries functions (the
 // hub's: a function is what a connector carries to this machine), and which
-// functions take an interface or line facts. **What a save refuses is the
-// server's to say**: a refusal is shown verbatim, never re-worded or
-// pre-empted by a copy of its checks here.
+// functions take an interface or line facts — and so do the limits a template
+// is held to (`template`: the connector cap, each number field's range, the
+// line facts by name). **What a save refuses is the server's to say**: a
+// refusal is shown verbatim, never re-worded or pre-empted by a copy of its
+// checks here, so a number field is text and what was typed is what is sent.
+//
+// **A changed draft is never dropped silently**: Cancel or Esc asks first,
+// another part opened over it asks first, and a project switch keeps it on
+// screen with Save disabled. `window.embarchParts.unsaved()` says whether
+// there is one, for the page's own leave guards.
 //
 // A built-in opens read-only, with "Copy to this repo"; a repo template the
 // server could not load opens on its error, and a fresh one under that id is
@@ -30,14 +37,6 @@
   var ROUTE_VOCAB = "/api/bench/vocabulary";
   var ROUTE_PARTS = "/api/bench/parts";
   var PARTS_DIR = "embarch/parts/";
-  var LINE_FACTS = [   // the template TOML's own names (embarch-topology decision 49)
-    { f: "baud", num: true },
-    { f: "write_terminator", esc: true },
-    { f: "read_terminator", esc: true },
-    { f: "min_interval_ms", num: true },
-    { f: "ack_ok" },
-    { f: "ack_err" },
-  ];
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -48,8 +47,9 @@
   function clone(v) { return v == null ? v : JSON.parse(JSON.stringify(v)); }
   function blank(v) { return v == null || v === ""; }
 
-  // A terminator holds control characters, so a field shows it escaped:
-  // `\r\n` for CR LF. `\\` is a backslash; any other backslash stays as typed.
+  // A text line fact (a terminator, an ack) may hold control characters, so a
+  // field shows it escaped: `\r\n` for CR LF. `\\` is a backslash; any other
+  // backslash stays as typed.
   function showEscaped(s) {
     return String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
   }
@@ -67,6 +67,7 @@
       '<div class="card-title"><span id="part-title">Part template</span><span id="part-badge" class="pe-badge" hidden></span></div>' +
       '<p id="part-path" class="placeholder-note pe-path mono"></p>' +
       '<p id="part-loading" class="placeholder-note" hidden>reading&hellip;</p>' +
+      '<p id="part-stale" class="pe-problem pe-confirm pe-note pe-stale" hidden></p>' +
       '<div id="part-problem" class="pe-problem" hidden>' +
         '<pre id="part-problem-text" class="pe-problem-text mono"></pre>' +
         '<p id="part-problem-note" class="pe-note"></p>' +
@@ -87,9 +88,9 @@
             '<label class="sd-field"><span>Category</span><select id="part-category" data-f="category" class="sd-input mono"></select></label>' +
             '<label class="sd-field"><span>Look</span><select id="part-look" data-f="look" class="sd-input mono"></select></label>' +
             '<div class="pe-nums">' +
-              '<label class="sd-field"><span>Width</span><input id="part-width" data-f="width" type="number" min="0" step="1" class="sd-input mono" placeholder="default" /></label>' +
-              '<label class="sd-field"><span>Min height</span><input id="part-min-height" data-f="min_height" type="number" min="0" step="1" class="sd-input mono" placeholder="none" /></label>' +
-              '<label class="sd-field"><span>Rows top</span><input id="part-rows-top" data-f="rows_top" type="number" min="0" step="1" class="sd-input mono" placeholder="none" /></label>' +
+              '<label class="sd-field"><span>Width</span><input id="part-width" data-f="width" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" class="sd-input mono" placeholder="default" /></label>' +
+              '<label class="sd-field"><span>Min height</span><input id="part-min-height" data-f="min_height" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" class="sd-input mono" placeholder="none" /></label>' +
+              '<label class="sd-field"><span>Rows top</span><input id="part-rows-top" data-f="rows_top" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" class="sd-input mono" placeholder="none" /></label>' +
             '</div>' +
           '</div>' +
           '<div class="pe-head"><span>Connectors</span><button type="button" id="part-add-conn" class="btn btn-tiny" data-act="conn-add">+ Connector</button></div>' +
@@ -100,6 +101,7 @@
             '</table>' +
           '</div>' +
           '<p id="part-conns-empty" class="placeholder-note pe-empty" hidden>no connectors</p>' +
+          '<p id="part-conns-full" class="placeholder-note pe-empty" hidden></p>' +
           '<div class="pe-head"><span>Passthrough pairs</span><button type="button" id="part-add-pass" class="btn btn-tiny" data-act="pass-add">+ Pair</button></div>' +
           '<div id="part-pass" class="pe-pass"></div>' +
           '<p id="part-pass-empty" class="placeholder-note pe-empty" hidden>no passthrough pairs</p>' +
@@ -112,6 +114,13 @@
       '</div>' +
       '<p id="part-result" class="sd-error pe-result" style="display:none;"></p>' +
       '<p id="part-hint" class="pe-note pe-hint" hidden></p>' +
+      '<div id="part-discard" class="pe-problem pe-confirm pe-discard" role="alertdialog" aria-labelledby="part-discard-text" hidden>' +
+        '<p id="part-discard-text" class="pe-note"></p>' +
+        '<div class="sd-row-actions">' +
+          '<button type="button" id="part-discard-yes" class="btn">Discard changes</button>' +
+          '<button type="button" id="part-discard-no" class="btn btn-primary">Keep editing</button>' +
+        '</div>' +
+      '</div>' +
       '<div class="sd-row-actions pe-actions">' +
         '<button type="button" id="part-reload" class="btn" hidden>Reload from disk</button>' +
         '<button type="button" id="part-fresh" class="btn" hidden>Start a fresh template under this id&hellip;</button>' +
@@ -130,6 +139,12 @@
     badge: document.getElementById("part-badge"),
     path: document.getElementById("part-path"),
     loading: document.getElementById("part-loading"),
+    stale: document.getElementById("part-stale"),
+    connsFull: document.getElementById("part-conns-full"),
+    discard: document.getElementById("part-discard"),
+    discardText: document.getElementById("part-discard-text"),
+    discardYes: document.getElementById("part-discard-yes"),
+    discardNo: document.getElementById("part-discard-no"),
     problem: document.getElementById("part-problem"),
     problemText: document.getElementById("part-problem-text"),
     problemNote: document.getElementById("part-problem-note"),
@@ -178,6 +193,7 @@
   // new: `fresh` is the error entry a fresh template replaces, `from` the
   // built-in it was copied from. edit: `version` is what PUT names.
   var st = { mode: null, id: null, version: null, fresh: null, from: null, error: null, confirming: false };
+  var pristine = null;   // the template as it stood when the draft was opened
   var draft = null;
   var opener = null;
   var openSeq = 0;
@@ -187,6 +203,26 @@
   function words(key) { return list(vocab && vocab[key]); }
   function has(key, word) { return words(key).indexOf(word) >= 0; }
   function takesPower(kind) { return has("power_kinds", kind); }
+  // The limits a template file is held to, as served under `template`.
+  function limits() { return (vocab && vocab.template && typeof vocab.template === "object") ? vocab.template : {}; }
+  function lineFacts() {
+    return list(limits().line_facts).filter(function (lf) { return lf && typeof lf.name === "string" && lf.name; });
+  }
+  function rangeOf(field) {
+    var n = limits().numbers, r = n && n[field];
+    return r && typeof r.min === "number" && typeof r.max === "number" ? r : null;
+  }
+  function rangeTitle(field) {
+    var r = rangeOf(field);
+    return r ? "a whole number, " + r.min + "\u2013" + r.max : "";
+  }
+  // A number field is text: a browser's number input reports unparseable
+  // text as empty, which would drop the field instead of letting the server
+  // say what is wrong with it.
+  function numberAttrs(field) {
+    var t = rangeTitle(field);
+    return ' type="text" inputmode="numeric" autocomplete="off" spellcheck="false"' + (t ? ' title="' + esc(t) + '"' : "");
+  }
   function carriesFunctions(kind) { return !!vocab && kind != null && kind === vocab.hub_kind; }
   function powerGroups() {
     var p = vocab && vocab.power;
@@ -235,9 +271,10 @@
           functions: list(c.functions).map(function (fe) {
             fe = fe || {};
             var out = { function: fe.function == null ? "" : String(fe.function), interface: fe.interface == null ? "" : String(fe.interface) };
-            // A terminator is held as its field shows it, escaped.
-            LINE_FACTS.forEach(function (lf) {
-              out[lf.f] = fe[lf.f] == null ? "" : lf.esc ? showEscaped(fe[lf.f]) : String(fe[lf.f]);
+            // A text fact is held as its field shows it, escaped.
+            lineFacts().forEach(function (lf) {
+              var v = fe[lf.name];
+              out[lf.name] = v == null ? "" : lf.numeric ? String(v) : showEscaped(v);
             });
             return out;
           }),
@@ -261,12 +298,12 @@
     return c ? c.id : "";
   }
 
-  // A number field as JSON: a whole number as itself, anything else typed as
-  // the text, so the server's refusal names what is wrong with it.
+  // A number field as JSON: a whole number as itself, anything else as the
+  // text typed, so the server's refusal names what is wrong with it.
   function num(v) {
     if (blank(v)) return undefined;
-    var n = Number(v);
-    return Number.isFinite(n) && String(v).trim() !== "" ? n : String(v);
+    var t = String(v).trim();
+    return /^-?\d+$/.test(t) ? Number(t) : String(v);
   }
 
   function setIf(o, k, v) { if (v !== undefined) o[k] = v; }
@@ -294,9 +331,9 @@
           if (!blank(fe.function)) e.function = fe.function;
           if (has("interface_functions", fe.function)) setIf(e, "interface", num(fe.interface));
           if (has("line_functions", fe.function)) {
-            LINE_FACTS.forEach(function (lf) {
-              if (blank(fe[lf.f])) return;
-              e[lf.f] = lf.num ? num(fe[lf.f]) : lf.esc ? readEscaped(fe[lf.f]) : fe[lf.f];
+            lineFacts().forEach(function (lf) {
+              if (blank(fe[lf.name])) return;
+              e[lf.name] = lf.numeric ? num(fe[lf.name]) : readEscaped(fe[lf.name]);
             });
           }
           return e;
@@ -357,7 +394,7 @@
           '<td><select data-f="kind" aria-label="Kind"' + dis() + ">" + options(words("kinds"), c.kind, "pick one") + "</select></td>" +
           '<td><select data-f="side" aria-label="Side"' + dis() + ">" + options(words("sides"), c.side, "pick one") + "</select></td>" +
           "<td>" + power + "</td>" +
-          '<td class="pe-c-max"><input type="number" min="1" step="1" data-f="max_cables" aria-label="Max cables" placeholder="default" value="' + esc(c.max_cables) + '"' + dis() + " /></td>" +
+          '<td class="pe-c-max"><input' + numberAttrs("max_cables") + ' data-f="max_cables" aria-label="Max cables" placeholder="default" value="' + esc(c.max_cables) + '"' + dis() + " /></td>" +
           '<td class="pe-c-x"><button type="button" class="btn-icon-danger btn" data-act="remove" title="Remove this connector" aria-label="Remove this connector">&times;</button></td>' +
         "</tr>";
       if (carriesFunctions(c.kind)) row += functionRow(c, i);
@@ -372,15 +409,14 @@
     var entries = c.functions.map(function (fe, j) {
       var facts = "";
       if (has("interface_functions", fe.function)) {
-        facts += '<label class="sd-param pe-fact"><span>interface</span><input type="number" min="0" step="1" data-f="interface" placeholder="unknown" value="' + esc(fe.interface) + '"' + dis() + " /></label>";
+        facts += '<label class="sd-param pe-fact"><span>interface</span><input' + numberAttrs("interface") + ' data-f="interface" placeholder="unknown" value="' + esc(fe.interface) + '"' + dis() + " /></label>";
       }
       if (has("line_functions", fe.function)) {
-        LINE_FACTS.forEach(function (lf) {
-          var v = fe[lf.f];
-          facts += '<label class="sd-param pe-fact' + (lf.num ? "" : " pe-fact-text") + '"><span>' + esc(lf.f) + "</span>" +
-            '<input type="' + (lf.num ? "number" : "text") + '"' + (lf.num ? ' min="0" step="1"' : ' spellcheck="false" autocomplete="off"') +
-            ' data-f="' + lf.f + '"' + (lf.esc ? ' placeholder="\\r\\n" title="escaped: \\r is CR, \\n is LF, \\t is tab, \\\\ is a backslash"' : "") +
-            ' value="' + esc(v) + '"' + dis() + " /></label>";
+        lineFacts().forEach(function (lf) {
+          var attrs = lf.numeric ? numberAttrs(lf.name)
+            : ' type="text" spellcheck="false" autocomplete="off" title="escaped: \\r is CR, \\n is LF, \\t is tab, \\\\ is a backslash"';
+          facts += '<label class="sd-param pe-fact' + (lf.numeric ? "" : " pe-fact-text") + '"><span>' + esc(lf.name) + "</span>" +
+            "<input" + attrs + ' data-f="' + esc(lf.name) + '" value="' + esc(fe[lf.name]) + '"' + dis() + " /></label>";
         });
       }
       return '<div class="pe-fn" data-fn="' + j + '">' +
@@ -420,9 +456,18 @@
     }).join("");
   }
 
+  // The served connector cap: at it, Add is disabled and says why.
+  function atCap() {
+    var max = limits().max_connectors;
+    return typeof max === "number" && draft.connectors.length >= max;
+  }
   function renderConnectors() {
     el.conns.innerHTML = connectorRows();
     el.connsEmpty.hidden = draft.connectors.length > 0;
+    var full = atCap();
+    el.addConn.disabled = full;
+    el.connsFull.hidden = !full;
+    el.connsFull.textContent = full ? "A template holds at most " + limits().max_connectors + " connectors." : "";
   }
   function renderPass() {
     el.pass.innerHTML = passRows();
@@ -448,6 +493,9 @@
     el.width.value = draft.width;
     el.minHeight.value = draft.min_height;
     el.rowsTop.value = draft.rows_top;
+    el.width.title = rangeTitle("width");
+    el.minHeight.title = rangeTitle("min_height");
+    el.rowsTop.title = rangeTitle("rows_top");
     // The id names the file, so it is fixed once the file exists — and for a
     // fresh template replacing an unreadable one, it is that file's.
     el.id.disabled = ro || st.mode === "edit" || !!st.fresh;
@@ -523,7 +571,9 @@
     el.fresh.hidden = !(m === "error" && !st.confirming && freshAllowed());
     el.reload.hidden = !(m === "missing" || m === "failed");
     el.cancel.textContent = m === "new" || m === "edit" ? "Cancel" : "Close";
+    el.save.disabled = saving || !!st.stale;
     renderProblem();
+    renderGuard();
   }
 
   function builtinWithId(id) {
@@ -566,6 +616,77 @@
       "removed or fixed by hand before Save will go through. Nothing is written until you Save.";
   }
 
+  // ---------------------------------------------------------------- the unsaved-draft guard
+  // A draft is changed when the template it builds differs from the one it
+  // was opened as; typing a field back to what it was is no change.
+  function snapshot() { return draft ? JSON.stringify(template()) : null; }
+  function markPristine() { pristine = snapshot(); }
+  function changed() { return !!draft && !readOnly() && snapshot() !== pristine; }
+
+  function draftName() {
+    var id = draft && !blank(draft.id) ? draft.id : null;
+    return id ? "`" + id + "`" : "this new part";
+  }
+
+  function renderGuard() {
+    el.discard.hidden = !st.discarding;
+    if (st.discarding) {
+      var next = st.then ? (st.then.id == null ? " and open a new part" : " and open `" + st.then.id + "`") : "";
+      el.discardText.textContent = draftName() + " has changes that are not saved. Discard them" + next + "?";
+    }
+    el.stale.hidden = !st.stale;
+    el.stale.textContent = st.stale
+      ? "The open project changed, so this draft belongs to the repo that was open before and cannot be saved here. " +
+        "Copy what you need from it, then close it."
+      : "";
+  }
+
+  // Asks before a changed draft goes. `then` is what to do once it is
+  // discarded: null closes, `{id}` opens that part (null id: a new one).
+  function askDiscard(then) {
+    st.discarding = true;
+    st.then = then || null;
+    if (!st.back) st.back = document.activeElement;
+    renderGuard();
+    el.discard.scrollIntoView({ block: "nearest" });
+    // After app.js's Esc handler, which moves focus to a panel under the
+    // dialog once it has clicked Cancel.
+    Promise.resolve().then(function () {
+      if (st.discarding) el.discardNo.focus({ preventScroll: true });
+    });
+  }
+
+  function keepEditing() {
+    var back = st.back;
+    st.discarding = false;
+    st.then = null;
+    st.back = null;
+    renderGuard();
+    Promise.resolve().then(function () {
+      if (back && back.isConnected && dlg.contains(back) && !back.disabled && back.getClientRects().length) back.focus({ preventScroll: true });
+      else focusFirst();
+    });
+  }
+
+  // Cancel and Esc: a changed draft asks first; Esc while it asks is "keep
+  // editing", the topmost thing closing first (decision 78).
+  function requestClose() {
+    if (st.discarding) { keepEditing(); return; }
+    if (changed()) { askDiscard(null); return; }
+    close();
+  }
+
+  function discardNow() {
+    var then = st.then;
+    if (then) open(then.id);
+    else close();
+  }
+
+  window.embarchParts = {
+    // A dialog open on a draft that differs from what it opened as.
+    unsaved: function () { return shown() && changed(); },
+  };
+
   // ---------------------------------------------------------------- open, close
   function api(method, route, body) {
     var init = { method: method, headers: { Accept: "application/json" } };
@@ -607,7 +728,8 @@
   // A save still in flight from before answers into nothing (`openSeq`), so
   // the Save it disabled is enabled here, not by that answer.
   function reset(mode, id) {
-    st = { mode: mode, id: id, version: null, fresh: null, from: null, error: null, confirming: false, failure: null };
+    st = { mode: mode, id: id, version: null, fresh: null, from: null, error: null, confirming: false, failure: null,
+           discarding: false, then: null, back: null, stale: false };
     saving = false;
     el.save.disabled = false;
     dlg.removeAttribute("data-busy");
@@ -632,6 +754,7 @@
       vocab = res[0] || {};
       catalog = res[1] || { parts: [], errors: [] };
       decide(id);
+      markPristine();
       render();
       focusFirst();
     }).catch(function (e) {
@@ -696,6 +819,7 @@
     st.from = label;
     draft = draftFrom(part);
     draft.id = id;
+    markPristine();
     render();
     el.id.focus({ preventScroll: true });
     el.id.select();
@@ -707,6 +831,7 @@
     st.fresh = e;
     st.error = e;
     draft = draftFrom({ id: id });
+    markPristine();
     render();
     focusFirst();
   }
@@ -723,7 +848,7 @@
   }
 
   function save() {
-    if (saving || !(st.mode === "new" || st.mode === "edit")) return;
+    if (saving || st.stale || !(st.mode === "new" || st.mode === "edit")) return;
     var body = template();
     var put = st.mode === "edit";
     if (put) body.version = st.version;
@@ -751,7 +876,7 @@
     }).then(function () {
       if (seq !== openSeq) return;
       saving = false;
-      el.save.disabled = false;
+      el.save.disabled = !!st.stale;
       dlg.removeAttribute("data-busy");
     });
   }
@@ -811,10 +936,11 @@
     if (t.tagName === "SELECT") return;
     onField(t, false);
   });
+  // A select changes on `change`; a text field on `input`, and on `change` as
+  // well, which is all some edits fire (a field cleared by the browser).
   dlg.addEventListener("change", function (ev) {
     var t = ev.target;
-    if (t.tagName !== "SELECT") return;
-    onField(t, true);
+    onField(t, t.tagName === "SELECT");
   });
 
   function newConnector() {
@@ -832,7 +958,7 @@
     var used = c.functions.map(function (fe) { return fe.function; });
     var free = words("functions").filter(function (w) { return used.indexOf(w) < 0; });
     var fe = { function: free[0] || "", interface: "" };
-    LINE_FACTS.forEach(function (lf) { fe[lf.f] = ""; });
+    lineFacts().forEach(function (lf) { fe[lf.name] = ""; });
     return fe;
   }
 
@@ -842,6 +968,7 @@
     var act = b.getAttribute("data-act"), row = rowOf(b), fn = fnOf(b), pass = passOf(b);
     var cs = draft.connectors;
     if (act === "conn-add") {
+      if (atCap()) return;
       cs.push(newConnector());
       renderConnectors();
       renderPass();
@@ -884,7 +1011,9 @@
   });
 
   el.save.addEventListener("click", save);
-  el.cancel.addEventListener("click", close);
+  el.cancel.addEventListener("click", requestClose);
+  el.discardYes.addEventListener("click", discardNow);
+  el.discardNo.addEventListener("click", keepEditing);
   el.copy.addEventListener("click", copyBuiltin);
   el.reload.addEventListener("click", function () { open(st.id); });
   el.fresh.addEventListener("click", function () {
@@ -910,11 +1039,22 @@
 
   document.addEventListener("embarch:edit-part", function (ev) {
     var d = ev && ev.detail;
-    open(d && d.id != null ? String(d.id) : null);
+    var id = d && d.id != null ? String(d.id) : null;
+    if (shown() && changed()) askDiscard({ id: id });
+    else open(id);
   });
-  // The open repo changed under the dialog: what it holds describes the old one.
+  // The open repo changed under the dialog: what it holds describes the old
+  // one. A changed draft stays, unsaveable and saying so, until it is closed.
   document.addEventListener("embarch:project", function () {
     savedEl.hidden = true;
-    if (shown()) close();
+    if (!shown()) return;
+    if (!changed()) { close(); return; }
+    ++openSeq;   // nothing read for the old repo answers into this dialog now
+    saving = false;
+    dlg.removeAttribute("data-busy");
+    st.stale = true;
+    showHint("");
+    el.reload.hidden = true;
+    render();
   });
 })();

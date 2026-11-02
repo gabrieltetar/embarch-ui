@@ -571,6 +571,65 @@
       "left",
       "right",
       "top"
-    ]
+    ],
+    "template": {
+      "line_facts": [
+        {
+          "name": "baud",
+          "numeric": true
+        },
+        {
+          "name": "write_terminator",
+          "numeric": false
+        },
+        {
+          "name": "read_terminator",
+          "numeric": false
+        },
+        {
+          "name": "min_interval_ms",
+          "numeric": true
+        },
+        {
+          "name": "ack_ok",
+          "numeric": false
+        },
+        {
+          "name": "ack_err",
+          "numeric": false
+        }
+      ],
+      "max_connectors": 64,
+      "numbers": {
+        "baud": {
+          "max": 4294967295,
+          "min": 0
+        },
+        "interface": {
+          "max": 255,
+          "min": 0
+        },
+        "max_cables": {
+          "max": 4294967295,
+          "min": 1
+        },
+        "min_height": {
+          "max": 4294967295,
+          "min": 0
+        },
+        "min_interval_ms": {
+          "max": 4294967295,
+          "min": 0
+        },
+        "rows_top": {
+          "max": 4294967295,
+          "min": 0
+        },
+        "width": {
+          "max": 4294967295,
+          "min": 0
+        }
+      }
+    }
   }
 }

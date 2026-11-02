@@ -8,22 +8,28 @@ really wrote and every refusal is the server's own text, compared with what the
 same request answers outside the browser.
 
 The canvas's parts bin opens the editor with `embarch:edit-part`; this drive
-dispatches that event itself, so it runs whether or not the bin is there. The
-live preview is the canvas's `window.embarchBench.previewTemplate`: when the
-page has it the drive checks a drawing appears and follows an edit, and when it
-does not, that the dialog says the canvas did not load and draws nothing.
+dispatches that event itself. The live preview is the canvas's
+`window.embarchBench.previewTemplate`, which must draw and follow an edit; with
+the canvas's object taken away, the dialog must say the canvas did not load and
+draw nothing. The browser opens the page through a pass-through proxy that puts
+an error listener at the top of it, so an error while `bench-parts.js` loads is
+caught too.
 
-Ports: geckodriver at EMBARCH_GECKO_PORT; the UI at EMBARCH_UI_PORT, and the two
-ports after it for a desk and a Core nothing listens on (no bench route calls
-either). EMBARCH_UI_BIN picks the binary (default the release build);
-EMBARCH_PARTS_SHOTS=<dir> saves screenshots of the dialog in both themes.
+Ports: geckodriver at EMBARCH_GECKO_PORT; the UI at EMBARCH_UI_PORT, a desk and
+a Core nothing listens on at +1 and +2 (no bench route calls either), and the
+proxy the browser opens at +3. EMBARCH_UI_BIN picks the binary (default the
+release build); EMBARCH_PARTS_SHOTS=<dir> saves screenshots of the dialog in
+both themes.
 
     cargo build --release
     geckodriver --port 4444 &
     python3 tests/browser/drive_bench_parts.py
 """
-import base64, json, os, shutil, subprocess, sys, tempfile, time, tomllib, urllib.error, urllib.request
+import base64, json, os, shutil, subprocess, sys, tempfile, threading, time, tomllib, urllib.error, urllib.request
+from http.client import HTTPConnection, HTTPException   # not `import http`: http() below is the UI helper
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.dont_write_bytecode = True   # no __pycache__ left in the checkout
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -35,6 +41,8 @@ UI = "http://127.0.0.1:" + UI_PORT
 BASE = addr.gecko_url()
 DESK_PORT = int(UI_PORT) + 1
 CORE_PORT = int(UI_PORT) + 2
+PROXY_PORT = int(UI_PORT) + 3
+PAGE = "http://127.0.0.1:%d" % PROXY_PORT
 BIN = os.environ.get("EMBARCH_UI_BIN", str(REPO / "target" / "release" / "embarch-ui"))
 SHOTS = os.environ.get("EMBARCH_PARTS_SHOTS")
 ELEMENT = "element-6066-11e4-a52e-4f735466cecf"
@@ -59,6 +67,63 @@ def http(method, path, body=None):
         return e.code, e.read().decode()
 
 
+# The page's first script: an error while the page loads is an error too.
+LISTEN = (b"<script>window.__errs=[];addEventListener('error',function(e){__errs.push(String(e.message))});"
+          b"addEventListener('unhandledrejection',function(e){__errs.push('unhandled: '+String(e.reason&&e.reason.message||e.reason))});</script>")
+
+
+class Proxy(BaseHTTPRequestHandler):
+    """Everything to the UI; the page gets the error listener first."""
+    protocol_version = "HTTP/1.0"   # a body ends with the connection, so the SSE stream passes as it comes
+
+    def log_message(self, *a):
+        pass
+
+    def _forward(self):
+        path = urlparse(self.path).path
+        length = int(self.headers.get("content-length") or 0)
+        data = self.rfile.read(length) if length else None
+        drop = {"connection", "keep-alive", "accept-encoding", "content-length"} | ({"if-none-match"} if path == "/" else set())
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in drop}
+        up = HTTPConnection("127.0.0.1", int(UI_PORT), timeout=120)
+        try:
+            up.request(self.command, self.path, body=data, headers=headers)
+            resp = up.getresponse()
+        except OSError as e:
+            body = str(e).encode()
+            self.send_response(502)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(resp.status)
+        for k, v in resp.getheaders():
+            if k.lower() not in ("transfer-encoding", "connection", "content-length", "keep-alive", "etag"):
+                self.send_header(k, v)
+        if (resp.getheader("content-type") or "").startswith("text/event-stream"):
+            self.end_headers()
+            try:
+                while True:
+                    chunk = resp.read1(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (OSError, HTTPException):
+                pass   # the UI or the browser closed the stream
+            return
+        body = resp.read()
+        if path == "/" and resp.status == 200:
+            body = body.replace(b"<head>", b"<head>" + LISTEN, 1)
+        if resp.status != 304:
+            self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body and resp.status != 304:
+            self.wfile.write(body)
+
+    do_GET = do_POST = do_PUT = do_DELETE = _forward
+
+
 def wd(method, url, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
@@ -78,6 +143,9 @@ env = dict(os.environ, EMBARCH_UI_CONFIG=str(cfg), EMBARCH_UI_PORT=UI_PORT, EMBA
            EMBARCH_DESK_CONFIG_DIR=iso + "/desk-cfg", XDG_DATA_HOME=iso + "/data", XDG_CONFIG_HOME=iso + "/config",
            EMBARCH_UI_STATE=iso + "/recent-projects.json", HOME=iso + "/home")
 ui = subprocess.Popen([BIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+proxy = ThreadingHTTPServer(("127.0.0.1", PROXY_PORT), Proxy)
+proxy.daemon_threads = True
+threading.Thread(target=proxy.serve_forever, daemon=True).start()
 sid = None
 try:
     end = time.time() + 30
@@ -179,11 +247,13 @@ try:
     def changed():
         return script("return window.__changed.length")
 
-    wd("POST", S + "/url", {"url": UI + "/#topology"})
+    wd("POST", S + "/url", {"url": PAGE + "/#topology"})
     check("the page loads the part editor and builds its dialog",
           wait_for("return !!document.getElementById('part-dialog') && !!document.getElementById('part-saved')") is True)
+    check("the error listener was on the page before it loaded, and heard nothing",
+          script("return Array.isArray(window.__errs) ? window.__errs : 'no listener'") == [],
+          script("return window.__errs"))
     script("window.__changed = []; document.addEventListener('embarch:parts-changed', function (e) { __changed.push(e.detail); });"
-           "window.__errs = []; addEventListener('error', function (e) { __errs.push(String(e.message)); });"
            "window.__sent = []; window.__delay = 0; var real = window.fetch; window.fetch = function (u, i) {"
            "  if (String(u).indexOf('/api/bench/parts') >= 0 && i && i.method && i.method !== 'GET') {"
            "    __sent.push({url: String(u), method: i.method, body: i.body ? JSON.parse(i.body) : null});"
@@ -191,8 +261,18 @@ try:
            "    if (wait) return new Promise(function (r) { setTimeout(r, wait); }).then(function () { return real.call(window, u, i); });"
            "  }"
            "  return real.call(window, u, i); }; return true")
-    HAS_PREVIEW = script("return !!(window.embarchBench && typeof window.embarchBench.previewTemplate === 'function')")
-    print("      (the canvas %s previewTemplate)" % ("provides" if HAS_PREVIEW else "does not provide"))
+    check("the canvas provides the preview", script("return !!(window.embarchBench && typeof window.embarchBench.previewTemplate === 'function')"))
+    check("the part editor answers whether it holds an unsaved draft",
+          script("return !!window.embarchParts && typeof window.embarchParts.unsaved === 'function' && window.embarchParts.unsaved() === false"))
+    TPL = VOCAB["template"]
+
+    def unsaved():
+        return script("return window.embarchParts.unsaved()")
+
+    def preview_state():
+        return script("return [document.getElementById('part-dialog').getAttribute('data-preview'),"
+                      " document.getElementById('part-preview-svg').childElementCount,"
+                      " document.getElementById('part-preview-note').hidden]")
 
     # ---- a new template -------------------------------------------------------
     m = open_editor(None)
@@ -202,14 +282,25 @@ try:
           script("return document.getElementById('part-path').textContent") == "embarch/parts/<id>.toml")
     check("category offers exactly the served categories", options_of("#part-category") == VOCAB["categories"])
     check("look offers exactly the served looks", options_of("#part-look") == VOCAB["looks"])
-    if HAS_PREVIEW:
-        check("the preview is the canvas's drawing", script("return document.getElementById('part-dialog').getAttribute('data-preview')") == "drawn"
-              and script("return document.getElementById('part-preview-svg').childElementCount") > 0)
-    else:
-        check("no canvas preview: the dialog says the canvas did not load and draws nothing",
-              visible("#part-preview-note")
-              and "canvas did not load" in script("return document.getElementById('part-preview-note').textContent")
-              and script("return document.getElementById('part-preview-svg').childElementCount") == 0)
+    ps = preview_state()
+    check("the preview is the canvas's drawing", ps[0] == "drawn" and ps[1] > 0 and ps[2] is True, ps)
+    check("an unchanged new part is no unsaved draft", unsaved() is False)
+    # Without the canvas's object the preview says so and draws nothing.
+    script("window.__bench = window.embarchBench; window.embarchBench = undefined; return true")
+    type_into("#part-label", "x")
+    ps = preview_state()
+    check("with no canvas, the dialog says the canvas did not load and draws nothing",
+          ps[0] == "none" and ps[1] == 0 and ps[2] is False
+          and "canvas did not load" in script("return document.getElementById('part-preview-note').textContent"), ps)
+    script("window.embarchBench = window.__bench; return true")
+    check("a typed field makes the draft unsaved", unsaved() is True)
+    type_into("#part-label", "")
+    check("typed back to what it was, the draft is unchanged", unsaved() is False)
+    check("the number fields are text, captioned with the served range",
+          script("return ['part-width', 'part-min-height', 'part-rows-top'].map(function (i) { var e = document.getElementById(i);"
+                 " return [e.type, e.getAttribute('inputmode'), e.title]; })")
+          == [["text", "numeric", "a whole number, %d\u2013%d" % (TPL["numbers"][f]["min"], TPL["numbers"][f]["max"])]
+              for f in ("width", "min_height", "rows_top")])
 
     type_into("#part-id", "usb-c-meter")
     check("the path follows the id as it is typed",
@@ -258,9 +349,20 @@ try:
     type_into(fn0 + "[data-f=interface]", "2")
     click("#part-conns tr.pe-fn-row[data-row='2'] [data-act='fn-add']")
     pick(fn1 + "[data-f=function]", "scpi")
-    check("scpi takes the line facts under the template's own names, and no interface",
-          all(visible(fn1 + "[data-f=%s]" % f) for f in ("baud", "write_terminator", "read_terminator", "min_interval_ms", "ack_ok", "ack_err"))
-          and not script("return !!document.querySelector(arguments[0])", [fn1 + "[data-f=interface]"]))
+    facts = script("return Array.from(document.querySelectorAll(arguments[0] + '.pe-fact:not(.pe-fact-fn) > span')).map(function (e) { return e.textContent; })",
+                   ["#part-conns tr.pe-fn-row[data-row='2'] [data-fn='1'] "])
+    check("scpi takes the served line facts, in order, under their names, and no interface",
+          facts == [lf["name"] for lf in TPL["line_facts"]]
+          and not script("return !!document.querySelector(arguments[0])", [fn1 + "[data-f=interface]"]), facts)
+    check("a numeric line fact is text captioned with its served range, a text one is not",
+          script("return [document.querySelector(arguments[0]).type, document.querySelector(arguments[0]).title, document.querySelector(arguments[1]).getAttribute('inputmode')]",
+                 [fn1 + "[data-f=baud]", fn1 + "[data-f=ack_ok]"])
+          == ["text", "a whole number, %d\u2013%d" % (TPL["numbers"]["baud"]["min"], TPL["numbers"]["baud"]["max"]), None])
+    check("the interface and max cables carry their served ranges",
+          script("return [document.querySelector(arguments[0]).title, document.querySelector(arguments[1]).title]",
+                 [fn0 + "[data-f=interface]", conn(2, "max_cables")])
+          == ["a whole number, %d\u2013%d" % (TPL["numbers"]["interface"]["min"], TPL["numbers"]["interface"]["max"]),
+              "a whole number, %d\u2013%d" % (TPL["numbers"]["max_cables"]["min"], TPL["numbers"]["max_cables"]["max"])])
     type_into(fn1 + "[data-f=baud]", "115200")
     type_into(fn1 + "[data-f=write_terminator]", "\\n")
     type_into(fn1 + "[data-f=read_terminator]", "\\r\\n")
@@ -300,11 +402,20 @@ try:
     type_into(conn(4, "id"), "junk")
     click(conn(4, "id").replace("[data-f='id']", "[data-act='remove']"))
     check("a row is removed", conn_ids() == ["in", "out", "usb", "aux"], conn_ids())
-    if HAS_PREVIEW:
-        before = script("return document.getElementById('part-preview-svg').innerHTML")
-        type_into("#part-label", "USB-C power meter, inline")
-        check("the preview follows an edit", script("return document.getElementById('part-preview-svg').innerHTML") != before)
-        type_into("#part-label", "USB-C power meter")
+    before = script("return document.getElementById('part-preview-svg').innerHTML")
+    type_into("#part-label", "USB-C power meter, inline")
+    check("the preview follows an edit", script("return document.getElementById('part-preview-svg').innerHTML") != before)
+    type_into("#part-label", "USB-C power meter")
+    # What a number field cannot hold is sent as typed, for the server to refuse.
+    type_into("#part-width", "21O")
+    click("#part-save")
+    settled()
+    status, text = http("POST", "/api/bench/parts", script("return window.__sent[window.__sent.length - 1].body"))
+    check("a number field typed wrong reaches the server as typed, and is refused 400",
+          script("return window.__sent[window.__sent.length - 1].body.width") == "21O" and status == 400, (status, text))
+    check("the dialog shows that refusal verbatim, nothing is written", result() == text and not (parts_dir / "usb-c-meter.toml").exists(),
+          (result(), text))
+    type_into("#part-width", "210")
     shot("new")
     n0 = changed()
     click("#part-save")
@@ -418,7 +529,9 @@ try:
     check("the dialog shows that refusal verbatim", result() == text, (result(), text))
     check("and nothing is written", not (parts_dir / "odd-kind.toml").exists())
     click("#part-cancel")
-    check("Cancel closes it", mode() == "closed")
+    check("Cancel on that changed draft asks first", mode() == "new" and visible("#part-discard"))
+    click("#part-discard-yes")
+    check("and Discard closes it", mode() == "closed")
 
     # ---- a built-in: read-only, and Copy to this repo ------------------------------
     check("a built-in opens read-only", open_editor("scpi-load") == "builtin")
@@ -508,14 +621,94 @@ try:
     key("")
     check("and closes it once the prompt is gone", mode() == "closed")
 
-    # A save still out when Esc closes the dialog is announced anyway: the file was written.
+    # ---- a changed draft is never dropped silently -------------------------------------
+    check("an unchanged part is no unsaved draft", open_editor("usb-c-meter") == "edit" and unsaved() is False)
+    original = script("return document.getElementById('part-subtitle').value")
+    type_into("#part-subtitle", "changed, not saved")
+    check("a changed field makes it an unsaved draft", unsaved() is True)
+    key("\uE00C")
+    check("Esc on a changed draft asks first, and the dialog stays",
+          mode() == "edit" and visible("#part-discard") and "not saved" in script("return document.getElementById('part-discard-text').textContent"))
+    check("focus is on Keep editing", script("return document.activeElement && document.activeElement.id") == "part-discard-no")
+    shot("discard", "foot")
+    key("\uE00C")
+    check("Esc again keeps editing: the question goes, the draft stays, focus is back in the field",
+          mode() == "edit" and not visible("#part-discard") and unsaved() is True
+          and script("return document.getElementById('part-subtitle').value") == "changed, not saved"
+          and script("return document.activeElement && document.activeElement.id") == "part-subtitle")
+    click("#part-cancel")
+    check("Cancel on a changed draft asks too", mode() == "edit" and visible("#part-discard"))
+    click("#part-discard-yes")
+    check("Discard closes it, and nothing is unsaved", mode() == "closed" and unsaved() is False)
+    check("the file is untouched by a discarded draft", tomllib.loads(path.read_text()).get("subtitle") == original)
+    open_editor("usb-c-meter")
+    type_into("#part-subtitle", "changed")
+    type_into("#part-subtitle", original)
+    key("\uE00C")
+    check("a draft typed back to the file closes on Esc without asking", mode() == "closed")
+
+    click('.topo-bar [data-topo-panel="saved"]')
+    open_editor("usb-c-meter")
+    type_into("#part-subtitle", "changed over a panel")
+    key("\uE00C")
+    check("over a panel, Esc on a changed draft asks and keeps focus on the question, the panel staying",
+          mode() == "edit" and visible("#part-discard") and visible("#topo-panel-saved")
+          and script("return document.activeElement && document.activeElement.id") == "part-discard-no")
+    click("#part-discard-yes")
+    check("Discard closes the editor and leaves the panel", mode() == "closed" and visible("#topo-panel-saved"))
+    key("\uE00C")
+
+    open_editor("usb-c-meter")
+    type_into("#part-subtitle", "changed, then another part opened")
+    script("document.dispatchEvent(new CustomEvent('embarch:edit-part', {detail: {id: 'scpi-load'}})); return true")
+    check("opening another part over a changed draft asks first, naming it",
+          mode() == "edit" and visible("#part-discard") and "`scpi-load`" in script("return document.getElementById('part-discard-text').textContent"))
+    click("#part-discard-yes")
+    check("Discard opens the part asked for", wait_for("return document.getElementById('part-dialog').getAttribute('data-mode') === 'builtin'") is True)
+    check("a built-in is never an unsaved draft", unsaved() is False)
+    click("#part-cancel")
+
+    open_editor("usb-c-meter")
+    type_into("#part-subtitle", "changed, then the project switched")
+    script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: '/elsewhere'}})); return true")
+    check("a project switch keeps a changed draft on screen, unsaveable, saying why",
+          mode() == "edit" and visible("#part-stale") and script("return document.getElementById('part-save').disabled") is True
+          and "cannot be saved" in script("return document.getElementById('part-stale').textContent") and unsaved() is True)
+    shot("stale")
+    n_sent = script("return window.__sent.length")
+    click("#part-save")
+    key("\uE007")
+    check("and neither Save nor Enter sends it", script("return window.__sent.length") == n_sent)
+    key("\uE00C")
+    click("#part-discard-yes")
+    check("it closes once discarded", mode() == "closed")
+    open_editor("usb-c-meter")
+    script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: '/elsewhere'}})); return true")
+    check("a project switch closes an unchanged one", mode() == "closed")
+
+    # ---- the connector cap is the server's ------------------------------------------
+    open_editor(None)
+    cap = TPL["max_connectors"]
+    script("var b = document.getElementById('part-add-conn'); for (var i = 0; i < arguments[0] + 3; i++) b.click(); return true", [cap])
+    check("Add stops at the served cap", script("return document.querySelectorAll('#part-conns tr.pe-conn').length") == cap)
+    check("and is disabled, saying why",
+          script("return document.getElementById('part-add-conn').disabled") is True and visible("#part-conns-full")
+          and script("return document.getElementById('part-conns-full').textContent") == "A template holds at most %d connectors." % cap)
+    click(conn(0, "id").replace("[data-f='id']", "[data-act='remove']"))
+    check("one removed, Add is back", script("return document.getElementById('part-add-conn').disabled") is False and not visible("#part-conns-full"))
+    key("\uE00C")
+    click("#part-discard-yes")
+
+    # A save still out when its draft is discarded is announced anyway: the file was written.
     open_editor("usb-c-meter")
     type_into("#part-subtitle", "saved while closing")
     n1 = changed()
     script("window.__delay = 800; return true")
     click("#part-save")
     key("\uE00C")
-    check("Esc closes the editor while its save is out", mode() == "closed")
+    check("Esc while the save is out asks, since the draft is not saved yet", mode() == "edit" and visible("#part-discard"))
+    click("#part-discard-yes")
+    check("discarded, the editor closes while its save is out", mode() == "closed")
     check("the save still lands and is announced",
           wait_for("return window.__changed.length === arguments[0]", 10, [n1 + 1]) is True
           and tomllib.loads(path.read_text()).get("subtitle") == "saved while closing"

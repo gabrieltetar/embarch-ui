@@ -41,8 +41,6 @@ macro_rules! vocabulary {
             $(#[serde(rename = $text)] $variant),+
         }
 
-        // Not every enum uses both of these.
-        #[allow(dead_code)]
         impl $name {
             pub const ALL: &'static [$name] = &[$($name::$variant),+];
 
@@ -211,7 +209,8 @@ fn powers_of(class: PowerClass) -> Vec<&'static str> {
 /// Besides the word lists, the rules between fields that a part editor has
 /// to follow to offer only what a save accepts: which kinds take a power
 /// role (`power_kinds`), and which functions take an interface or line facts
-/// — the same predicates [`PartTemplate::check`] applies.
+/// — the same predicates [`PartTemplate::check`] applies — and under
+/// `template`, the limits a template file is held to.
 pub fn vocabulary_json() -> serde_json::Value {
     fn words<T: Copy>(all: &[T], text: fn(T) -> &'static str) -> Vec<&'static str> {
         all.iter().map(|&w| text(w)).collect()
@@ -239,6 +238,7 @@ pub fn vocabulary_json() -> serde_json::Value {
         "roles": words(Role::ALL, Role::as_str),
         "interface_functions": functions_where(Function::takes_interface),
         "line_functions": functions_where(Function::takes_line_facts),
+        "template": template_limits(),
     })
 }
 
@@ -268,7 +268,39 @@ pub struct FunctionEntry {
     pub ack_err: Option<String>,
 }
 
+/// One line fact an instrument line takes: its TOML name, and whether it is a
+/// number (else text).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct LineFact {
+    pub name: &'static str,
+    pub numeric: bool,
+}
+
+/// The line facts, in the order a template writes them: served, so the part
+/// editor builds its fields from this list rather than its own copy.
+/// [`FunctionEntry::has_line_facts`] destructures every field, so a fact added
+/// to the struct does not compile until it is placed here or there.
+pub const LINE_FACTS: &[LineFact] = &[
+    LineFact { name: "baud", numeric: true },
+    LineFact { name: "write_terminator", numeric: false },
+    LineFact { name: "read_terminator", numeric: false },
+    LineFact { name: "min_interval_ms", numeric: true },
+    LineFact { name: "ack_ok", numeric: false },
+    LineFact { name: "ack_err", numeric: false },
+];
+
 impl FunctionEntry {
+    /// Whether any line fact ([`LINE_FACTS`]) is set.
+    fn has_line_facts(&self) -> bool {
+        let FunctionEntry { function: _, interface: _, baud, write_terminator, read_terminator, min_interval_ms, ack_ok, ack_err } = self;
+        baud.is_some()
+            || write_terminator.is_some()
+            || read_terminator.is_some()
+            || min_interval_ms.is_some()
+            || ack_ok.is_some()
+            || ack_err.is_some()
+    }
+
     fn check(&self, connector: &str) -> Result<(), String> {
         if self.interface.is_some() && !self.function.takes_interface() {
             return Err(format!(
@@ -276,13 +308,7 @@ impl FunctionEntry {
                 self.function.as_str()
             ));
         }
-        let line_facts = self.baud.is_some()
-            || self.write_terminator.is_some()
-            || self.read_terminator.is_some()
-            || self.min_interval_ms.is_some()
-            || self.ack_ok.is_some()
-            || self.ack_err.is_some();
-        if line_facts && !self.function.takes_line_facts() {
+        if self.has_line_facts() && !self.function.takes_line_facts() {
             return Err(format!(
                 "connector `{connector}`: line facts belong to `scpi`, not `{}`",
                 self.function.as_str()
@@ -323,6 +349,33 @@ impl Connector {
 /// The most connectors one template may list: far past any part, and a bound
 /// on what a repo file can make every check cost.
 pub const MAX_CONNECTORS: usize = 64;
+
+/// The fewest cables a connector may take: one that takes none is no connector.
+pub const MIN_MAX_CABLES: u32 = 1;
+
+fn range<T: Into<u64>>(min: T, max: T) -> serde_json::Value {
+    json!({ "min": min.into(), "max": max.into() })
+}
+
+/// What a template file may hold, served beside the vocabulary so the part
+/// editor restates no limit (spec.md: "a limit enforced server-side is
+/// served"): the connector cap, every number field's range — its integer
+/// type's, narrowed where the check narrows it — and the line facts.
+fn template_limits() -> serde_json::Value {
+    json!({
+        "max_connectors": MAX_CONNECTORS,
+        "numbers": {
+            "width": range(u32::MIN, u32::MAX),
+            "min_height": range(u32::MIN, u32::MAX),
+            "rows_top": range(u32::MIN, u32::MAX),
+            "max_cables": range(MIN_MAX_CABLES, u32::MAX),
+            "interface": range(u8::MIN, u8::MAX),
+            "baud": range(u32::MIN, u32::MAX),
+            "min_interval_ms": range(u32::MIN, u32::MAX),
+        },
+        "line_facts": LINE_FACTS,
+    })
+}
 
 /// The width a template gets when it states none: the generic board's.
 fn default_width() -> u32 {
@@ -398,8 +451,8 @@ impl PartTemplate {
             if !seen.insert(&c.id) {
                 return Err(format!("connector `{}` is listed twice", c.id));
             }
-            if c.max_cables == 0 {
-                return Err(format!("connector `{}` has max_cables 0", c.id));
+            if c.max_cables < MIN_MAX_CABLES {
+                return Err(format!("connector `{}` has max_cables {}; it takes at least {MIN_MAX_CABLES}", c.id, c.max_cables));
             }
             if c.power.is_some() && !carries_power(c.kind) {
                 return Err(format!(
@@ -944,32 +997,80 @@ mod tests {
         assert_eq!(v["power_kinds"], json!(["usb-c", "banana", "terminal"]));
         assert_eq!(v["interface_functions"], json!(["vcom", "bootload-app", "bootload-bootloader"]));
         assert_eq!(v["line_functions"], json!(["scpi"]));
+        let t = &v["template"];
+        assert_eq!(t["max_connectors"], 64);
+        assert_eq!(t["numbers"]["max_cables"], json!({ "min": 1, "max": 4_294_967_295u64 }));
+        assert_eq!(t["numbers"]["interface"], json!({ "min": 0, "max": 255 }));
+        assert_eq!(t["numbers"]["width"], json!({ "min": 0, "max": 4_294_967_295u64 }));
+        assert_eq!(
+            t["line_facts"],
+            json!([
+                { "name": "baud", "numeric": true },
+                { "name": "write_terminator", "numeric": false },
+                { "name": "read_terminator", "numeric": false },
+                { "name": "min_interval_ms", "numeric": true },
+                { "name": "ack_ok", "numeric": false },
+                { "name": "ack_err", "numeric": false },
+            ])
+        );
     }
 
-    /// The editor offers a power role, an interface and line facts only
-    /// where the vocabulary says so; each served list must be exactly what
-    /// the check accepts, or the editor would offer a field a save refuses.
+    /// Every served range is the parser's own: its ends parse, one past
+    /// either end does not — so a field whose type or check changes fails
+    /// here until the vocabulary says so too.
+    #[test]
+    fn the_served_number_ranges_are_the_parsers_own() {
+        let numbers = vocabulary_json()["template"]["numbers"].clone();
+        let numbers = numbers.as_object().unwrap();
+        assert_eq!(numbers.len(), 7, "{numbers:?}");
+        let head = "id = \"x\"\nlabel = \"X\"\ncategory = \"board\"\nlook = \"board\"\n";
+        let hub = HUB_KIND.as_str();
+        let with = |field: &str, n: i128| -> bool {
+            let text = match field {
+                "width" | "min_height" | "rows_top" => format!("{head}{field} = {n}\n"),
+                "max_cables" => format!("{head}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"swd\"\nside = \"left\"\nmax_cables = {n}\n"),
+                "interface" => format!("{head}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"{hub}\"\nside = \"left\"\nfunctions = [{{ function = \"vcom\", interface = {n} }}]\n"),
+                _ => format!("{head}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"{hub}\"\nside = \"left\"\nfunctions = [{{ function = \"scpi\", {field} = {n} }}]\n"),
+            };
+            parse_template(&text).is_ok()
+        };
+        for (field, r) in numbers {
+            let (min, max) = (r["min"].as_i64().unwrap() as i128, r["max"].as_i64().unwrap() as i128);
+            assert!(with(field, min) && with(field, max), "{field}: {min}..={max} should parse");
+            assert!(!with(field, min - 1) && !with(field, max + 1), "{field}: past {min}..={max} should not parse");
+        }
+    }
+
+    /// The editor offers a power role, functions, an interface and line facts
+    /// only where the vocabulary says so; each served rule must be exactly
+    /// what the check accepts, or the editor would offer a field a save
+    /// refuses (or hide one it accepts).
     #[test]
     fn the_served_field_rules_are_the_checks_own() {
         let v = vocabulary_json();
         let listed = |key: &str, word: &str| v[key].as_array().unwrap().iter().any(|w| w == word);
         let base = "id = \"x\"\nlabel = \"X\"\ncategory = \"board\"\nlook = \"board\"\n";
-        for kind in Kind::ALL {
-            let t = format!("{base}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"{}\"\nside = \"left\"\npower = \"drp\"\n", kind.as_str());
-            assert_eq!(parse_template(&t).is_ok(), listed("power_kinds", kind.as_str()), "{}", kind.as_str());
+        let connector = |kind: &str, extra: &str| {
+            parse_template(&format!("{base}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"{kind}\"\nside = \"left\"\n{extra}")).is_ok()
+        };
+        for kind in Kind::ALL.iter().map(|k| k.as_str()) {
+            assert!(connector(kind, ""), "{kind}");
+            assert_eq!(connector(kind, "power = \"drp\"\n"), listed("power_kinds", kind), "power on {kind}");
+            assert_eq!(connector(kind, "functions = [{ function = \"probe\" }]\n"), kind == v["hub_kind"], "functions on {kind}");
         }
         let hub = HUB_KIND.as_str();
-        for f in Function::ALL {
-            let with = |facts: &str| {
-                parse_template(&format!(
-                    "{base}[[connectors]]\nid = \"a\"\nlabel = \"A\"\nkind = \"{hub}\"\nside = \"left\"\nfunctions = [{{ function = \"{}\"{facts} }}]\n",
-                    f.as_str()
-                ))
-                .is_ok()
-            };
-            assert!(with(""), "{}", f.as_str());
-            assert_eq!(with(", interface = 1"), listed("interface_functions", f.as_str()), "{}", f.as_str());
-            assert_eq!(with(", baud = 9600"), listed("line_functions", f.as_str()), "{}", f.as_str());
+        let facts = v["template"]["line_facts"].as_array().unwrap().clone();
+        assert_eq!(facts.len(), LINE_FACTS.len());
+        for f in Function::ALL.iter().map(|f| f.as_str()) {
+            let with = |extra: &str| connector(hub, &format!("functions = [{{ function = \"{f}\"{extra} }}]\n"));
+            assert!(with(""), "{f}");
+            assert_eq!(with(", interface = 1"), listed("interface_functions", f), "interface on {f}");
+            for fact in &facts {
+                let (name, numeric) = (fact["name"].as_str().unwrap(), fact["numeric"].as_bool().unwrap());
+                let (right, wrong) = if numeric { ("1", "\"1\"") } else { ("\"x\"", "1") };
+                assert_eq!(with(&format!(", {name} = {right}")), listed("line_functions", f), "{name} on {f}");
+                assert!(!with(&format!(", {name} = {wrong}")), "{name} on {f} takes a {}", if numeric { "number" } else { "text" });
+            }
         }
     }
 
