@@ -250,12 +250,17 @@
   // What the same pass said about each bench board (`bench:<probe serial>`),
   // keyed by its probe serial; dropped when that board is no longer enrolled.
   let benchStatus = {};
+  // Which pass the verdicts are from: a new stamp per Validate pass, the
+  // same while a verdict is merely dropped, so the canvas can tell a pass
+  // that repeats the last one's results from a verdict going away.
+  let passStamp = null;
+  let passCount = 0;
 
   // **The bench canvas draws the same verdicts** (bench.js): under the part
   // holding a role, and under a bench board's part by its probe serial. Sent
   // after a Validate pass and whenever one is dropped — never from the poll.
   function publishVerdicts() {
-    const out = { roles: {}, boards: {} };
+    const out = { roles: {}, boards: {}, pass: passStamp };
     Object.keys(roleStatus).forEach(function (role) {
       out.roles[role] = { status: roleStatus[role].status, text: statusText(roleStatus[role]) };
     });
@@ -5553,17 +5558,15 @@
     return (parent.length > 2 ? "…" + sep : sep) + parent.slice(-2).join(sep);
   }
 
-  var projectRead = false;   // the first read at page load is no switch
-
-  function renderProject(state) {
-    var first = !projectRead;
-    projectRead = true;
+  // `initial`: the read at page load (sdLoadProject says so), which is no
+  // switch — bench.js keeps what it already loaded.
+  function renderProject(state, initial) {
     var before = projectState ? projectState.path : undefined;
     projectState = state || { path: null, recents: [] };
     // The Atlas tab (atlas.js) reads files in the open project and reloads on a switch.
     if (before !== projectState.path) {
-      document.dispatchEvent(new CustomEvent("embarch:project", { detail: { path: projectState.path, initial: first } }));
-      if (!first) dropValidateReport();
+      document.dispatchEvent(new CustomEvent("embarch:project", { detail: { path: projectState.path, initial: !!initial } }));
+      if (!initial) dropValidateReport();
     }
 
     renderShellDesk();
@@ -5670,7 +5673,9 @@
       if (!resp.ok) throw new Error(body.error || resp.status);
       closeProjectDialog();
       shellDeskKnown = true;
+      var wasPath = projectState ? projectState.path : null;
       await followDesk(body.desk, true);
+      if (switches && projectState.path === wasPath) benchLeaveDone(false);
       document.dispatchEvent(new CustomEvent("embarch:desk-switched"));
     } catch (e) {
       if (switches) benchLeaveDone(false);
@@ -5770,11 +5775,11 @@
     document.getElementById("project-dialog-backdrop").style.display = "none";
   }
 
-  async function sdLoadProject() {
+  async function sdLoadProject(initial) {
     try {
       var resp = await fetch("/api/study-designer/project");
       var state = await resp.json();
-      renderProject(state);
+      renderProject(state, initial);
       if (state.path) {
         await sdEnterProject();
       } else {
@@ -5820,7 +5825,11 @@
         shellDesk = null;
         hideBenchBanner();
       }
+      var wasPath = projectState ? projectState.path : null;
       renderProject(state);
+      // The same repo after all (the server's spelling of the path): no
+      // switch happened, so the bench editor keeps its edits.
+      if (projectState.path === wasPath) benchLeaveDone(false);
       closeProjectDialog();
       // Everything the previous project put on screen is about the previous
       // project: the table, the taps and the saved-study list. The server
@@ -6121,7 +6130,7 @@
     // study toolbar inside `sd-body`, where that distinction never came up.
     sdEl("sd-static-run").addEventListener("click", sdRunStaticAnalysis);
     sdEl("sd-discover").addEventListener("click", sdDiscover);
-    sdLoadProject();
+    sdLoadProject(true);
     // **Surveyed even with no project open**, because "no project" is one of
     // the answers: the card would otherwise sit on its "checking…"
     // placeholder forever on a tab whose data path never runs, which reads
@@ -6669,6 +6678,8 @@
       // lanes are already under.
       roleStatus = {};
       benchStatus = {};
+      passCount += 1;
+      passStamp = String(body.checked_at_utc_ms || 0) + "#" + passCount;
       (body.checks || []).forEach(function (c) {
         const entry = {
           status: c.status,

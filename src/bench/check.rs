@@ -520,18 +520,60 @@ fn joined(adj: &BTreeMap<&str, Vec<&str>>, from: &str, to: &str) -> bool {
 /// Every chain of `mounted_on` that comes back to where it started, each
 /// once, as its parts in chain order from the smallest id.
 fn mount_cycles(ctx: &Ctx, bench: &Bench) -> Vec<Vec<String>> {
+    fn canonical(mut chain: Vec<&str>) -> Vec<String> {
+        let min = chain.iter().enumerate().min_by_key(|(_, id)| **id).map_or(0, |(i, _)| i);
+        chain.rotate_left(min);
+        chain.into_iter().map(str::to_string).collect()
+    }
     let mut cycles: BTreeSet<Vec<String>> = BTreeSet::new();
-    for start in &bench.parts {
+    // The parts a mount can name — the first under each id — as nodes, each
+    // with at most one edge, to what it is mounted on: a functional graph,
+    // whose rings one walk with white/grey/black marks finds (fix round 2;
+    // a walk per part, checking its chain at each step, was cubic).
+    let nodes: Vec<&Part> = bench.parts.iter().filter(|p| ctx.part(&p.id).is_some_and(|q| std::ptr::eq(q, *p))).collect();
+    let index: BTreeMap<&str, usize> = nodes.iter().enumerate().map(|(i, p)| (p.id.as_str(), i)).collect();
+    let next = |i: usize| nodes[i].mounted_on.as_deref().and_then(|b| index.get(b).copied());
+    const WHITE: u8 = 0;
+    const GREY: u8 = 1;
+    const BLACK: u8 = 2;
+    let mut mark = vec![WHITE; nodes.len()];
+    for first in 0..nodes.len() {
+        if mark[first] != WHITE {
+            continue;
+        }
+        let mut path: Vec<usize> = Vec::new();
+        let mut at = Some(first);
+        while let Some(i) = at {
+            match mark[i] {
+                WHITE => {
+                    mark[i] = GREY;
+                    path.push(i);
+                    at = next(i);
+                }
+                GREY => {
+                    let from = path.iter().position(|&j| j == i).unwrap_or(0);
+                    cycles.insert(canonical(path[from..].iter().map(|&j| nodes[j].id.as_str()).collect()));
+                    break;
+                }
+                _ => break,
+            }
+        }
+        for j in path {
+            mark[j] = BLACK;
+        }
+    }
+    // A second part under an id is no node, but its own mount still starts a
+    // chain, which is a ring when it comes back to its id.
+    for start in bench.parts.iter().filter(|p| !ctx.part(&p.id).is_some_and(|q| std::ptr::eq(q, *p))) {
         let mut chain: Vec<&str> = vec![start.id.as_str()];
+        let mut seen: BTreeSet<&str> = BTreeSet::from([start.id.as_str()]);
         let mut at = start;
         while let Some(next) = at.mounted_on.as_deref().and_then(|b| ctx.part(b)) {
             if next.id == start.id {
-                let min = chain.iter().enumerate().min_by_key(|(_, id)| **id).map_or(0, |(i, _)| i);
-                chain.rotate_left(min);
-                cycles.insert(chain.iter().map(|s| s.to_string()).collect());
+                cycles.insert(canonical(chain));
                 break;
             }
-            if chain.contains(&next.id.as_str()) || chain.len() > bench.parts.len() {
+            if !seen.insert(next.id.as_str()) {
                 break;
             }
             chain.push(&next.id);
@@ -1283,6 +1325,103 @@ power = "drp"
         bench.parts[1].mounted_on = Some("partner".into());
         let f = check(&bench, &templates(), None);
         assert!(f.iter().any(|f| f.code == "mount-cycle" && f.text == "pd-bench is mounted on itself."), "{f:#?}");
+    }
+
+    /// The ring finder as it was before fix round 2: a walk from every part,
+    /// checking its chain at each step. Kept to hold the one walk to it.
+    fn mount_cycles_by_walks(ctx: &Ctx, bench: &Bench) -> Vec<Vec<String>> {
+        let mut cycles: BTreeSet<Vec<String>> = BTreeSet::new();
+        for start in &bench.parts {
+            let mut chain: Vec<&str> = vec![start.id.as_str()];
+            let mut at = start;
+            while let Some(next) = at.mounted_on.as_deref().and_then(|b| ctx.part(b)) {
+                if next.id == start.id {
+                    let min = chain.iter().enumerate().min_by_key(|(_, id)| **id).map_or(0, |(i, _)| i);
+                    chain.rotate_left(min);
+                    cycles.insert(chain.iter().map(|s| s.to_string()).collect());
+                    break;
+                }
+                if chain.contains(&next.id.as_str()) || chain.len() > bench.parts.len() {
+                    break;
+                }
+                chain.push(&next.id);
+                at = next;
+            }
+        }
+        cycles.into_iter().collect()
+    }
+
+    fn mounted(ids_and_bases: &[(&str, Option<&str>)]) -> Bench {
+        let parts = ids_and_bases
+            .iter()
+            .map(|(id, base)| {
+                let mut p = part(id, "riser");
+                p.mounted_on = base.map(str::to_string);
+                p
+            })
+            .collect();
+        Bench { slug: "m".into(), name: "M".into(), legacy: false, version: None, parts, cables: vec![], configs: vec![], signals: vec![] }
+    }
+
+    #[test]
+    fn rings_are_found_in_one_walk_exactly_as_before() {
+        let t = stackable();
+        let cases: Vec<Vec<(&str, Option<&str>)>> = vec![
+            vec![("a", Some("a"))],                                                     // mounted on itself
+            vec![("a", Some("b")), ("b", Some("a"))],                                   // two
+            vec![("t", Some("a")), ("a", Some("b")), ("b", Some("c")), ("c", Some("a"))], // a tail into a ring of three
+            vec![("a", None), ("b", Some("a")), ("c", Some("b"))],                      // a tower, no ring
+            vec![("a", Some("b")), ("b", Some("a")), ("c", Some("d")), ("d", Some("c")), ("e", Some("e"))], // three rings
+            vec![("x", Some("y")), ("y", Some("x")), ("x", Some("z")), ("z", None)],     // a second x
+            vec![("x", None), ("y", Some("x")), ("x", Some("y"))],                      // a second x closing a ring the first is not in
+            vec![("a", Some("nowhere")), ("b", Some("a"))],                             // a mount on no part
+        ];
+        for parts in &cases {
+            let bench = mounted(parts);
+            let ctx = Ctx::new(&bench, &t);
+            assert_eq!(mount_cycles(&ctx, &bench), mount_cycles_by_walks(&ctx, &bench), "{parts:?}");
+        }
+        // And on many benches no one wrote by hand: ids reused, mounts on
+        // themselves, on nothing, on no part.
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut roll = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..400 {
+            let n = 1 + roll(12) as usize;
+            let names: Vec<String> = (0..n).map(|_| format!("p{}", roll(9))).collect();
+            let bases: Vec<Option<String>> = (0..n)
+                .map(|_| match roll(5) {
+                    0 => None,
+                    1 => Some("ghost".to_string()),
+                    _ => Some(format!("p{}", roll(9))),
+                })
+                .collect();
+            let pairs: Vec<(&str, Option<&str>)> = names.iter().zip(&bases).map(|(id, b)| (id.as_str(), b.as_deref())).collect();
+            let bench = mounted(&pairs);
+            let ctx = Ctx::new(&bench, &t);
+            assert_eq!(mount_cycles(&ctx, &bench), mount_cycles_by_walks(&ctx, &bench), "{pairs:?}");
+        }
+    }
+
+    #[test]
+    fn a_ring_of_the_part_cap_is_found_cheaply() {
+        let t = stackable();
+        let n = crate::bench::files::MAX_PARTS;
+        let names: Vec<String> = (0..n).map(|i| format!("r{i}")).collect();
+        let bases: Vec<String> = (0..n).map(|i| format!("r{}", (i + 1) % n)).collect();
+        let pairs: Vec<(&str, Option<&str>)> = names.iter().zip(&bases).map(|(id, b)| (id.as_str(), Some(b.as_str()))).collect();
+        let bench = mounted(&pairs);
+        let ctx = Ctx::new(&bench, &t);
+        let started = std::time::Instant::now();
+        let rings = mount_cycles(&ctx, &bench);
+        let took = started.elapsed();
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].len(), n);
+        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
     }
 
     #[test]

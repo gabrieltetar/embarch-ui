@@ -152,6 +152,9 @@
   var lostEdits = null;      // a bench whose unsaved edits a project switch from elsewhere dropped
   var leavePending = null;   // a switch the human said may drop the edits, until it lands or fails
   var saveInFlight = null;   // the PUT on its way, which a leave waits for
+  var lastSaveError = null;  // why the last save did not land, for a leave that waited on it
+  var leaveParts = false;    // the leave confirmed also drops the part editor's draft, once it lands
+  var lastPass;              // the stamp of the Validate pass the verdicts are from
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -1149,7 +1152,11 @@
       });
     });
     verdicts = next;
-    placeVerdicts(changedIds);
+    // A new pass places every verdict afresh — one that repeats the last
+    // pass's result word for word included, since it checked the bench as it
+    // stands now; a verdict merely dropped re-places only what changed.
+    if (d.pass !== lastPass) { lastPass = d.pass; placeVerdicts(); }
+    else placeVerdicts(changedIds);
     render();
     renderNotes();
   });
@@ -1937,7 +1944,8 @@
       redoStack = [];
       remember(slug);
       picker.value = slug;
-      leavePending = null;
+      leaveLanded();
+      lastSaveError = null;
       buildModel();
       placeVerdicts();
       if (sel && !(sel.kind === "part" ? model.parts[sel.id] : cableById(sel.id))) sel = null;
@@ -1958,7 +1966,7 @@
       // A bench that would not open leaves the one on screen, edits and all,
       // with a line saying why — unless no project is open at all.
       if (bench && model && e && e.status !== 409) {
-        leavePending = null;
+        leaveDone(false);
         picker.value = bench.slug;
         notice("Could not open embarch/topologies/" + slug + ".toml: " + errText(e), "error");
         return;
@@ -2004,11 +2012,16 @@
   function edit(fn) {
     if (!bench) return false;
     // A cable being laid or a part being dragged was answered for the bench
-    // before this edit; its verdicts no longer hold (fix round 1).
+    // before this edit; its verdicts no longer hold (fix round 1). Ended even
+    // when the edit turns out to change nothing, and then drawn ended.
+    var had = !!(laying || drag || trayArm);
     cancelTransient();
     var before = snapshotContent();
     fn();
-    if (snapshotContent() === before) return false;
+    if (snapshotContent() === before) {
+      if (had) { render(); renderTray(); }
+      return false;
+    }
     notice("", "info");
     lostEdits = null;
     undoStack.push(before);
@@ -2544,11 +2557,15 @@
   // next Save would put it back over the file.
   function confirmLeave(what) {
     if (saveInFlight) {
-      var again = function () { return confirmLeave(what); };
+      // A save that came back refused opened its own dialog (a 409's
+      // Reload): that is what the human answers, and the leave waits for
+      // another try rather than closing it unseen.
+      var again = function () { return dlgState ? false : confirmLeave(what); };
       return saveInFlight.then(again, again);
     }
     var benchDirty = isDirty(), partDirty = partsUnsaved();
     if (!benchDirty && !partDirty) return Promise.resolve(true);
+    var failedSave = lastSaveError;
     var where = { tab: "leave the Topology tab", project: "switch project", desk: "open another desk", bench: "open another bench" }[what] || "go on";
     var held = [];
     if (benchDirty) held.push((bench.name || bench.slug) + " has changes that are not in embarch/topologies/" + bench.slug + ".toml");
@@ -2556,26 +2573,40 @@
     var text = held.join(", and ");
     return dialog({
       title: "Unsaved changes",
-      text: text.charAt(0).toUpperCase() + text.slice(1) + ". Discard " + (held.length > 1 ? "both" : "it") + " to " + where + "?",
+      text: (failedSave && benchDirty ? "The last save did not land: " + failedSave + ". " : "") +
+        text.charAt(0).toUpperCase() + text.slice(1) + ". Discard " + (held.length > 1 ? "both" : "it") + " to " + where + "?",
       ok: "Discard changes",
       danger: true,
       cancel: "Keep editing"
     }).then(function (ok) {
       if (!ok) return false;
       leavePending = what;
-      var pa = window.embarchParts;
-      if (partDirty && pa && typeof pa.discard === "function") {
-        try { pa.discard(); } catch (_) { /* its own dialog says what it could not do */ }
-      }
-      if (what === "tab") { discardEdits(); leavePending = null; }
+      leaveParts = partDirty;
+      // A tab switch cannot fail: both halves' unsaved work goes now. Any
+      // other leave drops them where the switch lands (leaveLanded).
+      if (what === "tab") { discardEdits(); leaveLanded(); }
       return true;
     });
   }
 
+  // The switch a leave was confirmed for happened: the part editor's draft
+  // goes too, when the leave was asked about it. The bench's own edits are
+  // replaced by whatever loaded.
+  function leaveLanded() {
+    var pa = window.embarchParts;
+    if (leavePending && leaveParts && pa && typeof pa.discard === "function") {
+      try { pa.discard(); } catch (_) { /* its own dialog says what it could not do */ }
+    }
+    leavePending = null;
+    leaveParts = false;
+  }
+
   // The switch a leave was confirmed for did not happen: the edits stay,
-  // still unsaved.
+  // still unsaved, and so does the part editor's draft.
   function leaveDone(ok) {
-    if (!ok) leavePending = null;
+    if (ok) { leaveLanded(); return; }
+    leavePending = null;
+    leaveParts = false;
   }
   function discardEdits() {
     if (!bench || saved == null || !isDirty()) return;
@@ -2595,6 +2626,7 @@
     saving = true;
     renderDirty();
     var sent = snapshotContent(), slug = bench.slug;
+    lastSaveError = null;
     saveInFlight = send("PUT", ROUTE_BENCHES + "/" + encodeURIComponent(slug), benchBody()).then(function (b) {
       saving = false;
       saveInFlight = null;
@@ -2612,20 +2644,21 @@
     }).catch(function (e) {
       saving = false;
       saveInFlight = null;
+      lastSaveError = errText(e);
       renderDirty();
       if (e && e.status === 409) { conflict(e); return; }
       notice("Not saved: " + errText(e), "error");
     });
   }
 
-  // A 409 on a save: the file changed on disk since it was read, so say so
-  // in the server's words and offer the file back — never an overwrite. The
-  // server names which 409 it is in a header (`x-embarch-refusal`); a file
-  // that no longer parses and a name that no longer derives the slug are
-  // fixed by hand, so those are said and Reload is not offered.
+  // A 409 on a save. The server names which it is in a header
+  // (`x-embarch-refusal`), and only `version-changed` — the file changed on
+  // disk since it was read — is cured by reading it again, so only that one
+  // offers Reload, never an overwrite. Any other (a file that no longer
+  // parses, a rename, no project open) is said in the server's words.
   function conflict(e) {
     var slug = bench.slug;
-    if (e.code === "unparseable" || e.code === "rename") { notice("Not saved: " + errText(e), "error"); return; }
+    if (e.code !== "version-changed") { notice("Not saved: " + errText(e), "error"); return; }
     dialog({
       title: "The file changed on disk",
       text: errText(e) + ". Reload reads it again and drops the unsaved edits on screen; Keep editing leaves the file as it is.",
@@ -2656,7 +2689,7 @@
         return send("POST", ROUTE_BENCHES, body).then(function (b) { made = b; return null; }, errText);
       }
     }).then(function (ok) {
-      if (!ok || !made) { leavePending = null; return; }
+      if (!ok || !made) { leaveDone(false); return; }
       remember(made.slug);
       document.dispatchEvent(new CustomEvent("embarch:bench-saved", { detail: { slug: made.slug } }));
       loadAll(false, made.slug);
@@ -2932,9 +2965,12 @@
       return;
     }
     if (k === "Escape") {
+      // The topmost thing first (decision 78): a panel open over the canvas
+      // is app.js's to close before a cable, a picked tray item or the bin.
+      if (document.querySelector(".topo-panel:not([hidden])")) return;
       if (laying) { e.stopPropagation(); cancelLaying(); return; }
       if (trayArm) { e.stopPropagation(); trayArm = null; renderTray(); render(); return; }
-      if (!binEl.hidden && !document.querySelector(".topo-panel:not([hidden])")) { setBin(false); return; }
+      if (!binEl.hidden) { setBin(false); return; }
       return;
     }
     if (inField(e.target) || closest(document.activeElement, ".topo-panel")) return;
@@ -3027,8 +3063,14 @@
     pickers = null; pickersError = null; pickersAsked = false;   // the board types are the repo's
     if (d.initial && bench) return;
     var asked = leavePending === "project" || leavePending === "desk";
-    leavePending = null;
     lostEdits = !asked && isDirty() ? "The project switched with unsaved changes to " + (bench.name || bench.slug) + " on screen; they were not saved." : null;
+    if (asked) leaveLanded(); else leaveDone(false);
+    // The bench on screen is the old repo's: it goes now, so nothing can save
+    // it into the new one, and a bench the new repo cannot read is said as
+    // that, never shown as the old one.
+    clearBench();
+    picker.hidden = true;
+    showState("reading…", false);
     renderNotes();
     loadAll(false);
   });

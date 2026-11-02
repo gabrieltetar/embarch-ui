@@ -264,7 +264,11 @@ an unbind; a confirmed leave that does not happen (a repo path that will not
 open, a Cancel on a new bench's name) keeping the edits; a save held in the
 proxy for 1.5 s being waited for; an edit under a cable being laid ending it;
 the `x-embarch-refusal: rename` 409 offering no Reload; and the part
-editor's unsaved draft (a stand-in `window.embarchParts`) asked about. It
+editor's unsaved draft (a stand-in `window.embarchParts`) asked about.
+Fix round 2 added: a second Validate pass with the same words restoring
+the verdicts (the pass stamp), the leave's dialog drawn over the real part
+editor, Esc yielding to an open panel, an edit that changes nothing ending
+a cable, and a project switch taking the old bench off the canvas. It
 uses four ports: `EMBARCH_UI_PORT` and the three after it (proxy, stub Core,
 an unused desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves screenshots in both
 themes.

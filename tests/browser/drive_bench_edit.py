@@ -662,6 +662,18 @@ try:
           wait_for("return !document.querySelector('#bench-svg [data-part=\"debug-probe\"]') && !document.querySelector('#bench-svg .bn-ok, #bench-svg .bn-source, #bench-svg .bn-pending');", 4))
     undo()
     wait_for("return !!document.querySelector('#bench-svg [data-part=\"debug-probe\"]');", 4)
+    # Esc closes the topmost thing: a panel open over a cable being laid goes first.
+    select_part("debug-probe")
+    click(conn("debug-probe", "swd"))
+    wait_for("var e=document.querySelector(arguments[0]); return !!e && e.classList.contains('bn-ok');", 6, [conn("dut", "swd")])
+    script("document.getElementById('bench-checks-btn').click();")
+    key(ESC)
+    check("Esc with a panel open over a cable being laid closes the panel and keeps the cable",
+          script("return document.getElementById('topo-panel-checks').hidden;") and script("return !!document.querySelector('#bench-svg .bn-source');"))
+    # An edit that changes nothing still ends the cable, and the canvas shows it ended.
+    script("var i=document.querySelector('#bench-inspector [data-ed=\"label\"]'); i.dispatchEvent(new Event('change', {bubbles:true}));")
+    check("an edit that changes nothing ends a cable being laid, and nothing is left pulsing",
+          wait_for("return !document.querySelector('#bench-svg .bn-ok, #bench-svg .bn-source, #bench-svg .bn-pending');", 4))
     select_part("debug-probe")
     click(conn("debug-probe", "swd"))
     wait_for("var e=document.querySelector(arguments[0]); return !!e && e.classList.contains('bn-ok');", 6, [conn("dut", "swd")])
@@ -756,8 +768,9 @@ try:
         "return document.querySelector('#bench-svg [data-part=\"partner\"] .bn-sub').textContent.indexOf(' + ') < 0;", 4) and not sits_on("drp", "partner"))
 
     # --- Validate's verdicts stay on the parts Validate checked --------------------
-    script("document.dispatchEvent(new CustomEvent('embarch:verdicts', {detail: {roles: {dut: {status: 'pass', text: 'hardware ID matches'}},"
-           " boards: {'%s': {status: 'pass', text: 'board answered'}, '%s': {status: 'pass', text: 'loose answered'}}}}));" % (BOUND, LOOSE))
+    PASS_JS = ("document.dispatchEvent(new CustomEvent('embarch:verdicts', {detail: {pass: arguments[0], roles: {dut: {status: 'pass', text: 'hardware ID matches'}},"
+               " boards: {'%s': {status: 'pass', text: 'board answered'}, '%s': {status: 'pass', text: 'loose answered'}}}}));" % (BOUND, LOOSE))
+    script(PASS_JS, ["pass-1"])
     check("a pass's verdicts land under the role's part and the bench board bound to the probe", wait_for(
         "return !!document.querySelector('#bench-svg [data-verdict=\"dut\"]') && !!document.querySelector('#bench-svg [data-verdict=\"partner\"]');", 4))
     check("a verdict for a probe no part binds is drawn nowhere", not verdict_on("debug-probe"))
@@ -848,6 +861,10 @@ try:
         "var i=document.getElementById('bench-inspector'); return i.contains(document.activeElement);"))
     undo()
     wait_for("return !document.querySelector('#bench-tray [data-tray=\"probe:%s\"]');" % BOUND, 4)
+    script(PASS_JS, ["pass-2"])
+    check("a second pass, word for word the same as the first, puts both verdicts back where they now belong",
+          wait_for("return !!document.querySelector('#bench-svg [data-verdict=\"dut\"]') && !!document.querySelector('#bench-svg [data-verdict=\"partner\"]');", 4)
+          and "Validate checked" not in notes(), notes())
     select_part("partner")
     before = script("return document.querySelector(arguments[0]).getAttribute('data-x');", [conn("partner", "stlink")])
     key("f")
@@ -1009,6 +1026,25 @@ try:
     script("document.getElementById('bench-dialog-ok').click();")
     check("Discard tells the part editor to drop its draft", on_bench("other-bench") and script("return window.__partsDiscarded === true;"))
     script("if (window.__parts) window.embarchParts = window.__parts; else delete window.embarchParts;")
+    # The real part editor open on a changed draft: the leave's dialog draws over it.
+    script("document.dispatchEvent(new CustomEvent('embarch:edit-part', {detail: {id: null}}));")
+    wait_for("return document.getElementById('part-dialog').style.display !== 'none' && !!document.getElementById('part-label');", 4)
+    script("var l=document.getElementById('part-label'); l.value='Trial pod'; l.dispatchEvent(new Event('input', {bubbles:true}));")
+    check("the real part editor counts its changed draft as unsaved", script("return window.embarchParts.unsaved() && window.embarchBench.unsaved();"))
+    script("location.hash = '#desk';")
+    wait_for("return document.getElementById('bench-dialog').style.display === 'block';", 4)
+    ontop = script("var r=document.getElementById('bench-dialog').getBoundingClientRect();"
+                   "var e=document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);"
+                   "return !!e && document.getElementById('bench-dialog').contains(e);")
+    check("leaving with the part editor open asks in a dialog drawn over the part editor, not under it", ontop and "part editor" in (dialog_text() or ""))
+    key(ESC)
+    check("Esc there keeps editing: the Topology tab, the part editor and its draft stay", not dialog_open() and script(
+        "return document.querySelector('.tab-panel.active').getAttribute('data-tab') === 'topology' && location.hash === '#topology' &&"
+        " document.getElementById('part-dialog').style.display !== 'none' && window.embarchParts.unsaved();"))
+    script("document.getElementById('part-cancel').click();")
+    wait_for("return !document.getElementById('part-discard').hidden;", 4)
+    script("document.getElementById('part-discard-yes').click();")
+    wait_for("return document.getElementById('part-dialog').style.display === 'none';", 4)
 
     # --- a new bench ------------------------------------------------------------------
     pick_bench("+new")
@@ -1041,6 +1077,12 @@ try:
     check("and Save writes it", file("loose-bench").get("configs") == [{"name": "A", "cables": [["dut.usb-c-1", "an.in"]]}], file("loose-bench").get("configs"))
     save()
     check("Ctrl+S with nothing unsaved writes nothing and says so", "Nothing to save" in notice(), notice())
+    # A project switch takes the old repo's bench off the canvas, whatever the new one holds.
+    script("document.getElementById('project-button').click();")
+    script("document.getElementById('project-path').value=arguments[0]; document.getElementById('project-open').click();", [iso + "/fw-two"])
+    gone = wait_for("var s=document.getElementById('bench-state'); return document.getElementById('bench-body').hidden && !s.hidden ? s.textContent : '';", 8)
+    check("after a project switch the old repo's bench is gone, and the new repo's state is said", gone == "no saved benches" and
+          not script("return !!document.querySelector('#bench-svg [data-part]');"), gone)
 
     check("no uncaught JS error or unhandled rejection, load included", script("return window.__errs;") == [], script("return window.__errs;"))
     check("bench.js holds no interval", "setInterval" not in (REPO / "assets" / "bench.js").read_text())
