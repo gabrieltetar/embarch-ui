@@ -583,6 +583,19 @@ try:
           script("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');"))
     check("and the inspector's Build as shows that pin", script(
         "var s=document.querySelector('#bench-inspector [data-pin=\"plank\"]'); return s ? s.selectedOptions[0].textContent : null;") == "rev 2 · variant ns")
+    # And a combination is the DUT's alone (decision 47): a dev-bench part on
+    # a board the scan does know is offered none.
+    inspect("dev")
+    was = wait_for("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]'); return s && !s.disabled ? s.value : null;", 8)
+    script("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]'); var o=document.createElement('option'); o.value='plank'; s.appendChild(o);"
+           " s.value='plank'; s.dispatchEvent(new Event('change',{bubbles:true}));")
+    held = wait_for("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]'); return s && s.value === 'plank' ? 'plank' : '';", 6)
+    check("a dev-bench part is offered no build combination, even on a board the scan has (decision 47)",
+          held == "plank" and not script("return !!document.querySelector('#bench-inspector [data-pin]');"),
+          script("return document.getElementById('bench-inspector').innerText.slice(0, 300);"))
+    script("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]'); s.value=arguments[0]; s.dispatchEvent(new Event('change',{bubbles:true}));", [was])
+    check("and putting its board back leaves the bench as saved",
+          bool(wait_for("return document.getElementById('bench-dirty').hidden;", 4)), was)
     # The other end of decision 48, in the page: a board type nothing can
     # answer a chip for says so where it is picked, and names where to fix it.
     script("document.getElementById('board-add').click();")

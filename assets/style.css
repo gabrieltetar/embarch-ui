@@ -2518,6 +2518,8 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
 .bench-live.bench-live-here { color: var(--success); border-color: var(--success); background: var(--success-soft-bg); }
 .bench-live.bench-live-missing, .bench-live.bench-live-unknown { color: var(--warning); border-color: var(--warning); background: var(--warning-soft-bg); }
 .bench-live.bench-live-other { color: var(--text-secondary); }
+/* "unknown: <reason>" carries the server's sentence: the bar shows its start, the tooltip all of it. */
+.bench-live.bench-live-unknown { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; }
 .bench-cfg.bench-cfg-live { border-color: var(--success); }
 .bench-cfg-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--success); margin-right: 6px; vertical-align: 1px; }
 .bench-live-sec { margin: 14px 0 4px; font-size: 12px; }

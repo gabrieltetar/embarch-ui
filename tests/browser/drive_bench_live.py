@@ -7,7 +7,11 @@ what Core holds that the bench does not name, each with its own Retract —
 write-through after a Save, after a Confirm and from Declare again, Stop
 being live, and the states a record can be in: none, live here, live in
 another bench, superseded by another repo (one live bench per machine),
-its config gone, its file gone or unparseable, and unreadable.
+its config gone, its file gone or unparseable, and unreadable (a 500, said
+as unknown with its reason). And the races: a read during a write cancels
+nothing, an answer with no record keeps its report, a confirmed mark rides
+only into its own re-apply, a Confirm declares again even when its report
+was replaced during the enrol.
 
 **The bench routes are the real binary's**, on a scratch firmware repo, so a
 Save is a real PUT and the version the browser makes live with is checked
@@ -136,7 +140,8 @@ def report_for(slug, config):
 
 
 STATE = {"live": None, "superseded": None, "leftovers": [], "refuse_live": None, "delay_live": 0.0, "fail_get": False,
-         "refuse_retract": None}
+         "refuse_retract": None, "no_record": False}
+ENROLL_DELAY = [0.0]
 LIVE_POSTS = []
 RETRACTS = []
 LIVE_DELETES = []
@@ -181,6 +186,8 @@ class Core(BaseHTTPRequestHandler):
         body = self._body()
         if path == "/probes/enroll":
             global ENROLLED
+            if ENROLL_DELAY[0]:
+                time.sleep(ENROLL_DELAY[0])
             ENROLLS.append(body)
             board = {"probe_serial": body.get("probe_serial") or "", "role": body["role"], "name": body.get("name") or "",
                      "chip": body["chip"], "hardware_id": "ee:ff", "confirmed_at_utc_ms": NOW_MS, "link_serial": None}
@@ -261,7 +268,7 @@ class Proxy(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/bench/live" and self.command == "GET":
             if STATE["fail_get"]:
-                self._send(500, b"could not tell whether the live bench's file is there", "text/plain")
+                self._send(500, b"could not read embarch/topologies/live-bench.toml: permission denied", "text/plain")
             else:
                 self._send(200, {"live": STATE["live"], "superseded": STATE["superseded"]})
             return True
@@ -305,6 +312,13 @@ class Proxy(BaseHTTPRequestHandler):
                 self._send(*refusal("config-missing", "the live config %s is not in %s any more" % (rec["config"], slug)))
             elif data["write_through"] and data.get("config") != rec["config"]:
                 self._send(*refusal("config-differs", "a write-through names the live config %s" % rec["config"]))
+            elif STATE["no_record"]:
+                # Applied, and the record of which bench is live not written.
+                rep = report_for(slug, data.get("config"))
+                rep["live"] = None
+                rep["applied"].append({"what": "live record", "route": "(this UI)", "ok": False,
+                                       "text": "applied, but the record of which bench is live was not written: disk full"})
+                self._send(200, rep)
             else:
                 rep = report_for(slug, data.get("config"))
                 STATE["live"] = rep["live"]
@@ -638,6 +652,20 @@ def real_flow():
           LIVE_POSTS[-1:])
     ind = wait_for("var w=document.getElementById('bench-live-wt'); return !w.hidden ? w.textContent : '';", 8)
     check("REAL: the write-through says so on the bar, without opening the report", (ind or "").startswith("declared") and not panel_open("live"), ind)
+    # A live bench file this process cannot read is the binary's 500, said as
+    # unknown with its reason — never as a state of the file.
+    os.chmod(TOPO / "live-bench.toml", 0)
+    try:
+        # Read again's own handler, pressed while hidden: the record read once more, and nothing else.
+        script("document.getElementById('bench-live-retry').click();")
+        unk = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent.indexOf('unknown: ') === 0 ? l.textContent : '';", 8)
+        check("REAL: an unreadable live bench file is said as unknown with the binary's reason, with Read again",
+              bool(unk) and bar()["retry"] and "missing" not in bar()["cls"], [unk, bar()])
+    finally:
+        os.chmod(TOPO / "live-bench.toml", 0o644)
+    click("#bench-live-retry")
+    wait_for("return document.getElementById('bench-live').textContent.indexOf('live') === 0;", 8)
+    on_bench("live-bench")
     wait_for("return !document.getElementById('bench-stop-live').hidden && !document.getElementById('bench-stop-live').disabled;", 8)
     click("#bench-stop-live")
     stopped = wait_for("return document.getElementById('bench-live').textContent === 'not live';", 8)
@@ -711,11 +739,25 @@ try:
         check("and the fresh report says who was enrolled and what the enrol moved", bool(done) and "Enrolled dut" in done and OLD_PROBE in done, done)
         check("the confirmed proposal keeps its enrolled mark, no Confirm, in the report that came back", [c[0] for c in confirm_buttons()] == ["1"],
               confirm_buttons())
+        # The enrol is slow, and Declare again replaces the report meanwhile:
+        # the Confirm still declares again when it lands (L2).
+        ENROLL_DELAY[0] = 1.2
+        posts = len(LIVE_POSTS)
         click_row('#bench-live-body [data-live-confirm="1"]')
+        time.sleep(0.3)
+        script("document.getElementById('bench-declare-again').click();")
+        until(lambda: len(LIVE_POSTS) >= posts + 2, 10)
+        ENROLL_DELAY[0] = 0.0
+        if not panel_open("live"):
+            click("#bench-live-btn")
         said = wait_for("var s=document.querySelector('#bench-live-body .topo-check-summary'); return s && s.innerText.indexOf('probe-pod') >= 0 ? s.innerText : '';", 8)
         check("a bench-board proposal enrols with no role and its label as the name",
               ENROLLS[-1] == {"role": "", "chip": "nRF54L15", "probe_serial": POD_PROBE, "name": "probe-pod"}, ENROLLS[-1])
+        check("a Confirm whose report a Declare again replaced during the enrol still declares again when it lands",
+              len(LIVE_POSTS) == posts + 2 and all(x["body"]["write_through"] is True for x in LIVE_POSTS[posts:]), LIVE_POSTS[posts:])
         check("a plain enrol shows no moved-role note", bool(said) and "displaced" not in said, said)
+        check("a confirmed mark rides only into its own Confirm's re-apply: the DUT's Confirm is back, the pod's marked",
+              [c[0] for c in confirm_buttons()] == ["0"] and "Enrolled probe-pod" in report_text(), confirm_buttons())
 
         # --- Retract ------------------------------------------------------------------------
         STATE["refuse_retract"] = "dev-bench"
@@ -749,19 +791,34 @@ try:
 
         # --- write-through after a Save, and Declare again ----------------------------------------
         flip("spare" if script("return !!document.querySelector('#bench-svg [data-part=\"spare\"]');") else "pod")
+        roles_before = len(events("embarch:role-changed"))
+        # A read of the record while the write-through is on its way (a
+        # bench list reload) must not cancel it (M1).
+        STATE["delay_live"] = 1.0
         click("#bench-save")
+        time.sleep(0.4)
+        script("document.dispatchEvent(new CustomEvent('embarch:benches-changed'));")
         until(lambda: len(LIVE_POSTS) > posts, 8)
+        STATE["delay_live"] = 0.0
         ind = wait_for("var w=document.getElementById('bench-live-wt'); return !w.hidden ? w.textContent : '';", 6)
+        settled_bar = wait_for("return !document.getElementById('bench-declare-again').disabled && !document.getElementById('bench-stop-live').disabled;", 6)
+        check("a read during the write-through drops nothing: the indicator says what it declared, Declare again and Stop wait no more",
+              bool(settled_bar) and (ind or "").startswith("declared"), [ind, bar()])
         check("saving the live bench declares it again, as a write-through with the version the save answered",
               len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"] == {"config": "A", "version": file_version("live-bench"), "write_through": True},
               LIVE_POSTS[-1:])
         check("without opening the report: the bar says what it declared, a click away", ind == "declared · 2 proposals · 2 failed" and not panel_open("live"), ind)
+        check("a re-apply whose rows say what the last report said drops no Validate verdict", len(events("embarch:role-changed")) == roles_before,
+              events("embarch:role-changed")[roles_before:])
         both_themes("live-writethrough")
         click("#bench-live-wt")
         check("the indicator opens the report, focus on the report", panel_open("live") and script(
             "return document.activeElement && document.activeElement.id === 'topo-panel-live';"))
         check("which says it was declared again after the save", "declared again" in report_text(), report_text()[:200])
         key(ESC)
+        check("Esc gives focus back to the indicator that opened it", bool(wait_for(
+            "return document.activeElement && document.activeElement.id === 'bench-live-wt';", 3)),
+            script("return document.activeElement ? document.activeElement.outerHTML.slice(0, 80) : null;"))
         posts = len(LIVE_POSTS)
         click("#bench-declare-again")
         until(lambda: len(LIVE_POSTS) > posts, 8)
@@ -794,11 +851,21 @@ try:
         check("while superseded, a save is not sent to Core at all, and says saved, not declared",
               len(LIVE_POSTS) == posts2 and "not declared" in notice(), [LIVE_POSTS[posts2:], notice()])
         both_themes("live-superseded")
+        roles_before = len(events("embarch:role-changed"))
+        STATE["delay_live"] = 1.0
         click("#bench-make-live")
+        time.sleep(0.4)
+        script("document.dispatchEvent(new CustomEvent('embarch:benches-changed'));")
         back = wait_for("return document.getElementById('bench-live').textContent === 'live · A';", 8)
+        STATE["delay_live"] = 0.0
+        check("a read during a make-live drops nothing: the report opens and the buttons wait no more",
+              bool(back) and bool(wait_for("return !document.getElementById('topo-panel-live').hidden;", 4)) and
+              bool(wait_for("return !document.getElementById('bench-declare-again').disabled && !document.getElementById('bench-stop-live').disabled;", 4)), bar())
         check("Make live takes the machine back, as the explicit click it is", bool(back) and LIVE_POSTS[-1]["body"]["write_through"] is False and
               STATE["superseded"] is None, LIVE_POSTS[-1:])
         check("and the saved-not-declared mark is gone", bar()["wt"] is None, bar())
+        check("an explicit make-live drops the verdicts its applied rows touch, unchanged or not",
+              {"role": "dut", "probe_serial": None} in events("embarch:role-changed")[roles_before:], events("embarch:role-changed")[roles_before:])
         key(ESC)
 
         # --- the live config is gone --------------------------------------------------------------
@@ -844,6 +911,26 @@ try:
         script("document.getElementById('bench-dialog-cancel').click();")
         STATE["refuse_live"] = None
 
+        # --- applied, and the record not written -----------------------------------------------------
+        STATE["no_record"] = True
+        click("#bench-make-live")
+        kept = wait_for("var p=document.getElementById('topo-panel-live'); return !p.hidden && document.getElementById('bench-live-body').innerText.indexOf('disk full') >= 0;", 8)
+        STATE["no_record"] = False
+        check("a make-live applied with no record written keeps its whole report, open, the reason on its row",
+              bool(kept) and "Applied" in report_text() and "Proposed" in report_text(), report_text()[:300])
+        check("its buttons wait: it is no live bench's report", confirm_buttons() and all(c[1] for c in confirm_buttons()), confirm_buttons())
+        check("the notice says it was declared and not recorded, and the bar keeps the record it read",
+              "not recorded" in notice() and (bar()["state"] or "").startswith("live: live-bench"), [notice(), bar()])
+        key(ESC)
+
+        # --- a bench opened from elsewhere right after a project switch waits for the list --------------
+        script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: arguments[0]}}));"
+               "window.embarchBench.showBench('other-bench', 'The desk lab uses');", [str(fw)])
+        opened = wait_for("var n=document.getElementById('bench-notice'); return !n.hidden && n.textContent.indexOf('Make live declares it') >= 0 ? n.textContent : '';", 8)
+        check("showBench right after a project switch waits for the bench list, then opens the bench",
+              bool(opened) and "does not have" not in (opened or "") and bool(on_bench("other-bench")), [opened, notice()])
+        bar_settled()
+
         # --- save and make live -----------------------------------------------------------------
         flip("spare")
         b6 = bar()
@@ -885,8 +972,9 @@ try:
         STATE["fail_get"] = True
         open_page()
         on_bench("other-bench")
-        unk = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent === 'live: unknown';", 6)
-        check("a record that could not be read says unknown, with Read again", bool(unk) and bar()["retry"], bar())
+        unk = wait_for("var l=document.getElementById('bench-live'); return !l.hidden && l.textContent.indexOf('unknown: ') === 0 ? l.textContent : '';", 6)
+        check("a record that could not be read (a 500) says unknown with the reason, with Read again — never a state of the file",
+              "permission denied" in (unk or "") and bar()["retry"] and "missing" not in bar()["cls"] and not bar()["stop"], bar())
         STATE["fail_get"] = False
         click("#bench-live-retry")
         check("and Read again reads it", bool(wait_for("return document.getElementById('bench-live').textContent === 'not live';", 6)), bar())

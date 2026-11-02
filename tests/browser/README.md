@@ -327,7 +327,14 @@ write-through after a Save and Declare again (`write_through: true`, shown as
 a bar indicator rather than an opened report, and "saved, not declared" when
 it is refused), a make-live answer dropped after a project switch, config
 tabs as a view change with the live wiring marked, a make-live `409`, and
-Stop being live. The bench routes are the real binary's on a scratch repo;
+Stop being live. It also holds the races: a read of the record during a
+make-live or a write-through cancelling neither, a make-live applied with no
+record written keeping its report, a confirmed mark riding only into its own
+Confirm's re-apply, a Confirm declaring again when a Declare again replaced
+its report during the enrol, Esc from a report the bar's indicator opened
+giving focus back to it, a bench opened from elsewhere right after a project
+switch waiting for the bench list, and an unreadable record (a `500`) said
+as unknown with its reason. The bench routes are the real binary's on a scratch repo;
 the live routes are answered by a stub in the proxy, from
 `coord/p4-contract.md`'s shapes, unless `EMBARCH_LIVE_REAL=1` passes them
 through to the binary's own: then the report's rows are the real apply's
@@ -342,7 +349,7 @@ on the canvas instead: role parts drawn with their role, a role part's board
 type picked in the inspector from the served pickers (the combinations the
 scan backs, a chip from Core's SoC table, the bench file written and Core
 not), the build combination pinned from the inspector's scan-backed Build as
-(decision 47, embarch/boards.toml only), a probe dropped from the tray onto a
+(decision 47, embarch/boards.toml only; a dev-bench part offered none), a probe dropped from the tray onto a
 role part's usb-host connector (decision 43's three properties on the tray's
 targets, through a rebuild of the canvas), Validate's verdicts on the role
 parts, and Saved benches' Open showing a bench without declaring anything.
