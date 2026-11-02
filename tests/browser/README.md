@@ -335,8 +335,8 @@ its report during the enrol, Esc from a report the bar's indicator opened
 giving focus back to it, a bench opened from elsewhere right after a project
 switch waiting for the bench list, and an unreadable record (a `500`) said
 as unknown with its reason. The bench routes are the real binary's on a scratch repo;
-the live routes are answered by a stub in the proxy, from
-`coord/p4-contract.md`'s shapes, unless `EMBARCH_LIVE_REAL=1` passes them
+the live routes are answered by a stub in the proxy, in the shapes
+embarch-doc's `embarch-ui/interfaces/topology.md` gives them, unless `EMBARCH_LIVE_REAL=1` passes them
 through to the binary's own: then the report's rows are the real apply's
 over the stub Core — the probe a proposal would replace named, a plain enrol
 with no moved-role note, a canonical role's Retract reaching Core. Four

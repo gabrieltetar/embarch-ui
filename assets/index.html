@@ -182,9 +182,9 @@
               <button type="button" class="btn btn-primary" id="bench-save" title="Write the bench file (Ctrl+S)" disabled>Save</button>
               <!-- Phase 4: which bench is live for this repo (this UI's own
                    record, never the repo's), and the two gestures on it. -->
-              <span id="bench-live" class="bench-live" hidden></span>
+              <span id="bench-live" class="bench-live" aria-live="polite" hidden></span>
               <button type="button" class="btn btn-tiny" id="bench-live-retry" title="Read which bench is live again" hidden>Read again</button>
-              <button type="button" class="btn bench-live-wt" id="bench-live-wt" hidden></button>
+              <button type="button" class="btn bench-live-wt" id="bench-live-wt" aria-controls="topo-panel-live" aria-expanded="false" hidden></button>
               <button type="button" class="btn" id="bench-make-live" hidden>Make live</button>
               <button type="button" class="btn" id="bench-declare-again" hidden>Declare again</button>
               <button type="button" class="btn" id="bench-stop-live" title="This repo has no live bench after this; Core keeps what it holds" hidden>Stop being live</button>

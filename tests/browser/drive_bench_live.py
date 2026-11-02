@@ -16,7 +16,8 @@ was replaced during the enrol.
 **The bench routes are the real binary's**, on a scratch firmware repo, so a
 Save is a real PUT and the version the browser makes live with is checked
 against the file. **The live routes are stubbed in a proxy** in front of the
-UI, answering the shapes `coord/p4-contract.md` gives; everything else —
+UI, answering in the shapes embarch-doc's `embarch-ui/interfaces/topology.md`
+gives the live routes; everything else —
 `/api/enroll` included, which reaches the stub Core below — passes through.
 
 **EMBARCH_LIVE_REAL=1 passes the live routes through to the binary's own**
@@ -140,7 +141,7 @@ def report_for(slug, config):
 
 
 STATE = {"live": None, "superseded": None, "leftovers": [], "refuse_live": None, "delay_live": 0.0, "fail_get": False,
-         "refuse_retract": None, "no_record": False}
+         "refuse_retract": None, "no_record": False, "delay_retract": 0.0}
 ENROLL_DELAY = [0.0]
 LIVE_POSTS = []
 RETRACTS = []
@@ -280,6 +281,11 @@ class Proxy(BaseHTTPRequestHandler):
             return True
         if path == "/api/bench/live/retract" and self.command == "POST":
             RETRACTS.append(data)
+            if STATE["delay_retract"]:
+                # The server runs one make-live or retract at a time: a
+                # re-apply that started meanwhile ran first, and this answer
+                # carries the newer list.
+                time.sleep(STATE["delay_retract"])
             offered = [x for x in STATE["leftovers"] if x["kind"] == data.get("kind") and x["id"] == data.get("id")]
             if STATE["superseded"]:
                 self._send(*refusal("superseded", "another repo holds this machine; nothing was retracted"))
@@ -650,8 +656,14 @@ def real_flow():
     check("REAL: saving the live bench declares it again with the new version, as a write-through",
           len(LIVE_POSTS) == posts + 1 and LIVE_POSTS[-1]["body"]["version"] == file_version("live-bench") and LIVE_POSTS[-1]["body"]["write_through"] is True,
           LIVE_POSTS[-1:])
+    # This Save's own write-through, not the text the Confirm's re-apply left:
+    # its answer has landed when Declare again acts again and the report
+    # says it was saved.
+    landed = wait_for("return !document.getElementById('bench-declare-again').disabled &&"
+                      " document.getElementById('bench-live-body').innerText.indexOf('Saved, and declared again') >= 0;", 15)
     ind = wait_for("var w=document.getElementById('bench-live-wt'); return !w.hidden ? w.textContent : '';", 8)
-    check("REAL: the write-through says so on the bar, without opening the report", (ind or "").startswith("declared") and not panel_open("live"), ind)
+    check("REAL: the write-through says so on the bar, without opening the report",
+          bool(landed) and (ind or "").startswith("declared") and not panel_open("live"), [landed, ind])
     # A live bench file this process cannot read is the binary's 500, said as
     # unknown with its reason — never as a state of the file.
     os.chmod(TOPO / "live-bench.toml", 0)
@@ -663,6 +675,7 @@ def real_flow():
               bool(unk) and bar()["retry"] and "missing" not in bar()["cls"], [unk, bar()])
     finally:
         os.chmod(TOPO / "live-bench.toml", 0o644)
+    wait_for("return !document.getElementById('bench-live-retry').hidden;", 8)
     click("#bench-live-retry")
     wait_for("return document.getElementById('bench-live').textContent.indexOf('live') === 0;", 8)
     on_bench("live-bench")
@@ -788,6 +801,36 @@ try:
         check("the bar offers to make B the live wiring instead, as its own click", b2["make"] == "Make B live", b2)
         script("document.querySelector('#bench-configs [data-cfg=\"0\"]').click();")
         settle()
+
+        # --- a write on its way holds the report's buttons; a late Retract still lands ------------------
+        click("#bench-live-btn")
+        STATE["delay_live"] = 1.0
+        posts = len(LIVE_POSTS)
+        script("document.getElementById('bench-declare-again').click();")
+        held = wait_for("var b=document.querySelectorAll('#bench-live-body [data-live-retract], #bench-live-body [data-live-confirm]');"
+                        " return b.length > 0 && Array.from(b).every(function(x){return x.disabled;});", 3)
+        check("while a re-apply is on its way, the report's Confirm and Retract wait", bool(held), confirm_buttons())
+        until(lambda: len(LIVE_POSTS) > posts, 8)
+        STATE["delay_live"] = 0.0
+        freed = wait_for("var b=document.querySelectorAll('#bench-live-body [data-live-retract]');"
+                         " return b.length === 2 && Array.from(b).every(function(x){return !x.disabled;});", 6)
+        check("and act again once it lands, on the report it answered", bool(freed), report_text()[-400:])
+        STATE["delay_retract"] = 1.0
+        retracts = len(RETRACTS)
+        click_row('#bench-live-body [data-live-retract="0"]')
+        time.sleep(0.25)
+        posts = len(LIVE_POSTS)
+        script("document.getElementById('bench-declare-again').click();")
+        until(lambda: len(LIVE_POSTS) > posts, 6)
+        late = wait_for("var n=document.getElementById('bench-notice'); return !n.hidden && n.textContent.indexOf('Retracted signal old-sig') === 0 ? n.textContent : '';", 6)
+        STATE["delay_retract"] = 0.0
+        check("a Retract answered after a re-apply replaced its report still says what it did",
+              bool(late) and RETRACTS[retracts:] == [{"kind": "signal", "id": "old-sig"}], [notice(), RETRACTS[retracts:]])
+        check("and its list, the newer one, goes on the report on screen: the signal gone, no Retract left for it",
+              "old-sig" not in report_text() and "dev-bench" in report_text() and
+              script("return document.querySelectorAll('#bench-live-body [data-live-retract]').length;") == 1, report_text()[-400:])
+        key(ESC)
+        posts = len(LIVE_POSTS)
 
         # --- write-through after a Save, and Declare again ----------------------------------------
         flip("spare" if script("return !!document.querySelector('#bench-svg [data-part=\"spare\"]');") else "pod")

@@ -193,6 +193,8 @@
   var liveOpener = null;     // the button that opened the report, when it is not Live report
   var openingLive = false;
   var listWait = null;       // the bench list on its way: resolves once it has answered
+  var benchShows = 0;        // a new number each time a different bench is shown (a reload of it is not one)
+  var focusMoves = 0;        // a new number each time focus moves or Esc is pressed: a late answer leaves focus alone
   var linkBoard = null;     // a `#topology?board=` link's board, marked on the parts it names
   var linkPanned = false;
   var settledOnce = false;   // a load has finished, bench or no bench
@@ -2074,6 +2076,7 @@
     api(ROUTE_BENCHES + "/" + encodeURIComponent(slug)).then(function (b) {
       if (seq !== benchSeq) return;
       keep = !!keep && !!bench && bench.slug === slug;
+      if (!keep) benchShows++;
       bench = b || {};
       hoverPart = null;
       laying = null; drag = null; trayArm = null;
@@ -3065,16 +3068,19 @@
   // way; its answer settles the count whether it is used or dropped, so a
   // dropped answer never leaves the buttons waiting. True when the answer
   // is still the newest write's in this project.
+  // While one is on its way the report's Confirm and Retract wait too: an
+  // answer to them would land on a report the write is about to replace.
   function writeBegun() {
     liveWrites++;
     liveBusy = true;
-    return { gen: projectGen, seq: ++liveSeq };
+    renderLiveReport();
+    return { gen: projectGen, seq: ++liveSeq, shows: benchShows, moves: focusMoves };
   }
   function writeSettled(w) {
     if (w.gen !== projectGen) return false;   // another repo since: its own count started at 0
     liveWrites = Math.max(0, liveWrites - 1);
     liveBusy = liveWrites > 0;
-    if (w.seq !== liveSeq) { renderLiveBar(); return false; }
+    if (w.seq !== liveSeq) { renderLiveBar(); renderLiveReport(); return false; }
     return true;
   }
 
@@ -3085,7 +3091,10 @@
     liveReport.slug = o.slug;
     liveReport.said = o.said || null;
     liveReport.confirmed = o.confirmed || dict();
-    liveRows = dict();
+    // A Confirm or Retract still on its way stays busy on the row it names.
+    var busy = dict();
+    Object.keys(liveRows).forEach(function (k) { if (liveRows[k] && liveRows[k].busy) busy[k] = liveRows[k]; });
+    liveRows = busy;
   }
 
   function goLive(o) {
@@ -3104,19 +3113,23 @@
       var before = o.explicit ? null : liveReport;
       if (!r) { liveState = "unknown"; renderLiveBar(); readLive(); return; }
       var props = (r.proposals || []).length, failed = (r.applied || []).filter(function (a) { return a && !a.ok; }).length;
-      if (!r.live) {
+      // Opened, and focused, only while the human is where the click left
+      // them: the same bench shown, focus not moved and Esc not pressed since.
+      var stillHere = w.shows === benchShows && w.moves === focusMoves;
+      var row = (r.applied || []).filter(function (a) { return a && !a.ok && a.what === "live record"; })[0];
+      if (!r.live || row) {
         // Core was told, and the record of which bench is live was not
-        // written (an applied row says why): the report is kept — its
-        // buttons wait, since it is no live bench's — and the record is
-        // read again for what the server holds.
-        var row = (r.applied || []).filter(function (a) { return a && !a.ok && a.what === "live record"; })[0];
+        // written (an applied row says why — and `live` is then the record
+        // as it was, maybe another bench's): the report is kept, as no live
+        // bench's, so its buttons wait, and the record is read again.
         var why = "Declared, not recorded live: " + (row ? row.text : "the answer named no live record");
+        r.live = null;
         takeReport(r, o);
         if (!o.explicit) wt = { ok: false, text: "declared, not recorded", title: why };
-        if (benchLoads === mine || !o.explicit) notice(why, "error");
+        if (w.shows === benchShows || !o.explicit) notice(why, "error");
         renderLiveBar();
         renderLiveReport();
-        if (o.explicit) openLivePanel();
+        if (o.explicit && stillHere) openLivePanel();
         dropVerdicts(r.applied, before);
         readLive();
         return;
@@ -3127,7 +3140,7 @@
       takeReport(r, o);
       if (o.explicit) {
         wt = null;
-        if (benchLoads === mine) notice(o.slug + " is live on this machine", "ok");
+        if (w.shows === benchShows) notice(o.slug + " is live on this machine", "ok");
       } else {
         wt = { ok: true, text: "declared" + (props ? " · " + props + " proposal" + (props === 1 ? "" : "s") : "") +
           (failed ? " · " + failed + " failed" : "") };
@@ -3135,7 +3148,7 @@
       renderLiveBar();
       renderConfigs();
       renderLiveReport();
-      if (o.explicit) openLivePanel();
+      if (o.explicit && stillHere) openLivePanel();
       dropVerdicts(r.applied, before);
       document.dispatchEvent(new CustomEvent("embarch:live-changed", { detail: { slug: live.slug, config: live.config == null ? null : live.config } }));
     }, function (e) {
@@ -3211,6 +3224,14 @@
   // indicator, once app.js has closed the panel on Esc — heard on capture,
   // so before app.js's own listener closes it.
   liveBtn.addEventListener("click", function () { if (!openingLive) liveOpener = null; });
+  (function () {
+    var panel = document.getElementById("topo-panel-live");
+    var mirror = function () { wtBtn.setAttribute("aria-expanded", panel && !panel.hidden ? "true" : "false"); };
+    if (panel && window.MutationObserver) new MutationObserver(mirror).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+    mirror();
+  })();
+  document.addEventListener("focusin", function () { focusMoves++; }, true);
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") focusMoves++; }, true);
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape" || !liveOpener) return;
     var panel = document.getElementById("topo-panel-live"), back = liveOpener;
@@ -3252,6 +3273,7 @@
     liveHead.textContent = still ? "Live: " + l.slug + (l.config ? " · config " + l.config : "")
       : r.live ? "Last made live: " + l.slug : "Declared: " + r.slug;
     var why = still ? "since " + sinceText(l.since_utc_ms)
+      : liveState === "error" ? "which bench is live could not be read (" + liveError + ") — its buttons wait until it is"
       : !r.live ? "declared to Core, but not recorded live — its buttons wait until it is"
       : superseded ? "superseded by " + repoName(superseded.repo) + " · " + superseded.slug + " — its buttons act no more"
       : live && live.slug === l.slug && (live.config || null) !== (l.config || null) ? "config " + (live.config || "none") + " is live now — its buttons act no more"
@@ -3260,7 +3282,7 @@
       '<span class="placeholder-note">' + esc(why) + "</span></div>";
     if (wt && !wt.ok) h += '<p class="sd-error" style="margin:6px 0 0;">' + esc(wt.title || wt.text) + "</p>";
     var applied = r.applied || [], props = r.proposals || [], notp = r.not_proposed || [], left = r.leftovers || [];
-    var off = still ? "" : " disabled";
+    var off = still && !liveBusy ? "" : " disabled";
     h += '<div class="card-title bench-live-sec">Applied · ' + applied.length + "</div>";
     h += applied.length ? applied.map(function (a) {
       return liveRow(a.ok ? badge("success", "applied") : badge("danger", a.route === "(not sent)" ? "not sent" : "failed"),
@@ -3310,7 +3332,7 @@
   // without a second click.
   function confirmProposal(i) {
     var r = liveReport, pr = r && (r.proposals || [])[i];
-    if (!pr || !reportCurrent()) return;
+    if (!pr || !reportCurrent() || liveBusy) return;
     var key = propKey(pr), id = r.id, gen = projectGen;
     liveRows[key] = { busy: true, text: "enrolling — reading the hardware ID through probe " + (pr.probe_serial || "?") + "…" };
     renderLiveReport();
@@ -3333,21 +3355,27 @@
       // re-apply that replaced the report meanwhile ran before this enrol.
       writeThrough(said + "; declared again", "Not declared again", carry);
     }).catch(function (e) {
-      if (!liveReport || liveReport.id !== id) return;
+      if (gen !== projectGen) return;
+      // Said even when a re-apply replaced the report meanwhile: on the row
+      // that names the same proposal, if the new report has it.
       liveRows[key] = { ok: false, text: "not enrolled: " + errText(e) };
+      notice("Not enrolled: " + errText(e), "error");
       renderLiveReport();
     });
   }
 
   // One leftover, by its own click; the list comes back from the answer.
+  // An answer that lands after a re-apply replaced the report still counts:
+  // the server runs one make-live or retract at a time, so its list is the
+  // newer one and goes on the report on screen, and what it did is said.
   function retractLeftover(i) {
     var r = liveReport, lo = r && (r.leftovers || [])[i];
-    if (!lo || !reportCurrent()) return;
-    var key = leftKey(lo), id = r.id;
+    if (!lo || !reportCurrent() || liveBusy) return;
+    var key = leftKey(lo), gen = projectGen;
     liveRows[key] = { busy: true, text: "retracting…" };
     renderLiveReport();
     send("POST", ROUTE_RETRACT, { kind: lo.kind, id: lo.id }).then(function (a) {
-      if (!liveReport || liveReport.id !== id) return;
+      if (gen !== projectGen || !liveReport) return;
       if (a && Array.isArray(a.leftovers)) liveReport.leftovers = a.leftovers;
       if (a && a.ok) delete liveRows[key];
       else liveRows[key] = { ok: false, text: "not retracted: " + ((a && a.text) || "Core refused") };
@@ -3358,8 +3386,9 @@
         document.dispatchEvent(new CustomEvent("embarch:role-changed", { detail: { role: lo.id, probe_serial: null } }));
       }
     }).catch(function (e) {
-      if (!liveReport || liveReport.id !== id) return;
+      if (gen !== projectGen) return;
       liveRows[key] = { ok: false, text: "not retracted: " + errText(e) };
+      notice("Not retracted: " + errText(e), "error");
       renderLiveReport();
       if (e && (e.status === 409 || e.status >= 500)) readLive();
     });
