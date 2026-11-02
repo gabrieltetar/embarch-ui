@@ -1416,12 +1416,16 @@ power = "drp"
         let pairs: Vec<(&str, Option<&str>)> = names.iter().zip(&bases).map(|(id, b)| (id.as_str(), Some(b.as_str()))).collect();
         let bench = mounted(&pairs);
         let ctx = Ctx::new(&bench, &t);
-        let started = std::time::Instant::now();
         let rings = mount_cycles(&ctx, &bench);
-        let took = started.elapsed();
         assert_eq!(rings.len(), 1);
         assert_eq!(rings[0].len(), n);
-        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
+        // The walk per part this replaced took over half a second here in a
+        // debug build; one walk takes a few milliseconds. The best of five,
+        // against a bound loose enough for a loaded machine.
+        let took = best_of_five(|| {
+            mount_cycles(&ctx, &bench);
+        });
+        assert!(took < std::time::Duration::from_millis(250), "{took:?}");
     }
 
     #[test]
@@ -1569,6 +1573,18 @@ power = "drp"
         assert_eq!(v["nucleo3.stack"].fit, Fit::Ok, "{:?}", v["nucleo3.stack"]);
     }
 
+    /// The quickest of five runs of `f`.
+    fn best_of_five(mut f: impl FnMut()) -> std::time::Duration {
+        (0..5)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                f();
+                started.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
     /// A template with headers both ways, so parts can stack into towers.
     fn stackable() -> Templates {
         let mut t = templates();
@@ -1636,12 +1652,14 @@ max_cables = 2
     fn mount_verdicts_on_a_bench_at_the_part_cap_stay_cheap() {
         let t = stackable();
         let bench = tower(crate::bench::files::MAX_PARTS - 1);
-        let started = std::time::Instant::now();
         let v = candidates(&bench, &t, None, "r0.plug").unwrap();
-        let took = started.elapsed();
         assert_eq!(v.values().filter(|v| v.fit == Fit::Refused).count(), crate::bench::files::MAX_PARTS - 2);
         // One walk per request: the per-socket walk this replaced took
-        // seconds here in a debug build.
+        // seconds here in a debug build. The best of five runs, so a loaded
+        // machine running the suite in parallel does not fail it.
+        let took = best_of_five(|| {
+            candidates(&bench, &t, None, "r0.plug").unwrap();
+        });
         assert!(took < std::time::Duration::from_millis(500), "{took:?}");
     }
 

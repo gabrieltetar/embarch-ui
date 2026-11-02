@@ -345,8 +345,15 @@ def pick_bench(slug):
              " !!document.querySelector('#bench-svg [data-part]');", 8, [slug])
 
 
+def settle():
+    """Two animation frames, so layout and paint have caught up before the next pointer action."""
+    rq("POST", b + "/execute/async", {"script": "var done = arguments[arguments.length - 1];"
+                                                " requestAnimationFrame(function(){ requestAnimationFrame(function(){ done(true); }); });", "args": []})
+
+
 def pick_config(i):
     script("document.querySelector('#bench-configs [data-cfg=\"%d\"]').click();" % i)
+    settle()
 
 
 def panel_open(name):

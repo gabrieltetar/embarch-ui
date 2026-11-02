@@ -397,6 +397,17 @@ def screen_of(wx, wy):
     return script("var m=document.getElementById('bench-svg').getScreenCTM(); return [m.a*arguments[0]+m.e, m.d*arguments[1]+m.f];", [wx, wy])
 
 
+def settle():
+    """Two animation frames, so layout and paint have caught up before the next pointer action."""
+    rq("POST", b + "/execute/async", {"script": "var done = arguments[arguments.length - 1];"
+                                                " requestAnimationFrame(function(){ requestAnimationFrame(function(){ done(true); }); });", "args": []})
+
+
+def pick_config(i):
+    script("document.querySelector('#bench-configs [data-cfg=\"%d\"]').click();" % i)
+    settle()
+
+
 def key(value, mods=()):
     acts = [{"type": "keyDown", "value": m} for m in mods] + [{"type": "keyDown", "value": value}, {"type": "keyUp", "value": value}] + \
         [{"type": "keyUp", "value": m} for m in mods]
@@ -725,12 +736,12 @@ try:
     undo()
     check("and Ctrl+Z brings it back", wait_for("return !!document.querySelector('#bench-svg .bn-cable[data-ends=\"debug-probe.swd|dut.swd\"]');", 4))
     # A part with a cable in each config: deleting it takes them all.
-    script("document.querySelector('#bench-configs [data-cfg=\"1\"]').click();")
+    pick_config(1)
     wait_for("return !!document.querySelector('#bench-svg .bn-cable[data-ends=\"an.out|dut.usb-c-2\"]');", 4)
     select_part("an")
     key(DEL)
     gone_b = wait_for("return !document.querySelector('#bench-svg [data-part=\"an\"]');", 4)
-    script("document.querySelector('#bench-configs [data-cfg=\"0\"]').click();")
+    pick_config(0)
     check("Del on a part deletes it with its cables in every config", gone_b and wait_for(
         "return !document.querySelector('#bench-svg .bn-cable[data-ends*=\"an.\"]');", 4))
     undo()
@@ -1005,6 +1016,25 @@ try:
     check("a project switch closes an open bench dialog", wait_for("return document.getElementById('bench-dialog').style.display !== 'block';", 4))
     on_bench("edit-bench")
 
+    # --- a save's answer belongs to the bench it was sent for ------------------------------
+    select_part("debug-probe")
+    key("f")
+    wait_for("return !document.getElementById('bench-dirty').hidden;", 4)
+    DELAY["put"] = 1.5
+    save()
+    time.sleep(0.2)
+    # The file changes on disk under the held save, which will come back 409 …
+    (TOPO / "edit-bench.toml").write_text((TOPO / "edit-bench.toml").read_text() + "\n# a hand note\n")
+    # … after a project switch that could not ask (a desk opened in another window).
+    script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: arguments[0]}}));", [str(fw)])
+    on_bench("edit-bench")
+    time.sleep(2.0)
+    DELAY["put"] = 0.0
+    check("a save's 409 that lands after a project switch it was not asked about is dropped: no dialog, no notice, no error",
+          not dialog_open() and "changed since" not in notice() and "Not saved" not in notice() and script("return window.__errs;") == [],
+          [notice(), script("return window.__errs;")])
+    check("and the bench now on screen is the one just read, nothing unsaved", not dirty())
+
     # --- a 409 that a reload cannot cure says so, and offers none -----------------------
     pick_bench("renamed")
     on_bench("renamed")
@@ -1077,12 +1107,37 @@ try:
     check("and Save writes it", file("loose-bench").get("configs") == [{"name": "A", "cables": [["dut.usb-c-1", "an.in"]]}], file("loose-bench").get("configs"))
     save()
     check("Ctrl+S with nothing unsaved writes nothing and says so", "Nothing to save" in notice(), notice())
+    # The old repo's unreadable file, and a Validate pass over its bench, are on screen …
+    (fw / "embarch" / "parts" / "broken.toml").write_text("id = [\n")
+    script("document.dispatchEvent(new CustomEvent('embarch:parts-changed'));")
+    check("an unreadable template in this repo is a note under the canvas", wait_for(
+        "return Array.from(document.querySelectorAll('#bench-notes li')).some(function(l){ return l.textContent.indexOf('broken.toml') >= 0; });", 4))
+    script("window.__verdictEvents = []; document.addEventListener('embarch:verdicts', function(e){ window.__verdictEvents.push(e.detail); });")
+    script(PASS_JS, ["pass-old-repo"])
     # A project switch takes the old repo's bench off the canvas, whatever the new one holds.
     script("document.getElementById('project-button').click();")
     script("document.getElementById('project-path').value=arguments[0]; document.getElementById('project-open').click();", [iso + "/fw-two"])
-    gone = wait_for("var s=document.getElementById('bench-state'); return document.getElementById('bench-body').hidden && !s.hidden ? s.textContent : '';", 8)
+    # "reading…" shows the moment the old bench goes; the new repo's own state follows it.
+    gone = wait_for("var s=document.getElementById('bench-state'); return document.getElementById('bench-body').hidden && !s.hidden &&"
+                    " s.textContent !== 'reading…' ? s.textContent : '';", 8)
     check("after a project switch the old repo's bench is gone, and the new repo's state is said", gone == "no saved benches" and
           not script("return !!document.querySelector('#bench-svg [data-part]');"), gone)
+    check("and the old repo's file errors are not listed under the new repo", "broken.toml" not in notes(), notes())
+    check("app.js tells the canvas the old pass is over: a verdicts event with nothing in it", script(
+        "var e=window.__verdictEvents; return e.length > 0 && Object.keys(e[e.length-1].roles).length === 0 && Object.keys(e[e.length-1].boards).length === 0;"),
+        script("return window.__verdictEvents;"))
+    # A third repo whose bench has a DUT: the old pass's DUT verdict is not drawn on it.
+    three = Path(iso) / "fw-three"
+    (three / ".git").mkdir(parents=True)
+    (three / "embarch" / "topologies").mkdir(parents=True)
+    (three / "embarch" / "topologies" / "three.toml").write_text(
+        'name = "three"\nparts = [{ id = "host", template = "this-machine", at = [20, 110] },'
+        ' { id = "dut", template = "nrf54l15dk", role = "dut", at = [400, 110] }]\n')
+    script(PASS_JS, ["pass-old-repo-2"])
+    script("document.getElementById('project-button').click();")
+    script("document.getElementById('project-path').value=arguments[0]; document.getElementById('project-open').click();", [str(three)])
+    on_bench("three")
+    check("a DUT in the new repo carries no verdict from a pass over the old repo's bench", not verdict_on("dut"))
 
     check("no uncaught JS error or unhandled rejection, load included", script("return window.__errs;") == [], script("return window.__errs;"))
     check("bench.js holds no interval", "setInterval" not in (REPO / "assets" / "bench.js").read_text())

@@ -7235,6 +7235,13 @@
     showError(topoEl("topo-validate-error"), null);
     const panel = document.getElementById("topo-panel-validate");
     if (panel && !panel.hidden) closeTopoPanels();
+    // And its verdicts: the old repo's results never land on the new repo's
+    // boxes or parts. The canvas hears it as a pass with nothing in it.
+    roleStatus = {};
+    benchStatus = {};
+    passStamp = null;
+    if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
+    publishVerdicts();
   }
 
   function topoPanelOpen() {

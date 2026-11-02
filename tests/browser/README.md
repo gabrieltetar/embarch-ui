@@ -268,7 +268,11 @@ editor's unsaved draft (a stand-in `window.embarchParts`) asked about.
 Fix round 2 added: a second Validate pass with the same words restoring
 the verdicts (the pass stamp), the leave's dialog drawn over the real part
 editor, Esc yielding to an open panel, an edit that changes nothing ending
-a cable, and a project switch taking the old bench off the canvas. It
+a cable, and a project switch taking the old bench off the canvas. The
+final round added: a save's 409 that lands after a project switch it was
+not asked about being dropped, the old repo's file errors and Validate's
+verdicts not shown under the new repo, and two animation frames after a
+config tab click before any pointer action (also in `drive_bench.py`). It
 uses four ports: `EMBARCH_UI_PORT` and the three after it (proxy, stub Core,
 an unused desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves screenshots in both
 themes.

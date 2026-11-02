@@ -155,6 +155,7 @@
   var lastSaveError = null;  // why the last save did not land, for a leave that waited on it
   var leaveParts = false;    // the leave confirmed also drops the part editor's draft, once it lands
   var lastPass;              // the stamp of the Validate pass the verdicts are from
+  var benchLoads = 0;        // which bench is on screen: a new number each time one loads or goes
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -1429,6 +1430,7 @@
       fillChip(el, it);
       if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
     });
+    refit();
   }
 
   function armTray(key) {
@@ -1734,6 +1736,7 @@
       return '<button type="button" class="bench-cfg" role="tab" aria-selected="' + (i === cfgIx) + '" data-cfg="' + i + '">' + esc(c && c.name) + "</button>";
     }).join("");
     cfgRow.hidden = !cfgs.length;
+    refit();
   }
 
   function renderNotes() {
@@ -1744,6 +1747,15 @@
       .concat(lostEdits ? [lostEdits] : []);
     notesEl.innerHTML = lines.map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("");
     notesEl.hidden = !lines.length;
+    refit();
+  }
+
+  // A row around the canvas changed height (the notes, the tray, the config
+  // tabs, the bar): the canvas resized, so its viewBox follows now, not a
+  // frame later when the resize observer runs — a click in between would
+  // land on the drawing as it stood (final fixes: the config-tab flake).
+  function refit() {
+    if (bench && model) setViewBox();
   }
 
   function showState(text, isError) {
@@ -1768,6 +1780,7 @@
     undoBtn.disabled = !on || !undoStack.length;
     redoBtn.disabled = !on || !redoStack.length;
     card.classList.toggle("bench-unsaved", dirty);
+    refit();
   }
 
   function renderHint() {
@@ -1792,6 +1805,7 @@
   noticeEl.addEventListener("click", function () { notice("", "info"); });
 
   function clearBench() {
+    benchLoads++;
     bench = null; model = null; sel = null; hoverPart = null;
     laying = null; drag = null; trayArm = null; trayDrag = null; trayHover = null;
     saved = null; undoStack = []; redoStack = []; findings = []; checkState = "idle";
@@ -1918,6 +1932,7 @@
       loadBench(slug, keep && slug === onScreen);
     }).catch(function (e) {
       if (seq !== loadSeq) return;
+      leaveDone(false);
       if (e && e.status === 404) showUnavailable();
       else showFailure(e, false);
     });
@@ -1942,6 +1957,7 @@
       saved = snapshotContent();
       undoStack = [];
       redoStack = [];
+      benchLoads++;
       remember(slug);
       picker.value = slug;
       leaveLanded();
@@ -1971,6 +1987,7 @@
         notice("Could not open embarch/topologies/" + slug + ".toml: " + errText(e), "error");
         return;
       }
+      leaveDone(false);
       showFailure(e, true);
     });
   }
@@ -2625,12 +2642,18 @@
     if (!isDirty()) { notice("Nothing to save: embarch/topologies/" + bench.slug + ".toml already says this.", "info"); return; }
     saving = true;
     renderDirty();
-    var sent = snapshotContent(), slug = bench.slug;
+    var sent = snapshotContent(), slug = bench.slug, mine = benchLoads;
+    // The answer is about the bench it was sent for. A project switch that
+    // could not ask (a desk opened elsewhere) may have replaced it by the
+    // time it lands: then it is dropped whole — no version adopted, no 409
+    // dialog or notice about the old repo's file over the new one, and
+    // nothing for the next leave to quote.
+    var gone = function () { return !bench || benchLoads !== mine; };
     lastSaveError = null;
     saveInFlight = send("PUT", ROUTE_BENCHES + "/" + encodeURIComponent(slug), benchBody()).then(function (b) {
       saving = false;
       saveInFlight = null;
-      if (!bench || bench.slug !== slug) return;
+      if (gone()) { renderDirty(); return; }
       bench.version = b.version;
       bench.legacy = !!b.legacy;
       // The file as it now reads is the working copy, unless the bench was
@@ -2644,6 +2667,7 @@
     }).catch(function (e) {
       saving = false;
       saveInFlight = null;
+      if (gone()) { renderDirty(); return; }
       lastSaveError = errText(e);
       renderDirty();
       if (e && e.status === 409) { conflict(e); return; }
@@ -3069,6 +3093,11 @@
     // it into the new one, and a bench the new repo cannot read is said as
     // that, never shown as the old one.
     clearBench();
+    // What the old repo's files said, and what Validate said about its bench,
+    // are not the new repo's: they go before anything is drawn.
+    vocab = null; templates = dict(); unreadable = dict(); partErrors = []; benchErrors = []; benchList = [];
+    verdicts = { roles: dict(), boards: dict() }; homes = dict(); verdictDrops = [];
+    renderBin();
     picker.hidden = true;
     showState("reading…", false);
     renderNotes();
