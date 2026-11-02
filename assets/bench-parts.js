@@ -37,6 +37,7 @@
   var ROUTE_VOCAB = "/api/bench/vocabulary";
   var ROUTE_PARTS = "/api/bench/parts";
   var PARTS_DIR = "embarch/parts/";
+  var REFUSAL_HEADER = "x-embarch-refusal";   // which 409 a refusal is, as a word (routes.rs)
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -702,6 +703,7 @@
         if (!r.ok) {
           var err = new Error(t || "HTTP " + r.status);
           err.status = r.status;
+          err.code = r.headers.get(REFUSAL_HEADER);
           throw err;
         }
         try {
@@ -868,12 +870,13 @@
     }).catch(function (e) {
       if (seq !== openSeq) return;
       showResult(e && e.message ? e.message : String(e));
-      var status = e && e.status;
-      // A changed or vanished file: what is on disk now is the way on.
-      if (put && (status === 409 || status === 404)) {
+      var code = e && e.code;
+      // Keyed on the refusal's word, never its sentence: only a file that
+      // changed since it was read is fixed by reading it again.
+      if (put && code === "version-changed") {
         el.reload.hidden = false;
         showHint("Reload from disk replaces what is in this dialog with the file as it is now.");
-      } else if (!put && st.fresh && status === 409 && errorOf(draft.id)) {
+      } else if (!put && st.fresh && code === "exists") {
         showHint(PARTS_DIR + draft.id + ".toml is still there and will not load: remove it or fix it by hand, then Save again.");
       }
     }).then(function () {
@@ -1048,7 +1051,10 @@
   });
   // The open repo changed under the dialog: what it holds describes the old
   // one. A changed draft stays, unsaveable and saying so, until it is closed.
-  document.addEventListener("embarch:project", function () {
+  // The page's first project read (`initial`) is no switch: a dialog opened
+  // before it describes the repo that read names.
+  document.addEventListener("embarch:project", function (ev) {
+    if (ev && ev.detail && ev.detail.initial) return;
     savedEl.hidden = true;
     if (!shown()) return;
     if (!changed()) { close(); return; }
@@ -1060,4 +1066,15 @@
     el.reload.hidden = true;
     render();
   });
+
+  // Leaving the Topology tab — a nav item, a link, Back — takes an unchanged
+  // dialog with it: on another tab nothing reaches it, not even Esc. A
+  // changed one stays: the canvas's leave guard asks about it, and its
+  // Discard closes it through `embarchParts.discard()`.
+  var topoTab = document.querySelector('.tab-panel[data-tab="topology"]');
+  if (topoTab && typeof MutationObserver === "function") {
+    new MutationObserver(function () {
+      if (!topoTab.classList.contains("active") && shown() && !changed()) close();
+    }).observe(topoTab, { attributes: true, attributeFilter: ["class"] });
+  }
 })();

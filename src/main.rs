@@ -1718,6 +1718,7 @@ mod tests {
             let resp = call.send().await.unwrap();
             let what = resp.url().to_string();
             assert_eq!(resp.status(), StatusCode::CONFLICT, "{what}");
+            assert_eq!(resp.headers().get(bench::routes::REFUSAL_HEADER).unwrap(), "no-project", "{what}");
             assert_eq!(
                 resp.text().await.unwrap(),
                 "no project is open — pick a firmware repo in Project, at the bottom of the sidebar",

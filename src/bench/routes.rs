@@ -32,11 +32,13 @@ fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
     (status, text.into()).into_response()
 }
 
-/// The header naming which of a save's `409`s this is, so the browser keys
-/// on a word rather than on the sentence: `version-changed` (the file changed
-/// since it was read; reading it again is the way out), `unparseable` (it no
-/// longer loads, and is fixed by hand), `rename` (the name no longer derives
-/// the slug). The body stays the plain-text sentence every refusal is.
+/// The header naming which `409` this is, so the browser keys on a word
+/// rather than on the sentence: `no-project` (no repo is open: every bench
+/// route), `version-changed` (the file changed since it was read; reading it
+/// again is the way out), `unparseable` (it no longer loads, and is fixed by
+/// hand), `rename` (the name no longer derives the slug), `exists` (a create
+/// found something at the path), `builtin-id` (a repo template took a
+/// built-in's id). The body stays the plain-text sentence every refusal is.
 pub const REFUSAL_HEADER: &str = "x-embarch-refusal";
 
 fn refuse_as(status: StatusCode, code: &'static str, text: impl Into<String>) -> Response {
@@ -65,14 +67,15 @@ impl FromRequestParts<AppState> for OpenRepo {
             .study_designer
             .repo_path()
             .map(OpenRepo)
-            .ok_or_else(|| refuse(StatusCode::CONFLICT, NO_PROJECT))
+            .ok_or_else(|| refuse_as(StatusCode::CONFLICT, "no-project", NO_PROJECT))
     }
 }
 
 fn write_refusal(what: &str, e: WriteError) -> Response {
     match e {
-        WriteError::Exists => refuse(
+        WriteError::Exists => refuse_as(
             StatusCode::CONFLICT,
+            "exists",
             format!("{what} already exists — open it and save that, or pick another name"),
         ),
         WriteError::Other(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -80,9 +83,11 @@ fn write_refusal(what: &str, e: WriteError) -> Response {
 }
 
 /// `GET /api/bench/vocabulary` — kinds, which kinds join, sides, power roles,
-/// categories, looks and functions, and which kinds take a power role and
-/// which functions take an interface or line facts: served so the browser
-/// restates none, the part editor included.
+/// categories, looks, functions and roles, which kinds take a power role and
+/// which functions take an interface or line facts, and under `template` the
+/// limits a template file is held to (the connector cap, every number
+/// field's range, the line facts): served so the browser restates none, the
+/// part editor included.
 pub async fn api_vocabulary(OpenRepo(_): OpenRepo) -> Response {
     Json(vocabulary_json()).into_response()
 }
@@ -96,17 +101,21 @@ pub async fn api_parts(OpenRepo(repo): OpenRepo) -> Response {
 
 /// A template from a request body: `source` and `version` (echoed back from
 /// `GET`) are not template fields, and the rest must be.
+///
+/// **A refusal names the field it is about** — `connectors[3].functions[0].
+/// interface: invalid type: …` — since a template holds up to 64 connectors
+/// and serde's own message names only the type.
 fn template_from(mut body: serde_json::Value) -> Result<(PartTemplate, Option<String>), Box<Response>> {
     let mut version = None;
     if let Some(obj) = body.as_object_mut() {
         obj.remove("source");
         version = obj.remove("version").and_then(|v| v.as_str().map(str::to_string));
     }
-    let template: PartTemplate = serde_json::from_value(body)
+    let template: PartTemplate = serde_path_to_error::deserialize(body)
         .map_err(|e| Box::new(refuse(StatusCode::BAD_REQUEST, format!("not a part template: {e}"))))?;
     template.check().map_err(|e| Box::new(refuse(StatusCode::BAD_REQUEST, e)))?;
     if let Some(builtin) = builtins().iter().find(|b| b.id == template.id) {
-        return Err(Box::new(refuse(StatusCode::CONFLICT, builtin_clash(&template.id, &builtin.label))));
+        return Err(Box::new(refuse_as(StatusCode::CONFLICT, "builtin-id", builtin_clash(&template.id, &builtin.label))));
     }
     Ok((template, version))
 }
@@ -121,8 +130,9 @@ fn write_template(repo: &std::path::Path, template: &PartTemplate, mode: WriteMo
 /// `POST /api/bench/parts` — creates a repo template at
 /// `embarch/parts/<id>.toml` and answers the whole catalog, `201`.
 ///
-/// **A built-in's id is refused `409`**, naming the built-in (owner,
-/// 2026-11-01), and so is an id whose file already exists, parseable or not.
+/// **A built-in's id is refused `409`** (`builtin-id`), naming the built-in
+/// (owner, 2026-11-01), and so is an id whose file already exists, parseable
+/// or not (`exists`).
 pub async fn api_post_part(OpenRepo(repo): OpenRepo, Json(body): Json<serde_json::Value>) -> Response {
     let (template, _) = match template_from(body) {
         Ok(t) => t,
@@ -139,7 +149,8 @@ pub async fn api_post_part(OpenRepo(repo): OpenRepo, Json(body): Json<serde_json
 /// `version` `GET /api/bench/parts` served for it; answers the catalog.
 ///
 /// `404` when there is no such file (create it with `POST`), `409` when the
-/// file changed since that version or does not parse as a template, `400`
+/// file changed since that version (`version-changed`), does not load as a
+/// template (`unparseable`) or the id is a built-in's (`builtin-id`), `400`
 /// when the path and the body's id differ.
 pub async fn api_put_part(OpenRepo(repo): OpenRepo, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Response {
     let (template, version) = match template_from(body) {
@@ -165,11 +176,12 @@ pub async fn api_put_part(OpenRepo(repo): OpenRepo, Path(id): Path<String>, Json
         Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("could not read embarch/parts/{id}.toml: {e}")),
     };
     if version_of(&current) != version {
-        return refuse(StatusCode::CONFLICT, format!("embarch/parts/{id}.toml changed since it was read; reload it and save again"));
+        return refuse_as(StatusCode::CONFLICT, "version-changed", format!("embarch/parts/{id}.toml changed since it was read; reload it and save again"));
     }
     if let Err(e) = std::str::from_utf8(&current).map_err(|e| e.to_string()).and_then(parse_template) {
-        return refuse(
+        return refuse_as(
             StatusCode::CONFLICT,
+            "unparseable",
             format!("embarch/parts/{id}.toml does not load as a template ({e}), so it is left alone — fix it by hand"),
         );
     }
@@ -369,7 +381,6 @@ mod tests {
         let file = repo.join("embarch/topologies/b.toml");
         std::fs::write(&file, "name = \"b\"\nparts = []\n").unwrap();
         let read = files::load(&repo, "b").unwrap();
-        let code = |resp: &Response| resp.headers().get(REFUSAL_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
         // The file changed since it was read.
         std::fs::write(&file, "name = \"b\"\nsaved_at_utc_ms = 7\nparts = []\n").unwrap();
         let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(read.clone())).await;
@@ -386,6 +397,81 @@ mod tests {
         stale.version = Some(version_of(b"name = ["));
         let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(stale)).await;
         assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("unparseable")));
+        // A new bench over one that is there.
+        let resp = api_post_bench(OpenRepo(repo.clone()), Json(files::load(&repo, "b").unwrap_or_else(|_| read.clone()))).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("exists")));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn code(resp: &Response) -> Option<String> {
+        resp.headers().get(REFUSAL_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string)
+    }
+
+    async fn text(resp: Response) -> String {
+        String::from_utf8(axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap()
+    }
+
+    fn part_repo(tag: &str) -> PathBuf {
+        let repo = std::env::temp_dir().join(format!("ebm-part409-{tag}-{}-{}", std::process::id(), now_utc_ms()));
+        std::fs::create_dir_all(parts_dir(&repo)).unwrap();
+        repo
+    }
+
+    fn a_part(id: &str) -> serde_json::Value {
+        json!({ "id": id, "label": "X", "category": "board", "look": "board",
+                "connectors": [{ "id": "usb", "label": "USB", "kind": "usb-host", "side": "left",
+                                 "functions": [{ "function": "vcom", "interface": 2 }] }] })
+    }
+
+    /// The part routes' `409`s are told apart by the header, so the editor
+    /// offers Reload for a changed file only.
+    #[tokio::test]
+    async fn each_409_on_a_part_save_names_which_it_is() {
+        let repo = part_repo("codes");
+        let resp = api_post_part(OpenRepo(repo.clone()), Json(a_part("x"))).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = api_post_part(OpenRepo(repo.clone()), Json(a_part("x"))).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("exists")));
+        let resp = api_post_part(OpenRepo(repo.clone()), Json(a_part("cy4500"))).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("builtin-id")));
+        let resp = api_put_part(OpenRepo(repo.clone()), Path("cy4500".into()), Json(a_part("cy4500"))).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("builtin-id")));
+
+        let file = parts_dir(&repo).join("x.toml");
+        let mut edit = a_part("x");
+        edit["version"] = json!(version_of(&std::fs::read(&file).unwrap()));
+        std::fs::write(&file, std::fs::read_to_string(&file).unwrap().replace("label = \"X\"", "label = \"By hand\"")).unwrap();
+        let resp = api_put_part(OpenRepo(repo.clone()), Path("x".into()), Json(edit.clone())).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("version-changed")));
+
+        std::fs::write(&file, "id = [").unwrap();
+        edit["version"] = json!(version_of(b"id = ["));
+        let resp = api_put_part(OpenRepo(repo.clone()), Path("x".into()), Json(edit)).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("unparseable")));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A template refused for one field names it by its path, however deep:
+    /// a number refusal across 64 connectors must say which.
+    #[tokio::test]
+    async fn a_refused_field_is_named_by_its_path() {
+        let repo = part_repo("path");
+        let mut part = a_part("y");
+        part["connectors"][0]["functions"][0]["interface"] = json!("abc");
+        let resp = api_post_part(OpenRepo(repo.clone()), Json(part)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let said = text(resp).await;
+        assert!(said.starts_with("not a part template: connectors[0].functions[0].interface: invalid type: string \"abc\""), "{said}");
+        let mut part = a_part("y");
+        part["width"] = json!(-1);
+        let said = text(api_post_part(OpenRepo(repo.clone()), Json(part)).await).await;
+        assert!(said.starts_with("not a part template: width: invalid value: integer `-1`"), "{said}");
+        // A refusal about the whole template names no field.
+        let mut part = a_part("y");
+        part.as_object_mut().unwrap().remove("category");
+        let said = text(api_post_part(OpenRepo(repo.clone()), Json(part)).await).await;
+        assert_eq!(said, "not a part template: missing field `category`");
+        assert!(!parts_dir(&repo).join("y.toml").exists());
         let _ = std::fs::remove_dir_all(&repo);
     }
 

@@ -1015,6 +1015,89 @@ mod tests {
         );
     }
 
+    /// Every field a template can hold, set: built by struct literal, so a
+    /// field added to any of the three structs does not compile here until it
+    /// is set too — and then the two tests below fail until the vocabulary
+    /// serves it.
+    fn every_field_set() -> PartTemplate {
+        let entry = FunctionEntry {
+            function: Function::Scpi,
+            interface: Some(1),
+            baud: Some(9600),
+            write_terminator: Some("\n".into()),
+            read_terminator: Some("\r\n".into()),
+            min_interval_ms: Some(200),
+            ack_ok: Some("ok".into()),
+            ack_err: Some("err".into()),
+        };
+        let connector = Connector {
+            id: "a".into(),
+            label: "A".into(),
+            kind: HUB_KIND,
+            side: Side::Left,
+            power: Some(Power::Drp),
+            max_cables: 2,
+            functions: vec![entry],
+        };
+        PartTemplate {
+            id: "x".into(),
+            label: "X".into(),
+            subtitle: Some("x".into()),
+            category: Category::Board,
+            look: Look::Board,
+            hub: false,
+            width: 180,
+            min_height: Some(100),
+            rows_top: Some(40),
+            passthrough: vec![["a".into(), "a".into()]],
+            connectors: vec![connector],
+        }
+    }
+
+    /// A function entry's fields are exactly `function`, `interface` and the
+    /// served line facts: a fact the struct gains and [`LINE_FACTS`] lacks
+    /// would be dropped by the editor from every file it saves.
+    #[test]
+    fn the_served_line_facts_are_every_line_fact_field() {
+        let t = serde_json::to_value(every_field_set()).unwrap();
+        let entry = t["connectors"][0]["functions"][0].as_object().unwrap().clone();
+        let keys: std::collections::BTreeSet<&str> = entry.keys().map(String::as_str).collect();
+        let mut want: std::collections::BTreeSet<&str> = ["function", "interface"].into();
+        want.extend(LINE_FACTS.iter().map(|f| f.name));
+        assert_eq!(keys, want);
+        for f in LINE_FACTS {
+            assert_eq!(entry[f.name].is_number(), f.numeric, "{} is served as numeric = {}", f.name, f.numeric);
+        }
+    }
+
+    /// The served `numbers` are exactly the template's number fields, found
+    /// in a template with every field set, never listed by hand here.
+    #[test]
+    fn every_number_field_has_a_served_range() {
+        fn numeric_keys(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        if v.is_number() {
+                            out.insert(k.clone());
+                        }
+                        numeric_keys(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| numeric_keys(v, out)),
+                _ => {}
+            }
+        }
+        let mut fields = std::collections::BTreeSet::new();
+        numeric_keys(&serde_json::to_value(every_field_set()).unwrap(), &mut fields);
+        let served: std::collections::BTreeSet<String> =
+            vocabulary_json()["template"]["numbers"].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(served, fields);
+        for f in LINE_FACTS.iter().filter(|f| f.numeric) {
+            assert!(served.contains(f.name), "numeric line fact {} has no served range", f.name);
+        }
+    }
+
     /// Every served range is the parser's own: its ends parse, one past
     /// either end does not — so a field whose type or check changes fails
     /// here until the vocabulary says so too.
@@ -1022,7 +1105,6 @@ mod tests {
     fn the_served_number_ranges_are_the_parsers_own() {
         let numbers = vocabulary_json()["template"]["numbers"].clone();
         let numbers = numbers.as_object().unwrap();
-        assert_eq!(numbers.len(), 7, "{numbers:?}");
         let head = "id = \"x\"\nlabel = \"X\"\ncategory = \"board\"\nlook = \"board\"\n";
         let hub = HUB_KIND.as_str();
         let with = |field: &str, n: i128| -> bool {

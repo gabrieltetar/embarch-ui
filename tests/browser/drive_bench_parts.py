@@ -56,15 +56,27 @@ def check(name, cond, extra=""):
         fails.append(name)
 
 
-def http(method, path, body=None):
-    """The UI's own answer, outside the browser: (status, text)."""
+def http_full(method, path, body=None):
+    """The UI's own answer, outside the browser: (status, text, the refusal's word)."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(UI + path, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, r.read().decode()
+            return r.status, r.read().decode(), r.headers.get("x-embarch-refusal")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return e.code, e.read().decode(), e.headers.get("x-embarch-refusal")
+
+
+def http(method, path, body=None):
+    return http_full(method, path, body)[:2]
+
+
+def version_of(data):
+    """The server's file version (mod.rs `version_of`): FNV-1a 64 of the bytes, and their count."""
+    h = 0xcbf29ce484222325
+    for byte in data:
+        h = ((h ^ byte) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return "%016x-%d" % (h, len(data))
 
 
 # The page's first script: an error while the page loads is an error too.
@@ -257,6 +269,8 @@ try:
            "window.__sent = []; window.__delay = 0; var real = window.fetch; window.fetch = function (u, i) {"
            "  if (String(u).indexOf('/api/bench/parts') >= 0 && i && i.method && i.method !== 'GET') {"
            "    __sent.push({url: String(u), method: i.method, body: i.body ? JSON.parse(i.body) : null});"
+           "    if (window.__version && i.body) { var b = JSON.parse(i.body); b.version = window.__version; window.__version = null;"
+           "      i = Object.assign({}, i, {body: JSON.stringify(b)}); __sent[__sent.length - 1].body = b; }"
            "    var wait = window.__delay; window.__delay = 0;"
            "    if (wait) return new Promise(function (r) { setTimeout(r, wait); }).then(function () { return real.call(window, u, i); });"
            "  }"
@@ -411,11 +425,18 @@ try:
     click("#part-save")
     settled()
     status, text = http("POST", "/api/bench/parts", script("return window.__sent[window.__sent.length - 1].body"))
-    check("a number field typed wrong reaches the server as typed, and is refused 400",
-          script("return window.__sent[window.__sent.length - 1].body.width") == "21O" and status == 400, (status, text))
+    check("a number field typed wrong reaches the server as typed, and is refused 400 naming the field",
+          script("return window.__sent[window.__sent.length - 1].body.width") == "21O" and status == 400
+          and text.startswith("not a part template: width: "), (status, text))
     check("the dialog shows that refusal verbatim, nothing is written", result() == text and not (parts_dir / "usb-c-meter.toml").exists(),
           (result(), text))
     type_into("#part-width", "210")
+    type_into(fn0 + "[data-f=interface]", "two")
+    click("#part-save")
+    settled()
+    check("a wrong number deep in the connectors is named by its path",
+          result().startswith("not a part template: connectors[2].functions[0].interface: invalid type: string \"two\""), result())
+    type_into(fn0 + "[data-f=interface]", "2")
     shot("new")
     n0 = changed()
     click("#part-save")
@@ -477,8 +498,8 @@ try:
     settled()
     part, _ = served("usb-c-meter")
     stale = dict(script("return window.__sent[window.__sent.length - 1].body"))
-    status, text = http("PUT", "/api/bench/parts/usb-c-meter", stale)
-    check("the server refuses the stale version 409", status == 409, (status, text))
+    status, text, word = http_full("PUT", "/api/bench/parts/usb-c-meter", stale)
+    check("the server refuses the stale version 409, as version-changed", status == 409 and word == "version-changed", (status, text, word))
     check("the dialog shows the server's refusal verbatim", result() == text, (result(), text))
     check("the dialog stays open on its edit, offering Reload", mode() == "edit" and visible("#part-reload"))
     check("the file is the hand edit, untouched", path.read_text() == on_disk)
@@ -495,6 +516,25 @@ try:
     check("naming the version read on Reload", sent["body"].get("version") == part["version"], (sent["body"].get("version"), part["version"]))
     after = tomllib.loads(path.read_text())
     check("the file keeps the hand edit and adds the new one", after.get("label") == "Edited by hand" and after.get("subtitle") == "after a reload", after)
+    check("the drive's version is the server's", served("usb-c-meter")[0]["version"] == version_of(path.read_bytes()))
+
+    # A file that no longer loads is refused as unparseable, and Reload is no way on.
+    check("editing it once more", open_editor("usb-c-meter") == "edit")
+    type_into("#part-subtitle", "over a broken file")
+    good = path.read_bytes()
+    broken = good + b"\n[[[\n"
+    path.write_bytes(broken)
+    script("window.__version = arguments[0]; return true", [version_of(broken)])   # as if it had read the broken file
+    click("#part-save")
+    settled()
+    status, text, word = http_full("PUT", "/api/bench/parts/usb-c-meter", script("return window.__sent[window.__sent.length - 1].body"))
+    check("the server refuses a file that does not load 409, as unparseable", status == 409 and word == "unparseable", (status, text, word))
+    check("the dialog shows it verbatim and offers no Reload", result() == text and not visible("#part-reload") and mode() == "edit",
+          (result(), text))
+    check("the broken file is left alone", path.read_bytes() == broken)
+    path.write_bytes(good)
+    key("\uE00C")
+    click("#part-discard-yes")
 
     # ---- a built-in id is refused with the server's text ---------------------------
     check("a new part again", open_editor(None) == "new")
@@ -504,8 +544,8 @@ try:
     pick("#part-look", "analyzer")
     click("#part-save")
     settled()
-    status, text = http("POST", "/api/bench/parts", script("return window.__sent[window.__sent.length - 1].body"))
-    check("the server refuses a built-in's id 409", status == 409 and "built-in" in text, (status, text))
+    status, text, word = http_full("POST", "/api/bench/parts", script("return window.__sent[window.__sent.length - 1].body"))
+    check("the server refuses a built-in's id 409, as builtin-id", status == 409 and "built-in" in text and word == "builtin-id", (status, text, word))
     check("the dialog shows that refusal verbatim", result() == text, (result(), text))
     check("nothing is written under the built-in's id", not (parts_dir / "cy4500.toml").exists())
     check("the dialog stays open as a new part", mode() == "new")
@@ -582,8 +622,8 @@ try:
     pick("#part-look", "board")
     click("#part-save")
     settled()
-    status, text = http("POST", "/api/bench/parts", script("return window.__sent[window.__sent.length - 1].body"))
-    check("the server will not create over the unreadable file", status == 409, (status, text))
+    status, text, word = http_full("POST", "/api/bench/parts", script("return window.__sent[window.__sent.length - 1].body"))
+    check("the server will not create over the unreadable file, as exists", status == 409 and word == "exists", (status, text, word))
     check("the dialog shows that verbatim and says the file must go by hand",
           result() == text and "remove it or fix it by hand" in script("return document.getElementById('part-hint').textContent"))
     check("the unreadable file is untouched", "usb-d" in (parts_dir / "broken.toml").read_text())
@@ -685,6 +725,22 @@ try:
     open_editor("usb-c-meter")
     script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: '/elsewhere'}})); return true")
     check("a project switch closes an unchanged one", mode() == "closed")
+    open_editor("usb-c-meter")
+    type_into("#part-subtitle", "changed before the page's first project read")
+    script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: '/elsewhere', initial: true}})); return true")
+    check("the page's first project read is no switch: the draft stays saveable",
+          mode() == "edit" and not visible("#part-stale") and script("return document.getElementById('part-save').disabled") is False)
+    key("\uE00C")
+    click("#part-discard-yes")
+    open_editor("usb-c-meter")
+    script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: '/elsewhere', initial: true}})); return true")
+    check("nor does it close an unchanged one", mode() == "edit")
+    script("location.hash = '#debug'; return true")
+    check("leaving the Topology tab takes an unchanged dialog with it",
+          wait_for("return document.getElementById('part-dialog').style.display === 'none'") is True
+          and script("return !!document.querySelector('.tab-panel.active[data-tab=\"debug\"]')"))
+    script("location.hash = '#topology'; return true")
+    wait_for("return !!document.querySelector('.tab-panel.active[data-tab=\"topology\"]')")
 
     # ---- the connector cap is the server's ------------------------------------------
     open_editor(None)

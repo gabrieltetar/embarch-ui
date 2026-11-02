@@ -55,6 +55,10 @@ heapless = { version = "0.8", features = ["serde"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+# A part template refused for a field names the field
+# (`connectors[3].functions[0].interface`). Already in the tree through axum's
+# `json` feature, so naming it adds no crate.
+serde_path_to_error = "0.1.20"
 tokio = { version = "1.53.0", features = ["full"] }
 toml = "1.1"
 tracing = "0.1.44"
