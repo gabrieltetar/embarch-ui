@@ -717,6 +717,9 @@ struct EnrollRequest {
 /// Its caller is the Topology tab; the Enroll tab that used to own it was
 /// folded into Topology (decision 43) without the route changing at all.
 async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> Response {
+    // Waits for a running make-live, retract or clear (`bench::live`), so a
+    // Confirm cannot land between a retract's check and its delete.
+    let _live = state.bench_live_lock.lock().await;
     // The same lookup and the same refusal `POST .../board` has (decision
     // 48) — an enrolment attaches, so it needs a chip, and the paths that
     // produce one must not disagree about where it comes from or what an
@@ -2582,6 +2585,78 @@ cables = [["pod.swd", "dut.swd"]]
         assert_eq!(stub.lock().unwrap().writes.len(), writes, "clearing touches nothing in Core");
         let _ = std::fs::remove_dir_all(&repo_a);
         let _ = std::fs::remove_dir_all(&repo_b);
+    }
+
+    /// Two DKs joined by a radio link, Core holding their roles swapped:
+    /// a radio link reaches no probe, so both roles are offered as leftovers.
+    /// Retracting dev-bench, whose part names no board type, says its link
+    /// went with the row. A VCOM on a connector that does not carry it is
+    /// still read for dev-bench and not declared elsewhere. An unreadable
+    /// bench file is a 500 on GET, make-live and retract alike.
+    #[tokio::test]
+    async fn a_radio_link_reaches_no_probe_and_a_swap_is_offered_both_ways() {
+        let stub = stub_with_leftovers();
+        {
+            let mut s = stub.lock().unwrap();
+            s.enrolled = vec![
+                serde_json::json!({ "role": "dut", "name": "nrf54l15dk/nrf54l15/cpuapp", "chip": "nRF54L15", "probe_serial": "B1" }),
+                serde_json::json!({ "role": "dev-bench", "name": "", "chip": "nRF54L15", "probe_serial": "D1" }),
+            ];
+        }
+        let core = serve_stub_core(stub.clone()).await;
+        let bench = r#"name = "radio"
+
+[[parts]]
+id = "host"
+template = "this-machine"
+
+[[parts]]
+id = "bench"
+template = "nrf54l15dk"
+role = "dev-bench"
+usb = { radio = { vcom = { serial = "B1V", interface = 2 } }, usb = { probe = "B1" } }
+
+[[parts]]
+id = "dut"
+template = "nrf54l15dk"
+role = "dut"
+usb = { radio = { vcom = 1 }, usb = { probe = "D1" } }
+
+[[cables]]
+from = "bench.usb"
+to = "host"
+
+[[cables]]
+from = "dut.usb"
+to = "host"
+
+[[configs]]
+name = "A"
+cables = [["bench.radio", "dut.radio"]]
+"#;
+        let (repo, record) = live_repo("live-radio", "radio", bench);
+        let base = serve_app_live(&core, Some(repo.clone()), Some(record)).await;
+        let http = reqwest::Client::new();
+        let version = version_of_bench(&http, &base, "radio").await;
+        let report: serde_json::Value = live_call(&http, &base, "radio", serde_json::json!({ "config": "A", "version": version, "write_through": false })).await.json().await.unwrap();
+        let left = leftover_ids(&report["leftovers"]);
+        assert!(left.contains(&("role".to_string(), "dut".to_string())) && left.contains(&("role".to_string(), "dev-bench".to_string())), "{left:?}");
+        assert_eq!(row_in(&report, "binding bench · radio · vcom")["text"], "`radio` is not a usb-host connector of a nRF54L15 DK; it is still read as dev-bench's VCOM");
+        assert_eq!(row_in(&report, "binding dut · radio · vcom")["text"], "`radio` is not a usb-host connector of a nRF54L15 DK; it was not declared");
+
+        let body: serde_json::Value = http.post(format!("{base}/api/bench/live/retract")).json(&serde_json::json!({ "kind": "role", "id": "dev-bench" })).send().await.unwrap().json().await.unwrap();
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["text"], "retracted the role `dev-bench`; its link (serial B1V, interface 2) went with the row");
+
+        use std::os::unix::fs::PermissionsExt;
+        let file = repo.join("embarch/topologies/radio.toml");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let get = http.get(format!("{base}/api/bench/live")).send().await.unwrap().status();
+        let make = live_call(&http, &base, "radio", serde_json::json!({ "config": "A", "version": version, "write_through": false })).await.status();
+        let retract = http.post(format!("{base}/api/bench/live/retract")).json(&serde_json::json!({ "kind": "role", "id": "dut" })).send().await.unwrap().status();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!((get, make, retract), (StatusCode::INTERNAL_SERVER_ERROR, StatusCode::INTERNAL_SERVER_ERROR, StatusCode::INTERNAL_SERVER_ERROR), "one answer for an unreadable file");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// One make-live, retract or clear at a time: a write-through held inside

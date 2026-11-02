@@ -249,6 +249,9 @@ fn view(repo: &Path, record: &LiveRecord) -> Result<LiveView, String> {
         .try_exists()
         .map_err(|e| format!("could not tell whether {} is there: {e}", files::bench_file(&record.slug)))?;
     let loaded = if present { Some(files::load(repo, &record.slug)) } else { None };
+    if let Some(Err(LoadError::Unreadable(e))) = &loaded {
+        return Err(e.clone());
+    }
     let unparseable = matches!(loaded, Some(Err(LoadError::Unparseable(_))));
     let config_missing = record
         .config
@@ -387,23 +390,27 @@ fn role_holders(bench: &Bench) -> BTreeMap<Role, &Part> {
 /// What a role's part names, for the leftovers and the differences.
 struct RoleNamed {
     probe: Option<String>,
-    /// Every probe serial the role's part reaches over raw cable endpoints —
-    /// its own, and any part's at the far end of a cable from it, bench-level
-    /// or in the live config — **read without templates**.
+    /// Every probe serial the role's part reaches: its own, and the far
+    /// end's of each SWD lead from it, bench-level or in the live config.
     reachable: BTreeSet<String>,
-    /// The holder's or a far end's template is missing: which probe the role
-    /// is on cannot be told, so no probe-mismatch leftover is offered.
+    /// **What protects a correct enrolment from a Retract**: a cable from the
+    /// role's part whose kind cannot be told — the holder's or the far end's
+    /// template missing, or a connector its template does not declare — so
+    /// whether it is an SWD lead to the probe Core holds cannot be told, and
+    /// no probe-mismatch leftover is offered.
     probe_unknown: bool,
     board: Option<String>,
     link: (Option<String>, Option<u8>),
 }
 
-/// The probe serials a part reaches over raw cable endpoints — its own and
-/// those of every part at the far end of a cable from it (bench-level or in
-/// the live config) — and whether any of those parts' templates is missing.
-/// **No template is read to follow a cable**: with one missing, an SWD lead
-/// to the probe Core holds in the role would otherwise read as no lead, and
-/// its Retract would delete the right enrolment.
+/// The probe serials a part reaches — its own, and the far end's of each SWD
+/// lead from it (bench-level or in the live config), followed as
+/// `files::reached_probe` and the probe-path check follow one: both
+/// connectors `swd`. A cable of another known kind (a radio link, a power
+/// lead) reaches no probe. **A cable whose kind cannot be told** — either
+/// part's template missing, or a connector its template does not declare —
+/// makes the role's probe unknown, so its Retract is not offered for an
+/// enrolment that lead may well be.
 fn raw_reach(part: &Part, bench: &Bench, configs: &[Config], templates: &Templates) -> (BTreeSet<String>, bool) {
     let mut serials: BTreeSet<String> = part.probe_serial().map(str::to_string).into_iter().collect();
     let mut unknown = !templates.contains_key(&part.template);
@@ -412,13 +419,42 @@ fn raw_reach(part: &Part, bench: &Bench, configs: &[Config], templates: &Templat
         .iter()
         .map(|c| (c.from.as_str(), c.to.as_str()))
         .chain(configs.iter().flat_map(|c| c.cables.iter().map(|[a, b]| (a.as_str(), b.as_str()))));
+    // `Some(kind)` for a connector its template declares, `None` when that
+    // cannot be told; a hub (this machine) has no connectors and is skipped.
+    enum End<'p> {
+        Known(&'p Part, Kind),
+        Hub,
+        Unknown,
+    }
+    let resolve = |end: &str| -> End {
+        let (pid, cid) = match end.split_once('.') {
+            Some((p, c)) => (p, Some(c)),
+            None => (end, None),
+        };
+        let Some(p) = bench.parts.iter().find(|x| x.id == pid) else { return End::Unknown };
+        let Some(t) = templates.get(&p.template) else { return End::Unknown };
+        if t.hub {
+            return End::Hub;
+        }
+        match cid.and_then(|c| t.connector(c)) {
+            Some(c) => End::Known(p, c.kind),
+            None => End::Unknown,
+        }
+    };
     let part_of = |end: &str| end.split('.').next().unwrap_or(end).to_string();
     for (a, b) in ends {
-        let (pa, pb) = (part_of(a), part_of(b));
-        let far = if pa == part.id { pb } else if pb == part.id { pa } else { continue };
-        if let Some(other) = bench.parts.iter().find(|p| p.id == far) {
-            unknown |= !templates.contains_key(&other.template);
-            serials.extend(other.probe_serial().map(str::to_string));
+        let (near, far) = if part_of(a) == part.id {
+            (a, b)
+        } else if part_of(b) == part.id {
+            (b, a)
+        } else {
+            continue;
+        };
+        match (resolve(near), resolve(far)) {
+            (_, End::Hub) => {}
+            (End::Known(_, Kind::Swd), End::Known(other, Kind::Swd)) => serials.extend(other.probe_serial().map(str::to_string)),
+            (End::Known(..), End::Known(..)) => {}
+            _ => unknown = true,
         }
     }
     (serials, unknown)
@@ -670,6 +706,7 @@ fn template_rows(bench: &Bench, catalog: &Catalog) -> Vec<Row> {
         .map(|e| row(format!("part template {}", e.file), NOT_SENT, false, format!("{}: {} — a part drawn from it declares nothing", e.file, e.error)))
         .collect();
     let templates = catalog.by_id();
+    let dev_bench_holder = role_holders(bench).get(&Role::DevBench).map(|p| p.id.clone());
     for part in &bench.parts {
         let Some(template) = templates.get(&part.template) else {
             out.push(row(
@@ -697,8 +734,8 @@ fn template_rows(bench: &Bench, catalog: &Catalog) -> Vec<Row> {
                 // than "not declared".
                 let what_happens = match function {
                     Function::Probe => "it is still read as the part's probe".to_string(),
-                    Function::Vcom => "it is still read as the part's VCOM".to_string(),
-                    _ => "so it was not declared".to_string(),
+                    Function::Vcom if dev_bench_holder.as_deref() == Some(part.id.as_str()) => "it is still read as dev-bench's VCOM".to_string(),
+                    _ => "it was not declared".to_string(),
                 };
                 out.push(row(format!("binding {} · {cid} · {}", part.display(), function.as_str()), NOT_SENT, false, format!("{why}; {what_happens}")));
             }
@@ -1222,7 +1259,10 @@ fn live_bench(state: &AppState, repo: &Path) -> Result<(Bench, Option<String>), 
                 format!("the live bench `{}` is not on disk any more, so leftovers cannot be worked out; make a bench live again", record.slug),
             )))
         }
-        Err(LoadError::Unparseable(e) | LoadError::Unreadable(e)) => return Err(Box::new(refuse_as(StatusCode::CONFLICT, "unparseable", e))),
+        Err(LoadError::Unparseable(e)) => return Err(Box::new(refuse_as(StatusCode::CONFLICT, "unparseable", e))),
+        // An I/O error is reported, never read as a broken file (the
+        // round-1 rule GET and make-live follow too).
+        Err(LoadError::Unreadable(e)) => return Err(Box::new(refuse(StatusCode::INTERNAL_SERVER_ERROR, e))),
     };
     if let Some(name) = record.config.as_deref().filter(|n| bench.config(n).is_none()) {
         return Err(Box::new(refuse_as(
@@ -1282,16 +1322,21 @@ pub async fn api_retract(State(state): State<AppState>, OpenRepo(repo): OpenRepo
     if ok && item.kind == "role" {
         if let Some(role) = Role::ALL.iter().find(|r| r.as_str() == item.id) {
             let binding = files::role_binding_in(&bench.parts, &bench.cables, &config.map(|c| vec![c.clone()]).unwrap_or_default(), *role, &templates);
-            if let Some(binding) = binding.filter(|b| !b.board.is_empty()) {
-                let chip = role_chip(&state, &item.id, &binding).await;
-                let written = write_role_board(&state, &item.id, &binding, &chip).await;
+            if let Some(binding) = binding {
+                let written = if binding.board.is_empty() {
+                    None
+                } else {
+                    let chip = role_chip(&state, &item.id, &binding).await;
+                    write_role_board(&state, &item.id, &binding, &chip).await
+                };
                 text.push_str(&match &written {
                     Some(BoardWrite::Applied { chip }) => format!("; its board type {} ({chip}) was written again, since this bench names it", binding.board),
                     Some(BoardWrite::Refused { error, .. }) => format!("; writing its board type {} again was refused: {error}", binding.board),
                     Some(BoardWrite::NoChip(sentence)) => format!("; its board type {} was not written again: {sentence}", binding.board),
                     None => String::new(),
                 });
-                // dev-bench's link lived on the row the retract removed.
+                // dev-bench's link lived on the row the retract removed —
+                // said whether or not the part names a board type.
                 let link = (binding.link_port_serial.clone(), binding.link_port_interface);
                 if *role == Role::DevBench && (link.0.is_some() || link.1.is_some()) {
                     text.push_str(&match written {
@@ -1299,7 +1344,7 @@ pub async fn api_retract(State(state): State<AppState>, OpenRepo(repo): OpenRepo
                             Ok(()) => format!("; its link ({}) was declared again", link_text(&link.0, link.1)),
                             Err(e) => format!("; declaring its link ({}) again was refused: {e:#}", link_text(&link.0, link.1)),
                         },
-                        _ => format!("; its link ({}) went with the row, and comes back once dev-bench holds its board again", link_text(&link.0, link.1)),
+                        _ => format!("; its link ({}) went with the row", link_text(&link.0, link.1)),
                     });
                 }
             }
