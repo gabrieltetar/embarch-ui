@@ -551,6 +551,10 @@ try:
     check("Edit and New part… dispatch embarch:edit-part for the part editor, with the id or null",
           script("return window.__edits;") == [{"id": "pd-dut"}, {"id": None}], script("return window.__edits;"))
     check("and neither places a part", not dirty())
+    # With the part editor loaded the event opens its dialog, a modal over the
+    # canvas; close it the way its own Cancel does before using the bin again.
+    script("var c = document.getElementById('part-cancel');"
+           " if (c && document.getElementById('part-dialog').style.display !== 'none') c.click();")
     click('#bench-bin [data-template="debug-probe"]')
     placed = wait_for("return !!document.querySelector('#bench-svg [data-part=\"debug-probe\"]');", 4)
     check("clicking a card places the part near the view's centre, its id the template's", placed)
