@@ -63,6 +63,7 @@
   var binList = document.getElementById("bench-bin-list");
   var binClose = document.getElementById("bench-bin-close");
   var trayEl = document.getElementById("bench-tray");
+  insEl.tabIndex = -1;
   var dlg = {
     box: document.getElementById("bench-dialog"),
     backdrop: document.getElementById("bench-dialog-backdrop"),
@@ -121,7 +122,9 @@
   var cfgIx = 0;
   var sel = null;            // { kind: "part" | "cable", id }
   var hoverPart = null;
-  var verdicts = { roles: dict(), boards: dict() };
+  var verdicts = { roles: dict(), boards: dict() };   // as Validate's pass sent them
+  var homes = dict();        // part key -> { id, v, label }: the part each verdict is drawn on, fixed when placed
+  var verdictDrops = [];     // { id, text }: verdicts an edit took off their part since the pass
   var snap = { seen: false, known: false, portsKnown: false, portsError: null, probes: dict(), probeList: [], ports: [] };
   var view = { x: 0, y: 0, k: 1 };
   var fitted = false;
@@ -147,6 +150,8 @@
   var previewing = false;    // drawing a template for the part editor, not the bench
   var dlgState = null;
   var lostEdits = null;      // a bench whose unsaved edits a project switch from elsewhere dropped
+  var leavePending = null;   // a switch the human said may drop the edits, until it lands or fails
+  var saveInFlight = null;   // the PUT on its way, which a leave waits for
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -826,17 +831,73 @@
     return p.tpl.subtitle || "";
   }
 
-  // What Validate last said about this part: its role's verdict, or a bench
-  // board's by the probe it is bound to.
-  function verdictOf(p) {
-    if (p.inst.role) return hasOwn(verdicts.roles, p.inst.role) ? verdicts.roles[p.inst.role] : null;
+  // **A verdict is drawn on the part Validate checked, and only while that
+  // part still holds what it was checked as** (fix round 1). Which part that
+  // is — the one holding the role, or a bench board's part by the probe it
+  // binds — is fixed when the pass's verdicts arrive or the bench is loaded;
+  // an edit since never moves one onto a part Validate never saw. An edit
+  // that moves the role or the probe takes the verdict off, and a note says so.
+  function identityOf(p) {
+    if (p.inst.role) return hasOwn(verdicts.roles, p.inst.role) ? "role:" + p.inst.role : null;
     var usb = p.inst.usb || {}, found = null;
     Object.keys(usb).some(function (cid) {
       var serial = deviceSerial(p, cid);
-      if (serial && hasOwn(verdicts.boards, serial)) found = verdicts.boards[serial];
+      if (serial && hasOwn(verdicts.boards, serial)) found = "probe:" + serial;
       return !!found;
     });
     return found;
+  }
+  function verdictById(id) {
+    var kind = id.indexOf("role:") === 0 ? "roles" : "boards", key = id.slice(id.indexOf(":") + 1);
+    return hasOwn(verdicts[kind], key) ? verdicts[kind][key] : null;
+  }
+  function holds(p, id) {
+    if (id.indexOf("role:") === 0) return p.inst.role === id.slice(5);
+    if (p.inst.role) return false;
+    var usb = p.inst.usb || {}, serial = id.slice(6);
+    return Object.keys(usb).some(function (cid) { return deviceSerial(p, cid) === serial; });
+  }
+  function identityText(id) {
+    return id.indexOf("role:") === 0 ? "the " + id.slice(5) + " role" : "probe " + id.slice(6);
+  }
+
+  // `only`: the identities to place (those a new pass changed); the rest
+  // keep the part they are on, or stay off it.
+  function placeVerdicts(only) {
+    if (!model) { homes = dict(); return; }
+    var next = dict();
+    if (only) {
+      Object.keys(homes).forEach(function (key) {
+        var h = homes[key];
+        if (!only[h.id] && verdictById(h.id)) next[key] = { id: h.id, v: verdictById(h.id), label: h.label };
+      });
+      verdictDrops = verdictDrops.filter(function (d) { return !only[d.id] && verdictById(d.id); });
+    } else {
+      verdictDrops = [];
+    }
+    model.order.forEach(function (p) {
+      if (p.dup || hasOwn(next, p.key)) return;
+      var id = identityOf(p);
+      if (id && (!only || only[id])) next[p.key] = { id: id, v: verdictById(id), label: name(p) };
+    });
+    homes = next;
+  }
+
+  // After an edit: a part that no longer holds what Validate checked it as
+  // loses the verdict, and the notes say which and why.
+  function reconcileVerdicts() {
+    Object.keys(homes).forEach(function (key) {
+      var h = homes[key], p = model.parts[key];
+      if (p && holds(p, h.id)) return;
+      delete homes[key];
+      verdictDrops.push({ id: h.id, text: "Validate checked " + h.label + " as " + identityText(h.id) + "; " +
+        (p ? "an edit since moved that" : "the part was deleted since") + ", so its verdict is no longer drawn — validate again" });
+    });
+  }
+
+  function verdictOf(p) {
+    var h = hasOwn(homes, p.key) ? homes[p.key] : null;
+    return h && holds(p, h.id) ? h.v : null;
   }
 
   // The part and everything mounted on it, however high the stack goes.
@@ -1061,23 +1122,36 @@
     snap = { seen: true, known: known, portsKnown: known && !s.serial_ports_error, portsError: s.serial_ports_error || null,
              probes: probes, probeList: (s.probes || []).filter(function (p) { return p && p.serial_number; }), ports: s.serial_ports || [] };
     applyLive();
-    // The tray is not the canvas: it follows what is plugged in. A tray item
-    // picked or being dragged keeps the tray as it is until it lands.
-    if (trayArm && !trayItemByKey(trayArm)) { trayArm = null; render(); }
+    // The tray is not the canvas: it follows what is plugged in, chip by chip,
+    // so a chip with focus keeps it. A picked item that was unplugged is put
+    // down by toggling classes — a snapshot never rebuilds the canvas — and
+    // a tray item being dragged keeps the tray as it is until it lands.
+    if (trayArm && !trayItemByKey(trayArm)) {
+      trayArm = null;
+      svg.querySelectorAll(".bn-tray-ok").forEach(function (el) { el.classList.remove("bn-ok", "bn-tray-ok", "bn-target"); });
+      renderHint();
+    }
     if (!trayDrag) renderTray();
   });
 
   // Validate's verdicts, sent after a pass and when one is dropped. A pass is
   // a gesture, not a poll, so the canvas redraws for it.
+  // A verdict that changed, or is new, is placed on whichever part holds its
+  // role or probe now; one that did not keeps its part, or stays off it.
   document.addEventListener("embarch:verdicts", function (ev) {
     var d = ev.detail || {};
-    var next = { roles: dict(), boards: dict() };
-    ["roles", "boards"].forEach(function (k) {
-      var src = d[k] || {};
-      Object.keys(src).forEach(function (id) { next[k][id] = src[id]; });
+    var next = { roles: dict(), boards: dict() }, changedIds = dict();
+    [["roles", "role:"], ["boards", "probe:"]].forEach(function (k) {
+      var src = d[k[0]] || {};
+      Object.keys(src).forEach(function (id) { next[k[0]][id] = src[id]; });
+      Object.keys(next[k[0]]).concat(Object.keys(verdicts[k[0]])).forEach(function (id) {
+        if (JSON.stringify(next[k[0]][id]) !== JSON.stringify(verdicts[k[0]][id])) changedIds[k[1] + id] = true;
+      });
     });
     verdicts = next;
+    placeVerdicts(changedIds);
     render();
+    renderNotes();
   });
 
   // ---------------------------------------------------------------- the checks
@@ -1301,26 +1375,53 @@
     return b;
   }
 
+  // Updated in place, chip by chip, so a snapshot rewrites only what changed
+  // and a chip with focus keeps it.
+  function fillChip(el, it) {
+    var cls = "bench-tray-chip" + (trayArm === it.key ? " is-armed" : "") + (it.dead ? " is-dead" : "");
+    if (el.className !== cls) el.className = cls;
+    el.draggable = !it.dead;
+    var title = it.dead ? "no serial and no VID/PID: nothing could find this port again"
+      : "drag onto a usb-host connector, or click it and then the connector";
+    if (el.title !== title) el.title = title;
+    var text = it.kind + "\u0000" + it.label;
+    if (el.getAttribute("data-text") !== text) {
+      el.setAttribute("data-text", text);
+      el.innerHTML = "<b>" + esc(it.kind) + "</b>" + esc(it.label);
+    }
+  }
+
   function renderTray() {
     if (!bench || !model) { trayEl.hidden = true; trayEl.innerHTML = ""; return; }
     trayEl.hidden = false;
-    var items = trayItemsNow();
-    var h = '<span class="bench-tray-label">Plugged in, on no part</span>';
-    if (!snap.seen) {
-      h += '<span class="bench-tray-unknown">waiting for Core…</span>';
-    } else if (!snap.known) {
-      h += '<span class="bench-tray-unknown">Core is not answering: what is plugged in is unknown</span>';
-    } else {
-      h += items.map(function (it) {
-        return '<span class="bench-tray-chip' + (trayArm === it.key ? " is-armed" : "") + (it.dead ? " is-dead" : "") +
-          '" role="button" tabindex="0" draggable="' + (it.dead ? "false" : "true") + '" data-tray="' + esc(it.key) + '" title="' +
-          esc(it.dead ? "no serial and no VID/PID: nothing could find this port again" :
-            "drag onto a usb-host connector, or click it and then the connector") + '"><b>' + esc(it.kind) + "</b>" + esc(it.label) + "</span>";
-      }).join("");
-      if (!snap.portsKnown) h += '<span class="bench-tray-unknown">serial ports unknown</span>';
-      else if (!items.length) h += '<span class="bench-tray-unknown bench-tray-none">none</span>';
+    if (!trayEl.querySelector(".bench-tray-items")) {
+      trayEl.innerHTML = '<span class="bench-tray-label">Plugged in, on no part</span><span class="bench-tray-items"></span>' +
+        '<span class="bench-tray-status"></span>';
     }
-    trayEl.innerHTML = h;
+    var box = trayEl.querySelector(".bench-tray-items"), status = trayEl.querySelector(".bench-tray-status");
+    var items = snap.seen && snap.known ? trayItemsNow() || [] : [];
+    var st = !snap.seen ? ["waiting for Core…", "bench-tray-unknown"]
+      : !snap.known ? ["Core is not answering: what is plugged in is unknown", "bench-tray-unknown"]
+      : !snap.portsKnown ? ["serial ports unknown", "bench-tray-unknown"]
+      : !items.length ? ["none", "bench-tray-none"] : ["", ""];
+    if (status.textContent !== st[0]) status.textContent = st[0];
+    var stCls = "bench-tray-status " + st[1];
+    if (status.className !== stCls) status.className = stCls;
+    var have = dict(), want = dict();
+    Array.prototype.forEach.call(box.children, function (el) { have[el.getAttribute("data-tray")] = el; });
+    items.forEach(function (it) { want[it.key] = true; });
+    Object.keys(have).forEach(function (k) { if (!want[k]) box.removeChild(have[k]); });
+    items.forEach(function (it, i) {
+      var el = want[it.key] && have[it.key] && have[it.key].parentNode === box ? have[it.key] : null;
+      if (!el) {
+        el = document.createElement("span");
+        el.setAttribute("role", "button");
+        el.tabIndex = 0;
+        el.setAttribute("data-tray", it.key);
+      }
+      fillChip(el, it);
+      if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+    });
   }
 
   function armTray(key) {
@@ -1350,8 +1451,12 @@
         if (hasOwn(usb[connId], fn)) replaced = bindingText(usb[connId][fn]);
         usb[connId][fn] = b;
       });
+      var here = model.parts[partKey], dev = here ? deviceSerial(here, connId) : null;
+      // A binding that names more than one port names none of them for sure.
+      var matches = item.kind === "probe" ? 0 : snap.ports.filter(function (pt) { return bindingMatchesPort(b, dev, pt); }).length;
       notice(name(q) + " · " + c.label + ": " + fn + " is " + bindingText(b) + (replaced ? ", replacing " + replaced : "") +
-        (cablesAt(model.parts[partKey], model.parts[partKey].byId[connId]).length ? "" : " — this connector has no cable to this machine yet"), "ok");
+        (matches > 1 ? " — it matches " + matches + " enumerated ports, so which one is ambiguous" : "") +
+        (here && cablesAt(here, here.byId[connId]).length ? "" : " — this connector has no cable to this machine yet"), matches > 1 ? "error" : "ok");
     };
     if (fns.length === 1) { go(fns[0]); return; }
     var m = connBindings(p, connId) || {};
@@ -1542,6 +1647,20 @@
     return h;
   }
 
+  // What has focus in the inspector, so a rebuild for the same selection —
+  // an edit committed, the board types answering, a save — puts it back,
+  // with a label half typed and its caret, rather than dropping it (fix
+  // round 1).
+  var insFor = null;
+  function inspectorFocus() {
+    var a = document.activeElement;
+    if (!a || a === insEl || !insEl.contains(a)) return null;
+    var css = ["data-ed", "data-act", "data-cid", "data-fn"].filter(function (n) { return a.hasAttribute(n); })
+      .map(function (n) { return "[" + n + '="' + CSS.escape(a.getAttribute(n)) + '"]'; }).join("");
+    var typing = a.tagName === "INPUT" && a.defaultValue !== a.value;
+    return { css: css, value: typing ? a.value : null, start: typing ? a.selectionStart : null, end: typing ? a.selectionEnd : null };
+  }
+
   // The inspector floats over the canvas only while something is selected.
   function renderInspector() {
     var cb = sel && sel.kind === "cable" ? cableById(sel.id) : null;
@@ -1549,10 +1668,26 @@
     if (!bench || !model || (!cb && !p)) {
       insEl.innerHTML = "";
       insEl.hidden = true;
+      insFor = null;
       return;
     }
+    var now = sel.kind + ":" + sel.id;
+    var keep = insFor === now ? inspectorFocus() : null;
     insEl.innerHTML = p ? partInspector(p) : cableInspector(cb);
     insEl.hidden = false;
+    insFor = now;
+    if (keep) {
+      var back = keep.css ? insEl.querySelector(keep.css) : null;
+      if (back) {
+        if (keep.value != null) {
+          back.value = keep.value;
+          try { back.setSelectionRange(keep.start, keep.end); } catch (_) { /* not a text field */ }
+        }
+        back.focus({ preventScroll: true });
+      } else {
+        insEl.focus({ preventScroll: true });   // the control went with what it named; stay in the inspector
+      }
+    }
     applyLive();
   }
 
@@ -1597,7 +1732,9 @@
   function renderNotes() {
     var lines = partErrors.concat(benchErrors).map(function (e) {
       return (e && e.file ? e.file : "a file") + ": " + (e && e.error ? e.error : "unreadable");
-    }).concat(model && bench ? model.notes : []);
+    }).concat(model && bench ? model.notes : [])
+      .concat(model && bench ? verdictDrops.map(function (d) { return d.text; }) : [])
+      .concat(lostEdits ? [lostEdits] : []);
     notesEl.innerHTML = lines.map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("");
     notesEl.hidden = !lines.length;
   }
@@ -1691,6 +1828,7 @@
         var err = new Error(t || "HTTP " + r.status);
         err.status = r.status;
         err.route = route;
+        err.code = r.headers.get("x-embarch-refusal");
         throw err;
       });
     };
@@ -1799,13 +1937,14 @@
       redoStack = [];
       remember(slug);
       picker.value = slug;
+      leavePending = null;
       buildModel();
+      placeVerdicts();
       if (sel && !(sel.kind === "part" ? model.parts[sel.id] : cableById(sel.id))) sel = null;
       showState("", false);
       renderPath();
       bodyEl.hidden = false;
-      notice(lostEdits || "", lostEdits ? "error" : "info");
-      lostEdits = null;
+      notice("", "info");
       renderConfigs();
       render();
       renderInspector();
@@ -1816,6 +1955,14 @@
       if (!keep) fit();
     }).catch(function (e) {
       if (seq !== benchSeq) return;
+      // A bench that would not open leaves the one on screen, edits and all,
+      // with a line saying why — unless no project is open at all.
+      if (bench && model && e && e.status !== 409) {
+        leavePending = null;
+        picker.value = bench.slug;
+        notice("Could not open embarch/topologies/" + slug + ".toml: " + errText(e), "error");
+        return;
+      }
       showFailure(e, true);
     });
   }
@@ -1856,10 +2003,14 @@
   // clears it, and says its own after.
   function edit(fn) {
     if (!bench) return false;
+    // A cable being laid or a part being dragged was answered for the bench
+    // before this edit; its verdicts no longer hold (fix round 1).
+    cancelTransient();
     var before = snapshotContent();
     fn();
     if (snapshotContent() === before) return false;
     notice("", "info");
+    lostEdits = null;
     undoStack.push(before);
     redoStack = [];
     changed();
@@ -1871,6 +2022,7 @@
     var cfgs = bench.configs || [];
     if (cfgIx >= cfgs.length) cfgIx = Math.max(0, cfgs.length - 1);
     buildModel();
+    reconcileVerdicts();
     if (sel && !(sel.kind === "part" ? model.parts[sel.id] : cableById(sel.id))) sel = null;
     renderConfigs();
     render();
@@ -1949,8 +2101,10 @@
     if (!dropPoint || !stacks.length) { commit(null); return; }
     var trial = benchBody();
     trial.parts = trial.parts.concat([inst]);
+    var unasked = null;
     Promise.all(stacks.map(function (c) {
-      return send("POST", ROUTE_CANDIDATES, { bench: trial, config: cfgName(), from: id + "." + c.id }).catch(function () { return null; });
+      return send("POST", ROUTE_CANDIDATES, { bench: trial, config: cfgName(), from: id + "." + c.id })
+        .catch(function (e) { unasked = errText(e); return null; });
     })).then(function (answers) {
       var base = null;
       answers.forEach(function (r) {
@@ -1962,6 +2116,8 @@
         });
       });
       commit(base);
+      // "No board offered" and "the server could not be asked" differ.
+      if (unasked && !base) notice(t.label + " placed unmounted: where it may sit could not be asked (" + unasked + ")", "error");
     });
   }
 
@@ -2115,11 +2271,14 @@
   function askMounts(p) {
     var plugs = p.dup ? [] : p.conns.filter(function (c) { return c.stack && !c.missing; });
     if (!plugs.length) return;
-    var seq = drag.seq, body = benchBody();
+    var seq = drag.seq, body = benchBody(), unasked = null, who = name(p);
     Promise.all(plugs.map(function (c) {
-      return send("POST", ROUTE_CANDIDATES, { bench: body, config: cfgName(), from: p.id + "." + c.id }).catch(function () { return null; });
+      return send("POST", ROUTE_CANDIDATES, { bench: body, config: cfgName(), from: p.id + "." + c.id })
+        .catch(function (e) { unasked = errText(e); return null; });
     })).then(function (answers) {
+      if (unasked) notice("Where " + who + " may be stacked could not be asked (" + unasked + "); it will not snap onto a board", "error");
       if (!drag || drag.seq !== seq) return;
+      drag.unasked = unasked;
       var merged = dict();
       answers.forEach(function (r) {
         var v = (r && r.verdicts) || {};
@@ -2186,7 +2345,8 @@
     var p = model.parts[d.key], base = d.snap ? model.parts[d.snap] : null;
     if (p && base) { p.inst.mounted_on = base.id; p.inst.at = null; }
     if (snapshotContent() !== d.before) { undoStack.push(d.before); redoStack = []; }
-    notice(p && base ? name(p) + " is stacked on " + name(base) : "", "ok");
+    if (p && base) notice(name(p) + " is stacked on " + name(base), "ok");
+    else if (!d.unasked) notice("", "info");
     changed();
   }
 
@@ -2367,27 +2527,64 @@
 
   // Unsaved edits before leaving them: ask, and on Discard put the bench back
   // the way its file says, so coming back shows the file, not the edits.
+  // The part editor (bench-parts.js) keeps a draft of its own; a leave asks
+  // about it too. A page without the editor has nothing unsaved there.
+  function partsUnsaved() {
+    var pa = window.embarchParts;
+    try { return !!(pa && typeof pa.unsaved === "function" && pa.unsaved()); } catch (_) { return false; }
+  }
+
+  // Asks, and decides nothing else (fix round 1): what was discarded is
+  // dropped only once the switch it was asked for happens — a bench or
+  // project that loads replaces it, a create that succeeds opens the new
+  // bench — so a repo path that does not exist, or a Cancel on a new bench's
+  // name, keeps the edits. A tab switch cannot fail, so leaving the tab
+  // discards at once. A save on its way is waited for first: a discard
+  // under it would leave the old content on screen as "unsaved", and the
+  // next Save would put it back over the file.
   function confirmLeave(what) {
-    if (!isDirty()) return Promise.resolve(true);
+    if (saveInFlight) {
+      var again = function () { return confirmLeave(what); };
+      return saveInFlight.then(again, again);
+    }
+    var benchDirty = isDirty(), partDirty = partsUnsaved();
+    if (!benchDirty && !partDirty) return Promise.resolve(true);
     var where = { tab: "leave the Topology tab", project: "switch project", desk: "open another desk", bench: "open another bench" }[what] || "go on";
+    var held = [];
+    if (benchDirty) held.push((bench.name || bench.slug) + " has changes that are not in embarch/topologies/" + bench.slug + ".toml");
+    if (partDirty) held.push("the part editor holds a template that is not saved");
+    var text = held.join(", and ");
     return dialog({
       title: "Unsaved changes",
-      text: (bench.name || bench.slug) + " has changes that are not in embarch/topologies/" + bench.slug + ".toml. Discard them to " + where + "?",
+      text: text.charAt(0).toUpperCase() + text.slice(1) + ". Discard " + (held.length > 1 ? "both" : "it") + " to " + where + "?",
       ok: "Discard changes",
       danger: true,
       cancel: "Keep editing"
     }).then(function (ok) {
       if (!ok) return false;
-      discardEdits();
+      leavePending = what;
+      var pa = window.embarchParts;
+      if (partDirty && pa && typeof pa.discard === "function") {
+        try { pa.discard(); } catch (_) { /* its own dialog says what it could not do */ }
+      }
+      if (what === "tab") { discardEdits(); leavePending = null; }
       return true;
     });
   }
+
+  // The switch a leave was confirmed for did not happen: the edits stay,
+  // still unsaved.
+  function leaveDone(ok) {
+    if (!ok) leavePending = null;
+  }
   function discardEdits() {
-    if (!bench || saved == null) return;
+    if (!bench || saved == null || !isDirty()) return;
     cancelTransient();
     restoreContent(saved);
     undoStack = [];
     redoStack = [];
+    buildModel();
+    placeVerdicts();   // the bench is the file again, as when it was loaded
     changed();
   }
 
@@ -2398,8 +2595,9 @@
     saving = true;
     renderDirty();
     var sent = snapshotContent(), slug = bench.slug;
-    send("PUT", ROUTE_BENCHES + "/" + encodeURIComponent(slug), benchBody()).then(function (b) {
+    saveInFlight = send("PUT", ROUTE_BENCHES + "/" + encodeURIComponent(slug), benchBody()).then(function (b) {
       saving = false;
+      saveInFlight = null;
       if (!bench || bench.slug !== slug) return;
       bench.version = b.version;
       bench.legacy = !!b.legacy;
@@ -2413,19 +2611,21 @@
       document.dispatchEvent(new CustomEvent("embarch:bench-saved", { detail: { slug: slug } }));
     }).catch(function (e) {
       saving = false;
+      saveInFlight = null;
       renderDirty();
       if (e && e.status === 409) { conflict(e); return; }
       notice("Not saved: " + errText(e), "error");
     });
   }
 
-  // The file changed on disk since it was read: say so in the server's words
-  // and offer the file back — never an overwrite. A 409 for anything else (a
-  // file that no longer parses, a name that no longer derives the slug) is
-  // fixed by hand, so it is said, and Reload is not offered.
+  // A 409 on a save: the file changed on disk since it was read, so say so
+  // in the server's words and offer the file back — never an overwrite. The
+  // server names which 409 it is in a header (`x-embarch-refusal`); a file
+  // that no longer parses and a name that no longer derives the slug are
+  // fixed by hand, so those are said and Reload is not offered.
   function conflict(e) {
     var slug = bench.slug;
-    if (!/changed since/.test(errText(e))) { notice("Not saved: " + errText(e), "error"); return; }
+    if (e.code === "unparseable" || e.code === "rename") { notice("Not saved: " + errText(e), "error"); return; }
     dialog({
       title: "The file changed on disk",
       text: errText(e) + ". Reload reads it again and drops the unsaved edits on screen; Keep editing leaves the file as it is.",
@@ -2456,7 +2656,7 @@
         return send("POST", ROUTE_BENCHES, body).then(function (b) { made = b; return null; }, errText);
       }
     }).then(function (ok) {
-      if (!ok || !made) return;
+      if (!ok || !made) { leavePending = null; return; }
       remember(made.slug);
       document.dispatchEvent(new CustomEvent("embarch:bench-saved", { detail: { slug: made.slug } }));
       loadAll(false, made.slug);
@@ -2691,7 +2891,8 @@
       return;
     }
     if (!want || want === here) return;
-    if (isDirty()) {
+    lostEdits = null;
+    if (isDirty() || partsUnsaved()) {
       picker.value = here;
       confirmLeave("bench").then(function (ok) { if (ok) { picker.value = want; loadBench(want); } });
       return;
@@ -2717,7 +2918,9 @@
   // picked or the bench's dialog is what Esc closes first.
   document.addEventListener("keydown", function (e) {
     if (dlgState) {
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeDialog(null); }
+      // Core's operator prompt, when it is up, owns Esc.
+      var prompt = document.getElementById("prompt-dialog");
+      if (e.key === "Escape" && !(prompt && shown(prompt))) { e.preventDefault(); e.stopPropagation(); closeDialog(null); }
       return;
     }
     if (!topologyActive() || !bench || !model || foreignDialog()) return;
@@ -2735,6 +2938,9 @@
       return;
     }
     if (inField(e.target) || closest(document.activeElement, ".topo-panel")) return;
+    // A cable being laid or a part being dragged was answered for the bench
+    // as it stands: nothing changes it under the gesture.
+    if (laying || drag) return;
     if (mod && !e.altKey && (k === "z" || k === "Z")) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if (mod && !e.altKey && (k === "y" || k === "Y")) { e.preventDefault(); redo(); return; }
     if (mod || e.altKey) return;
@@ -2747,7 +2953,7 @@
 
   // A reload or a closed tab with unsaved edits: the browser asks.
   window.addEventListener("beforeunload", function (e) {
-    if (!isDirty()) return;
+    if (!isDirty() && !partsUnsaved()) return;
     e.preventDefault();
     e.returnValue = "";
   });
@@ -2804,18 +3010,26 @@
 
   window.embarchBench = {
     previewTemplate: previewTemplate,
-    unsaved: function () { return isDirty(); },
-    confirmLeave: confirmLeave
+    unsaved: function () { return isDirty() || partsUnsaved(); },
+    confirmLeave: confirmLeave,
+    leaveDone: leaveDone
   };
 
   // A project switch reloads — the parts and benches are the open repo's — and
   // so does a save or delete on the Saved benches panel, which writes the same
   // files. A load already in flight is discarded by its sequence number.
   // A switch made here asked first (app.js); one made elsewhere — a desk
-  // opened in another window — could not, and the line says what went.
-  document.addEventListener("embarch:project", function () {
+  // opened in another window — could not, and a note under the canvas says
+  // what went. The first read of the project at page load is no switch.
+  document.addEventListener("embarch:project", function (ev) {
+    var d = (ev && ev.detail) || {};
+    closeDialog(null);
     pickers = null; pickersError = null; pickersAsked = false;   // the board types are the repo's
-    lostEdits = isDirty() ? "The project switched with unsaved changes to " + (bench.name || bench.slug) + " on screen; they were not saved." : null;
+    if (d.initial && bench) return;
+    var asked = leavePending === "project" || leavePending === "desk";
+    leavePending = null;
+    lostEdits = !asked && isDirty() ? "The project switched with unsaved changes to " + (bench.name || bench.slug) + " on screen; they were not saved." : null;
+    renderNotes();
     loadAll(false);
   });
   document.addEventListener("embarch:benches-changed", function () { loadAll(true); });

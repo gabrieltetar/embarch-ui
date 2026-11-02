@@ -31,6 +31,13 @@
     return b.confirmLeave(what);
   }
 
+  // The switch a leave was confirmed for did not happen (a repo path that
+  // does not open, a desk that would not): bench.js keeps its edits.
+  function benchLeaveDone(ok) {
+    const b = window.embarchBench;
+    if (b && typeof b.leaveDone === "function") b.leaveDone(ok);
+  }
+
   function leavingUnsavedBench(name) {
     const active = document.querySelector(".tab-panel.active");
     const b = window.embarchBench;
@@ -5546,13 +5553,17 @@
     return (parent.length > 2 ? "…" + sep : sep) + parent.slice(-2).join(sep);
   }
 
+  var projectRead = false;   // the first read at page load is no switch
+
   function renderProject(state) {
+    var first = !projectRead;
+    projectRead = true;
     var before = projectState ? projectState.path : undefined;
     projectState = state || { path: null, recents: [] };
     // The Atlas tab (atlas.js) reads files in the open project and reloads on a switch.
     if (before !== projectState.path) {
-      document.dispatchEvent(new CustomEvent("embarch:project", { detail: { path: projectState.path } }));
-      if (before !== undefined) dropValidateReport();
+      document.dispatchEvent(new CustomEvent("embarch:project", { detail: { path: projectState.path, initial: first } }));
+      if (!first) dropValidateReport();
     }
 
     renderShellDesk();
@@ -5642,10 +5653,13 @@
     followDesk(desk, !first);
   });
 
-  async function openDesk(id) {
+  // `repo`: the desk's first firmware repo, which opening it opens. Only a
+  // desk on another repo switches project, so only that one asks about the
+  // bench editor's unsaved edits; closing the desk keeps the repo.
+  async function openDesk(id, repo) {
     var err = document.getElementById("project-error");
-    // A desk names its repo, so opening one may switch project.
-    if (!(await benchLeaveOk("desk"))) return;
+    var switches = id !== "none" && !!repo && repo !== (projectState ? projectState.path : null);
+    if (switches && !(await benchLeaveOk("desk"))) return;
     try {
       var resp = await fetch("/api/desk/open", {
         method: "POST",
@@ -5659,6 +5673,7 @@
       await followDesk(body.desk, true);
       document.dispatchEvent(new CustomEvent("embarch:desk-switched"));
     } catch (e) {
+      if (switches) benchLeaveDone(false);
       if (err) { err.textContent = String(e.message || e); err.style.display = "block"; }
     }
   }
@@ -5680,7 +5695,7 @@
                    d.harvest ? d.harvest.label : null,
                    (d.firmware_repos || [])[0] || null].filter(Boolean).join(" · ");
         return '<button type="button" class="desk-switch-item' + (body.open === d.id ? " current" : "") +
-          '" data-open-desk="' + escapeHtml(d.id) + '"><span><b>' + escapeHtml(d.name) + "</b><br>" +
+          '" data-open-desk="' + escapeHtml(d.id) + '" data-desk-repo="' + escapeHtml((d.firmware_repos || [])[0] || "") + '"><span><b>' + escapeHtml(d.name) + "</b><br>" +
           '<span class="desk-switch-sub">' + escapeHtml(sub) + "</span></span>" +
           (body.open === d.id ? '<span class="badge badge-success">open</span>' : '<span class="badge badge-neutral">open it</span>') +
           "</button>";
@@ -5789,6 +5804,7 @@
       });
       var text = await resp.text();
       if (!resp.ok) {
+        benchLeaveDone(false);
         err.textContent = text;
         err.style.display = "block";
         return;
@@ -5827,6 +5843,7 @@
       // The Live Study picker lists this project's saved studies too.
       await lsLoadSavedStudies();
     } catch (e) {
+      benchLeaveDone(false);
       err.textContent = String(e);
       err.style.display = "block";
     } finally {
@@ -10888,14 +10905,17 @@
     if (deskList) {
       deskList.addEventListener("click", function (ev) {
         const b = ev.target.closest("[data-open-desk]");
-        if (b) openDesk(b.getAttribute("data-open-desk"));
+        if (b) openDesk(b.getAttribute("data-open-desk"), b.getAttribute("data-desk-repo"));
       });
     }
     const newDesk = document.getElementById("project-new-desk");
     if (newDesk) {
-      newDesk.addEventListener("click", function () {
+      newDesk.addEventListener("click", async function () {
         closeProjectDialog();
-        showTab("desk");
+        // The desk form opens on the Desk tab, once leaving the bench's
+        // unsaved edits has been answered.
+        if (leavingUnsavedBench("desk") && !(await benchLeaveOk("tab"))) return;
+        showTab("desk", true);
         document.dispatchEvent(new CustomEvent("embarch:desk-form", { detail: { id: null } }));
       });
     }

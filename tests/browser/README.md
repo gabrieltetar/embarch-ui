@@ -256,7 +256,15 @@ lifted, a probe and three port binding forms from the tray, the inspector's
 label, role and flip, the Checks panel and its findings drawn on the parts,
 Save, the `409` after a hand edit and its Reload, the unsaved-changes prompt
 on a bench switch, a tab switch, a project switch and a reload, a new bench
-through `POST`, and the config "A" a first part-to-part cable creates. It
+through `POST`, and the config "A" a first part-to-part cable creates.
+Fix round 1 added: what the canvas draws while a cable is laid compared end
+by end with a direct `POST /api/bench/candidates`; Validate's verdicts
+staying on the part they were placed on through a role edit, a tray bind and
+an unbind; a confirmed leave that does not happen (a repo path that will not
+open, a Cancel on a new bench's name) keeping the edits; a save held in the
+proxy for 1.5 s being waited for; an edit under a cable being laid ending it;
+the `x-embarch-refusal: rename` 409 offering no Reload; and the part
+editor's unsaved draft (a stand-in `window.embarchParts`) asked about. It
 uses four ports: `EMBARCH_UI_PORT` and the three after it (proxy, stub Core,
 an unused desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves screenshots in both
 themes.

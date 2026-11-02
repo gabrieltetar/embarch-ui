@@ -6,7 +6,9 @@
 //! Two kinds of rule. **Refusals** — a cable of another kind, a connector past
 //! `max_cables`, a role on two parts, one USB identity on two parts, two
 //! providers on one bus — are what [`candidates`] refuses while a cable is
-//! laid, and an `error` finding when a file already breaks one. **Warnings**
+//! laid, and an `error` finding when a file already breaks one; from a stack
+//! plug, [`candidates`] answers where its part may be mounted instead (full
+//! headers, a ring). **Warnings**
 //! stay warnings: the picture must match the wiring "including when the
 //! wiring is deliberately unusual" (decision 10).
 //!
@@ -610,21 +612,11 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
             }
         }
     }
-    let mut mounted_on: BTreeMap<&str, Vec<&Part>> = BTreeMap::new();
-    for p in &bench.parts {
-        if let Some(base) = p.mounted_on.as_deref().filter(|b| *b != p.id) {
-            mounted_on.entry(base).or_default().push(p);
-        }
-    }
-    for (base_id, on) in &mounted_on {
+    for (base_id, on) in &mounts_by_board(bench) {
         let Some(base) = ctx.part(base_id) else { continue };
         let Some(bt) = ctx.template(base) else { continue };
-        let room = bt
-            .connectors
-            .iter()
-            .filter(|c| c.kind == Kind::StackSocket)
-            .fold(0u32, |sum, c| sum.saturating_add(c.max_cables));
-        if room > 0 && on.len() > room as usize {
+        let room = stack_room(bt);
+        if room > 0 && on.len() > room {
             let mut parts = vec![base.id.clone()];
             parts.extend(on.iter().map(|p| p.id.clone()));
             out.push(finding(Level::Error, "mount-full",
@@ -916,20 +908,26 @@ fn full_why(ctx: &Ctx, wiring: &Wiring, end: &str) -> String {
     }
 }
 
-/// Whether `part` sits, directly or up its stack, on the part `on`.
-fn sits_on(ctx: &Ctx, bench: &Bench, part: &Part, on: &str) -> bool {
-    let mut at = part;
-    for _ in 0..=bench.parts.len() {
-        match at.mounted_on.as_deref() {
-            Some(base) if base == on => return true,
-            Some(base) => match ctx.part(base) {
-                Some(next) if next.id != at.id => at = next,
-                _ => return false,
-            },
-            None => return false,
+/// The parts mounted on each board, by the board's id; a part mounted on
+/// itself is a `mount-cycle`, never a part its own headers carry. One map
+/// for the check's `mount-full` and the mount verdicts, so the two counts
+/// cannot drift.
+fn mounts_by_board(bench: &Bench) -> BTreeMap<&str, Vec<&Part>> {
+    let mut on: BTreeMap<&str, Vec<&Part>> = BTreeMap::new();
+    for p in &bench.parts {
+        if let Some(base) = p.mounted_on.as_deref().filter(|b| *b != p.id) {
+            on.entry(base).or_default().push(p);
         }
     }
-    false
+    on
+}
+
+/// How many parts a template's stack sockets take.
+fn stack_room(t: &PartTemplate) -> usize {
+    t.connectors
+        .iter()
+        .filter(|c| c.kind == Kind::StackSocket)
+        .fold(0u32, |sum, c| sum.saturating_add(c.max_cables)) as usize
 }
 
 /// Where a part's stack plug may be mounted: one verdict per stack socket on
@@ -938,10 +936,28 @@ fn sits_on(ctx: &Ctx, bench: &Bench, part: &Part, on: &str) -> bool {
 ///
 /// A socket refuses when its board already carries what its sockets take —
 /// counting every part mounted there but the one being placed, which is
-/// moving — and when its board sits on the part being placed, since a stack
-/// has a board at the bottom (`mount-cycle`). Nothing else is refused here:
-/// a missing socket or plug is a finding, not a verdict.
+/// moving, and never a board mounted on itself — and when its board sits on
+/// the part being placed, directly or up a stack, since a stack has a board
+/// at the bottom (`mount-cycle`). Nothing else is refused here: a missing
+/// socket or plug is a finding, not a verdict.
+///
+/// **One pass per request** (fix round 1): the mount map is built once, what
+/// sits on the placed part is found by walking down from it, and each board
+/// gets one verdict, copied to each of its sockets — a 500-part stack costs
+/// a few map lookups per part, not a walk per socket.
 fn mount_candidates(ctx: &Ctx, bench: &Bench, placing: &Part) -> BTreeMap<String, Verdict> {
+    let on = mounts_by_board(bench);
+    // Everything sitting on the placed part, however high: mounting it on
+    // any of them would make a ring.
+    let mut above: BTreeSet<&str> = BTreeSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::from([placing.id.as_str()]);
+    while let Some(id) = queue.pop_front() {
+        for q in on.get(id).into_iter().flatten() {
+            if q.id != placing.id && above.insert(q.id.as_str()) {
+                queue.push_back(q.id.as_str());
+            }
+        }
+    }
     let mut verdicts = BTreeMap::new();
     for part in &bench.parts {
         let Some(template) = ctx.template(part) else { continue };
@@ -949,39 +965,40 @@ fn mount_candidates(ctx: &Ctx, bench: &Bench, placing: &Part) -> BTreeMap<String
             verdicts.insert(part.id.clone(), Verdict::of(Fit::Hidden));
             continue;
         }
-        let room = template
-            .connectors
-            .iter()
-            .filter(|c| c.kind == Kind::StackSocket)
-            .fold(0u32, |sum, c| sum.saturating_add(c.max_cables)) as usize;
+        let sockets: Vec<&Connector> = template.connectors.iter().filter(|c| c.kind == Kind::StackSocket).collect();
+        let verdict = if sockets.is_empty() || part.id == placing.id {
+            None
+        } else if above.contains(part.id.as_str()) {
+            Some(Verdict::refused(format!(
+                "{} sits on {}; a stack has a board at the bottom",
+                part.display(),
+                placing.display()
+            )))
+        } else {
+            let room = stack_room(template);
+            let carried: Vec<&Part> = on
+                .get(part.id.as_str())
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|q| q.id != placing.id)
+                .collect();
+            Some(if carried.len() >= room {
+                Verdict::refused(match carried.as_slice() {
+                    [one] => format!("{} already carries {}", part.display(), one.display()),
+                    _ => format!("{} already carries {} parts and takes {room}", part.display(), carried.len()),
+                })
+            } else {
+                Verdict::of(Fit::Ok)
+            })
+        };
         for c in &template.connectors {
             let end = format!("{}.{}", part.id, c.id);
-            if c.kind != Kind::StackSocket || part.id == placing.id {
-                verdicts.insert(end, Verdict::of(Fit::Hidden));
-                continue;
-            }
-            let verdict = 'v: {
-                if sits_on(ctx, bench, part, &placing.id) {
-                    break 'v Verdict::refused(format!(
-                        "{} sits on {}; a stack has a board at the bottom",
-                        part.display(),
-                        placing.display()
-                    ));
-                }
-                let carried: Vec<&Part> = bench
-                    .parts
-                    .iter()
-                    .filter(|q| q.id != placing.id && q.mounted_on.as_deref() == Some(part.id.as_str()))
-                    .collect();
-                if carried.len() >= room {
-                    break 'v Verdict::refused(match carried.as_slice() {
-                        [one] => format!("{} already carries {}", part.display(), one.display()),
-                        _ => format!("{} already carries {} parts, the most it takes", part.display(), carried.len()),
-                    });
-                }
-                Verdict::of(Fit::Ok)
+            let v = match &verdict {
+                Some(v) if c.kind == Kind::StackSocket => v.clone(),
+                _ => Verdict::of(Fit::Hidden),
             };
-            verdicts.insert(end, verdict);
+            verdicts.insert(end, v);
         }
     }
     verdicts
@@ -1404,6 +1421,89 @@ power = "drp"
         bench.parts.iter_mut().find(|p| p.id == "nucleo2").unwrap().mounted_on = Some("snk".into());
         let v = candidates(&bench, &templates(), None, "snk.stack").unwrap();
         assert_eq!(v["nucleo2.stack"], Verdict::refused("nucleo2 sits on snk; a stack has a board at the bottom".into()));
+        // A board mounted on itself does not count against its own headers.
+        let mut bench = pd_bench();
+        bench.parts.push(part("nucleo3", "nucleo-g0b1re"));
+        bench.parts.last_mut().unwrap().mounted_on = Some("nucleo3".into());
+        bench.parts.push(part("snk", "x-nucleo-snk1m1"));
+        let v = candidates(&bench, &templates(), None, "snk.stack").unwrap();
+        assert_eq!(v["nucleo3.stack"].fit, Fit::Ok, "{:?}", v["nucleo3.stack"]);
+    }
+
+    /// A template with headers both ways, so parts can stack into towers.
+    fn stackable() -> Templates {
+        let mut t = templates();
+        let riser: PartTemplate = toml::from_str(
+            r#"
+id = "riser"
+label = "Riser"
+category = "shield"
+look = "shield"
+[[connectors]]
+id = "plug"
+label = "Plug"
+kind = "stack-plug"
+side = "top"
+[[connectors]]
+id = "socket"
+label = "Socket"
+kind = "stack-socket"
+side = "top"
+max_cables = 2
+"#,
+        )
+        .unwrap();
+        t.insert(riser.id.clone(), riser);
+        t
+    }
+
+    fn tower(n: usize) -> Bench {
+        let mut parts = vec![part("host", "this-machine")];
+        for i in 0..n {
+            let mut p = part(&format!("r{i}"), "riser");
+            if i > 0 {
+                p.mounted_on = Some(format!("r{}", i - 1));
+                p.at = None;
+            }
+            parts.push(p);
+        }
+        Bench { slug: "t".into(), name: "T".into(), legacy: false, version: None, parts, cables: vec![], configs: vec![], signals: vec![] }
+    }
+
+    #[test]
+    fn a_ring_through_a_stack_is_refused_and_a_full_board_says_what_it_takes() {
+        let t = stackable();
+        let mut bench = tower(4);
+        // r3 sits on r2 on r1 on r0: r0's plug cannot go on any of them.
+        let v = candidates(&bench, &t, None, "r0.plug").unwrap();
+        for top in ["r1", "r2", "r3"] {
+            assert_eq!(v[&format!("{top}.socket")], Verdict::refused(format!("{top} sits on r0; a stack has a board at the bottom")));
+        }
+        assert_eq!(v["r0.socket"].fit, Fit::Hidden, "its own socket");
+        // r3, moved, may go anywhere under it but its own socket.
+        let v = candidates(&bench, &t, None, "r3.plug").unwrap();
+        assert_eq!(v["r2.socket"].fit, Fit::Ok, "r3 itself does not count against r2");
+        // Two more on r1 fill its two places.
+        for id in ["x", "y"] {
+            let mut p = part(id, "riser");
+            p.mounted_on = Some("r1".into());
+            bench.parts.push(p);
+        }
+        let v = candidates(&bench, &t, None, "r3.plug").unwrap();
+        assert_eq!(v["r1.socket"], Verdict::refused("r1 already carries 3 parts and takes 2".into()));
+    }
+
+    #[test]
+    fn mount_verdicts_on_a_bench_at_the_part_cap_stay_cheap() {
+        let t = stackable();
+        let bench = tower(crate::bench::files::MAX_PARTS - 1);
+        let started = std::time::Instant::now();
+        let v = candidates(&bench, &t, None, "r0.plug").unwrap();
+        let took = started.elapsed();
+        assert_eq!(v.values().filter(|v| v.fit == Fit::Refused).count(), crate::bench::files::MAX_PARTS - 2);
+        // One walk per request: the per-socket walk this replaced took
+        // seconds here in a debug build.
+        assert!(took < std::time::Duration::from_millis(500), "{took:?}");
     }
 
     #[test]

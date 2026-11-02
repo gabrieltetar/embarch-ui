@@ -32,6 +32,19 @@ fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
     (status, text.into()).into_response()
 }
 
+/// The header naming which of a save's `409`s this is, so the browser keys
+/// on a word rather than on the sentence: `version-changed` (the file changed
+/// since it was read; reading it again is the way out), `unparseable` (it no
+/// longer loads, and is fixed by hand), `rename` (the name no longer derives
+/// the slug). The body stays the plain-text sentence every refusal is.
+pub const REFUSAL_HEADER: &str = "x-embarch-refusal";
+
+fn refuse_as(status: StatusCode, code: &'static str, text: impl Into<String>) -> Response {
+    let mut resp = refuse(status, text);
+    resp.headers_mut().insert(REFUSAL_HEADER, axum::http::HeaderValue::from_static(code));
+    resp
+}
+
 const NO_PROJECT: &str = "no project is open — pick a firmware repo in Project, at the bottom of the sidebar";
 
 /// The open repo, extracted **ahead of any body**, so a request with no
@@ -248,8 +261,9 @@ pub async fn api_put_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>, J
     };
     let derived = crate::topology::slugify(&bench.name);
     if derived != slug {
-        return refuse(
+        return refuse_as(
             StatusCode::CONFLICT,
+            "rename",
             format!(
                 "`{}` names the bench `{derived}`, not `{slug}`: renaming a saved bench is refused, because a \
                  desk and a study name it by its slug. Keep a name that slugs to `{slug}`, or create a new \
@@ -262,13 +276,17 @@ pub async fn api_put_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>, J
     match files::read_file(&repo, &slug) {
         Ok((_, current)) if current == version => {}
         Ok(_) => {
-            return refuse(StatusCode::CONFLICT, format!("{} changed since it was read; reload it and save again", files::bench_file(&slug)))
+            return refuse_as(
+                StatusCode::CONFLICT,
+                "version-changed",
+                format!("{} changed since it was read; reload it and save again", files::bench_file(&slug)),
+            )
         }
         Err(LoadError::Missing) => {
             return refuse(StatusCode::NOT_FOUND, format!("no saved bench `{slug}`; create it with POST /api/bench/benches"))
         }
         Err(LoadError::Unparseable(e)) => {
-            return refuse(StatusCode::CONFLICT, format!("{e} — the file does not parse, so it is left alone; fix it by hand"))
+            return refuse_as(StatusCode::CONFLICT, "unparseable", format!("{e} — the file does not parse, so it is left alone; fix it by hand"))
         }
         Err(LoadError::Unreadable(e)) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -323,7 +341,9 @@ pub async fn api_check(OpenRepo(repo): OpenRepo, Json(req): Json<CheckRequest>) 
 }
 
 /// `POST /api/bench/candidates` — one verdict per connector end on the bench
-/// for a cable being laid from `from`, so the browser decides nothing.
+/// for a cable being laid from `from`, so the browser decides nothing; from a
+/// stack plug, where its part may be mounted instead (each stack socket ok or
+/// refused, the rest hidden).
 pub async fn api_candidates(OpenRepo(repo): OpenRepo, Json(req): Json<CandidatesRequest>) -> Response {
     if let Err(e) = files::check_size(&req.bench) {
         return refuse(StatusCode::BAD_REQUEST, e);
@@ -341,6 +361,33 @@ pub async fn api_candidates(OpenRepo(repo): OpenRepo, Json(req): Json<Candidates
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn each_409_on_a_bench_save_names_which_it_is() {
+        let repo = std::env::temp_dir().join(format!("ebm-409-{}-{}", std::process::id(), now_utc_ms()));
+        std::fs::create_dir_all(repo.join("embarch/topologies")).unwrap();
+        let file = repo.join("embarch/topologies/b.toml");
+        std::fs::write(&file, "name = \"b\"\nparts = []\n").unwrap();
+        let read = files::load(&repo, "b").unwrap();
+        let code = |resp: &Response| resp.headers().get(REFUSAL_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+        // The file changed since it was read.
+        std::fs::write(&file, "name = \"b\"\nsaved_at_utc_ms = 7\nparts = []\n").unwrap();
+        let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(read.clone())).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("version-changed")));
+        // A name that no longer derives the slug.
+        let mut renamed = files::load(&repo, "b").unwrap();
+        renamed.name = "c".into();
+        let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(renamed)).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("rename")));
+        // A file that no longer parses.
+        let fresh = files::load(&repo, "b").unwrap();
+        std::fs::write(&file, "name = [").unwrap();
+        let mut stale = fresh;
+        stale.version = Some(version_of(b"name = ["));
+        let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(stale)).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("unparseable")));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     #[test]
     fn a_repo_write_never_follows_a_link_out_of_the_repo() {

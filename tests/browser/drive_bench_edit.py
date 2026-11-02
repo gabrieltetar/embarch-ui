@@ -57,6 +57,9 @@ SERIAL_PORTS = [
     # a bridge with no serial at all
     {"port_name": "COM10", "detected_by": "enumerated", "vendor_id": 6790, "product_id": 29987, "serial_number": None,
      "product": None, "interface": None},
+    # its twin: same vid and pid, no serial, no interface — a binding cannot tell them apart
+    {"port_name": "COM11", "detected_by": "enumerated", "vendor_id": 6790, "product_id": 29987, "serial_number": None,
+     "product": None, "interface": None},
 ]
 
 PD_DUT = """id = "pd-dut"
@@ -149,6 +152,10 @@ saved_at_utc_ms = 2
 parts = [{ id = "host", template = "this-machine", at = [20, 110] }]
 """
 
+RENAMED_BENCH = """name = "an older name"
+parts = [{ id = "host", template = "this-machine", at = [20, 110] }]
+"""
+
 LOOSE_BENCH = """name = "loose-bench"
 saved_at_utc_ms = 1
 
@@ -204,6 +211,7 @@ class Core(BaseHTTPRequestHandler):
 
 
 CORE_WRITES = []
+DELAY = {"put": 0.0}   # seconds a bench save is held in the proxy
 LISTEN = (b"<script>window.__errs=[];addEventListener('error',function(e){__errs.push(String(e.message))});"
           b"addEventListener('unhandledrejection',function(e){__errs.push('unhandled: '+String(e.reason&&e.reason.message||e.reason))});</script>")
 
@@ -219,6 +227,8 @@ class Proxy(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         length = int(self.headers.get("content-length") or 0)
         data = self.rfile.read(length) if length else None
+        if self.command == "PUT" and path.startswith("/api/bench/benches/") and DELAY["put"]:
+            time.sleep(DELAY["put"])
         up = http.client.HTTPConnection("127.0.0.1", int(UI_PORT), timeout=120)
         drop = {"connection", "keep-alive", "accept-encoding", "content-length"}
         if path == "/":
@@ -300,6 +310,7 @@ TOPO = fw / "embarch" / "topologies"
 (TOPO / "edit-bench.toml").write_text(EDIT_BENCH)
 (TOPO / "other-bench.toml").write_text(OTHER_BENCH)
 (TOPO / "loose-bench.toml").write_text(LOOSE_BENCH)
+(TOPO / "renamed.toml").write_text(RENAMED_BENCH)
 cfg = Path(iso) / "ui.toml"
 cfg.write_text('[core]\nbase_url = "http://127.0.0.1:%d"\ntoken = "%s"\n\n[study_designer]\nfirmware_repo_path = "%s"\n'
                % (CORE_PORT, TOKEN, fw))
@@ -469,6 +480,22 @@ def sits_on(top, base):
     return abs(g[0]) <= 3 and abs(g[1]) <= 3   # a selected part's thicker stroke counts in its box
 
 
+def notes():
+    return script("return Array.from(document.querySelectorAll('#bench-notes li')).map(function(l){return l.textContent;}).join('|');")
+
+
+def verdict_on(pid):
+    return script("return !!document.querySelector('#bench-svg [data-verdict=\"' + arguments[0] + '\"]');", [pid])
+
+
+def api(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request("http://127.0.0.1:%s%s" % (UI_PORT, path), data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode())
+
+
 def checks_done():
     return wait_for("return document.getElementById('bench-checks-btn').getAttribute('data-state') === 'ok';", 8)
 
@@ -607,11 +634,34 @@ try:
     click(conn("debug-probe", "swd"))
     ok = wait_for("var e=document.querySelector(arguments[0]); return !!e && e.classList.contains('bn-ok');", 6, [conn("dut", "swd")])
     check("pressing a free connector asks the server: the DUT's free SWD pulses as a fit, though nothing hovered it", ok)
-    check("an end of another kind is not drawn at all", not script("return !!document.querySelector(arguments[0]);", [conn("dut", "usb-c-2")]) or
-          "bn-dim" in (classes(conn("dut", "usb-c-2")) or ""))
+    # What the canvas drew, against what the route says for the same bench.
+    trial = api("GET", "/api/bench/benches/edit-bench")
+    for pid, tpl in [("debug-probe", "debug-probe"), ("usb-uart-bridge", "usb-uart-bridge")]:
+        trial["parts"].append({"id": pid, "template": tpl, "at": [0, 0]})
+    said = api("POST", "/api/bench/candidates", {"bench": trial, "config": "A", "from": "debug-probe.swd"})["verdicts"]
+    drawn = script("var o={}; document.querySelectorAll('#bench-svg [data-end]').forEach(function(g){ if (g.getAttribute('data-end') !== 'debug-probe.swd')"
+                   " o[g.getAttribute('data-conn')] = [g.getAttribute('data-end'), g.getAttribute('class')]; }); return o;")
+    agree = all(("bn-ok" in cls) == (said[end]["fit"] == "ok") and (said[end]["fit"] != "hidden" or ("bn-dim" in cls and "bn-ok" not in cls))
+                for end, cls in drawn.values())
+    check("every end drawn reads as the route's verdict: the fit pulses, a wired end of another kind is dimmed, never pulsing",
+          agree and said["dut.swd"]["fit"] == "ok" and said["an.in"]["fit"] == "hidden" and "bn-dim" in (classes(conn("an", "in")) or ""), drawn)
+    check("and a free end of another kind is not drawn at all",
+          said["dut.usb-c-2"]["fit"] == "hidden" and not script("return !!document.querySelector(arguments[0]);", [conn("dut", "usb-c-2")]))
     check("the hint says how to finish", "pulsing" in script("return document.getElementById('bench-hint').textContent;"))
     key(ESC)
     check("Esc cancels the cable being laid", wait_for("return !document.querySelector('#bench-svg .bn-ok, #bench-svg .bn-source');", 4))
+    # An edit under a cable being laid ends it: its verdicts were for the bench before.
+    select_part("debug-probe")
+    click(conn("debug-probe", "swd"))
+    wait_for("var e=document.querySelector(arguments[0]); return !!e && e.classList.contains('bn-ok');", 6, [conn("dut", "swd")])
+    key(DEL)
+    check("Del while a cable is laid changes nothing", script("return !!document.querySelector('#bench-svg [data-part=\"debug-probe\"]') &&"
+                                                             " !!document.querySelector('#bench-svg .bn-ok');"))
+    script("document.querySelector('#bench-inspector [data-act=\"delete\"]').click();")
+    check("deleting the part from the inspector ends the cable: nothing pulses, nothing names the part",
+          wait_for("return !document.querySelector('#bench-svg [data-part=\"debug-probe\"]') && !document.querySelector('#bench-svg .bn-ok, #bench-svg .bn-source, #bench-svg .bn-pending');", 4))
+    undo()
+    wait_for("return !!document.querySelector('#bench-svg [data-part=\"debug-probe\"]');", 4)
     select_part("debug-probe")
     click(conn("debug-probe", "swd"))
     wait_for("var e=document.querySelector(arguments[0]); return !!e && e.classList.contains('bn-ok');", 6, [conn("dut", "swd")])
@@ -649,8 +699,10 @@ try:
     check("and this machine names the new port after the part", "Debug probe" in script(
         "return Array.from(document.querySelectorAll('#bench-svg [data-part=\"host\"] .bn-clabel')).map(function(t){return t.textContent;}).join('|');"))
     select_part("usb-uart-bridge")
-    drag_to(conn("usb-uart-bridge", "usb"), '#bench-svg [data-part="an"] .bn-body')
-    check("a drag released on an end of another kind lays nothing",
+    press_drag(conn("usb-uart-bridge", "usb"), conn("an", "in"))
+    dim = wait_for("var e=document.querySelector(arguments[0]); return !!e && e.classList.contains('bn-dim');", 6, [conn("an", "in")])
+    release_at(conn("an", "in"))
+    check("a drag released on a drawn end of another kind lays nothing", dim and
           not script("return !!document.querySelector('#bench-svg .bn-cable[data-ends*=\"usb-uart-bridge\"]');"))
 
     # --- delete and undo -------------------------------------------------------
@@ -703,10 +755,22 @@ try:
     check("dragged off, the shield is unmounted where it was dropped", wait_for(
         "return document.querySelector('#bench-svg [data-part=\"partner\"] .bn-sub').textContent.indexOf(' + ') < 0;", 4) and not sits_on("drp", "partner"))
 
+    # --- Validate's verdicts stay on the parts Validate checked --------------------
+    script("document.dispatchEvent(new CustomEvent('embarch:verdicts', {detail: {roles: {dut: {status: 'pass', text: 'hardware ID matches'}},"
+           " boards: {'%s': {status: 'pass', text: 'board answered'}, '%s': {status: 'pass', text: 'loose answered'}}}}));" % (BOUND, LOOSE))
+    check("a pass's verdicts land under the role's part and the bench board bound to the probe", wait_for(
+        "return !!document.querySelector('#bench-svg [data-verdict=\"dut\"]') && !!document.querySelector('#bench-svg [data-verdict=\"partner\"]');", 4))
+    check("a verdict for a probe no part binds is drawn nowhere", not verdict_on("debug-probe"))
+
     # --- the tray ---------------------------------------------------------------
     tray = wait_for("return Array.from(document.querySelectorAll('#bench-tray [data-tray]')).map(function(c){return c.getAttribute('data-tray');});", 12)
     check("the tray lists what Core enumerates that no part binds",
-          sorted(tray or []) == sorted(["probe:" + LOOSE, "port:COM7", "port:COM8", "port:COM9", "port:COM10"]), tray)
+          sorted(tray or []) == sorted(["probe:" + LOOSE, "port:COM7", "port:COM8", "port:COM9", "port:COM10", "port:COM11"]), tray)
+    # A poll rewrites only what changed: a chip with focus keeps it.
+    script("document.querySelector('#bench-tray [data-tray=\"port:COM7\"]').focus(); window.__chip = document.querySelector('#bench-tray [data-tray=\"port:COM7\"]');")
+    time.sleep(6)
+    check("a snapshot leaves the tray's chips in place, focus included", script(
+        "return document.activeElement === window.__chip && document.querySelector('#bench-tray [data-tray=\"port:COM7\"]') === window.__chip;"))
     if SHOTS:
         theme("dark"); shot("edit-tray-dark.png")
         theme("light"); shot("edit-tray-light.png")
@@ -719,6 +783,7 @@ try:
     click(conn("debug-probe", "usb"))
     check("clicking one writes the probe's serial into the bench", wait_for(
         "return !document.querySelector('#bench-tray [data-tray=\"probe:%s\"]');" % LOOSE, 4) and LOOSE in notice(), notice())
+    check("and Validate's verdict for that probe does not follow it onto a part it never checked", not verdict_on("debug-probe"))
     # COM7, alone under its serial, dragged onto the bridge's VCOM: its serial.
     select_part("usb-uart-bridge")
     allowed = dnd('#bench-tray [data-tray="port:COM7"]', *center(conn("usb-uart-bridge", "usb")))
@@ -740,6 +805,8 @@ try:
     script("document.querySelector('#bench-dialog [data-choice=\"vcom\"]').click();")
     check("a port with no serial is written by its vid and pid", wait_for(
         "return !document.querySelector('#bench-tray [data-tray=\"port:COM10\"]');", 4) and "vid 0x1a86 · pid 0x7523" in notice(), notice())
+    check("and since its twin has the same, the notice warns the binding is ambiguous",
+          "matches 2 enumerated ports" in notice() and script("return document.getElementById('bench-notice').getAttribute('data-kind');") == "error", notice())
 
     # --- the inspector ------------------------------------------------------------
     select_part("dfu")
@@ -754,6 +821,7 @@ try:
         "return document.querySelector('#bench-svg [data-flag=\"dfu\"]').classList.contains('bn-flag-error') &&"
         " document.querySelector('#bench-svg [data-flag=\"dut\"]').classList.contains('bn-flag-error');", 4))
     check("and the Checks button counts it as an error", script("return document.getElementById('bench-checks-btn').getAttribute('data-worst');") == "error")
+    check("the DUT role on a second part brings no verdict with it: Validate never checked that part", not verdict_on("dfu") and verdict_on("dut"))
     click("#bench-checks-btn")
     if SHOTS:
         theme("dark"); shot("edit-checks-dark.png")
@@ -765,6 +833,21 @@ try:
         " document.getElementById('topo-panel-checks').hidden;", 4))
     select_part("dfu")
     script("var r=document.querySelector('#bench-inspector [data-ed=\"role\"]'); r.value=''; r.dispatchEvent(new Event('change', {bubbles:true}));")
+    select_part("dut")
+    script("var r=document.querySelector('#bench-inspector [data-ed=\"role\"]'); r.value=''; r.dispatchEvent(new Event('change', {bubbles:true}));")
+    check("taking the role off the part Validate checked takes its verdict off, and a note says so",
+          wait_for("return !document.querySelector('#bench-svg [data-verdict=\"dut\"]');", 4) and "Validate checked PD DUT as the dut role" in notes(), notes())
+    undo()
+    check("undoing the edit gives the role back, not the verdict: validate again", wait_for(
+        "return document.querySelector('#bench-svg [data-part=\"dut\"] .bn-role') !== null;", 4) and not verdict_on("dut"))
+    select_part("partner")
+    click('#bench-inspector [data-act="unbind"][data-fn="probe"]')
+    check("unbinding the probe Validate checked a bench board by takes that verdict off, said in the notes",
+          wait_for("return !document.querySelector('#bench-svg [data-verdict=\"partner\"]');", 4) and "as probe %s" % BOUND in notes(), notes())
+    check("and focus stays in the inspector, the control gone with what it named", script(
+        "var i=document.getElementById('bench-inspector'); return i.contains(document.activeElement);"))
+    undo()
+    wait_for("return !document.querySelector('#bench-tray [data-tray=\"probe:%s\"]');" % BOUND, 4)
     select_part("partner")
     before = script("return document.querySelector(arguments[0]).getAttribute('data-x');", [conn("partner", "stlink")])
     key("f")
@@ -830,6 +913,14 @@ try:
         "return document.querySelector('.tab-panel.active').getAttribute('data-tab');") == "topology")
     check("a reload with unsaved changes has the browser ask", script(
         "var e=new Event('beforeunload', {cancelable:true}); window.dispatchEvent(e); return e.defaultPrevented;"))
+    # "New desk" in the project dialog opens its form on the Desk tab only once the leave is answered.
+    script("window.__forms=0; document.addEventListener('embarch:desk-form', function(){ window.__forms++; });"
+           "document.getElementById('project-button').click(); document.getElementById('project-new-desk').click();")
+    asked = wait_for("return document.getElementById('bench-dialog').style.display === 'block';", 4)
+    check("New desk with unsaved changes asks before the desk form opens", asked and script("return window.__forms;") == 0)
+    script("document.getElementById('bench-dialog-cancel').click();")
+    check("and Keep editing opens no form and stays on Topology", script("return window.__forms;") == 0 and script(
+        "return document.querySelector('.tab-panel.active').getAttribute('data-tab');") == "topology" and dirty())
     # Opening another repo by hand asks too, and Keep editing keeps the project.
     other_repo = Path(iso) / "fw-two"
     (other_repo / ".git").mkdir(parents=True)
@@ -847,6 +938,77 @@ try:
     script("document.getElementById('bench-dialog-ok').click();")
     check("Discard changes opens the other bench", on_bench("other-bench") and not dirty())
     check("and the discarded edit never reached the file", not part_of(file("edit-bench"), "debug-probe").get("flip"))
+
+    # --- a confirmed leave that does not happen keeps the edits ---------------------
+    pick_bench("edit-bench")
+    on_bench("edit-bench")
+    select_part("debug-probe")
+    key("f")
+    wait_for("return !document.getElementById('bench-dirty').hidden;", 4)
+    script("document.getElementById('project-button').click();")
+    script("document.getElementById('project-path').value=arguments[0]; document.getElementById('project-open').click();", [iso + "/no-such-repo"])
+    wait_for("return document.getElementById('bench-dialog').style.display === 'block';", 4)
+    script("document.getElementById('bench-dialog-ok').click();")
+    refused = wait_for("var e=document.getElementById('project-error'); return e && e.style.display === 'block' ? e.textContent : '';", 6)
+    with urllib.request.urlopen("http://127.0.0.1:%s/api/study-designer/project" % UI_PORT, timeout=10) as r:
+        still = json.loads(r.read().decode()).get("path")
+    check("a repo path that does not open, after Discard, leaves the project and the edits as they were",
+          bool(refused) and still == str(fw) and dirty(), [refused, still])
+    script("var d=document.getElementById('project-dialog'); if (d && d.style.display==='block') document.getElementById('project-cancel').click();")
+    pick_bench("+new")
+    wait_for("return document.getElementById('bench-dialog').style.display === 'block';", 4)
+    script("document.getElementById('bench-dialog-ok').click();")   # Discard changes
+    wait_for("return document.getElementById('bench-dialog').style.display === 'block' &&"
+             " !document.getElementById('bench-dialog-field').hidden;", 4)
+    script("document.getElementById('bench-dialog-cancel').click();")   # then Cancel on the name
+    check("New bench…, Discard, then Cancel on the name, keeps the edits", not dialog_open() and dirty() and
+          script("return document.getElementById('bench-pick').value;") == "edit-bench")
+
+    # --- a save on its way is waited for ---------------------------------------------
+    DELAY["put"] = 1.5
+    click("#bench-save")
+    pick_bench("other-bench")
+    time.sleep(0.4)
+    check("switching bench while a save is on its way asks nothing yet", not dialog_open())
+    check("and once the save lands there is nothing to ask: the other bench opens", on_bench("other-bench") and not dialog_open() and not dirty())
+    DELAY["put"] = 0.0
+    check("the save reached the file", part_of(file("edit-bench"), "debug-probe").get("flip") is True)
+    pick_bench("edit-bench")
+    on_bench("edit-bench")
+    check("and coming back shows the saved bench, nothing unsaved", not dirty())
+
+    # --- Core's prompt owns Esc; a project switch closes the bench's dialog -------------
+    pick_bench("+new")
+    wait_for("return document.getElementById('bench-dialog').style.display === 'block';", 4)
+    script("document.getElementById('prompt-backdrop').style.display='block'; document.getElementById('prompt-dialog').style.display='block';")
+    key(ESC)
+    check("Esc with Core's operator prompt up leaves the bench's dialog open under it", dialog_open())
+    script("document.getElementById('prompt-dialog').style.display='none'; document.getElementById('prompt-backdrop').style.display='none';")
+    script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: arguments[0]}}));", [str(fw)])
+    check("a project switch closes an open bench dialog", wait_for("return document.getElementById('bench-dialog').style.display !== 'block';", 4))
+    on_bench("edit-bench")
+
+    # --- a 409 that a reload cannot cure says so, and offers none -----------------------
+    pick_bench("renamed")
+    on_bench("renamed")
+    select_part("host")
+    key("f")
+    save()
+    said409 = wait_for("var n=document.getElementById('bench-notice'); return n.hidden ? '' : n.textContent;", 6)
+    check("a save refused as a rename says the server's sentence, and offers no Reload",
+          "renaming a saved bench is refused" in (said409 or "") and not dialog_open() and dirty(), said409)
+    undo()
+
+    # --- the part editor's unsaved draft is asked about too ------------------------------
+    script("window.__parts = window.embarchParts; window.embarchParts = {unsaved: function(){ return true; }, discard: function(){ window.__partsDiscarded = true; }};")
+    check("with the bench saved but a part draft unsaved, the page still counts as unsaved", not dirty() and script(
+        "var e=new Event('beforeunload', {cancelable:true}); window.dispatchEvent(e); return e.defaultPrevented && window.embarchBench.unsaved();"))
+    pick_bench("other-bench")
+    asked = wait_for("return document.getElementById('bench-dialog').style.display === 'block' ? document.getElementById('bench-dialog-text').textContent : '';", 4)
+    check("and a bench switch asks, naming the part editor's template", "part editor" in (asked or ""), asked)
+    script("document.getElementById('bench-dialog-ok').click();")
+    check("Discard tells the part editor to drop its draft", on_bench("other-bench") and script("return window.__partsDiscarded === true;"))
+    script("if (window.__parts) window.embarchParts = window.__parts; else delete window.embarchParts;")
 
     # --- a new bench ------------------------------------------------------------------
     pick_bench("+new")

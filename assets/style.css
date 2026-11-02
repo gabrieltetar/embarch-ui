@@ -2300,6 +2300,7 @@ table.data-table {
 .bench-legend-cfg { stroke-dasharray: 7 5; }
 .bench-legend-glow { stroke: var(--success); stroke-width: 9; opacity: 0.3; }
 .bench-hint { position: absolute; bottom: 8px; left: 12px; right: 12px; font: 11px var(--font-mono); color: var(--text-tertiary); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bench-inspector:focus { outline: none; }
 .bench-inspector { position: absolute; top: 10px; right: 10px; width: 290px; max-width: calc(100% - 20px); max-height: calc(100% - 130px); overflow: auto; z-index: 3; border: 1px solid var(--border-strong); border-radius: 10px; padding: 12px; background: var(--bg-surface); box-shadow: 0 8px 26px oklch(0% 0 0 / 0.3); font-size: 12.5px; display: flex; flex-direction: column; gap: 8px; }
 .bench-foot { flex-shrink: 0; display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; padding: 7px 14px; border-top: 1px solid var(--border); background: var(--bg-surface); }
 .bench-config-label { font: 600 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
@@ -2478,6 +2479,8 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
 .bench-tray-chip:hover, .bench-tray-chip:focus-visible { border-color: var(--accent); outline: none; }
 .bench-tray-chip.is-armed { border-color: var(--accent); background: var(--accent-soft-bg); }
 .bench-tray-chip.is-dead { cursor: not-allowed; opacity: 0.6; }
+.bench-tray-items { display: contents; }
+.bench-tray-status:empty { display: none; }
 .bench-tray-unknown { color: var(--warning); }
 .bench-tray-none { color: var(--text-tertiary); }
 
