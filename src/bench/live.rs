@@ -1,0 +1,832 @@
+//! Making a bench live (bench editor phase 4): **applying a saved bench to
+//! Core, and this UI's record of which bench and config are on the desk**.
+//!
+//! # What goes to Core, and what never does
+//!
+//! A bench's **declarations** apply straight away, each with its own outcome
+//! (a refusal is one row with Core's words, and the rest still apply): every
+//! signal, each role's board type, an instrument's line on an `scpi`
+//! binding, the DUT's bootload pair, dev-bench's link. Its **enrolments**
+//! come back as proposals, because a file is not evidence about what is
+//! plugged in (decision 44) — the same split, and for the two roles the same
+//! code, as `POST /api/topology/profiles/{slug}/apply` (decision 75).
+//!
+//! **Nothing is retracted by making a bench live** (owner, 2026-11-01).
+//! Core's store is machine-wide, not this repo's, so what Core holds that the
+//! bench does not name comes back as **leftovers**, each retracted only by
+//! its own `POST /api/bench/live/retract` — and that route refuses anything
+//! the leftovers do not list.
+//!
+//! # The live record
+//!
+//! **Which bench and config are live is this UI's record, not the repo's**
+//! (owner): a checkout shared between two machines would otherwise claim one
+//! machine's bench on the other. It lives beside the UI's own per-user state
+//! (`live-benches.json` next to the recent-projects list), keyed by the
+//! repo's canonical path, one entry per repo. A bench file renamed or deleted
+//! on disk leaves the record pointing at nothing, and `GET` says so
+//! (`missing: true`) rather than guessing another bench.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use axum::extract::{Path as UrlPath, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
+use embarch_core_client::{EnrolledBoardResponse, Instrument, InstrumentProtocol, ProbeInfo, UsbPortId};
+use serde::{Deserialize, Serialize};
+
+use super::check::Templates;
+use super::files::{self, Bench, Binding, Config, LoadError, Part};
+use super::routes::{path_slug, refuse, refuse_as, OpenRepo};
+use super::{catalog, Category, Function, Kind, Role};
+use crate::topology::{apply_link, apply_role, declare_signals, lookup_chip, no_chip_sentence, now_utc_ms, pick_chip, profile_path, recorded_chip, BoardWrite};
+use crate::AppState;
+
+// ---- the live record --------------------------------------------------------
+
+/// One repo's live bench.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveRecord {
+    pub slug: String,
+    pub config: Option<String>,
+    /// When this bench and config became live; a re-apply of the same pair
+    /// keeps it.
+    pub since_utc_ms: u64,
+}
+
+/// The record as the routes serve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LiveView {
+    pub slug: String,
+    pub config: Option<String>,
+    pub since_utc_ms: u64,
+    /// The bench file is not there any more: renamed or deleted on disk.
+    pub missing: bool,
+}
+
+/// `live-benches.json` beside the recent-projects list: in the directory of
+/// the file `EMBARCH_UI_STATE` names when it is set (so a drive that isolates
+/// its state isolates this too), else in the per-user data directory the
+/// suite already keeps process-written state in. **Never in the firmware
+/// repo.**
+pub fn default_record_path() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("EMBARCH_UI_STATE") {
+        let dir = Path::new(&explicit).parent().map(Path::to_path_buf).unwrap_or_default();
+        return Some(dir.join("live-benches.json"));
+    }
+    embarch_core_client::user_dirs::user_data_dir()
+        .map(|dir| dir.join("ui").join("live-benches.json"))
+        .map_err(|e| tracing::warn!("no per-user data dir for the live-bench record: {e:#}"))
+        .ok()
+}
+
+/// Held across every read-modify-write of the record file.
+static RECORD: Mutex<()> = Mutex::new(());
+
+/// A repo's key in the record: its canonical path, so two spellings of one
+/// checkout are one entry.
+fn repo_key(repo: &Path) -> String {
+    repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf()).to_string_lossy().into_owned()
+}
+
+/// Every repo's record. A missing file is no records; **an unreadable or
+/// unparseable one is an error**, never an empty map that a write would then
+/// replace.
+fn read_records(path: &Path) -> Result<BTreeMap<String, LiveRecord>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("the live-bench record {} does not parse: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(format!("the live-bench record {} could not be read: {e}", path.display())),
+    }
+}
+
+fn write_records(path: &Path, records: &BTreeMap<String, LiveRecord>) -> Result<(), String> {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let text = serde_json::to_string_pretty(records).map_err(|e| e.to_string())?;
+    let tmp = dir.join(format!(".live-benches.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("could not write {}: {e}", path.display())
+    })
+}
+
+/// The open repo's record, if any.
+pub fn record_for(path: &Path, repo: &Path) -> Result<Option<LiveRecord>, String> {
+    let _held = RECORD.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(read_records(path)?.remove(&repo_key(repo)))
+}
+
+/// Sets (`Some`) or clears (`None`) the open repo's record, leaving every
+/// other repo's as it was.
+pub fn set_record(path: &Path, repo: &Path, record: Option<LiveRecord>) -> Result<(), String> {
+    let _held = RECORD.lock().unwrap_or_else(|e| e.into_inner());
+    let mut records = read_records(path)?;
+    let key = repo_key(repo);
+    match record {
+        Some(r) => {
+            records.insert(key, r);
+        }
+        None => {
+            if records.remove(&key).is_none() {
+                return Ok(());
+            }
+        }
+    }
+    write_records(path, &records)
+}
+
+fn view(repo: &Path, record: &LiveRecord) -> LiveView {
+    LiveView {
+        slug: record.slug.clone(),
+        config: record.config.clone(),
+        since_utc_ms: record.since_utc_ms,
+        missing: !matches!(profile_path(repo, &record.slug).try_exists(), Ok(true)),
+    }
+}
+
+fn record_path(state: &AppState) -> Result<&Path, Box<Response>> {
+    state.bench_live_path.as_deref().ok_or_else(|| {
+        Box::new(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "this UI has no per-user data directory to keep the live-bench record in; set EMBARCH_UI_STATE",
+        ))
+    })
+}
+
+// ---- what a report carries --------------------------------------------------
+
+/// One declaration's outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Row {
+    pub what: String,
+    pub route: String,
+    pub ok: bool,
+    pub text: String,
+}
+
+fn row(what: impl Into<String>, route: impl Into<String>, ok: bool, text: impl Into<String>) -> Row {
+    Row { what: what.into(), route: route.into(), ok, text: text.into() }
+}
+
+/// An enrolment for a human to confirm through `POST /api/enroll`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Proposal {
+    pub kind: &'static str,
+    /// `None` for a bench board.
+    pub role: Option<String>,
+    /// What `/api/enroll` sends as the board's name: **a role's board type**
+    /// (decision 45: a role's name is its board type, which the board write
+    /// just set) or **a bench board's label** (`embarch-core` decision 83).
+    pub name: String,
+    pub chip: String,
+    pub probe_serial: String,
+    pub part: String,
+    pub text: String,
+}
+
+/// Why a part with a probe, or a role, gets no proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NotProposed {
+    pub part: String,
+    pub text: String,
+}
+
+/// Something Core holds that the live bench does not name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Leftover {
+    pub kind: &'static str,
+    pub id: String,
+    pub text: String,
+}
+
+// ---- what a bench names -----------------------------------------------------
+
+/// The configs whose cables are on the desk: the live one alone, or none —
+/// with no config live, only the bench-level cables are, so an SWD lead in a
+/// config reaches nothing.
+fn live_configs(config: Option<&Config>) -> &[Config] {
+    config.map(std::slice::from_ref).unwrap_or_default()
+}
+
+/// The name an instrument part is declared under: its label, else its id.
+fn instrument_name(part: &Part) -> String {
+    part.label.as_deref().map(str::trim).filter(|l| !l.is_empty()).unwrap_or(&part.id).to_string()
+}
+
+/// A role-less board that reaches a probe is a bench board (`embarch-topology`
+/// decision 41); a probe pod, an analyzer or an instrument is not, even with
+/// a probe bound.
+fn is_bench_board(part: &Part, templates: &Templates) -> bool {
+    part.role.is_none() && templates.get(&part.template).is_some_and(|t| t.category == Category::Board)
+}
+
+/// The first binding of `function` on a part whose template carries it, and
+/// the connector it is on.
+fn bound<'p>(part: &'p Part, templates: &Templates, function: Function) -> Vec<(&'p str, &'p Binding)> {
+    let template = templates.get(&part.template);
+    part.usb
+        .iter()
+        .filter(|(cid, _)| template.and_then(|t| t.connector(cid)).is_some_and(|c| c.kind == Kind::UsbHost && c.carries(function)))
+        .filter_map(|(cid, functions)| functions.get(&function).map(|b| (cid.as_str(), b)))
+        .collect()
+}
+
+/// What the live bench names, for the leftovers.
+struct Named {
+    signals: BTreeSet<String>,
+    instruments: BTreeSet<String>,
+    /// Each role a part holds, with the probe the bench binds there.
+    roles: BTreeMap<String, Option<String>>,
+    bench_boards: BTreeSet<String>,
+    bootload: bool,
+}
+
+fn named(bench: &Bench, templates: &Templates, config: Option<&Config>) -> Named {
+    let configs = live_configs(config);
+    let reach = |p: &Part| files::reached_probe(p, &bench.parts, &bench.cables, configs, templates).ok().flatten();
+    Named {
+        signals: bench.signals.iter().map(|s| s.name.clone()).collect(),
+        instruments: bench
+            .parts
+            .iter()
+            .filter(|p| !bound(p, templates, Function::Scpi).is_empty())
+            .map(instrument_name)
+            .collect(),
+        roles: bench
+            .parts
+            .iter()
+            .filter_map(|p| p.role.map(|r| (r.as_str().to_string(), reach(p))))
+            .collect(),
+        bench_boards: bench.parts.iter().filter(|p| is_bench_board(p, templates)).filter_map(reach).collect(),
+        bootload: bench.parts.iter().filter(|p| p.role == Some(Role::Dut)).any(|p| {
+            !bound(p, templates, Function::BootloadApp).is_empty() || !bound(p, templates, Function::BootloadBootloader).is_empty()
+        }),
+    }
+}
+
+/// What Core holds that the bench does not name, and a row for each Core
+/// read that did not answer — **an unanswered read is not "no leftovers"**.
+async fn leftovers(state: &AppState, named: &Named) -> (Vec<Leftover>, Vec<Row>) {
+    let mut out = Vec::new();
+    let mut unread = Vec::new();
+    let not_read = |route: &str, what: &str, e: anyhow::Error| {
+        row(format!("leftover {what}"), route, false, format!("Core did not answer ({e:#}), so its {what} were not compared with this bench"))
+    };
+
+    match state.core.list_signals().await {
+        Ok(signals) => out.extend(signals.into_iter().filter(|s| !named.signals.contains(&s.name)).map(|s| Leftover {
+            kind: "signal",
+            text: format!("Core declares the signal `{}`, which this bench does not name.", s.name),
+            id: s.name,
+        })),
+        Err(e) => unread.push(not_read("GET /signals", "signals", e)),
+    }
+    match state.core.instruments().await {
+        Ok(instruments) => out.extend(instruments.into_iter().filter(|i| !named.instruments.contains(&i.name)).map(|i| Leftover {
+            kind: "instrument",
+            text: format!("Core declares the instrument `{}`, which this bench does not name.", i.name),
+            id: i.name,
+        })),
+        Err(e) => unread.push(not_read("GET /instruments", "instruments", e)),
+    }
+    match state.core.list_enrolled().await {
+        Ok(rows) => {
+            for r in rows {
+                let probe = r.probe_serial.clone();
+                if r.role.is_empty() {
+                    let Some(serial) = probe else { continue };
+                    if !named.bench_boards.contains(&serial) {
+                        out.push(Leftover {
+                            kind: "bench-board",
+                            text: format!("Core enrols the bench board `{}` on probe {serial}, which this bench does not have.", r.name),
+                            id: serial,
+                        });
+                    }
+                    continue;
+                }
+                let on = probe.as_deref().map(|s| format!("probe {s}")).unwrap_or_else(|| "no probe".to_string());
+                match named.roles.get(&r.role) {
+                    None => out.push(Leftover {
+                        kind: "role",
+                        text: format!("Core holds the {} role ({}, {on}); this bench has no part in that role.", r.role, if r.name.is_empty() { "no board type" } else { &r.name }),
+                        id: r.role,
+                    }),
+                    Some(bench_probe) if probe.is_some() && *bench_probe != probe => out.push(Leftover {
+                        kind: "role",
+                        text: format!(
+                            "Core enrols {on} in the {} role; this bench binds {} there.",
+                            r.role,
+                            bench_probe.as_deref().map(|s| format!("probe {s}")).unwrap_or_else(|| "no probe".to_string())
+                        ),
+                        id: r.role,
+                    }),
+                    Some(_) => {}
+                }
+            }
+        }
+        Err(e) => unread.push(not_read("GET /probes/enrolled", "enrolled boards", e)),
+    }
+    match state.core.bootload_ports().await {
+        Ok(Some(pair)) if !named.bootload => {
+            let role = if pair.role.is_empty() { "dut".to_string() } else { pair.role.clone() };
+            out.push(Leftover {
+                kind: "bootload",
+                text: format!("Core holds a bootload pair for {role} (bootloader {}), which this bench does not declare.", port_text(&pair.bootloader)),
+                id: role,
+            });
+        }
+        Ok(_) => {}
+        Err(e) => unread.push(not_read("GET /bootload/ports", "bootload ports", e)),
+    }
+    (out, unread)
+}
+
+fn port_text(p: &UsbPortId) -> String {
+    let mut s = format!("{:04x}:{:04x}", p.vid, p.pid);
+    if let Some(serial) = &p.serial {
+        s.push_str(&format!(" serial {serial}"));
+    }
+    if let Some(i) = p.interface {
+        s.push_str(&format!(" interface {i}"));
+    }
+    s
+}
+
+/// A binding as the USB identity Core finds a port by, or why it is not one:
+/// Core matches a port on its VID:PID (`embarch-topology` decision 36), so a
+/// binding that names neither cannot be declared.
+fn port_of(binding: &Binding, what: &str) -> Result<UsbPortId, String> {
+    match binding {
+        Binding::Port(p) => match (p.vid, p.pid) {
+            (Some(vid), Some(pid)) => Ok(UsbPortId { vid, pid, serial: p.serial.clone(), interface: p.interface }),
+            _ => Err(format!("{what} names no VID and PID, which Core finds a port by — bind it from Core's port list")),
+        },
+        Binding::Serial(_) | Binding::Interface(_) => {
+            Err(format!("{what} names no VID and PID, which Core finds a port by — bind it from Core's port list"))
+        }
+    }
+}
+
+/// The three facts a proposal carries, as words after its sentence.
+fn facts(already: bool, attached: bool, displaces: Option<&EnrolledBoardResponse>, already_text: &str) -> String {
+    let mut s = String::new();
+    if already {
+        s.push_str(&format!("; {already_text}"));
+    }
+    if !attached {
+        s.push_str("; the probe is not attached now, so confirming fails until it is");
+    }
+    if let (false, Some(d)) = (already, displaces) {
+        s.push_str(&format!(
+            "; displaces {} on probe {}",
+            if d.name.is_empty() { "the board" } else { &d.name },
+            d.probe_serial.as_deref().unwrap_or("(none)")
+        ));
+    }
+    s
+}
+
+// ---- applying ---------------------------------------------------------------
+
+/// Everything making a bench live reports.
+#[derive(Debug, Default, Serialize)]
+pub struct Applied {
+    pub applied: Vec<Row>,
+    pub proposals: Vec<Proposal>,
+    pub not_proposed: Vec<NotProposed>,
+}
+
+/// Applies a bench's declarations and decides its proposals. Every Core
+/// write goes through `embarch-core-client`; each outcome is its own row.
+async fn apply_bench(state: &AppState, bench: &Bench, templates: &Templates, config: Option<&Config>) -> Applied {
+    let mut out = Applied::default();
+    let configs = live_configs(config);
+    let snapshot = state.snapshot_rx.borrow().clone();
+    let enrolled = match state.core.list_enrolled().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            out.applied.push(row(
+                "enrolled boards",
+                "GET /probes/enrolled",
+                false,
+                format!("Core did not answer ({e:#}); the proposals' facts come from the last poll"),
+            ));
+            snapshot.enrolled.clone()
+        }
+    };
+    let probes: &[ProbeInfo] = &snapshot.probes;
+
+    for (name, outcome) in declare_signals(state, &bench.signals).await {
+        out.applied.push(row(format!("signal {name}"), "POST /signals", outcome.is_ok(), outcome.err().unwrap_or_else(|| "declared".to_string())));
+    }
+
+    // ---- the two roles, through the step the topology apply shares ----
+    let mut dev_bench_link = None;
+    for role in [Role::DevBench, Role::Dut] {
+        let Some(part) = bench.parts.iter().find(|p| p.role == Some(role)) else { continue };
+        let Some(binding) = files::role_binding_in(&bench.parts, &bench.cables, configs, role, templates) else { continue };
+        let r = role.as_str();
+        if role == Role::DevBench {
+            dev_bench_link = Some((binding.link_port_serial.clone(), binding.link_port_interface));
+        }
+        let outcome = apply_role(state, r, &binding, &enrolled, probes).await;
+        if let Some(board) = &outcome.board {
+            let route = format!("PUT /probes/enrolled/{r}/board");
+            out.applied.push(match board {
+                BoardWrite::Applied { chip } => row(format!("{r} board {} ({chip})", binding.board), route, true, "applied"),
+                BoardWrite::Refused { chip, error } => row(format!("{r} board {} ({chip})", binding.board), route, false, error.clone()),
+                BoardWrite::NoChip(sentence) => row(format!("{r} board {}", binding.board), route, false, sentence.clone()),
+            });
+        }
+        match outcome.enrol {
+            Err(why) => out.not_proposed.push(NotProposed { part: part.id.clone(), text: why }),
+            Ok(p) => {
+                let displaces = enrolled.iter().find(|b| b.role == r);
+                let board = if binding.board.is_empty() { String::new() } else { format!(" as {}", binding.board) };
+                out.proposals.push(Proposal {
+                    kind: "enroll",
+                    role: Some(r.to_string()),
+                    name: binding.board.clone(),
+                    text: format!(
+                        "Enrol probe {} in the {r} role{board} ({}){}",
+                        binding.probe_serial,
+                        p.chip,
+                        facts(p.already_enrolled, p.probe_attached, displaces, "the role already holds this probe")
+                    ),
+                    chip: p.chip,
+                    probe_serial: binding.probe_serial.clone(),
+                    part: part.id.clone(),
+                });
+            }
+        }
+    }
+
+    // ---- bench boards: role-less boards that reach a probe ----
+    for part in bench.parts.iter().filter(|p| is_bench_board(p, templates)) {
+        let name = part.display().to_string();
+        let serial = match files::reached_probe(part, &bench.parts, &bench.cables, configs, templates) {
+            Ok(Some(serial)) => serial,
+            Ok(None) => continue,
+            Err(note) => {
+                out.not_proposed.push(NotProposed { part: part.id.clone(), text: format!("{name}: {note} — not proposed") });
+                continue;
+            }
+        };
+        let board = part.board.as_deref().map(str::trim).unwrap_or_default();
+        let recorded = part.chip.as_ref().map(|c| c.chip.as_str()).unwrap_or_default();
+        let recorded_for = part.chip.as_ref().map(|c| c.board.as_str());
+        let chip = if board.is_empty() {
+            recorded_chip(recorded, recorded_for, "")
+                .map(Option::unwrap_or_default)
+                .map_err(|note| format!("{name}: not proposed — no board type to look a chip up for, and the {note}"))
+        } else {
+            pick_chip(lookup_chip(state, "", board).await, recorded, recorded_for, board)
+                .map_err(|why| format!("{name}: not proposed — {}", no_chip_sentence(board, &why)))
+        };
+        let chip = match chip {
+            Ok(c) if !c.is_empty() => c,
+            Ok(_) => {
+                out.not_proposed.push(NotProposed {
+                    part: part.id.clone(),
+                    text: format!("{name}: no board type and no recorded chip, so nothing to attach the probe as — not proposed"),
+                });
+                continue;
+            }
+            Err(text) => {
+                out.not_proposed.push(NotProposed { part: part.id.clone(), text });
+                continue;
+            }
+        };
+        let already = enrolled.iter().any(|b| b.role.is_empty() && b.probe_serial.as_deref() == Some(serial.as_str()));
+        let attached = probes.iter().any(|p| p.serial_number.as_deref() == Some(serial.as_str()));
+        let displaces = enrolled.iter().find(|b| !b.role.is_empty() && b.probe_serial.as_deref() == Some(serial.as_str()));
+        out.proposals.push(Proposal {
+            kind: "enroll",
+            role: None,
+            text: format!(
+                "Enrol {name} as a bench board on probe {serial} ({chip}){}",
+                facts(already, attached, displaces, "already enrolled on this probe")
+            ),
+            name,
+            chip,
+            probe_serial: serial,
+            part: part.id.clone(),
+        });
+    }
+
+    // ---- instruments: one per part with an `scpi` binding ----
+    for part in &bench.parts {
+        let lines = bound(part, templates, Function::Scpi);
+        let Some((cid, binding)) = lines.first() else { continue };
+        let name = instrument_name(part);
+        let what = format!("instrument {name}");
+        for (extra, _) in lines.iter().skip(1) {
+            out.applied.push(row(
+                format!("instrument {name} · {extra}"),
+                "PUT /instruments",
+                false,
+                format!("{} binds a second scpi line on `{extra}`; a part declares one instrument, so it is not declared", part.display()),
+            ));
+        }
+        let facts = templates
+            .get(&part.template)
+            .and_then(|t| t.connector(cid))
+            .and_then(|c| c.functions.iter().find(|f| f.function == Function::Scpi))
+            .cloned();
+        let port = match port_of(binding, &format!("{} · {cid}'s scpi binding", part.display())) {
+            Ok(p) => p,
+            Err(why) => {
+                out.applied.push(row(what, "PUT /instruments", false, why));
+                continue;
+            }
+        };
+        let Some((f, baud)) = facts.and_then(|f| f.baud.map(|b| (f, b))) else {
+            out.applied.push(row(what, "PUT /instruments", false, format!("the {} template states no baud for its scpi line, and Core needs one", part.template)));
+            continue;
+        };
+        let inst = Instrument {
+            name: name.clone(),
+            protocol: InstrumentProtocol::Scpi,
+            port,
+            baud,
+            write_terminator: f.write_terminator.clone().unwrap_or_else(|| "\n".to_string()),
+            read_terminator: f.read_terminator.clone().unwrap_or_else(|| "\r\n".to_string()),
+            min_interval_ms: f.min_interval_ms.unwrap_or(0),
+            ack_ok: f.ack_ok.clone(),
+            ack_err: f.ack_err.clone(),
+        };
+        out.applied.push(match state.core.declare_instrument(&inst).await {
+            Ok(stored) => row(what, "PUT /instruments", true, format!("declared on {} at {} baud", port_text(&stored.port), stored.baud)),
+            Err(e) => row(what, "PUT /instruments", false, format!("{e:#}")),
+        });
+    }
+
+    // ---- the DUT's bootload pair ----
+    if let Some(dut) = bench.parts.iter().find(|p| p.role == Some(Role::Dut)) {
+        let app = bound(dut, templates, Function::BootloadApp).first().map(|(cid, b)| port_of(b, &format!("{} · {cid}'s bootload-app binding", dut.display())));
+        let bootloader = bound(dut, templates, Function::BootloadBootloader)
+            .first()
+            .map(|(cid, b)| port_of(b, &format!("{} · {cid}'s bootload-bootloader binding", dut.display())));
+        let what = "bootload ports";
+        match (app, bootloader) {
+            (None, None) => {}
+            (Some(_), None) => out.applied.push(row(
+                what,
+                "PUT /bootload/ports",
+                false,
+                format!("{} binds bootload-app but not bootload-bootloader, and Core needs the bootloader's port; nothing was declared", dut.display()),
+            )),
+            (Some(Err(why)), Some(_)) | (_, Some(Err(why))) => out.applied.push(row(what, "PUT /bootload/ports", false, why)),
+            (app, Some(Ok(bootloader))) => {
+                let app = app.and_then(Result::ok);
+                out.applied.push(match state.core.declare_bootload_ports(app.as_ref(), &bootloader).await {
+                    Ok(_) => row(
+                        what,
+                        "PUT /bootload/ports",
+                        true,
+                        format!(
+                            "declared: bootloader {}{}",
+                            port_text(&bootloader),
+                            app.as_ref().map(|a| format!(", app {}", port_text(a))).unwrap_or_default()
+                        ),
+                    ),
+                    Err(e) => row(what, "PUT /bootload/ports", false, format!("{e:#}")),
+                });
+            }
+        }
+    }
+
+    // ---- dev-bench's link, worded after the proposals are decided ----
+    if let Some((serial, interface)) = dev_bench_link {
+        let enrolled_bench = enrolled.iter().any(|b| b.role == "dev-bench");
+        let proposed = out.proposals.iter().any(|p| p.role.as_deref() == Some("dev-bench"));
+        if let Some(link) = apply_link(state, serial.as_deref(), interface, enrolled_bench, proposed).await {
+            out.applied.push(row("dev-bench link", "POST /dev-bench/link", link.ok(), link.text("make this bench live again")));
+        }
+    }
+    out
+}
+
+// ---- routes -----------------------------------------------------------------
+
+/// `GET /api/bench/live` — the open repo's live bench, or `null`.
+pub async fn api_live(State(state): State<AppState>, OpenRepo(repo): OpenRepo) -> Response {
+    let path = match record_path(&state) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    match record_for(path, &repo) {
+        Ok(record) => Json(serde_json::json!({ "live": record.map(|r| view(&repo, &r)) })).into_response(),
+        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// `DELETE /api/bench/live` — clears the open repo's record. **Touches
+/// nothing in Core.**
+pub async fn api_clear_live(State(state): State<AppState>, OpenRepo(repo): OpenRepo) -> Response {
+    let path = match record_path(&state) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    match set_record(path, &repo, None) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MakeLiveRequest {
+    #[serde(default)]
+    pub config: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// `POST /api/bench/benches/{slug}/live` — applies the bench **as saved**
+/// to Core, records it live, and answers the applied rows, the proposals,
+/// the parts not proposed and the leftovers. Calling it again for the live
+/// bench re-applies: the write-through after a Save.
+///
+/// `version` is the one the browser last read, refused `409`
+/// (`version-changed`) when the file changed since — the browser saves
+/// first — and the bench is read from disk, never from the request.
+pub async fn api_make_live(
+    State(state): State<AppState>,
+    OpenRepo(repo): OpenRepo,
+    UrlPath(slug): UrlPath<String>,
+    Json(req): Json<MakeLiveRequest>,
+) -> Response {
+    let slug = match path_slug(&slug) {
+        Ok(s) => s.to_string(),
+        Err(resp) => return *resp,
+    };
+    let path = match record_path(&state) {
+        Ok(p) => p.to_path_buf(),
+        Err(resp) => return *resp,
+    };
+    let (file, current) = match files::read_file(&repo, &slug) {
+        Ok(read) => read,
+        Err(LoadError::Missing) => return refuse(StatusCode::NOT_FOUND, format!("no saved bench `{slug}`")),
+        Err(LoadError::Unparseable(e)) => {
+            return refuse_as(StatusCode::CONFLICT, "unparseable", format!("{e} — the file does not parse, so it cannot go live; fix it by hand"))
+        }
+        Err(LoadError::Unreadable(e)) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let Some(version) = req.version else {
+        return refuse(StatusCode::BAD_REQUEST, "making a bench live names the `version` it last read; save first, then send that version");
+    };
+    if version != current {
+        return refuse_as(
+            StatusCode::CONFLICT,
+            "version-changed",
+            format!("{} changed since it was read; reload it, then make it live", files::bench_file(&slug)),
+        );
+    }
+    let bench = files::bench_from_file(&slug, file, Some(current));
+    let config = match req.config.as_deref() {
+        None => None,
+        Some(name) => match bench.config(name) {
+            Some(c) => Some(c),
+            None => return refuse(StatusCode::BAD_REQUEST, format!("the bench `{slug}` has no config named `{name}`")),
+        },
+    };
+    let templates = catalog(Some(&repo)).by_id();
+    let mut report = apply_bench(&state, &bench, &templates, config).await;
+
+    // The record: a re-apply of the same bench and config keeps its `since`.
+    let previous = record_for(&path, &repo).ok().flatten();
+    let since = match &previous {
+        Some(p) if p.slug == slug && p.config == req.config => p.since_utc_ms,
+        _ => now_utc_ms(),
+    };
+    let record = LiveRecord { slug: slug.clone(), config: req.config.clone(), since_utc_ms: since };
+    if let Err(e) = set_record(&path, &repo, Some(record)) {
+        report.applied.push(row("live record", "(this UI)", false, format!("applied, but the record of which bench is live was not written: {e}")));
+    }
+    let live = record_for(&path, &repo).ok().flatten().map(|r| view(&repo, &r));
+
+    let (left, unread) = leftovers(&state, &named(&bench, &templates, config)).await;
+    report.applied.extend(unread);
+    state.poke.notify_one();
+    Json(serde_json::json!({
+        "live": live,
+        "applied": report.applied,
+        "proposals": report.proposals,
+        "not_proposed": report.not_proposed,
+        "leftovers": left,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetractRequest {
+    pub kind: String,
+    pub id: String,
+}
+
+/// The live bench, read from its file, and its live config — or the `409`
+/// saying there is none to compare Core with.
+fn live_bench(state: &AppState, repo: &Path) -> Result<(Bench, Option<String>), Box<Response>> {
+    let path = record_path(state)?;
+    let record = record_for(path, repo).map_err(|e| Box::new(refuse(StatusCode::INTERNAL_SERVER_ERROR, e)))?;
+    let Some(record) = record else {
+        return Err(Box::new(refuse_as(StatusCode::CONFLICT, "not-live", "no bench is live in this repo, so nothing is a leftover yet; make a bench live first")));
+    };
+    match files::load(repo, &record.slug) {
+        Ok(bench) => Ok((bench, record.config)),
+        Err(LoadError::Missing) => Err(Box::new(refuse_as(
+            StatusCode::CONFLICT,
+            "not-live",
+            format!("the live bench `{}` is not on disk any more, so leftovers cannot be worked out; make a bench live again", record.slug),
+        ))),
+        Err(LoadError::Unparseable(e) | LoadError::Unreadable(e)) => Err(Box::new(refuse_as(StatusCode::CONFLICT, "unparseable", e))),
+    }
+}
+
+/// `POST /api/bench/live/retract` — retracts **one leftover the current list
+/// offers**, through the matching Core delete, and answers the leftovers
+/// recomputed. A kind and id the list does not hold is refused `409`
+/// (`not-offered`): retract only what was offered.
+pub async fn api_retract(State(state): State<AppState>, OpenRepo(repo): OpenRepo, Json(req): Json<RetractRequest>) -> Response {
+    let (bench, config_name) = match live_bench(&state, &repo) {
+        Ok(b) => b,
+        Err(resp) => return *resp,
+    };
+    let templates = catalog(Some(&repo)).by_id();
+    let config = config_name.as_deref().and_then(|n| bench.config(n));
+    let names = named(&bench, &templates, config);
+    let (current, _) = leftovers(&state, &names).await;
+    let Some(item) = current.iter().find(|l| l.kind == req.kind && l.id == req.id) else {
+        return refuse_as(
+            StatusCode::CONFLICT,
+            "not-offered",
+            format!("`{}` `{}` is not among this bench's leftovers now, so it is not retracted; only a listed leftover is", req.kind, req.id),
+        );
+    };
+    let result = match item.kind {
+        "signal" => state.core.remove_signal(&item.id).await,
+        "instrument" => state.core.remove_instrument(&item.id).await,
+        "bench-board" => state.core.unenroll_probe_by_serial(&item.id).await,
+        "role" => state.core.unenroll_probe(&item.id).await,
+        "bootload" => state.core.clear_bootload_ports().await,
+        other => Err(anyhow::anyhow!("no retraction exists for a `{other}`")),
+    };
+    let (ok, mut text) = match result {
+        Ok(true) => (true, format!("retracted the {} `{}`", item.kind, item.id)),
+        Ok(false) => (false, format!("Core held no {} `{}` any more", item.kind, item.id)),
+        Err(e) => (false, format!("{e:#}")),
+    };
+    let (after, unread) = leftovers(&state, &names).await;
+    for r in unread {
+        text.push_str(&format!("; {}", r.text));
+    }
+    state.poke.notify_one();
+    Json(serde_json::json!({ "ok": ok, "text": text, "leftovers": after })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ebm-live-{tag}-{}-{}", std::process::id(), now_utc_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_record_keeps_one_entry_per_repo_and_never_overwrites_an_unreadable_file() {
+        let dir = temp("record");
+        let path = dir.join("state").join("live-benches.json");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_eq!(record_for(&path, &a).unwrap(), None);
+        let rec = |slug: &str| LiveRecord { slug: slug.into(), config: Some("A".into()), since_utc_ms: 1 };
+        set_record(&path, &a, Some(rec("one"))).unwrap();
+        set_record(&path, &b, Some(rec("two"))).unwrap();
+        assert_eq!(record_for(&path, &a).unwrap().unwrap().slug, "one");
+        // Another spelling of the same checkout is the same entry.
+        assert_eq!(record_for(&path, &a.join(".")).unwrap().unwrap().slug, "one");
+        set_record(&path, &a, None).unwrap();
+        assert_eq!(record_for(&path, &a).unwrap(), None);
+        assert_eq!(record_for(&path, &b).unwrap().unwrap().slug, "two");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(record_for(&path, &b).unwrap_err().contains("does not parse"));
+        assert!(set_record(&path, &b, None).is_err(), "an unreadable record is not replaced by an empty one");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_binding_with_no_vid_and_pid_is_not_a_port_core_can_find() {
+        let port = Binding::Port(files::PortBinding { vid: Some(0x1a86), pid: Some(0x7523), serial: None, interface: Some(0) });
+        assert_eq!(port_of(&port, "x").unwrap(), UsbPortId { vid: 0x1a86, pid: 0x7523, serial: None, interface: Some(0) });
+        assert!(port_of(&Binding::Serial("A1".into()), "load · usb's scpi binding").unwrap_err().contains("names no VID and PID"));
+        assert!(port_of(&Binding::Interface(2), "x").is_err());
+    }
+}

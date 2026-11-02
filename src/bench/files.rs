@@ -337,7 +337,7 @@ pub fn file_from_bench(bench: &Bench, saved_at_utc_ms: u64) -> BenchFile {
 /// **Leads that reach different probes in different configs are not
 /// guessed between** (fix round 2): `Err` names them, and nothing is
 /// proposed — which config is live is phase 4's record, not this file's.
-fn reached_probe(part: &Part, parts: &[Part], cables: &[Cable], configs: &[Config], templates: &Templates) -> Result<Option<String>, String> {
+pub(crate) fn reached_probe(part: &Part, parts: &[Part], cables: &[Cable], configs: &[Config], templates: &Templates) -> Result<Option<String>, String> {
     if let Some(own) = part.probe_serial() {
         return Ok(Some(own.to_string()));
     }
@@ -393,8 +393,16 @@ fn reached_probe(part: &Part, parts: &[Part], cables: &[Cable], configs: &[Confi
 /// role picker does and uses this when nothing answers and the role still
 /// holds that board (decision 48).
 fn role_binding(file: &BenchFile, parts: &[Part], role: Role, templates: &Templates) -> Option<RoleBinding> {
+    role_binding_in(parts, &file.cables, &file.configs, role, templates)
+}
+
+/// [`role_binding`] over the cables a caller names: making a bench live
+/// passes the bench-level cables and **its live config's alone**, so an SWD
+/// lead in another config is not the role's probe (phase 4); with no config
+/// named, every config is searched as the topology apply does.
+pub(crate) fn role_binding_in(parts: &[Part], cables: &[Cable], configs: &[Config], role: Role, templates: &Templates) -> Option<RoleBinding> {
     let part = parts.iter().find(|p| p.role == Some(role))?;
-    let (probe_serial, probe_note) = match reached_probe(part, parts, &file.cables, &file.configs, templates) {
+    let (probe_serial, probe_note) = match reached_probe(part, parts, cables, configs, templates) {
         Ok(serial) => (serial.unwrap_or_default(), None),
         Err(note) => (String::new(), Some(note)),
     };

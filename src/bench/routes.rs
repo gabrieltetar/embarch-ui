@@ -2,8 +2,9 @@
 //!
 //! **No route here calls Core.** The vocabulary and the built-ins are served
 //! from the binary, the repo's templates and benches are files in the open
-//! repo, and the checks are pure. Making a bench live is the apply path's
-//! (`/api/topology/profiles/{slug}/apply`), unchanged in phase 1.
+//! repo, and the checks are pure. Making a bench live — the one place a
+//! bench reaches Core — is `bench::live`'s, which shares each role's apply
+//! with `/api/topology/profiles/{slug}/apply`.
 //!
 //! **Creating and updating are two routes.** `POST` creates and refuses `409`
 //! when anything is already at the derived path; `PUT` updates and names the
@@ -28,7 +29,7 @@ use super::{
 use crate::topology::now_utc_ms;
 use crate::AppState;
 
-fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
+pub(super) fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
     (status, text.into()).into_response()
 }
 
@@ -41,7 +42,7 @@ fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
 /// built-in's id). The body stays the plain-text sentence every refusal is.
 pub const REFUSAL_HEADER: &str = "x-embarch-refusal";
 
-fn refuse_as(status: StatusCode, code: &'static str, text: impl Into<String>) -> Response {
+pub(super) fn refuse_as(status: StatusCode, code: &'static str, text: impl Into<String>) -> Response {
     let mut resp = refuse(status, text);
     resp.headers_mut().insert(REFUSAL_HEADER, axum::http::HeaderValue::from_static(code));
     resp
@@ -207,7 +208,7 @@ fn load_refusal(slug: &str, e: LoadError) -> Response {
 
 /// A path's slug, or the `400` for one that is not a slug: **a path is never
 /// slugified into another bench's name** (fix round 1).
-fn path_slug(slug: &str) -> Result<&str, Box<Response>> {
+pub(super) fn path_slug(slug: &str) -> Result<&str, Box<Response>> {
     if files::is_slug(slug) {
         Ok(slug)
     } else {

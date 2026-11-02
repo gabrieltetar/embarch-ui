@@ -19,6 +19,7 @@
 
 pub mod check;
 pub mod files;
+pub mod live;
 pub mod routes;
 #[cfg(test)]
 mod drive_fixture;

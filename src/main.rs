@@ -178,6 +178,11 @@ pub(crate) struct AppState {
     /// Where `embarch-api`'s project config is, when this UI's own config
     /// names it. `None` falls through to `EMBARCH_API_CONFIG`.
     build_config_path: Option<std::path::PathBuf>,
+    /// Where this UI records which bench is live in each repo
+    /// (`bench::live`): beside its per-user state, never in a firmware repo.
+    /// `None` when there is no per-user data directory, and the live routes
+    /// say so.
+    bench_live_path: Option<std::path::PathBuf>,
 }
 
 /// One decoded capture, keyed by the study and tap it was decoded from.
@@ -260,6 +265,7 @@ async fn async_main() -> anyhow::Result<()> {
         build_locks: Arc::new(embarch_firmware_build::build::BuildLocks::new()),
         build_runs: firmware_build::BuildRuns::new(),
         build_config_path,
+        bench_live_path: bench::live::default_record_path(),
     };
 
     let app = app(state);
@@ -340,6 +346,9 @@ fn app(state: AppState) -> Router {
             "/api/bench/benches/{slug}",
             get(bench::routes::api_bench).put(bench::routes::api_put_bench),
         )
+        .route("/api/bench/benches/{slug}/live", post(bench::live::api_make_live))
+        .route("/api/bench/live", get(bench::live::api_live).delete(bench::live::api_clear_live))
+        .route("/api/bench/live/retract", post(bench::live::api_retract))
         .route("/api/bench/check", post(bench::routes::api_check))
         .route("/api/bench/candidates", post(bench::routes::api_candidates))
         // ---- Live Study -------------------------------------------------
@@ -1160,6 +1169,17 @@ mod tests {
     }
 
     async fn serve_app_in(core_url: &str, repo: Option<std::path::PathBuf>) -> String {
+        let live = std::env::temp_dir().join(format!(
+            "ebm-live-record-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        serve_app_live(core_url, repo, Some(live)).await
+    }
+
+    /// The real router with `repo` open and the live-bench record at `live`,
+    /// so a test can restart the server over the same record.
+    async fn serve_app_live(core_url: &str, repo: Option<std::path::PathBuf>, bench_live_path: Option<std::path::PathBuf>) -> String {
         let core_config: embarch_core_client::CoreConfig =
             toml::from_str(&format!("base_url = \"{core_url}\"\ntoken = \"x\"\n")).unwrap();
         let core = Arc::new(CoreClient::new(&core_config).unwrap());
@@ -1183,6 +1203,7 @@ mod tests {
             build_locks: Arc::new(embarch_firmware_build::build::BuildLocks::new()),
             build_runs: firmware_build::BuildRuns::new(),
             build_config_path: None,
+            bench_live_path,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1713,6 +1734,11 @@ mod tests {
             http.post(format!("{base}/api/bench/candidates")).json(&serde_json::json!({ "bench": bench, "from": "x" })),
             http.post(format!("{base}/api/bench/check")).body("not json"),
             http.put(format!("{base}/api/bench/benches/b")).header("content-type", "application/json").body("{"),
+            http.get(format!("{base}/api/bench/live")),
+            http.delete(format!("{base}/api/bench/live")),
+            http.post(format!("{base}/api/bench/benches/b/live")).json(&serde_json::json!({ "config": null, "version": "v" })),
+            http.post(format!("{base}/api/bench/live/retract")).json(&serde_json::json!({ "kind": "signal", "id": "x" })),
+            http.post(format!("{base}/api/bench/benches/b/live")).body("not json"),
         ];
         for call in calls {
             let resp = call.send().await.unwrap();
@@ -1725,5 +1751,440 @@ mod tests {
                 "{what}"
             );
         }
+    }
+
+    // ---- making a bench live, against a stub Core --------------------------
+
+    /// Core's stores, as a stub holds them: what each GET answers, and every
+    /// write it was sent, in order.
+    #[derive(Default)]
+    struct StubCore {
+        signals: Vec<serde_json::Value>,
+        instruments: Vec<serde_json::Value>,
+        enrolled: Vec<serde_json::Value>,
+        bootload: Option<serde_json::Value>,
+        writes: Vec<String>,
+        /// When set, `PUT /instruments` is refused with this text, as Core
+        /// refuses a write under a lease the UI does not hold.
+        refuse_instruments: Option<String>,
+    }
+
+    type Stub = Arc<std::sync::Mutex<StubCore>>;
+
+    /// A stub Core serving the routes making a bench live reads and writes.
+    async fn serve_stub_core(stub: Stub) -> String {
+        use axum::extract::{Json as J, Path as P, State as S};
+        use axum::routing::{delete, get, put};
+        fn named(list: &mut Vec<serde_json::Value>, v: serde_json::Value, key: &str) {
+            list.retain(|x| x[key] != v[key]);
+            list.push(v);
+        }
+        let app = axum::Router::new()
+            .route(
+                "/signals",
+                get(|S(s): S<Stub>| async move { axum::Json(serde_json::Value::Array(s.lock().unwrap().signals.clone())) })
+                    .post(|S(s): S<Stub>, J(v): J<serde_json::Value>| async move {
+                        let mut s = s.lock().unwrap();
+                        s.writes.push(format!("POST /signals {}", v["name"].as_str().unwrap_or_default()));
+                        named(&mut s.signals, v, "name");
+                        StatusCode::NO_CONTENT
+                    }),
+            )
+            .route(
+                "/signals/{name}",
+                delete(|S(s): S<Stub>, P(name): P<String>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push(format!("DELETE /signals/{name}"));
+                    let before = s.signals.len();
+                    s.signals.retain(|x| x["name"] != name.as_str());
+                    if s.signals.len() < before { StatusCode::NO_CONTENT.into_response() } else { (StatusCode::NOT_FOUND, "no such signal").into_response() }
+                }),
+            )
+            .route(
+                "/instruments",
+                get(|S(s): S<Stub>| async move { axum::Json(serde_json::Value::Array(s.lock().unwrap().instruments.clone())) })
+                    .put(|S(s): S<Stub>, J(v): J<serde_json::Value>| async move {
+                        let mut s = s.lock().unwrap();
+                        s.writes.push(format!("PUT /instruments {v}"));
+                        if let Some(text) = s.refuse_instruments.clone() {
+                            return (StatusCode::CONFLICT, text).into_response();
+                        }
+                        named(&mut s.instruments, v.clone(), "name");
+                        axum::Json(v).into_response()
+                    }),
+            )
+            .route(
+                "/instruments/{name}",
+                delete(|S(s): S<Stub>, P(name): P<String>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push(format!("DELETE /instruments/{name}"));
+                    let before = s.instruments.len();
+                    s.instruments.retain(|x| x["name"] != name.as_str());
+                    if s.instruments.len() < before { StatusCode::NO_CONTENT.into_response() } else { (StatusCode::NOT_FOUND, "no such instrument").into_response() }
+                }),
+            )
+            .route(
+                "/bootload/ports",
+                get(|S(s): S<Stub>| async move {
+                    match s.lock().unwrap().bootload.clone() {
+                        Some(v) => axum::Json(v).into_response(),
+                        None => (StatusCode::NOT_FOUND, "no bootload ports declared").into_response(),
+                    }
+                })
+                .put(|S(s): S<Stub>, J(mut v): J<serde_json::Value>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push(format!("PUT /bootload/ports {v}"));
+                    v["role"] = "dut".into();
+                    s.bootload = Some(v.clone());
+                    axum::Json(v).into_response()
+                })
+                .delete(|S(s): S<Stub>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push("DELETE /bootload/ports".to_string());
+                    match s.bootload.take() {
+                        Some(_) => StatusCode::NO_CONTENT.into_response(),
+                        None => (StatusCode::NOT_FOUND, "no bootload ports declared").into_response(),
+                    }
+                }),
+            )
+            .route("/probes/enrolled", get(|S(s): S<Stub>| async move { axum::Json(serde_json::Value::Array(s.lock().unwrap().enrolled.clone())) }))
+            .route(
+                "/probes/enrolled/{role}/board",
+                put(|S(s): S<Stub>, P(role): P<String>, J(v): J<serde_json::Value>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push(format!("PUT /probes/enrolled/{role}/board {v}"));
+                    let (board, chip) = (v["board"].clone(), v["chip"].clone());
+                    let row = match s.enrolled.iter_mut().find(|r| r["role"] == role.as_str()) {
+                        Some(r) => {
+                            r["name"] = board;
+                            r["chip"] = chip;
+                            r.clone()
+                        }
+                        None => {
+                            let r = serde_json::json!({ "role": role, "name": board, "chip": chip });
+                            s.enrolled.push(r.clone());
+                            r
+                        }
+                    };
+                    axum::Json(row)
+                }),
+            )
+            .route(
+                "/probes/enrolled/{role}",
+                delete(|S(s): S<Stub>, P(role): P<String>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push(format!("DELETE /probes/enrolled/{role}"));
+                    let before = s.enrolled.len();
+                    s.enrolled.retain(|r| r["role"] != role.as_str());
+                    if s.enrolled.len() < before { StatusCode::NO_CONTENT.into_response() } else { (StatusCode::NOT_FOUND, "no such role").into_response() }
+                }),
+            )
+            .route(
+                "/probes/by-serial/{serial}",
+                delete(|S(s): S<Stub>, P(serial): P<String>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push(format!("DELETE /probes/by-serial/{serial}"));
+                    let before = s.enrolled.len();
+                    s.enrolled.retain(|r| r["probe_serial"] != serial.as_str());
+                    if s.enrolled.len() < before { StatusCode::NO_CONTENT.into_response() } else { (StatusCode::NOT_FOUND, "no such probe").into_response() }
+                }),
+            )
+            .route(
+                "/dev-bench/link",
+                post(|S(s): S<Stub>, J(v): J<serde_json::Value>| async move {
+                    s.lock().unwrap().writes.push(format!("POST /dev-bench/link {v}"));
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .with_state(stub);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    /// A Core already holding things the PD bench below does not name: a
+    /// stale signal, an old instrument, a bench board on another probe, and
+    /// the DUT role on a probe the bench does not bind.
+    fn stub_with_leftovers() -> Stub {
+        Arc::new(std::sync::Mutex::new(StubCore {
+            signals: vec![serde_json::json!({ "name": "stale-sig", "origin_role": "dut", "direction": "bidirectional", "route": { "kind": "direct", "port_serial": "S0" } })],
+            instruments: vec![serde_json::json!({ "name": "old-load", "port": { "vid": 1, "pid": 2 }, "baud": 9600 })],
+            enrolled: vec![
+                serde_json::json!({ "role": "", "name": "old-board", "chip": "STM32G0B1VE", "probe_serial": "OLD1" }),
+                serde_json::json!({ "role": "dut", "name": "x", "chip": "nRF54L15", "probe_serial": "Z9" }),
+            ],
+            ..StubCore::default()
+        }))
+    }
+
+    /// The PD bench: a dev-bench DK, a DUT with a bootload pair, the partner
+    /// Nucleo as a bench board, an SCPI load, a console signal.
+    fn pd_live_repo(tag: &str) -> std::path::PathBuf {
+        let repo = bench_repo(tag);
+        std::fs::create_dir_all(repo.join("embarch/parts")).unwrap();
+        std::fs::create_dir_all(repo.join("embarch/topologies")).unwrap();
+        std::fs::write(
+            repo.join("embarch/parts/pd-dut.toml"),
+            "id = \"pd-dut\"\nlabel = \"PD DUT\"\ncategory = \"board\"\nlook = \"power-board\"\n\n[[connectors]]\nid = \"usb\"\nlabel = \"USB\"\nkind = \"usb-host\"\nside = \"left\"\nfunctions = [{ function = \"probe\" }, { function = \"bootload-app\" }, { function = \"bootload-bootloader\" }]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("embarch/topologies/pd.toml"),
+            r#"name = "pd"
+saved_at_utc_ms = 1
+
+[[parts]]
+id = "host"
+template = "this-machine"
+
+[[parts]]
+id = "bench"
+template = "nrf54l15dk"
+role = "dev-bench"
+board = "nrf54l15dk/nrf54l15/cpuapp"
+usb = { usb = { probe = "B1", vcom = { serial = "B1V", interface = 2 } } }
+
+[[parts]]
+id = "dut"
+template = "pd-dut"
+role = "dut"
+board = "plank"
+chip = { board = "plank", chip = "STM32G0B1VE" }
+usb = { usb = { probe = "D1", bootload-app = { vid = 12259, pid = 256, serial = "APP" }, bootload-bootloader = { vid = 12259, pid = 512 } } }
+
+[[parts]]
+id = "partner"
+template = "nucleo-g0b1re"
+label = "pd-bench"
+chip = { board = "", chip = "STM32G0B1VE" }
+usb = { stlink = { probe = "N1" } }
+
+[[parts]]
+id = "load"
+template = "scpi-load"
+label = "eload"
+usb = { usb = { scpi = { vid = 6790, pid = 29987 } } }
+
+[[cables]]
+from = "bench.usb"
+to = "host"
+
+[[cables]]
+from = "dut.usb"
+to = "host"
+
+[[cables]]
+from = "partner.stlink"
+to = "host"
+
+[[cables]]
+from = "load.usb"
+to = "host"
+
+[[configs]]
+name = "A"
+cables = []
+
+[[signals]]
+name = "console"
+origin_role = "dut"
+direction = "bidirectional"
+
+[signals.route]
+kind = "direct"
+port_serial = "C1"
+"#,
+        )
+        .unwrap();
+        repo
+    }
+
+    async fn version_of_bench(http: &reqwest::Client, base: &str, slug: &str) -> String {
+        let bench: serde_json::Value = http.get(format!("{base}/api/bench/benches/{slug}")).send().await.unwrap().json().await.unwrap();
+        bench["version"].as_str().unwrap().to_string()
+    }
+
+    async fn make_live(http: &reqwest::Client, base: &str, version: &str) -> reqwest::Response {
+        http.post(format!("{base}/api/bench/benches/pd/live"))
+            .json(&serde_json::json!({ "config": "A", "version": version }))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Phase 4: every kind of declaration applies through Core, each with its
+    /// own row; enrolments come back as proposals (a role's named by its board
+    /// type, a bench board's by its label); what Core holds that the bench
+    /// does not name comes back as leftovers and **nothing is retracted**.
+    #[tokio::test]
+    async fn making_a_bench_live_applies_each_kind_and_lists_leftovers_without_retracting() {
+        let stub = stub_with_leftovers();
+        let core = serve_stub_core(stub.clone()).await;
+        let repo = pd_live_repo("live-apply");
+        let base = serve_app_live(&core, Some(repo.clone()), Some(repo.join("state/live-benches.json"))).await;
+        let http = reqwest::Client::new();
+        let version = version_of_bench(&http, &base, "pd").await;
+        let resp = make_live(&http, &base, &version).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let report: serde_json::Value = resp.json().await.unwrap();
+
+        let rows = report["applied"].as_array().unwrap();
+        let find = |what: &str| rows.iter().find(|r| r["what"].as_str().unwrap().starts_with(what)).unwrap_or_else(|| panic!("no {what} row in {report}")).clone();
+        assert_eq!(find("signal console"), serde_json::json!({ "what": "signal console", "route": "POST /signals", "ok": true, "text": "declared" }));
+        assert_eq!(find("dev-bench board")["what"], "dev-bench board nrf54l15dk/nrf54l15/cpuapp (nRF54L15)");
+        assert_eq!(find("dev-bench board")["route"], "PUT /probes/enrolled/dev-bench/board");
+        assert_eq!(find("dut board")["what"], "dut board plank (STM32G0B1VE)", "the recorded chip, its board still the part's");
+        assert_eq!(find("instrument eload")["text"], "declared on 1a86:7523 at 9600 baud");
+        assert!(find("bootload ports")["ok"].as_bool().unwrap(), "{report}");
+        let link = find("dev-bench link");
+        assert_eq!(link["ok"], false);
+        assert!(link["text"].as_str().unwrap().contains("confirm its enrolment below, then make this bench live again"), "{link}");
+        assert!(rows.iter().all(|r| r["ok"] == true || r["what"] == "dev-bench link"), "{report}");
+
+        let proposals = report["proposals"].as_array().unwrap();
+        let by_part = |part: &str| proposals.iter().find(|p| p["part"] == part).unwrap_or_else(|| panic!("no proposal for {part}: {report}")).clone();
+        let dut = by_part("dut");
+        assert_eq!((dut["kind"].as_str(), dut["role"].as_str(), dut["name"].as_str(), dut["chip"].as_str(), dut["probe_serial"].as_str()),
+            (Some("enroll"), Some("dut"), Some("plank"), Some("STM32G0B1VE"), Some("D1")));
+        assert!(dut["text"].as_str().unwrap().contains("displaces x on probe Z9"), "{dut}");
+        assert_eq!(by_part("bench")["chip"], "nRF54L15");
+        let partner = by_part("partner");
+        assert_eq!((partner["role"].clone(), partner["name"].as_str(), partner["probe_serial"].as_str()), (serde_json::Value::Null, Some("pd-bench"), Some("N1")));
+        assert_eq!(report["not_proposed"], serde_json::json!([]));
+
+        let left: Vec<(String, String)> = report["leftovers"].as_array().unwrap().iter()
+            .map(|l| (l["kind"].as_str().unwrap().to_string(), l["id"].as_str().unwrap().to_string())).collect();
+        assert_eq!(left, [
+            ("signal".to_string(), "stale-sig".to_string()),
+            ("instrument".to_string(), "old-load".to_string()),
+            ("bench-board".to_string(), "OLD1".to_string()),
+            ("role".to_string(), "dut".to_string()),
+        ]);
+        assert_eq!(report["live"]["slug"], "pd");
+        assert_eq!(report["live"]["config"], "A");
+        assert_eq!(report["live"]["missing"], false);
+
+        let writes = stub.lock().unwrap().writes.clone();
+        assert!(writes.iter().all(|w| !w.starts_with("DELETE")), "making a bench live retracts nothing: {writes:?}");
+        let inst = writes.iter().find(|w| w.starts_with("PUT /instruments")).unwrap();
+        for fact in ["\"baud\":9600", "\"write_terminator\":\"\\n\"", "\"read_terminator\":\"\\r\\n\"", "\"min_interval_ms\":200", "\"ack_ok\":\"Rexecu success\"", "\"vid\":6790"] {
+            assert!(inst.contains(fact), "{fact} missing from {inst}");
+        }
+        let boot = writes.iter().find(|w| w.starts_with("PUT /bootload/ports")).unwrap();
+        assert!(boot.contains("\"serial\":\"APP\"") && boot.contains("\"pid\":512"), "{boot}");
+
+        let live: serde_json::Value = http.get(format!("{base}/api/bench/live")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(live["live"]["slug"], "pd");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A Core refusal — here a lease the UI does not hold — is one row with
+    /// Core's words; the rest still apply.
+    #[tokio::test]
+    async fn a_core_refusal_is_one_row_and_the_rest_still_apply() {
+        let stub = stub_with_leftovers();
+        stub.lock().unwrap().refuse_instruments = Some("the bench lease is held by agent-7".to_string());
+        let core = serve_stub_core(stub.clone()).await;
+        let repo = pd_live_repo("live-refusal");
+        let base = serve_app_live(&core, Some(repo.clone()), Some(repo.join("state/live-benches.json"))).await;
+        let http = reqwest::Client::new();
+        let version = version_of_bench(&http, &base, "pd").await;
+        let report: serde_json::Value = make_live(&http, &base, &version).await.json().await.unwrap();
+        let rows = report["applied"].as_array().unwrap();
+        let refused: Vec<_> = rows.iter().filter(|r| r["ok"] == false && r["what"] != "dev-bench link").collect();
+        assert_eq!(refused.len(), 1, "{report}");
+        assert_eq!(refused[0]["what"], "instrument eload");
+        assert!(refused[0]["text"].as_str().unwrap().contains("the bench lease is held by agent-7"), "{}", refused[0]);
+        assert!(rows.iter().any(|r| r["what"] == "signal console" && r["ok"] == true));
+        assert!(rows.iter().any(|r| r["what"] == "bootload ports" && r["ok"] == true));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Retract refuses what the leftovers do not list, removes what they do
+    /// through the matching Core delete, and answers the list recomputed.
+    /// Making the bench live again re-applies and keeps its `since`; a file
+    /// changed since it was read is `version-changed`.
+    #[tokio::test]
+    async fn retract_takes_only_a_listed_leftover_and_a_re_apply_keeps_the_record() {
+        let stub = stub_with_leftovers();
+        let core = serve_stub_core(stub.clone()).await;
+        let repo = pd_live_repo("live-retract");
+        let base = serve_app_live(&core, Some(repo.clone()), Some(repo.join("state/live-benches.json"))).await;
+        let http = reqwest::Client::new();
+        let not_live = http.post(format!("{base}/api/bench/live/retract")).json(&serde_json::json!({ "kind": "signal", "id": "stale-sig" })).send().await.unwrap();
+        assert_eq!((not_live.status(), not_live.headers().get(bench::routes::REFUSAL_HEADER).unwrap().to_str().unwrap()), (StatusCode::CONFLICT, "not-live"));
+
+        let version = version_of_bench(&http, &base, "pd").await;
+        let first: serde_json::Value = make_live(&http, &base, &version).await.json().await.unwrap();
+        let retract = |kind: &str, id: &str| http.post(format!("{base}/api/bench/live/retract")).json(&serde_json::json!({ "kind": kind, "id": id })).send();
+
+        let unlisted = retract("signal", "console").await.unwrap();
+        assert_eq!(unlisted.status(), StatusCode::CONFLICT);
+        assert_eq!(unlisted.headers().get(bench::routes::REFUSAL_HEADER).unwrap(), "not-offered");
+        assert!(stub.lock().unwrap().writes.iter().all(|w| !w.starts_with("DELETE")), "an unlisted id reaches no Core delete");
+
+        for (kind, id, delete) in [
+            ("signal", "stale-sig", "DELETE /signals/stale-sig"),
+            ("instrument", "old-load", "DELETE /instruments/old-load"),
+            ("bench-board", "OLD1", "DELETE /probes/by-serial/OLD1"),
+            ("role", "dut", "DELETE /probes/enrolled/dut"),
+        ] {
+            let resp = retract(kind, id).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{kind} {id}");
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert_eq!(body["ok"], true, "{body}");
+            assert_eq!(body["text"], format!("retracted the {kind} `{id}`"));
+            assert!(body["leftovers"].as_array().unwrap().iter().all(|l| l["id"] != id), "{body}");
+            assert_eq!(stub.lock().unwrap().writes.last().unwrap(), delete);
+        }
+        let again = retract("signal", "stale-sig").await.unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT, "gone from the list, so no longer offered");
+
+        // A re-apply (the write-through after a Save) answers the same shape and keeps `since`.
+        let second: serde_json::Value = make_live(&http, &base, &version).await.json().await.unwrap();
+        assert_eq!(second["live"]["since_utc_ms"], first["live"]["since_utc_ms"]);
+        assert_eq!(second["leftovers"], serde_json::json!([]));
+        for key in ["applied", "proposals", "not_proposed", "leftovers"] {
+            assert!(second[key].is_array(), "{key}");
+        }
+
+        std::fs::write(repo.join("embarch/topologies/pd.toml"), std::fs::read_to_string(repo.join("embarch/topologies/pd.toml")).unwrap() + "\n").unwrap();
+        let stale = make_live(&http, &base, &version).await;
+        assert_eq!((stale.status(), stale.headers().get(bench::routes::REFUSAL_HEADER).unwrap().to_str().unwrap()), (StatusCode::CONFLICT, "version-changed"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// The record is this UI's, on this machine: it survives a restart over
+    /// the same state, reads `missing` once the bench file is gone, and
+    /// clearing it touches nothing in Core.
+    #[tokio::test]
+    async fn the_live_record_survives_a_restart_and_says_when_its_file_is_gone() {
+        let stub = stub_with_leftovers();
+        let core = serve_stub_core(stub.clone()).await;
+        let repo = pd_live_repo("live-restart");
+        let record = repo.join("state/live-benches.json");
+        let http = reqwest::Client::new();
+        let first = serve_app_live(&core, Some(repo.clone()), Some(record.clone())).await;
+        assert_eq!(http.get(format!("{first}/api/bench/live")).send().await.unwrap().json::<serde_json::Value>().await.unwrap(), serde_json::json!({ "live": null }));
+        let version = version_of_bench(&http, &first, "pd").await;
+        assert_eq!(make_live(&http, &first, &version).await.status(), StatusCode::OK);
+
+        let restarted = serve_app_live(&core, Some(repo.clone()), Some(record.clone())).await;
+        let live: serde_json::Value = http.get(format!("{restarted}/api/bench/live")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((live["live"]["slug"].as_str(), live["live"]["config"].as_str(), live["live"]["missing"].as_bool()), (Some("pd"), Some("A"), Some(false)));
+        assert!(!std::fs::read_to_string(&record).unwrap().is_empty());
+        assert!(!repo.join("embarch").read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("live")), "never in the firmware repo");
+
+        std::fs::remove_file(repo.join("embarch/topologies/pd.toml")).unwrap();
+        let live: serde_json::Value = http.get(format!("{restarted}/api/bench/live")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((live["live"]["slug"].as_str(), live["live"]["missing"].as_bool()), (Some("pd"), Some(true)), "points at nothing, and says so");
+
+        let writes = stub.lock().unwrap().writes.len();
+        let cleared = http.delete(format!("{restarted}/api/bench/live")).send().await.unwrap();
+        assert_eq!(cleared.status(), StatusCode::NO_CONTENT);
+        assert_eq!(stub.lock().unwrap().writes.len(), writes, "clearing the record touches nothing in Core");
+        assert_eq!(http.get(format!("{restarted}/api/bench/live")).send().await.unwrap().json::<serde_json::Value>().await.unwrap(), serde_json::json!({ "live": null }));
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

@@ -987,7 +987,7 @@ pub async fn resolve_chip_or_refuse(
 
 /// The refusal for a board type nothing could find a chip for: why, then
 /// where to put the answer.
-fn no_chip_sentence(board: &str, why: &str) -> String {
+pub(crate) fn no_chip_sentence(board: &str, why: &str) -> String {
     format!(
         "'{board}' has no chip: {why}. Set the chip on the row in Board types below — Core \
          attaches every probe bound to this role as it."
@@ -1728,171 +1728,57 @@ pub async fn api_apply_profile(
     let snapshot = state.snapshot_rx.borrow().clone();
     let mut applied: Vec<serde_json::Value> = Vec::new();
 
-    for signal in &profile.signals {
-        match state.core.declare_signal(signal).await {
-            Ok(()) => applied.push(json!({
-                "what": format!("signal {}", signal.name),
-                "ok": true,
-                "detail": "declared",
-            })),
-            Err(e) => applied.push(json!({
-                "what": format!("signal {}", signal.name),
-                "ok": false,
-                "detail": format!("{e:#}"),
-            })),
-        }
-    }
-
-    let mut proposals: Vec<serde_json::Value> = Vec::new();
-    for (role, binding) in [("dev-bench", &profile.dev_bench), ("dut", &profile.dut)] {
-        let Some(binding) = binding else { continue };
-        // **The board half applies now, like the signals.** It names a
-        // shape a repo builds for and claims nothing about silicon
-        // (decision 45), so a loaded bench describes itself immediately;
-        // only the probe binding below, which is an identity claim, waits
-        // for a human.
-        //
-        // **The chip is looked up once and used for both halves**: the
-        // board write here and the proposal below, which the browser
-        // confirms through `/api/enroll` with that chip. Looked up first,
-        // the recorded chip only a fallback (decision 48: looked up, never
-        // typed); a board nothing answers for is reported, not skipped.
-        let chip = if binding.board.is_empty() {
-            // No board to look a chip up for: only a chip recorded for no
-            // board either is usable (fix round 3).
-            recorded_chip(&binding.chip, binding.chip_board.as_deref(), "").map(Option::unwrap_or_default)
-        } else {
-            pick_chip(
-                lookup_chip(&state, role, &binding.board).await,
-                &binding.chip,
-                binding.chip_board.as_deref(),
-                &binding.board,
-            )
-        };
-        if !binding.board.is_empty() {
-            match &chip {
-                Ok(chip) => match state.core.set_role_board(role, &binding.board, chip).await {
-                    Ok(_) => applied.push(json!({
-                        "what": format!("{role} board"),
-                        "ok": true,
-                        "detail": format!("{} ({})", binding.board, chip),
-                    })),
-                    Err(e) => applied.push(json!({
-                        "what": format!("{role} board"),
-                        "ok": false,
-                        "detail": format!("{e:#}"),
-                    })),
-                },
-                Err(why) => applied.push(json!({
-                    "what": format!("{role} board"),
-                    "ok": false,
-                    "detail": no_chip_sentence(&binding.board, why),
-                })),
-            }
-        }
-        // **Never a silent skip, and never a proposal that can only fail**
-        // (fix rounds 1 and 2): a role whose part, or the part an SWD lead
-        // reaches, binds no probe says so; so does one whose leads reach two
-        // probes; and an enrolment with no chip to attach as is not offered.
-        let not_proposed = |why: String| json!({ "what": format!("{role} probe"), "ok": false, "detail": why });
-        if binding.probe_serial.is_empty() {
-            applied.push(not_proposed(match &binding.probe_note {
-                Some(note) => format!("{role}: {note} — not proposed"),
-                None => format!("{role}: no probe on its part — not proposed"),
-            }));
-            continue;
-        }
-        let chip = match chip {
-            Ok(chip) if !chip.is_empty() => chip,
-            Ok(_) => {
-                applied.push(not_proposed(format!(
-                    "{role}: no board type and no recorded chip, so nothing to attach the probe as — not proposed"
-                )));
-                continue;
-            }
-            Err(why) if binding.board.is_empty() => {
-                applied.push(not_proposed(format!(
-                    "{role}: not proposed — no board type to look a chip up for, and the {why}"
-                )));
-                continue;
-            }
-            Err(why) => {
-                applied.push(not_proposed(format!("{role}: not proposed — {}", no_chip_sentence(&binding.board, &why))));
-                continue;
-            }
-        };
-        let current = snapshot.enrolled.iter().find(|b| b.role == role);
-        let already = current
-            .is_some_and(|b| b.probe_serial.as_deref() == Some(binding.probe_serial.as_str()));
-        let attached = snapshot
-            .probes
-            .iter()
-            .any(|p| p.serial_number.as_deref() == Some(binding.probe_serial.as_str()));
-        proposals.push(json!({
-            "role": role,
-            "board": binding.board,
-            "chip": chip,
-            "probe_serial": binding.probe_serial,
-            "link_port_serial": binding.link_port_serial,
-            "link_port_interface": binding.link_port_interface,
-            // Three separate facts, none of which is a decision: whether
-            // this role already holds this probe, whether the probe is even
-            // attached, and who would be displaced. The browser renders
-            // them; nothing here skips a proposal on their account.
-            "already_enrolled": already,
-            "probe_attached": attached,
-            "displaces": current.map(|b| json!({
-                "board": b.name,
-                "chip": b.chip,
-                "probe_serial": b.probe_serial,
-            })),
+    for (name, outcome) in declare_signals(&state, &profile.signals).await {
+        applied.push(json!({
+            "what": format!("signal {name}"),
+            "ok": outcome.is_ok(),
+            "detail": outcome.err().unwrap_or_else(|| "declared".to_string()),
         }));
     }
 
-    // The link amends dev-bench's enrolment row, so Core refuses it when
-    // that role is empty. **Worded after the proposals are decided** (fix
-    // round 3): "declared with its enrolment" is only true when a dev-bench
-    // enrolment is actually proposed; otherwise the row says what to do.
-    // Never a silent skip — a bench half-loaded with nothing on screen about
-    // it is the failure this report exists to prevent.
+    // Each role through the step making a bench live shares (`apply_role`),
+    // shaped here as this route has always answered.
+    let mut proposals: Vec<serde_json::Value> = Vec::new();
+    for (role, binding) in [("dev-bench", &profile.dev_bench), ("dut", &profile.dut)] {
+        let Some(binding) = binding else { continue };
+        let outcome = apply_role(&state, role, binding, &snapshot.enrolled, &snapshot.probes).await;
+        if let Some(board) = &outcome.board {
+            applied.push(json!({
+                "what": format!("{role} board"),
+                "ok": board.ok(),
+                "detail": match board {
+                    BoardWrite::Applied { chip } => format!("{} ({chip})", binding.board),
+                    BoardWrite::Refused { error, .. } => error.clone(),
+                    BoardWrite::NoChip(sentence) => sentence.clone(),
+                },
+            }));
+        }
+        match outcome.enrol {
+            Err(why) => applied.push(json!({ "what": format!("{role} probe"), "ok": false, "detail": why })),
+            Ok(p) => proposals.push(json!({
+                "role": role,
+                "board": binding.board,
+                "chip": p.chip,
+                "probe_serial": binding.probe_serial,
+                "link_port_serial": binding.link_port_serial,
+                "link_port_interface": binding.link_port_interface,
+                // Three separate facts, none of which is a decision: whether
+                // this role already holds this probe, whether the probe is even
+                // attached, and who would be displaced. The browser renders
+                // them; nothing here skips a proposal on their account.
+                "already_enrolled": p.already_enrolled,
+                "probe_attached": p.probe_attached,
+                "displaces": p.displaces,
+            })),
+        }
+    }
+
     let bench_enrolled = snapshot.enrolled.iter().any(|b| b.role == "dev-bench");
     let bench_proposed = proposals.iter().any(|p| p["role"] == "dev-bench");
     if let Some(bench) = &profile.dev_bench {
-        if bench.link_port_serial.is_some() || bench.link_port_interface.is_some() {
-            if bench_enrolled {
-                match state
-                    .core
-                    .set_dev_bench_link(bench.link_port_serial.as_deref(), bench.link_port_interface)
-                    .await
-                {
-                    Ok(()) => applied.push(json!({
-                        "what": "dev-bench link",
-                        "ok": true,
-                        "detail": "declared",
-                    })),
-                    Err(e) => applied.push(json!({
-                        "what": "dev-bench link",
-                        "ok": false,
-                        "detail": format!("{e:#}"),
-                    })),
-                }
-            } else if bench_proposed {
-                applied.push(json!({
-                    "what": "dev-bench link",
-                    "ok": false,
-                    "detail": "deferred: Core amends the dev-bench row, so the role has to hold \
-                               a board first — confirm its enrolment below and the link is \
-                               declared with it",
-                }));
-            } else {
-                applied.push(json!({
-                    "what": "dev-bench link",
-                    "ok": false,
-                    "detail": "not declared: Core amends the dev-bench row, so the role has to hold \
-                               a board first, and this bench proposes no dev-bench enrolment (its \
-                               row above says why) — enrol dev-bench, then apply this bench again",
-                }));
-            }
+        let link = apply_link(&state, bench.link_port_serial.as_deref(), bench.link_port_interface, bench_enrolled, bench_proposed).await;
+        if let Some(link) = link {
+            applied.push(json!({ "what": "dev-bench link", "ok": link.ok(), "detail": link.text("apply this bench again") }));
         }
     }
 
@@ -1906,12 +1792,188 @@ pub async fn api_apply_profile(
     .into_response()
 }
 
+/// Every signal declared to Core, each with its own outcome: `Err` is Core's
+/// own words.
+pub(crate) async fn declare_signals(state: &AppState, signals: &[SignalLink]) -> Vec<(String, Result<(), String>)> {
+    let mut out = Vec::with_capacity(signals.len());
+    for signal in signals {
+        out.push((signal.name.clone(), state.core.declare_signal(signal).await.map_err(|e| format!("{e:#}"))));
+    }
+    out
+}
+
+/// What applying one role's board half did.
+pub(crate) enum BoardWrite {
+    Applied { chip: String },
+    /// Core refused the write; `error` is its own words.
+    Refused { chip: String, error: String },
+    /// No chip to write it with: the sentence says why and where to set one.
+    NoChip(String),
+}
+
+impl BoardWrite {
+    pub(crate) fn ok(&self) -> bool {
+        matches!(self, BoardWrite::Applied { .. })
+    }
+}
+
+/// An enrolment proposal's chip and the three facts it carries, none of them
+/// a decision.
+pub(crate) struct RoleProposal {
+    pub chip: String,
+    pub already_enrolled: bool,
+    pub probe_attached: bool,
+    pub displaces: Option<serde_json::Value>,
+}
+
+/// One role applied: its board write, when the binding names a board, and an
+/// enrolment to propose or the sentence saying why there is none.
+pub(crate) struct RoleApplied {
+    pub board: Option<BoardWrite>,
+    pub enrol: Result<RoleProposal, String>,
+}
+
+/// Applies one role's binding: **the step `POST /api/topology/profiles/
+/// {slug}/apply` and making a bench live share** (decision 75), so the chip
+/// lookup, the board write and the not-proposed rows cannot drift apart.
+///
+/// **The board half applies now, like the signals.** It names a shape a repo
+/// builds for and claims nothing about silicon (decision 45); only the probe
+/// binding, an identity claim, waits for a human. **The chip is looked up
+/// once and used for both halves** — the board write and the proposal the
+/// browser confirms through `/api/enroll` — the recorded chip only a fallback
+/// (decision 48: looked up, never typed). **Never a silent skip, and never a
+/// proposal that can only fail**: no probe, leads to two probes, or no chip to
+/// attach as each become a sentence instead.
+pub(crate) async fn apply_role(
+    state: &AppState,
+    role: &str,
+    binding: &RoleBinding,
+    enrolled: &[embarch_core_client::EnrolledBoardResponse],
+    probes: &[embarch_core_client::ProbeInfo],
+) -> RoleApplied {
+    let chip = if binding.board.is_empty() {
+        // No board to look a chip up for: only a chip recorded for no board
+        // either is usable (fix round 3).
+        recorded_chip(&binding.chip, binding.chip_board.as_deref(), "").map(Option::unwrap_or_default)
+    } else {
+        pick_chip(lookup_chip(state, role, &binding.board).await, &binding.chip, binding.chip_board.as_deref(), &binding.board)
+    };
+    let board = if binding.board.is_empty() {
+        None
+    } else {
+        Some(match &chip {
+            Ok(chip) => match state.core.set_role_board(role, &binding.board, chip).await {
+                Ok(_) => BoardWrite::Applied { chip: chip.clone() },
+                Err(e) => BoardWrite::Refused { chip: chip.clone(), error: format!("{e:#}") },
+            },
+            Err(why) => BoardWrite::NoChip(no_chip_sentence(&binding.board, why)),
+        })
+    };
+    if binding.probe_serial.is_empty() {
+        let why = match &binding.probe_note {
+            Some(note) => format!("{role}: {note} — not proposed"),
+            None => format!("{role}: no probe on its part — not proposed"),
+        };
+        return RoleApplied { board, enrol: Err(why) };
+    }
+    let chip = match chip {
+        Ok(chip) if !chip.is_empty() => chip,
+        Ok(_) => {
+            let why = format!("{role}: no board type and no recorded chip, so nothing to attach the probe as — not proposed");
+            return RoleApplied { board, enrol: Err(why) };
+        }
+        Err(why) if binding.board.is_empty() => {
+            let why = format!("{role}: not proposed — no board type to look a chip up for, and the {why}");
+            return RoleApplied { board, enrol: Err(why) };
+        }
+        Err(why) => {
+            let why = format!("{role}: not proposed — {}", no_chip_sentence(&binding.board, &why));
+            return RoleApplied { board, enrol: Err(why) };
+        }
+    };
+    let current = enrolled.iter().find(|b| b.role == role);
+    RoleApplied {
+        board,
+        enrol: Ok(RoleProposal {
+            chip,
+            already_enrolled: current.is_some_and(|b| b.probe_serial.as_deref() == Some(binding.probe_serial.as_str())),
+            probe_attached: probes.iter().any(|p| p.serial_number.as_deref() == Some(binding.probe_serial.as_str())),
+            displaces: current.map(|b| json!({ "board": b.name, "chip": b.chip, "probe_serial": b.probe_serial })),
+        }),
+    }
+}
+
+/// What declaring dev-bench's link did, or why it waits.
+pub(crate) enum LinkOutcome {
+    Declared,
+    Refused(String),
+    /// The role is empty and its enrolment is proposed: the link goes in
+    /// once that is confirmed.
+    Deferred,
+    /// The role is empty and no enrolment is proposed: nothing will declare
+    /// it until dev-bench is enrolled and the bench applied again.
+    NotDeclared,
+}
+
+impl LinkOutcome {
+    pub(crate) fn ok(&self) -> bool {
+        matches!(self, LinkOutcome::Declared)
+    }
+
+    /// The row's sentence; `again` is how the caller's surface re-applies
+    /// ("apply this bench again", "make this bench live again").
+    pub(crate) fn text(&self, again: &str) -> String {
+        match self {
+            LinkOutcome::Declared => "declared".to_string(),
+            LinkOutcome::Refused(e) => e.clone(),
+            LinkOutcome::Deferred if again == "apply this bench again" => "deferred: Core amends the dev-bench row, so the role has to hold \
+                 a board first — confirm its enrolment below and the link is declared with it"
+                .to_string(),
+            LinkOutcome::Deferred => format!(
+                "deferred: Core amends the dev-bench row, so the role has to hold a board first — confirm its \
+                 enrolment below, then {again} to declare the link"
+            ),
+            LinkOutcome::NotDeclared => format!(
+                "not declared: Core amends the dev-bench row, so the role has to hold a board first, and this bench \
+                 proposes no dev-bench enrolment (its row above says why) — enrol dev-bench, then {again}"
+            ),
+        }
+    }
+}
+
+/// Declares dev-bench's link when the role holds a board; otherwise says
+/// which of the two waits it is. **Worded after the proposals are decided**
+/// (fix round 3): "declared with its enrolment" only when that enrolment is
+/// proposed. `None` when the binding names no link at all.
+pub(crate) async fn apply_link(
+    state: &AppState,
+    serial: Option<&str>,
+    interface: Option<u8>,
+    bench_enrolled: bool,
+    bench_proposed: bool,
+) -> Option<LinkOutcome> {
+    if serial.is_none() && interface.is_none() {
+        return None;
+    }
+    Some(if bench_enrolled {
+        match state.core.set_dev_bench_link(serial, interface).await {
+            Ok(()) => LinkOutcome::Declared,
+            Err(e) => LinkOutcome::Refused(format!("{e:#}")),
+        }
+    } else if bench_proposed {
+        LinkOutcome::Deferred
+    } else {
+        LinkOutcome::NotDeclared
+    })
+}
+
 /// The chip a saved role uses: the lookup when it answers, **the chip the
 /// file recorded only when it does not** — decision 48's "looked up, never
 /// typed", with a bench saved before a catalog row existed still loading —
 /// and only while the role holds the board it was recorded for
 /// (`recorded_for`; `None` is an old file's chip, which is its own board's).
-fn pick_chip(looked_up: Result<String, String>, recorded: &str, recorded_for: Option<&str>, board: &str) -> Result<String, String> {
+pub(crate) fn pick_chip(looked_up: Result<String, String>, recorded: &str, recorded_for: Option<&str>, board: &str) -> Result<String, String> {
     match looked_up {
         Ok(chip) => Ok(chip),
         Err(why) => match recorded_chip(recorded, recorded_for, board) {
@@ -1927,7 +1989,7 @@ fn pick_chip(looked_up: Result<String, String>, recorded: &str, recorded_for: Op
 /// holds the board it was recorded for — **an empty board never matches a
 /// non-empty recorded one**, and `None` is an old file's chip, which belongs
 /// to that file's own board.
-fn recorded_chip(recorded: &str, recorded_for: Option<&str>, board: &str) -> Result<Option<String>, String> {
+pub(crate) fn recorded_chip(recorded: &str, recorded_for: Option<&str>, board: &str) -> Result<Option<String>, String> {
     let recorded = recorded.trim();
     if recorded.is_empty() {
         return Ok(None);
