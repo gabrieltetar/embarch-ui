@@ -117,6 +117,14 @@ def main():
     (fw / ".git").mkdir(parents=True)
     (fw / "embarch").mkdir()
     (fw / "embarch" / "boards.toml").write_text('[[boards]]\nname = "plank"\nchip = "nRF54L15"\nbuild_target = "plank/nrf54l15/cpuapp"\n')
+    # The bench the canvas draws: a DUT part and a dev-bench part, holding the
+    # board types the roles hold in Core (phase 4: a link marks the part on
+    # the canvas now that the old diagram's role boxes are gone).
+    (fw / "embarch" / "topologies").mkdir()
+    (fw / "embarch" / "topologies" / "links.toml").write_text(
+        'name = "links"\nparts = [{ id = "host", template = "this-machine", at = [20, 110] },'
+        ' { id = "dut", template = "nrf54l15dk", role = "dut", board = "nrf54l15dk", at = [380, 110] },'
+        ' { id = "dev", template = "generic-board", role = "dev-bench", board = "esp32c5_devkitc/esp32c5/hpcore", at = [720, 110] }]\n')
     procs = []
     try:
         procs.append(subprocess.Popen([DESK_BIN, "serve"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
@@ -164,9 +172,13 @@ def main():
             def note():
                 return js("var n = document.getElementById('route-note'); return n.hidden ? null : n.textContent")
 
+            def parts_marked():
+                return js("return Array.from(document.querySelectorAll('#bench-svg [data-part].bn-link-focus'))"
+                          ".map(function (e) { return e.getAttribute('data-part'); })")
+
             def marked(css):
                 return js("return Array.from(document.querySelectorAll(arguments[0] + '.link-focus'))"
-                          ".map(function (e) { return e.getAttribute('data-card') || e.getAttribute('data-enroll-role') ||"
+                          ".map(function (e) { return e.getAttribute('data-card') ||"
                           " (e.querySelector('[data-board-edit]') || {getAttribute: function () { return null; }}).getAttribute('data-board-edit'); })", css)
 
             def in_view(css_or_el_js):
@@ -186,8 +198,8 @@ def main():
             check("plain #topology lands on Topology, as before", until("return document.querySelector('.tab-panel.active[data-tab=topology]') && true") is True)
             time.sleep(1.5)
             check("and marks nothing, says nothing, and keeps its address",
-                  marked("[data-enroll-role]") == [] and note() is None and js("return location.hash") == "#topology",
-                  [marked("[data-enroll-role]"), note(), js("return location.hash")])
+                  parts_marked() == [] and note() is None and js("return location.hash") == "#topology",
+                  [parts_marked(), note(), js("return location.hash")])
             hop("#live-study")
             check("a plain #live-study while open switches the tab", until("return document.querySelector('.tab-panel.active[data-tab=\"live-study\"]') && true") is True)
             hop("#enroll")
@@ -254,40 +266,41 @@ def main():
             check("a study Core has never heard of: the tab, its own refusal, and a notice naming it", bool(n) and unknown in n, n)
 
             # ---- #topology?board= -------------------------------------------
-            go("#topology?board=dut")
-            got = until("return document.querySelector('[data-enroll-role].link-focus') && true")
-            check("#topology?board=dut on load: the DUT box, and only it, is marked",
-                  got is True and active() == "topology" and marked("[data-enroll-role]") == ["dut"], marked("[data-enroll-role]"))
-            js("document.querySelector('#topology-diagram > *').setAttribute('data-old', '1'); return true")
-            redrawn = until("return !document.querySelector('#topology-diagram [data-old]')", 12)
-            check("the next snapshot redraws the diagram and the box stays marked",
-                  redrawn is True and marked("[data-enroll-role]") == ["dut"], marked("[data-enroll-role]"))
-            for label, role in (("DUT", "dut"), ("Dev bench", "dev-bench"), ("nrf54l15dk", "dut"),
-                                ("esp32c5_devkitc", "dev-bench"), ("esp32c5_devkitc/esp32c5/hpcore", "dev-bench")):
-                hop("#topology?board=" + urllib.parse.quote(label))
-                got = until("var m = document.querySelectorAll('[data-enroll-role].link-focus');"
-                            " return m.length === 1 && m[0].getAttribute('data-enroll-role') === arguments[0]", 10, role)
-                check("#topology?board=%s while open marks the %s box" % (label, role), got is True, marked("[data-enroll-role]"))
-            hop("#topology?board=plank")
-            n = until("var n = document.getElementById('route-note'); return !n.hidden && n.textContent", 10)
-            check("a board no role holds and no catalog lists: nothing marked, a notice naming it",
-                  bool(n) and "plank" in n and marked("[data-enroll-role]") == [], n)
+            # The canvas draws the open repo's bench, so the repo is open first.
             http("POST", UI + "/api/study-designer/project", {"path": str(fw)})
+            go("#topology?board=dut")
+            got = until("return document.querySelector('#bench-svg [data-part].bn-link-focus') && true", 15)
+            check("#topology?board=dut on load: the DUT's part on the canvas, and only it, is marked",
+                  got is True and active() == "topology" and parts_marked() == ["dut"] and note() is None, [parts_marked(), note()])
+            js("document.dispatchEvent(new CustomEvent('embarch:verdicts', {detail: {roles: {}, boards: {}}})); return true")
+            check("a rebuild of the canvas keeps the part marked", until("return document.querySelector('#bench-svg [data-part=\"dut\"].bn-link-focus') && true", 5) is True,
+                  parts_marked())
+            for label, part in (("DUT", "dut"), ("Dev bench", "dev"), ("nrf54l15dk", "dut"),
+                                ("esp32c5_devkitc", "dev"), ("esp32c5_devkitc/esp32c5/hpcore", "dev")):
+                hop("#topology?board=" + urllib.parse.quote(label))
+                got = until("var m = document.querySelectorAll('#bench-svg [data-part].bn-link-focus');"
+                            " return m.length === 1 && m[0].getAttribute('data-part') === arguments[0]", 10, part)
+                check("#topology?board=%s while open marks the %s part" % (label, part), got is True, parts_marked())
+            hop("#topology?board=ghostboard")
+            n = until("var n = document.getElementById('route-note'); return !n.hidden && n.textContent", 10)
+            check("a board no part holds and no catalog lists: nothing marked, a notice naming it",
+                  bool(n) and "ghostboard" in n and parts_marked() == [] and marked("#board-catalog-body tr") == [], n)
             go("#topology?board=plank")
             got = until("return document.querySelector('#board-catalog-body tr.link-focus') && true", 15)
-            check("with a project open, a board type only its catalog lists marks the catalog row",
-                  got is True and marked("#board-catalog-body tr") == ["plank"] and marked("[data-enroll-role]") == [] and note() is None,
-                  [marked("#board-catalog-body tr"), note()])
+            check("a board type only the catalog lists marks its catalog row, in the Board types panel it opens",
+                  got is True and marked("#board-catalog-body tr") == ["plank"] and parts_marked() == [] and note() is None and
+                  js("return !document.getElementById('topo-panel-boards').hidden"), [marked("#board-catalog-body tr"), note()])
             hop("#topology?board=" + urllib.parse.quote(evil))
             n = until("var n = document.getElementById('route-note'); return !n.hidden && n.textContent", 10)
             check("a board name is text, never markup", bool(n) and evil in n
                   and js("return !document.querySelector('#route-note img') && !window.__pwned"), n)
             hop("#topology?board=dut")
-            until("return document.querySelector('[data-enroll-role].link-focus') && true", 10)
+            until("return document.querySelector('#bench-svg [data-part].bn-link-focus') && true", 10)
             hop("#desk")
             check("a plain #tab followed later drops the earlier link's mark and notice",
                   until("return document.querySelector('.tab-panel.active[data-tab=desk]') && !document.querySelector('.link-focus')"
-                        " && document.getElementById('route-note').hidden", 10) is True, [marked("[data-enroll-role]"), note()])
+                        " && !document.querySelector('.bn-link-focus') && document.getElementById('route-note').hidden", 10) is True,
+                  [parts_marked(), note()])
         finally:
             wd("DELETE", S)
     finally:

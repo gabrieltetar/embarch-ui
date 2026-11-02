@@ -397,8 +397,8 @@ try:
     bar = script("var b=document.getElementById('topo-bar'); return [!!b.querySelector('#bench-pick'), !!b.querySelector('#topo-validate'),"
                  " Array.from(b.querySelectorAll('.topo-menu [data-topo-panel]')).map(function(x){return x.textContent;})];")
     check("the bar holds the bench picker, Validate topology and one button per panel",
-          bar == [True, True, ["Signals", "Board types", "Saved benches", "Old diagram"]], bar)
-    check("every panel starts closed", not any(panel_open(n) for n in ["signals", "boards", "saved", "diagram", "validate"]))
+          bar == [True, True, ["Signals", "Board types", "Saved benches"]], bar)
+    check("every panel starts closed", not any(panel_open(n) for n in ["signals", "boards", "saved", "validate", "checks"]))
     click('[data-topo-panel="signals"]')
     geo = script("var p=document.getElementById('topo-panel-signals').getBoundingClientRect(),"
                  " bar=document.getElementById('topo-bar').getBoundingClientRect(), cs=getComputedStyle(document.getElementById('topo-panel-signals'));"
@@ -414,14 +414,17 @@ try:
     key("")
     check("Esc closes it, and focus goes back to its button", not panel_open("boards") and
           script("return document.activeElement === document.querySelector('[data-topo-panel=\"boards\"]');"))
+    click('[data-topo-panel="boards"]')
     click('[data-topo-panel="saved"]')
-    click('[data-topo-panel="diagram"]')
-    check("one panel at a time", panel_open("diagram") and not panel_open("saved"))
-    check("the old diagram, its probe pool and its drop targets live in their panel",
-          script("var p=document.getElementById('topo-panel-diagram');"
-                 "return !!p.querySelector('#topology-diagram [data-enroll-role=\"dut\"]') && !!p.querySelector('#probes-pool');"))
+    check("one panel at a time", panel_open("saved") and not panel_open("boards"))
+    # Phase 4 deleted the old diagram: the canvas is the only picture, the
+    # tray the way a probe comes in, and making a bench live what enrols.
+    check("the old diagram, its probe pool and its enrol and board-type dialogs are gone",
+          script("return !document.getElementById('topo-panel-diagram') && !document.querySelector('[data-topo-panel=\"diagram\"]') &&"
+                 " !document.getElementById('topology-diagram') && !document.getElementById('probes-pool') &&"
+                 " !document.getElementById('assign-dialog') && !document.getElementById('role-board-dialog');"))
     click("#bench-wrap", 0, 200)
-    check("a click outside closes it", not panel_open("diagram"))
+    check("a click outside closes it", not panel_open("saved"))
     click('[data-topo-panel="signals"]')
     script("document.getElementById('sig-declare').click();")
     wait_for("return document.getElementById('sig-dialog').style.display === 'block';", 4)
@@ -650,18 +653,18 @@ try:
     wait_for("return !document.getElementById('topo-validate').disabled &&"
              " document.getElementById('topo-validate-report').textContent.indexOf('Role') >= 0;", 10)
     key("")
-    click('[data-topo-panel="diagram"]')
-    script("document.querySelector('[data-board-role=\"dut\"] text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    wait_for("return document.getElementById('role-board-dialog').style.display === 'block';", 5)
+    click('[data-topo-panel="boards"]')
+    script("document.getElementById('board-add').click();")
+    wait_for("return document.getElementById('board-dialog').style.display === 'block';", 5)
     key("")
-    check("Esc over the board-type dialog closes the dialog, not the Old diagram panel under it",
-          script("return document.getElementById('role-board-dialog').style.display !== 'block';") and panel_open("diagram"))
-    script("document.querySelector('[data-board-role=\"dut\"] text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    wait_for("return document.getElementById('role-board-dialog').style.display === 'block';", 5)
-    script("window.confirm=function(){return true}; document.getElementById('role-board-retract').click();")
+    check("Esc over the board-type dialog closes the dialog, not the Board types panel under it",
+          script("return document.getElementById('board-dialog').style.display !== 'block';") and panel_open("boards"))
+    key("")
+    # What a confirmed enrolment or a retracted role on the live report sends
+    # (bench.js): the role's verdict goes from its part, and only its.
+    script("document.dispatchEvent(new CustomEvent('embarch:role-changed', {detail: {role: 'dut', probe_serial: null}}));")
     gone = wait_for("return !document.querySelector('#bench-svg [data-verdict=\"dut\"]');", 6)
     check("a role's binding changing drops its verdict from its part, and only its", gone and script(VERDICT, ["devkit"]), script(VERDICT, ["devkit"]))
-    key("")
 
     # --- the Saved benches panel and the canvas read the same files ---------
     pick_config(1)
@@ -815,7 +818,7 @@ try:
     key("")
     rq("POST", b + "/window/rect", {"width": 1500, "height": 950})
     time.sleep(0.6)
-    click('[data-topo-panel="diagram"]')
+    click('[data-topo-panel="saved"]')
     if SHOTS:
         shots.append(shot("bench-tab-dark-panel.png"))
     key("")

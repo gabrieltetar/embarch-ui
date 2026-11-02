@@ -163,8 +163,9 @@
              Validate topology and one button per panel, and every other card
              opens as a panel over the canvas — anchored under the bar,
              scrolling inside itself, closed by Esc, its own button or a
-             click outside. The old diagram, with its probe pool and enrol
-             drop targets, lives in its panel until the editor replaces it. -->
+             click outside. The old diagram went in phase 4: a probe is bound
+             on the canvas (the tray), and a role is enrolled by confirming
+             what making the bench live proposes. -->
         <div class="topo-full">
           <div id="topology-error" class="card topo-error" style="display:none; border-color:var(--danger);"></div>
           <div class="topo-bar" id="topo-bar">
@@ -179,16 +180,21 @@
               <button type="button" class="btn bench-icon-btn" id="bench-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled>&#8631;</button>
               <span id="bench-dirty" class="bench-dirty" hidden>unsaved changes</span>
               <button type="button" class="btn btn-primary" id="bench-save" title="Write the bench file (Ctrl+S)" disabled>Save</button>
+              <!-- Phase 4: which bench is live for this repo (this UI's own
+                   record, never the repo's), and the two gestures on it. -->
+              <span id="bench-live" class="bench-live" hidden></span>
+              <button type="button" class="btn" id="bench-make-live" hidden>Make live</button>
+              <button type="button" class="btn" id="bench-stop-live" title="This repo has no live bench after this; Core keeps what it holds" hidden>Stop being live</button>
             </span>
             <span class="topo-bar-spacer"></span>
             <button id="topo-validate" class="btn btn-primary">Validate topology</button>
             <button type="button" class="btn topo-menu-btn" id="topo-report" data-topo-panel="validate" aria-expanded="false" aria-controls="topo-panel-validate" title="The last Validate topology report" hidden>Report</button>
+            <button type="button" class="btn topo-menu-btn" id="bench-live-btn" data-topo-panel="live" aria-expanded="false" aria-controls="topo-panel-live" title="The last make-live report: what applied, what is proposed, what Core holds that the bench does not name" hidden>Live report</button>
             <button type="button" class="btn topo-menu-btn" id="bench-checks-btn" data-topo-panel="checks" aria-expanded="false" aria-controls="topo-panel-checks" title="What the bench's rule checks say about the bench on screen" hidden>Checks<span id="bench-checks-count" class="bench-checks-n"></span></button>
             <div class="topo-menu" role="group" aria-label="Panels">
               <button type="button" class="btn topo-menu-btn" data-topo-panel="signals" aria-expanded="false" aria-controls="topo-panel-signals">Signals</button>
               <button type="button" class="btn topo-menu-btn" data-topo-panel="boards" aria-expanded="false" aria-controls="topo-panel-boards">Board types</button>
               <button type="button" class="btn topo-menu-btn" data-topo-panel="saved" aria-expanded="false" aria-controls="topo-panel-saved">Saved benches</button>
-              <button type="button" class="btn topo-menu-btn" data-topo-panel="diagram" aria-expanded="false" aria-controls="topo-panel-diagram">Old diagram</button>
             </div>
           </div>
           <div class="topo-stage" id="topo-stage">
@@ -263,7 +269,7 @@
                  *types* this repo builds for — shapes, not pieces of hardware,
                  the same sense Zephyr means by a board. No probe serial here on
                  purpose: a probe is moved between boards, so which probe serves
-                 a role is a separate binding, made on the old diagram. -->
+                 a role is a separate binding, made on the canvas. -->
             <div tabindex="-1" class="card topo-panel" id="topo-panel-boards" role="region" aria-label="Board types" hidden>
           <div class="sd-toolbar">
             <div class="card-title" style="margin:0;">Board types in this project</div>
@@ -308,18 +314,19 @@
 
             <!-- The bench's rule checks (POST /api/bench/check), re-run after
                  every edit: errors and warnings, each selecting what it names. -->
+            <!-- Making a bench live answers here: applied, proposed (each
+                 confirmed by hand), not proposed, and what Core holds that
+                 the bench does not name, each with its own Retract. -->
+            <div tabindex="-1" class="card topo-panel" id="topo-panel-live" role="region" aria-label="Live report" hidden>
+              <div class="card-title" style="margin:0 0 4px;" id="bench-live-head">Live</div>
+              <div id="bench-live-body"></div>
+            </div>
+
             <div tabindex="-1" class="card topo-panel" id="topo-panel-checks" role="region" aria-label="Checks" hidden>
               <div class="card-title" style="margin:0 0 4px;" id="bench-checks-head">Checks</div>
               <div id="bench-checks-list"></div>
             </div>
 
-            <div tabindex="-1" class="card topo-panel" id="topo-panel-diagram" role="region" aria-label="Old diagram" hidden>
-              <svg id="topology-diagram" width="100%" height="230" viewBox="0 0 1000 230" style="display:block;"></svg>
-              <div class="topo-enroll-strip">
-                <div class="card-title" style="margin:0 0 8px;">Attached probes — drag onto the Dev bench or DUT box above, or click a probe then a box</div>
-                <div id="probes-pool" class="chip-pool">waiting for embarch-core…</div>
-              </div>
-            </div>
 
           </div>
         </div>
@@ -767,22 +774,6 @@
         </div>
       </div>
 
-      <div id="assign-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
-      <div id="assign-dialog" class="dialog card" style="display:none; top:30%; width:340px;">
-        <div class="card-title">Enroll <span id="assign-probe-label" class="mono"></span> as <span id="assign-role-label" class="mono"></span></div>
-        <p id="assign-replace-note" class="placeholder-note" style="display:none; margin:0 0 10px;"></p>
-        <label class="sd-field" style="margin-bottom:10px;"><span>Board type in this role</span>
-          <select id="assign-board" class="sd-input mono"></select>
-        </label>
-        <label style="display:block; font-size:12.5px; color:var(--text-secondary); margin-bottom:6px;">Chip &mdash; from that board type
-          <input id="assign-chip" readonly style="width:100%; margin-top:4px; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-family:var(--font-mono); font-size:13px;">
-        </label>
-        <div id="assign-result" class="placeholder-note" style="margin:10px 0;"></div>
-        <div style="display:flex; gap:8px; justify-content:flex-end;">
-          <button type="button" class="btn" id="assign-cancel">Cancel</button>
-          <button type="button" class="btn btn-primary" id="assign-confirm">Enroll</button>
-        </div>
-      </div>
 
       <!-- decision 14's picker, now the whole page's rather than one tab's.
            A typed path rather than a file picker, on purpose — a browser
@@ -835,30 +826,6 @@
         </div>
       </div>
 
-      <div id="role-board-backdrop" class="dialog-backdrop" style="display:none;"></div>
-      <div id="role-board-dialog" class="dialog card" style="display:none; top:30%; width:420px;">
-        <div class="card-title" id="role-board-title">Board type in this role</div>
-        <label class="sd-field"><span>Board type</span>
-          <select id="role-board-select" class="sd-input mono"></select>
-        </label>
-        <!-- A revision and a variant that really exist *together*, as this
-             repo's own scan reports them. Two independent dropdowns would
-             offer combinations `west build` then refuses — a board revision
-             can be backed only with a named variant, and vice versa — so
-             what is picked here is one scanned combination, never a pair
-             assembled out of two lists. -->
-        <label class="sd-field" id="role-board-combo-field" style="margin-top:12px;"><span>Build combination — revision and variant</span>
-          <select id="role-board-combo" class="sd-input mono"></select>
-        </label>
-        <p id="role-board-combo-note" class="placeholder-note" style="margin:6px 0 0;"></p>
-        <p id="role-board-result" class="sd-error" style="display:none; margin-top:10px;"></p>
-        <div class="sd-row-actions" style="margin-top:16px;">
-          <button id="role-board-retract" class="btn" title="Clear this role — its board type and its probe binding both go">Retract role</button>
-          <span style="flex:1;"></span>
-          <button id="role-board-cancel" class="btn">Cancel</button>
-          <button id="role-board-save" class="btn btn-primary">Set</button>
-        </div>
-      </div>
 
       <div id="topo-save-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="topo-save-dialog" class="dialog card" style="display:none; top:30%; width:420px;">

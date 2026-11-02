@@ -14,6 +14,15 @@ the open project. The project halves need a real firmware repo on disk, so
 this makes one in a temp directory and opens it through the same route the
 Study Designer's own panel posts to.
 
+**Phase 4 deleted the old diagram** (embarch-bench-editor-proposal.md, "What is
+deleted"): its role boxes, probe pool and enrol and board-type dialogs. What
+they did is checked here against the canvas instead — the role parts drawn
+with their role, a role part's board type picked in the inspector from the
+same served pickers, a probe dropped from the tray onto a role part's
+usb-host connector (decision 43's three properties, on the tray's drop
+targets now), and Validate's verdicts landing on the role parts. Making a
+bench live, and confirming what it proposes, is `drive_bench_live.py`'s.
+
 It brings its own stub rather than extending `stub_core.py`, which serves an
 empty bench on purpose for `drive.py`'s Live Study fixtures: what this needs
 is the opposite — attached probes, one role already enrolled (so the replace
@@ -258,8 +267,9 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 # A firmware repo for the project halves. `.git` alone is enough for the
 # open-project check (`api_open_project`'s own rule), and the catalog and the
 # topologies directory are created on the first save.
-REPO = "/tmp/embarch-ui-topology-drive-repo"
-subprocess.run(["rm", "-rf", REPO], check=False)
+import tempfile
+_REPO_PARENT = tempfile.mkdtemp(prefix="embarch-ui-topology-drive-")
+REPO = _REPO_PARENT + "/embarch-ui-topology-drive-repo"
 os.makedirs(REPO + "/.git", exist_ok=True)
 
 # A real enough Zephyr tree for the *build menu*: the board catalog lists what
@@ -312,7 +322,17 @@ with open(REPO + "/embarch/embarch.toml", "w") as f:
             'west_binary = "west"\n'
             'build_dir_root = "%s/build"\n' % (CORE_PORT, TOKEN, REPO, REPO))
 
-cfg = "/tmp/embarch-ui-topology-drive.toml"
+# The bench the canvas draws: this machine, the dev bench and the DUT, each a
+# part holding its role, no probe bound yet (the tray is how one is).
+os.makedirs(REPO + "/embarch/topologies", exist_ok=True)
+with open(REPO + "/embarch/topologies/topo.toml", "w") as f:
+    f.write('name = "topo"\nsaved_at_utc_ms = 9\n'
+            'parts = [{ id = "host", template = "this-machine", at = [20, 110] },'
+            ' { id = "dev", template = "nrf54l15dk", role = "dev-bench", board = "esp32c5_devkitc/esp32c5/hpcore", at = [380, 110] },'
+            ' { id = "dut", template = "generic-board", role = "dut", at = [380, 420] }]\n'
+            'cables = [{ from = "dev.usb", to = "host" }]\n')
+
+cfg = _REPO_PARENT + "/ui.toml"
 with open(cfg, "w") as f:
     f.write('[core]\nbase_url = "http://127.0.0.1:%d"\ntoken = "%s"\n' % (CORE_PORT, TOKEN))
 # Scratch desk config/data and a desk port nothing listens on: the page
@@ -363,6 +383,16 @@ def script(js, args=None):
     return rq("POST", b + "/execute/sync", {"script": js, "args": args or []})
 
 
+def wait_for(js, timeout=10.0, args=None):
+    end = time.time() + timeout
+    while time.time() < end:
+        v = script(js, args)
+        if v:
+            return v
+        time.sleep(0.2)
+    return script(js, args)
+
+
 # The Topology tab is the bench canvas with every card a panel over it (owner,
 # 2026-11-01): open the card's panel before touching it, the way a human has to.
 def panel(name):
@@ -398,7 +428,7 @@ try:
           == "embarch-ui-topology-drive-repo")
     check("and where it is under that — no desk is open in this isolated run, so it says so, then the parent",
           script("return document.getElementById('project-current-path').textContent;")
-          == "no desk \u00b7 /tmp")
+          == "no desk \u00b7 " + "/" + "/".join(_REPO_PARENT.strip("/").split("/")[-2:]))
     script("document.getElementById('project-button').click();")
     time.sleep(0.4)
     check("the control opens the picker from any tab",
@@ -410,20 +440,20 @@ try:
     check("the Study Designer's own project card no longer carries a second picker",
           script("return !document.getElementById('sd-project-picker');"))
 
-    # --- the pool and the targets ------------------------------------------
-    panel("diagram")
-    check("the probe pool renders inside the diagram card",
-          script("return !!document.getElementById('probes-pool').closest('.card')"
-                 ".querySelector('#topology-diagram');"))
-    check("both attached probes are offered",
-          script("return document.querySelectorAll('#probes-pool .probe-card').length;") == 2)
-    check("both role boxes are drop targets",
-          script("return Array.from(document.querySelectorAll('#topology-diagram "
-                 "[data-enroll-role]')).map(function(g){return g.getAttribute('data-enroll-role')});")
-          == ["dev-bench", "dut"])
+    # --- the old diagram is gone; the canvas is the picture -------------------
+    check("the Old diagram panel and its button are gone",
+          script("return !document.getElementById('topo-panel-diagram') && !document.querySelector('[data-topo-panel=\"diagram\"]');"))
+    check("and with it the probe pool, the role boxes and their enrol and board-type dialogs",
+          script("return !document.getElementById('probes-pool') && !document.getElementById('topology-diagram') &&"
+                 " !document.querySelector('[data-enroll-role]') && !document.getElementById('assign-dialog') &&"
+                 " !document.getElementById('role-board-dialog');"))
+    roles = wait_for("return Array.from(document.querySelectorAll('#bench-svg [data-part] .bn-role text')).map(function(t){return t.textContent;});", 10)
+    check("the canvas draws each role's part with its role on it", sorted(roles or []) == ["DEV-BENCH", "DUT"], roles)
+    check("no verdict is drawn before Validate topology has run",
+          not script("return document.querySelectorAll('#bench-svg [data-verdict]').length;"))
 
-    # --- the roles table is gone; the diagram carries it -------------------
-    check("the roles table is folded into the diagram, not sitting beside it",
+    # --- the roles table is gone; the canvas carries it --------------------
+    check("the roles table is folded into the picture, not sitting beside it",
           script("return !document.getElementById('topology-table-body');"))
     check("the Topology tab no longer carries an alert list",
           script("return !document.getElementById('topology-alerts-list');"))
@@ -431,32 +461,10 @@ try:
           script("return !document.getElementById('dashboard-alerts-list') && "
                  "!!document.querySelector('.tab-panel[data-tab=desk]');"))
 
-    # --- the boxes: role title, board line, no chip, no status yet ---------
-    # The diagram is drawn after the roles and the board catalog arrive, so
-    # wait for it to carry all four lines rather than racing a fixed sleep.
-    _labels_js = ("return Array.from(document.querySelectorAll('#topology-diagram "
-                  "[data-enroll-role] text')).map(function(t){return t.textContent});")
-    labels = script(_labels_js)
-    for _ in range(12):
-        # The bench box first draws the raw west qualifier and takes its label
-        # once /api/topology/pickers has answered (topology-boards.md, "A dev-bench
-        # board type is shown by its label"), so a non-empty line is not yet settled.
-        if len(labels) >= 4 and labels[1] and labels[1] != "esp32c5_devkitc/esp32c5/hpcore" and labels[3]:
-            break
-        time.sleep(0.25)
-        labels = script(_labels_js)
-    check("the box's title is the role and the board type is under it",
-          labels[0] == "Dev bench" and labels[1] == "Espressif ESP32-C5-DevKitC", labels)
-    check("a role with no board type says what to do rather than going blank",
-          labels[2] == "DUT" and labels[3] == "pick a board type", labels)
-    check("the chip is not on the diagram any more",
-          not any("esp32c5\u0020" in t or t.strip() == "esp32c5" for t in labels), labels)
-    check("no status is shown before Validate topology has run",
-          not any("validated" in t or "●" in t for t in labels), labels)
-    check("the board line is its own click target",
-          script("return Array.from(document.querySelectorAll('#topology-diagram "
-                 "[data-board-role]')).map(function(g){return g.getAttribute('data-board-role')});")
-          == ["dev-bench", "dut"])
+    # --- the tray: what the probe pool was ------------------------------------
+    tray = wait_for("return Array.from(document.querySelectorAll('#bench-tray [data-tray]')).map(function(c){return c.getAttribute('data-tray');});", 12)
+    check("the tray offers both attached probes, since no part binds either",
+          sorted(t for t in (tray or []) if t.startswith("probe:")) == ["probe:000683001234", "probe:ABC123"], tray)
 
     # --- the board-type catalog, which the DUT picker reads ----------------
     panel("boards")
@@ -475,38 +483,35 @@ try:
     check("and in the file the card names",
           os.path.exists(REPO + "/embarch/boards.toml"))
 
-    # --- picking a board type on the box -----------------------------------
-    panel("diagram")
-    script("document.querySelector('[data-board-role=\"dut\"] text')"
-           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    time.sleep(0.5)
-    check("clicking the board line opens the picker rather than the enrol dialog",
-          script("return document.getElementById('role-board-dialog').style.display === 'block' "
-                 "&& document.getElementById('assign-dialog').style.display !== 'block';"))
-    dut_options = script("return Array.from(document.getElementById('role-board-select').options)"
-                         ".map(function(o){return o.value});")
-    check("the DUT picker offers this project's board types",
-          dut_options == ["nrf52840dk/nrf52840"], dut_options)
-    script("document.getElementById('role-board-cancel').click();")
-    time.sleep(0.3)
+    # --- a role part's board type, in the inspector ----------------------------
+    # The role boxes' picker is gone; the same served pickers fill the select
+    # a role part's inspector carries, and it writes the bench file — Core is
+    # told when the bench is made live, never by picking.
+    def inspect(pid):
+        script("var e=new PointerEvent('pointerdown',{bubbles:true,button:0}); document.querySelector('#bench-svg [data-part=\"'+arguments[0]+'\"] .bn-body').dispatchEvent(e);"
+               "document.querySelector('#bench-svg').dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0}));", [pid])
 
-    script("document.querySelector('[data-board-role=\"dev-bench\"] text')"
-           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
+    def board_options(pid, texts=False):
+        inspect(pid)
+        return wait_for("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]');"
+                        "if (!s || s.disabled) return null;"
+                        "return Array.from(s.options).map(function(o){return " + ("o.textContent" if texts else "o.value") + "});", 8)
+    writes = len(BOARD_WRITES)
+    dut_options = board_options("dut")
+    check("the DUT part's board type is picked from this project's board types",
+          dut_options == ["", "nrf52840dk/nrf52840"], dut_options)
+    bench_options = board_options("dev", texts=True)
+    check("the dev bench part's is the suite's fixed supported list, not the catalog",
+          bench_options == ["none", "Nordic nRF54L15 DK — nRF54L15", "Espressif ESP32-C5-DevKitC — esp32c5"], bench_options)
+    script("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]'); s.value='nrf54l15dk/nrf54l15/cpuapp'; s.dispatchEvent(new Event('change',{bubbles:true}));")
     time.sleep(0.4)
-    bench_options = script("return Array.from(document.getElementById('role-board-select').options)"
-                           ".map(function(o){return o.textContent});")
-    check("the dev-bench picker is the suite's fixed supported list, not the catalog",
-          bench_options == ["Nordic nRF54L15 DK — nRF54L15",
-                            "Espressif ESP32-C5-DevKitC — esp32c5"], bench_options)
-    check("a dev-bench board is offered no build combination — it is not a project board",
-          script("return document.getElementById('role-board-combo-field').style.display "
-                 "=== 'none';"))
-    script("document.getElementById('role-board-select').value='nrf54l15dk/nrf54l15/cpuapp';"
-           "document.getElementById('role-board-save').click();")
-    time.sleep(1.2)
-    check("picking a board type writes it with no probe opened",
-          BOARD_WRITES == [{"role": "dev-bench", "board": "nrf54l15dk/nrf54l15/cpuapp",
-                            "chip": "nRF54L15"}], BOARD_WRITES)
+    check("picking one writes the bench, not Core", len(BOARD_WRITES) == writes and
+          script("return !document.getElementById('bench-dirty').hidden;"), BOARD_WRITES[writes:])
+    script("document.getElementById('bench-save').click();")
+    time.sleep(1.0)
+    with open(REPO + "/embarch/topologies/topo.toml") as f:
+        saved = f.read()
+    check("and Save puts it in the bench file", 'board = "nrf54l15dk/nrf54l15/cpuapp"' in saved, saved)
 
     # --- what a board type can be *built* as (the catalog's own columns) ----
     panel("boards")
@@ -534,50 +539,38 @@ try:
           "nRF52840_xxAA" not in script("return document.getElementById('board-catalog-body')"
                                         ".textContent;"))
 
-    # --- picking a *real* combination for the DUT --------------------------
-    panel("diagram")
-    script("document.querySelector('[data-board-role=\"dut\"] text')"
-           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    time.sleep(0.6)
-    script("document.getElementById('role-board-select').value='plank';"
-           "document.getElementById('role-board-select')"
-           ".dispatchEvent(new Event('change'));")
-    time.sleep(0.4)
+    # --- a *real* combination for the DUT --------------------------------------
+    plank_opts = board_options("dut", texts=True)
     # The catalog row states no chip — Rescan seeds none, because the scan
     # reports west targets. It reports each target's SoC too, and that is
     # Core's table's input (decision 48), so the picker has a chip anyway.
     check("a board type whose row states no chip is still offered with one",
-          script("return document.getElementById('role-board-select')"
-                 ".selectedOptions[0].textContent;") == "plank — nRF54L15")
+          "plank — nRF54L15" in (plank_opts or []), plank_opts)
     check("and it came from Core's SoC table, not from a string in the browser",
           "nrf54l15" in RESOLVED, RESOLVED)
-    combos = script("return Array.from(document.getElementById('role-board-combo').options)"
-                    ".map(function(o){return o.textContent});")
-    check("the picker offers the combinations the scan found, not revisions × variants",
-          len(combos) == 3, combos)
-    check("each one names its revision and its variant, and stops there (decision 49)",
-          combos and combos[0] == "rev 1 · no variant", combos)
-    check("the west qualifier is on the option's tooltip, not in the line",
-          script("return document.getElementById('role-board-combo').options[0].title;")
-          == "plank@1/nrf54l15/cpuapp")
-    check("the combination Zephyr does not back is not offered",
-          not any("rev 1 · variant ns" in c for c in combos), combos)
-    script("document.getElementById('role-board-combo').value='2';"
-           "document.getElementById('role-board-save').click();")
-    time.sleep(1.4)
-    # One gesture, two owners, and the split is the point: which board type
-    # is in a role is Core's fact and reaches Core unchanged, while which
-    # combination of it this repo builds is the project's and lands in the
-    # project's own file. Core is never told about a revision.
-    check("Core is told the board type and nothing about the combination",
+    script("var s=document.querySelector('#bench-inspector [data-ed=\"board\"]'); s.value='plank'; s.dispatchEvent(new Event('change',{bubbles:true}));")
+    combos = wait_for("var n=document.querySelector('#bench-inspector .bn-ed-note'); return n ? n.textContent : '';", 6)
+    check("the inspector names the combinations the scan found, not revisions × variants",
+          (combos or "").count("rev ") == 3, combos)
+    check("each one by its revision and its variant (decision 49)", "rev 1 · no variant" in (combos or ""), combos)
+    check("the combination Zephyr does not back is not offered", "rev 1 · variant ns" not in (combos or ""), combos)
+    script("document.getElementById('bench-save').click();")
+    time.sleep(0.8)
+    # The role route still answers what the deleted picker sent: one gesture,
+    # two owners — the board type to Core, the combination to the project's
+    # own file, and Core never told about a revision.
+    ui_post("/api/topology/roles/dut/board", {"board": "plank", "chip": "", "revision": "2", "variant": "ns"})
+    check("the role route tells Core the board type and nothing about the combination",
           BOARD_WRITES[-1] == {"role": "dut", "board": "plank", "chip": "nRF54L15"},
           BOARD_WRITES[-1])
     with open(REPO + "/embarch/boards.toml") as f:
         catalog = f.read()
     plank = catalog.split('name = "plank"')[-1]
-    check("and the combination is recorded on the board in the project's own file",
+    check("and records the combination on the board in the project's own file",
           'revision = "2"' in plank and 'variant = "ns"' in plank, plank)
     panel("boards")
+    script("document.getElementById('board-rescan').click();")   # re-reads the catalog the route just pinned
+    wait_for("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');", 8)
     check("the list marks the combination a build would use now",
           script("return !!document.querySelector('#board-catalog-body .build-chip.is-pinned');"))
     # The other end of decision 48: a board type nothing can answer for is
@@ -588,57 +581,53 @@ try:
     check("a board type with no chip anywhere is refused here, not by Core",
           status == 400 and "Board types" in text, (status, text))
 
-    # --- click-to-assign, onto the label rather than the rect --------------
-    panel("diagram")
-    script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();")
-    script("var g=document.querySelector('[data-enroll-role=\"dev-bench\"]');"
-           "g.querySelector('text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    time.sleep(0.5)
-    check("clicking the box's *title* opens the enrol dialog, not just the rect",
-          script("return document.getElementById('assign-dialog').style.display === 'block';"))
-    check("the chip is read out of the role's board type rather than typed",
-          script("return document.getElementById('assign-chip').value;") == "nRF54L15" and
-          script("return document.getElementById('assign-chip').readOnly;"))
-    note = script("return document.getElementById('assign-replace-note').textContent;")
-    check("the dialog names the probe it would replace",
-          "000683001234" in note, note)
-
-    script("document.getElementById('assign-cancel').click();")
-    time.sleep(0.3)
-
-    # --- drag onto an empty role -------------------------------------------
-    drag = ("var dt=new DataTransfer(); dt.setData('text/plain','ABC123');"
-            "var g=document.querySelector('[data-enroll-role=\"dut\"]');"
-            "var r=g.querySelector('rect');"
-            "r.dispatchEvent(new DragEvent('dragover',{bubbles:true,dataTransfer:dt}));")
-    script(drag)
-    check("a drag over a box highlights that box",
-          script("return document.querySelector('[data-enroll-role=\"dut\"]')"
-                 ".classList.contains('dragover');"))
-
-    # The diagram is rebuilt on every 5 s poll. A highlight that does not
-    # survive one is a box that goes dark under a stationary cursor.
+    # --- a probe onto a role part: the tray ---------------------------------------
+    # Decision 43's three properties, on the tray's drop targets now: the
+    # listeners are the canvas's, the connector under the pointer is state
+    # drawn again on every rebuild, and only a connector that takes the probe
+    # allows the drop.
+    key_close = "\ue00c"
+    rq("POST", b + "/actions", {"actions": [{"type": "key", "id": "kb", "actions": [{"type": "keyDown", "value": key_close}, {"type": "keyUp", "value": key_close}]}]})
+    rq("DELETE", b + "/actions")
+    DRAG = ("var src=document.querySelector('#bench-tray [data-tray=\"probe:ABC123\"]'); window.__dt = window.__dt || new DataTransfer();"
+            "if (arguments[0] === 'start') { src.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:__dt})); return true; }"
+            "var t=document.querySelector('#bench-svg [data-conn=\"dut.usb\"]') || document.querySelector('#bench-svg [data-part=\"dut\"] [data-conn]');"
+            "if (!t) return 'no target';"
+            "var r=t.getBoundingClientRect(), x=r.left+r.width/2, y=r.top+r.height/2, at=document.elementFromPoint(x,y);"
+            "var ev=new DragEvent(arguments[0],{bubbles:true,cancelable:true,dataTransfer:__dt,clientX:x,clientY:y}); at.dispatchEvent(ev);"
+            "return arguments[0] === 'dragover' ? ev.defaultPrevented : true;")
+    script(DRAG, ["start"])
+    target = script("var t=document.querySelector('#bench-svg [data-part=\"dut\"] .bn-tray-ok'); return t ? t.getAttribute('data-conn') : null;")
+    check("dragging a probe from the tray reveals the DUT part's free usb-host connector as a target", target is not None, target)
+    allowed = script(DRAG, ["dragover"])
+    check("the drop is allowed over that connector", allowed is True, allowed)
+    check("which is marked as the one under the pointer",
+          script("return !!document.querySelector('#bench-svg [data-part=\"dut\"] .bn-tray-ok.bn-target');"))
     time.sleep(6)
-    check("the highlight survives the snapshot that rebuilds the box under it",
-          script("return document.querySelector('[data-enroll-role=\"dut\"]')"
-                 ".classList.contains('dragover');"))
-
-    script("var dt=new DataTransfer(); dt.setData('text/plain','ABC123');"
-           "var r=document.querySelector('[data-enroll-role=\"dut\"] rect');"
-           "r.dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:dt}));")
-    time.sleep(0.5)
-    check("dropping opens the dialog for that role",
-          script("return document.getElementById('assign-role-label').textContent;") == "DUT")
-    check("a role with no probe bound displaces nothing",
-          script("return document.getElementById('assign-replace-note').style.display === 'none';"))
-
-    script("document.getElementById('assign-board').value='nrf52840dk/nrf52840';"
-           "document.getElementById('assign-board').dispatchEvent(new Event('change'));"
-           "document.getElementById('assign-confirm').click();")
-    time.sleep(1.5)
-    check("the enrolment carries the dropped probe and the board type's own chip",
-          POSTED == [{"role": "dut", "chip": "nRF52840_xxAA", "probe_serial": "ABC123",
-                      "name": "nrf52840dk/nrf52840"}], POSTED)
+    check("and stays marked through the snapshot that lands meanwhile",
+          script("return !!document.querySelector('#bench-svg [data-part=\"dut\"] .bn-tray-ok.bn-target');"))
+    gap = script("var s=document.getElementById('bench-svg').getBoundingClientRect(); var x=s.left+8, y=s.top+s.height-40, at=document.elementFromPoint(x,y);"
+                 "var ev=new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:window.__dt,clientX:x,clientY:y}); at.dispatchEvent(ev); return ev.defaultPrevented;")
+    check("bare canvas between the parts does not take the drop", gap is False, gap)
+    before = len(POSTED)
+    script(DRAG, ["dragover"])
+    script(DRAG, ["drop"])
+    script("document.querySelector('#bench-tray [data-tray=\"probe:ABC123\"]') && document.querySelector('#bench-tray [data-tray=\"probe:ABC123\"]').dispatchEvent(new DragEvent('dragend',{bubbles:true,dataTransfer:window.__dt}));")
+    time.sleep(0.4)
+    script("document.getElementById('bench-save').click();")
+    time.sleep(1.0)
+    with open(REPO + "/embarch/topologies/topo.toml") as f:
+        saved = f.read()
+    check("dropping writes the probe into the DUT part's binding, and Save puts it in the file",
+          'probe = "ABC123"' in saved, saved)
+    check("binding a probe enrols nothing: making the bench live proposes that, for a human to confirm",
+          len(POSTED) == before, POSTED[before:])
+    # The ordinary enrol route is what a confirmed proposal calls.
+    ui_post("/api/enroll", {"role": "dut", "chip": "nRF52840_xxAA", "probe_serial": "ABC123", "name": "nrf52840dk/nrf52840"})
+    check("the ordinary enrol carries the probe and the board type's own chip",
+          POSTED[-1:] == [{"role": "dut", "chip": "nRF52840_xxAA", "probe_serial": "ABC123",
+                           "name": "nrf52840dk/nrf52840"}], POSTED[-1:])
+    time.sleep(2.5)   # the validate pass reads the poll loop's snapshot, which the enrol pokes
 
     # --- Validate topology --------------------------------------------------
     script("document.getElementById('topo-validate').click();")
@@ -662,24 +651,10 @@ try:
     check("a supported bench board is not reported as missing from the project catalog",
           "no board type of that name" not in report, report[-400:])
 
-    # The diagram is drawn after the roles and the board catalog arrive, so
-    # wait for it to carry all four lines rather than racing a fixed sleep.
-    _labels_js = ("return Array.from(document.querySelectorAll('#topology-diagram "
-                  "[data-enroll-role] text')).map(function(t){return t.textContent});")
-    labels = script(_labels_js)
-    for _ in range(12):
-        # The bench box first draws the raw west qualifier and takes its label
-        # once /api/topology/pickers has answered (topology-boards.md, "A dev-bench
-        # board type is shown by its label"), so a non-empty line is not yet settled.
-        if len(labels) >= 4 and labels[1] and labels[1] != "esp32c5_devkitc/esp32c5/hpcore" and labels[3]:
-            break
-        time.sleep(0.25)
-        labels = script(_labels_js)
-    panel("diagram")
-    check("the verdict lands on the box, which was blank until this run",
-          any("validated" in t for t in labels), labels)
-    check("a role Core refused shows as failed on its own box",
-          any("failed" in t for t in labels), labels)
+    pills = wait_for("var o={}; document.querySelectorAll('#bench-svg [data-verdict]').forEach(function(g){ o[g.getAttribute('data-verdict')] = g.textContent; }); return Object.keys(o).length >= 2 ? o : null;", 8)
+    check("the verdict lands on the role's part on the canvas, which carried none until this run",
+          bool(pills) and "validated" in pills.get("dev", ""), pills)
+    check("a role Core refused shows as failed on its own part", bool(pills) and "failed" in pills.get("dut", ""), pills)
 
     # --- saving and loading a bench ----------------------------------------
     panel("saved")
@@ -726,38 +701,8 @@ try:
     check("the leftover role can be cleared, which nothing could do before",
           DELETED == ["sniffer"], DELETED)
 
-    # And a canonical role is retracted from its own picker, since it has
-    # no row anywhere either.
-    panel("diagram")
-    script("document.querySelector('[data-board-role=\"dut\"] text')"
-           ".dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    time.sleep(0.4)
-    check("a role in a box is retracted from the picker that sets it",
-          script("return document.getElementById('role-board-retract').offsetParent !== null;"))
-    script("document.getElementById('role-board-retract').click();")
-    time.sleep(1.2)
-    check("retracting a role reaches Core", DELETED == ["sniffer", "dut"], DELETED)
-
-    # --- an enrol that moves a role says so (decision 61) ---------------------
-    panel("diagram")
-    # State here: dev-bench holds 000683001234, dut was retracted. Enrolling
-    # that probe as dut vacates dev-bench; its board type is named, so it is kept.
-    script("document.querySelector('#probes-pool .probe-card[data-serial=\"000683001234\"]').click();")
-    script("var g=document.querySelector('[data-enroll-role=\"dut\"]');"
-           "g.querySelector('text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    time.sleep(0.5)
-    script("document.getElementById('assign-board').value='nrf52840dk/nrf52840';"
-           "document.getElementById('assign-board').dispatchEvent(new Event('change'));"
-           "document.getElementById('assign-confirm').click();")
-    time.sleep(1.5)
-    moved = script("var n=document.getElementById('assign-moved-note');return n?n.textContent:null;")
-    check("an enrol that vacated a role names it and says its board type is kept",
-          moved is not None and "'dev-bench'" in moved and "vacated" in moved and "kept" in moved, moved)
-    check("a plain enrol shows no moved-role note (the dut enrol above sent none)",
-          "moved_roles_note" not in json.dumps(POSTED[0]))
-    time.sleep(6.5)
-    check("the dialog closes on its own after the longer read time",
-          script("return document.getElementById('assign-dialog').style.display === 'none';"))
+    # A canonical role is retracted from the live report's leftovers now, by
+    # its own click (drive_bench_live.py), never from a picker on a box.
 
     # --- the summary never says "passed" over a warning or an empty bench ----
     #
@@ -781,28 +726,13 @@ try:
     check("a bench with nothing to check says so, not that every check passed",
           "every check passed" not in all_empty and "nothing to check yet" in all_empty, all_empty)
 
-    # --- enroll refuses a board with no chip, in the dialog and at the route ---
-    panel("diagram")
+    # --- enroll refuses a board with no chip, at the route ---------------------
     before = len(POSTED)
     status, text = ui_post_status("/api/enroll", {"role": "dut", "chip": "", "name": "no-such-board",
                                                   "probe_serial": "ABC123"})
     check("POST /api/enroll with an unanswerable board is a 400 naming where to set the chip, "
           "and Core is never asked",
           status == 400 and "Board types" in text and len(POSTED) == before, (status, text, POSTED[before:]))
-    script("document.querySelector('#probes-pool .probe-card[data-serial=\"ABC123\"]').click();")
-    script("var g=document.querySelector('[data-enroll-role=\"dut\"]');"
-           "g.querySelector('text').dispatchEvent(new MouseEvent('click',{bubbles:true}));")
-    time.sleep(0.5)
-    script("document.getElementById('assign-board').value='nrf52840dk/nrf52840';"
-           "document.getElementById('assign-board').dispatchEvent(new Event('change'));"
-           "document.getElementById('assign-chip').value='';"
-           "document.getElementById('assign-confirm').click();")
-    time.sleep(0.5)
-    refusal = script("return document.getElementById('assign-result').textContent;")
-    check("the dialog names the missing chip when a board type is picked",
-          "has no chip" in refusal and "nrf52840dk" in refusal and "pick a board type" not in refusal,
-          refusal)
-    check("and that refusal made no enrolment", len(POSTED) == before, POSTED[before:])
 
     # --- a direct route on a two-interface device declares its interface ----
     panel("signals")
@@ -857,6 +787,7 @@ finally:
         pass
     ui.terminate()
     srv.shutdown()
+    subprocess.run(["rm", "-rf", _REPO_PARENT, _iso], check=False)
 
 print(("\n%d check(s) failed: " % len(fails)) + ", ".join(fails) if fails else "\nall checks passed")
 sys.exit(1 if fails else 0)

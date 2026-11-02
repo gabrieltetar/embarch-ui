@@ -74,14 +74,14 @@ which absorbed the Enroll tab (`embarch-ui` decision 43). It brings its own
 stub — `stub_core.py` serves an empty bench for the fixtures above, and this
 one needs attached probes, a role already enrolled, and a `POST /probes/enroll`
 that records what it was sent — so it needs nothing but geckodriver and a
-release build. The drop target is an SVG `<g>` rebuilt on every snapshot, so
-`tests/element_ids.rs` cannot see any of it.
+release build. The drop targets are the canvas's connectors, drawn as SVG,
+so `tests/element_ids.rs` cannot see any of it.
 
 ```sh
 python3 tests/browser/drive_topology.py
 ```
 
-It starts the UI with scratch desk/XDG dirs and an unused desk port, and its stub returns `displaced`/`vacated`/`vacated_kept` so the enrol dialog's moved-role note is checked (decision 61).
+It starts the UI with scratch desk/XDG dirs, a private temp repo and an unused desk port. The enrol dialog went with the old diagram in phase 4; the moved-role note a confirmed enrolment shows (decision 61) is `drive_bench_live.py`'s.
 
 `drive_payload_mode.py` is the sixth: the Study Designer row editor's
 "Payload as" toggle, which also needs neither the stub nor a project — one
@@ -311,4 +311,34 @@ cargo build --release
 geckodriver --port 4444 &
 python3 tests/browser/drive_bench_edit.py
 python3 tests/browser/drive_bench_parts.py
+```
+
+`drive_bench_live.py` drives making a bench live (the bench editor's phase 4,
+browser side): the bar's live state, Make live and Save and make live, the
+live report's rows (applied, failed with Core's text, a proposal confirmed
+through the ordinary enrol and the bench then declared again, a part not
+proposed, leftovers each with its own Retract, one Core refuses), reopening
+the report, config tabs as a view change with the live wiring marked,
+write-through after a Save, a make-live `409`, Stop being live and a record
+whose file is gone. The bench routes are the real binary's on a scratch
+repo; the live routes are answered by a stub in the proxy, from
+`coord/p4-contract.md`'s shapes, unless `EMBARCH_LIVE_REAL=1` passes them
+through to the binary's own and runs a shorter flow that holds against any
+Core answer. Four ports: `EMBARCH_UI_PORT` and the three after it (proxy,
+stub Core, an unused desk port); `EMBARCH_BENCH_SHOTS=<dir>` saves the bar
+and the report in both themes.
+
+Phase 4 deleted the old diagram, so `drive_topology.py` checks what it did
+on the canvas instead: role parts drawn with their role, a role part's board
+type picked in the inspector from the served pickers (the combinations the
+scan backs, a chip from Core's SoC table, the bench file written and Core
+not), a probe dropped from the tray onto a role part's usb-host connector
+(decision 43's three properties on the tray's targets), and Validate's
+verdicts on the role parts. `drive_links.py` marks the board's part on the
+canvas for `#topology?board=`.
+
+```sh
+cargo build --release
+geckodriver --port 4444 &
+python3 tests/browser/drive_bench_live.py
 ```

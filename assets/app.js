@@ -275,12 +275,18 @@
     publishVerdicts();
   }
 
-  function statusColor(status) {
-    if (status === "pass") return "var(--success)";
-    if (status === "fail") return "var(--danger)";
-    if (status === "warn") return "var(--warning)";
-    return "var(--text-tertiary)";
-  }
+  // bench.js confirmed an enrolment or retracted a role from the live
+  // report: whatever the last Validate said about that role, or that bench
+  // board, described the binding before it.
+  document.addEventListener("embarch:role-changed", function (ev) {
+    const d = (ev && ev.detail) || {};
+    if (d.role) {
+      dropRoleStatus(d.role);
+    } else if (d.probe_serial && benchStatus[d.probe_serial]) {
+      delete benchStatus[d.probe_serial];
+      publishVerdicts();
+    }
+  });
 
   function statusText(entry) {
     if (entry.status === "pass") return "● validated " + entry.at;
@@ -303,23 +309,6 @@
 
   function findEnrolled(snapshot, role) {
     return (snapshot.enrolled || []).find((b) => b.role === role) || null;
-  }
-
-  // A board is "attached" when one of its declared serials (the JTAG
-  // probe's own serial, or — for dev-bench — its separate runtime-link
-  // serial, `embarch-topology` decision 17) matches a
-  // currently-enumerated probe's serial number.
-  function isAttached(snapshot, board) {
-    if (!board) return false;
-    const probes = snapshot.probes || [];
-    // A row with no probe bound is not "attached" — and `null === null`
-    // must never make it look like one, which is what a bare equality
-    // against two nullable fields would do.
-    return probes.some(
-      (p) =>
-        (!!board.probe_serial && p.serial_number === board.probe_serial) ||
-        (!!board.link_port_serial && p.serial_number === board.link_port_serial)
-    );
   }
 
   function renderStatusChip(snapshot) {
@@ -348,114 +337,6 @@
       '<p class="placeholder-note">' + escapeHtml(snapshot.error) + "</p>";
   }
 
-  // Every declared signal gets its own lane **below** the three nodes, and the
-  // lane is where decision 10's requirement lives: a `direct` signal's line
-  // runs the full width, past and underneath the dev-bench box, and comes back
-  // up into "this machine"; a `via dev-bench` signal's line stops at the bench
-  // and goes no further. The bypass is therefore a shape a reader sees at a
-  // glance rather than a label they have to read — "the picture matches the
-  // wiring, including when the wiring is deliberately unusual."
-  //
-  // Below the nodes rather than between them, found the hard way: an earlier
-  // version drew the `via dev-bench` edge at the nodes' own y, which put the
-  // line straight through both boxes it was meant to connect.
-  const SIGNAL_LANE_TOP = 184;
-  const SIGNAL_LANE_STEP = 30;
-  const NODE_BOTTOM = 160;
-  const DUT_CENTRE = 840;
-  const BENCH_CENTRE = 490;
-  const HOST_CENTRE = 140;
-
-  function renderTopologyDiagram(snapshot) {
-    const svg = document.getElementById("topology-diagram");
-    if (!svg) return;
-
-    const devBench = findEnrolled(snapshot, "dev-bench");
-    const dut = findEnrolled(snapshot, "dut");
-    const devBenchAttached = isAttached(snapshot, devBench);
-    const dutAttached = isAttached(snapshot, dut);
-    const linkColor = devBenchAttached ? "var(--accent)" : "var(--border-strong)";
-    const bleColor = devBenchAttached && dutAttached ? "var(--text-secondary)" : "var(--border-strong)";
-
-    // **The role is the box's title, and what is in it is stacked under
-    // that** (decisions 44, 45): the board *type*, which is clickable and
-    // opens a picker, and then a status line that is blank until Validate
-    // topology has run. The chip is gone from the picture — it is a
-    // property of the board type, shown where board types are listed, and
-    // on the diagram it was one more thing to read past.
-    function boxBoard(board) {
-      if (!board || !board.name) return "pick a board type";
-      return boardTypeLabel(board.role, board.name);
-    }
-
-    // **The box a role is drawn as is the target a probe is dropped on**
-    // (decision 43). The whole node — rect and both labels — is one `<g>`
-    // so a drop on the chip name counts as a drop on the box; a `<rect>`
-    // alone would leave the text a dead zone sitting on top of it. The
-    // role travels in the markup rather than in a closure because this
-    // whole string is rebuilt on every snapshot, so no listener bound to
-    // an element here would survive the next poll — the listeners live on
-    // the `<svg>` and read this attribute (`initEnrollOnDiagram`).
-    function roleNode(role, x, centre, label, boardText, hasBoard) {
-      // The board line is its own `<g>` with its own hit area, sitting on
-      // top of the drop target: clicking it picks a board type, dragging a
-      // probe anywhere on the box binds a probe. Two bindings, two
-      // gestures, one box — which is the whole model (decision 45).
-      const boardFill = hasBoard ? "var(--accent)" : "var(--text-tertiary)";
-      const status = roleStatus[role];
-      const statusLine = status
-        ? '<text x="' + centre + '" y="150" text-anchor="middle" fill="' + statusColor(status.status) +
-          '" font-size="11" font-weight="600" font-family="IBM Plex Sans, sans-serif">' +
-          escapeHtml(statusText(status)) + "</text>"
-        : "";
-      return '<g class="topo-drop" data-enroll-role="' + role + '">' +
-        '<rect x="' + x + '" y="76" width="200" height="88" rx="12" fill="var(--bg-surface-2)" stroke="var(--border-strong)" stroke-width="1.4"/>' +
-        '<text x="' + centre + '" y="104" text-anchor="middle" fill="var(--text-primary)" font-size="14" font-weight="600" font-family="IBM Plex Sans, sans-serif">' + escapeHtml(label) + "</text>" +
-        '<g class="topo-board-pick" data-board-role="' + role + '">' +
-        '<rect x="' + (x + 12) + '" y="112" width="176" height="20" rx="6" fill="transparent"/>' +
-        '<text x="' + centre + '" y="127" text-anchor="middle" fill="' + boardFill +
-        '" font-size="11.5" font-family="IBM Plex Mono, monospace" style="cursor:pointer; text-decoration:underline; text-underline-offset:3px;">' +
-        escapeHtml(boardText) + "</text></g>" +
-        statusLine +
-        "</g>";
-    }
-
-    svg.innerHTML =
-      '<rect x="30" y="80" width="220" height="80" rx="12" fill="var(--bg-surface-2)" stroke="var(--border-strong)" stroke-width="1.4"/>' +
-      '<text x="140" y="112" text-anchor="middle" fill="var(--text-primary)" font-size="14" font-weight="600" font-family="IBM Plex Sans, sans-serif">this machine</text>' +
-      '<text x="140" y="132" text-anchor="middle" fill="var(--text-tertiary)" font-size="11.5" font-family="IBM Plex Mono, monospace">' +
-      (snapshot.core_reachable ? "embarch-core" : "embarch-core (unreachable)") + "</text>" +
-
-      roleNode("dev-bench", 390, 490, roleLabel("dev-bench"), boxBoard(devBench), !!(devBench && devBench.name)) +
-      roleNode("dut", 740, 840, roleLabel("dut"), boxBoard(dut), !!(dut && dut.name)) +
-
-      '<line x1="250" y1="120" x2="390" y2="120" stroke="' + linkColor + '" stroke-width="2"/>' +
-      '<text x="320" y="108" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">serial</text>' +
-
-      '<line x1="590" y1="120" x2="740" y2="120" stroke="' + bleColor + '" stroke-width="2" stroke-dasharray="6 5"/>' +
-      '<text x="665" y="108" text-anchor="middle" fill="var(--text-secondary)" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">BLE</text>' +
-      signalEdges(snapshot);
-
-    // The picture grows with the wiring rather than clipping it: every declared
-    // signal takes its own lane under the nodes.
-    const laneCount = (snapshot.signals || []).length;
-    const height = Math.max(230, SIGNAL_LANE_TOP + laneCount * SIGNAL_LANE_STEP + 10);
-    svg.setAttribute("viewBox", "0 0 1000 " + height);
-    svg.setAttribute("height", String(height));
-
-    // A snapshot landing mid-drag rebuilds the node under the cursor, and
-    // with it the class that says "you are over this box". The drag is
-    // still in progress, so the highlight is restored rather than left for
-    // the next `dragover` — which, over a node the pointer is already
-    // inside and no longer moving across, may not come.
-    if (dragoverRole) {
-      const g = svg.querySelector('[data-enroll-role="' + CSS.escape(dragoverRole) + '"]');
-      if (g) g.classList.add("dragover");
-    }
-    // Same reason for a board a link named: the box it marked was rebuilt.
-    markLinkedBoard();
-  }
-
   // --- A link to one board: `#topology?board=<…>` (decision 58) ----------
   //
   // What a link calls a board is whatever its writer knew: a role's slot
@@ -465,9 +346,10 @@
   // otherwise. Each is matched case-insensitively, and only when nothing
   // matches exactly is the board's own name — before a `/` qualifier or an
   // `@` revision — compared, so `nrf54l15dk` finds a role holding
-  // `nrf54l15dk/nrf54l15/cpuapp`. Every match is marked, a role box on the
-  // diagram and a row in the catalog alike, and the first is scrolled to
-  // once. Nothing matching leaves the tab as it is and says so in one line.
+  // `nrf54l15dk/nrf54l15/cpuapp`. Every match is marked — a part on the
+  // canvas that holds the role or the board type (bench.js), and a row in the
+  // catalog — and a row is scrolled to once when no part holds it. Nothing
+  // matching leaves the tab as it is and says so in one line.
   let linkBoard = null;
   let linkBoardScrolled = false;
   // The catalog is read once at start-up whether a project is open or not;
@@ -482,57 +364,53 @@
     return boardKey(value).split(/[/@]/)[0];
   }
 
-  function linkedBoardMatches(snapshot) {
+  // The catalog rows a link names; the parts it names are bench.js's to mark
+  // on the canvas, and it says how many (`embarch.markedParts()`).
+  function linkedRows() {
     const want = boardKey(linkBoard);
     const wantBase = boardBase(linkBoard);
-    const tier = (same, bySlot) => {
-      const roles = ROLES.map((r) => r.role).filter((role) => {
-        if (bySlot && (want === role || want === boardKey(roleLabel(role)) ||
-            want === role.replace("-", " ") || want === role.replace("-", "_"))) return true;
-        const b = findEnrolled(snapshot, role);
-        return !!(b && b.name) && (same(b.name) || same(boardTypeLabel(role, b.name)));
-      });
-      const rows = boardCatalog
-        .filter((b) => same(b.name) || (!!b.build_target && same(b.build_target)))
-        .map((b) => b.name);
-      return { roles: roles, rows: rows };
-    };
-    const exact = tier((v) => boardKey(v) === want, true);
-    if (exact.roles.length || exact.rows.length) return exact;
-    return wantBase ? tier((v) => boardBase(v) === wantBase, false) : exact;
+    const rows = (same) => boardCatalog
+      .filter((b) => same(b.name) || (!!b.build_target && same(b.build_target)))
+      .map((b) => b.name);
+    const exact = rows((v) => boardKey(v) === want);
+    if (exact.length || !wantBase) return exact;
+    return rows((v) => boardBase(v) === wantBase);
   }
 
   function markLinkedBoard() {
-    const svg = document.getElementById("topology-diagram");
     const body = document.getElementById("board-catalog-body");
-    if (!svg || !body) return;
-    const m = linkBoard != null && latestSnapshot ? linkedBoardMatches(latestSnapshot) : { roles: [], rows: [] };
-    let first = null;
-    svg.querySelectorAll("[data-enroll-role]").forEach((g) => {
-      const on = m.roles.indexOf(g.getAttribute("data-enroll-role")) >= 0;
-      g.classList.toggle("link-focus", on);
-      if (on && !first) first = g;
-    });
+    if (!body) return;
+    const rows = linkBoard != null ? linkedRows() : [];
+    const bench = window.embarchBench;
+    const parts = linkBoard != null && bench && typeof bench.markedParts === "function" ? bench.markedParts() : [];
+    let firstRow = null;
     body.querySelectorAll("tr").forEach((tr) => {
       const edit = tr.querySelector("[data-board-edit]");
-      const on = !!edit && m.rows.indexOf(edit.getAttribute("data-board-edit")) >= 0;
+      const on = !!edit && rows.indexOf(edit.getAttribute("data-board-edit")) >= 0;
       tr.classList.toggle("link-focus", on);
-      if (on && !first) first = tr;
+      if (on && !firstRow) firstRow = tr;
     });
-    // The roles come with the first snapshot; until then nothing is known.
-    if (linkBoard == null || !latestSnapshot) return;
-    if (first) {
+    if (linkBoard == null) return;
+    // A part on the canvas is the board itself, so it wins: the canvas
+    // already shows it. Only a board type no part holds opens Board types.
+    if (parts.length) {
+      showRouteNote(null);
+      return;
+    }
+    if (firstRow) {
       if (!linkBoardScrolled) {
         linkBoardScrolled = true;
-        const host = first.closest(".topo-panel");
-        if (host) openTopoPanel(host.id.replace("topo-panel-", ""));
-        first.scrollIntoView({ block: "center" });
+        openTopoPanel("boards");
+        firstRow.scrollIntoView({ block: "center" });
       }
       showRouteNote(null);
-    } else if (boardCatalogRead) {
-      showRouteNote("No board " + linkBoard + " here: no role holds it and this project's board types do not list it.");
+    } else if (boardCatalogRead && bench && typeof bench.settled === "function" && bench.settled()) {
+      showRouteNote("No board " + linkBoard + " here: no part on this bench holds it and this project's board types do not list it.");
     }
   }
+  // The canvas marked what the link names, or finished loading a bench that
+  // has none of it: decide again.
+  document.addEventListener("embarch:bench-marked", () => markLinkedBoard());
 
   document.addEventListener("embarch:route", (ev) => {
     const d = ev.detail || {};
@@ -547,44 +425,6 @@
 
   function isDirect(sig) {
     return sig && sig.route && sig.route.kind === "direct";
-  }
-
-  // A signal drawn from the same data the rows below are drawn from — one
-  // source, two renderings, which is what stops the picture and the table
-  // from ever disagreeing.
-  function signalEdges(snapshot) {
-    const signals = snapshot.signals || [];
-    let out = "";
-    let lane = 0;
-
-    signals.forEach((sig) => {
-      const direct = isDirect(sig);
-      const viaBench = sig.route && sig.route.kind === "via-dev-bench";
-      if (!direct && !viaBench) return;
-
-      const y = SIGNAL_LANE_TOP + lane * SIGNAL_LANE_STEP;
-      lane += 1;
-      // Where the line comes back up decides what a reader concludes, so it is
-      // the one geometric fact here that is not cosmetic: a direct signal
-      // reaches the host, a bench-mediated one does not.
-      const endX = direct ? HOST_CENTRE : BENCH_CENTRE;
-      const colour = direct ? "var(--warning)" : "var(--accent)";
-      const detail = direct
-        ? "direct — bypasses dev-bench" +
-          (sig.route.port_serial ? " · " + sig.route.port_serial : "") +
-          (sig.route.interface != null ? ", interface " + sig.route.interface : "")
-        : "via dev-bench · rx " + (sig.route.rx_pin || "?") + " / tx " + (sig.route.tx_pin || "?");
-
-      out +=
-        '<path d="M' + DUT_CENTRE + " " + NODE_BOTTOM + " L" + DUT_CENTRE + " " + y +
-        " L" + endX + " " + y + " L" + endX + " " + NODE_BOTTOM + '" fill="none" stroke="' + colour +
-        '" stroke-width="2" stroke-linejoin="round"/>' +
-        '<circle cx="' + endX + '" cy="' + NODE_BOTTOM + '" r="3.2" fill="' + colour + '"/>' +
-        '<text x="' + (DUT_CENTRE - 20) + '" y="' + (y - 8) + '" text-anchor="end" fill="' + colour +
-        '" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">' +
-        escapeHtml(sig.name) + " · " + escapeHtml(detail) + "</text>";
-    });
-    return out;
   }
 
   function routeCell(sig) {
@@ -652,7 +492,7 @@
     if (!signals.length) {
       return (
         '<tr><td colspan="6" class="placeholder-note">No signal declared. A wire between two ' +
-        "headers is invisible to software — declare one to put it on the diagram.</td></tr>"
+        "headers is invisible to software — declare one so the suite knows it is there.</td></tr>"
       );
     }
     return signals
@@ -674,8 +514,6 @@
 
   function renderTopology(snapshot) {
     renderErrorBanner("topology-error", snapshot);
-    renderTopologyDiagram(snapshot);
-    renderProbePool(snapshot);
     document.getElementById("signals-table-body").innerHTML = signalsTableRows(snapshot);
 
     // **An empty signal list and an unanswerable one are different states.**
@@ -700,242 +538,12 @@
     // `carrierCell` is where that shows, per row.
   }
 
-  // --- Enrolling, on the Topology tab --------------------------------------
-  // Drag-and-drop, inherited from embarch-core's own retired `/enroll` page
-  // (embarch-core/src/enroll_page.rs) by way of this UI's own retired Enroll
-  // tab — but submitting through `/api/enroll`, which already holds a live
-  // `CoreClient` server-side, rather than asking a human to paste in Core's
-  // bearer token by hand the way that static page had to.
-  //
-  // **The drop target is the diagram, not a pair of rectangles beside it**
-  // (decision 43): the same box that says a role is empty is the box a probe
-  // is dropped onto to fill it.
-  let selectedSerial = null;
-  let lastProbesKey = null;
+  // The latest snapshot, which the signals table, the board types and the
+  // Study Designer's build card read. (The probe pool and the role boxes it
+  // fed went with the old diagram in phase 4: a probe is bound on the
+  // canvas's tray, and a role enrolled by confirming what making a bench
+  // live proposes.)
   let latestSnapshot = null;
-  let dragoverRole = null;
-
-  function probeLabel(serial) {
-    const probes = (latestSnapshot && latestSnapshot.probes) || [];
-    const p = probes.find((p) => (p.serial_number || "") === serial);
-    return p ? p.identifier + " (" + serial + ")" : serial;
-  }
-
-  function renderProbePool(snapshot) {
-    const pool = document.getElementById("probes-pool");
-    if (!pool) return;
-    const probes = snapshot.probes || [];
-    // Skip rebuilding the DOM when nothing actually changed, so a
-    // mid-drag/selection isn't dropped by a routine 5s re-poll — same
-    // reasoning embarch-core's own retired /enroll page used.
-    const key = JSON.stringify(probes.map((p) => [p.identifier, p.serial_number]));
-    if (key === lastProbesKey) return;
-    lastProbesKey = key;
-
-    if (probes.length === 0) {
-      pool.innerHTML = '<span class="placeholder-note">no debug probes detected</span>';
-      return;
-    }
-    pool.innerHTML = "";
-    probes.forEach((p) => {
-      const card = document.createElement("div");
-      card.className = "probe-card" + (p.serial_number === selectedSerial ? " selected" : "");
-      card.draggable = true;
-      card.dataset.serial = p.serial_number || "";
-      card.textContent = p.identifier + " (" + (p.serial_number || "no serial") + ")";
-      card.addEventListener("dragstart", (ev) => {
-        ev.dataTransfer.setData("text/plain", card.dataset.serial);
-      });
-      card.addEventListener("click", () => {
-        document.querySelectorAll(".probe-card").forEach((c) => c.classList.remove("selected"));
-        if (selectedSerial === card.dataset.serial) {
-          selectedSerial = null;
-        } else {
-          selectedSerial = card.dataset.serial;
-          card.classList.add("selected");
-        }
-      });
-      pool.appendChild(card);
-    });
-  }
-
-  // **The dialog does not invent a board type, and it does not ask for a
-  // chip** (decision 45). Binding a probe attaches to real silicon, and
-  // what to attach as is a property of the board type in the role — so the
-  // list is that role's served picker, defaulted to what the role already
-  // holds, and the chip field is a read-out of the chosen entry. A role
-  // with no board type yet is named as such, and the enrol is refused
-  // rather than guessed.
-  function fillAssignBoards(role, current) {
-    const select = document.getElementById("assign-board");
-    if (!select) return;
-    const options = rolePickers[role] || [];
-    if (!options.length) {
-      select.innerHTML = '<option value="">no board type available for this role</option>';
-    } else {
-      select.innerHTML = options
-        .map(function (o) {
-          return '<option value="' + escapeHtml(o.board) + '" data-chip="' + escapeHtml(o.chip) +
-            '">' + escapeHtml(o.label) + "</option>";
-        })
-        .join("");
-    }
-    if (current) select.value = current;
-    syncAssignChip();
-  }
-
-  function syncAssignChip() {
-    const select = document.getElementById("assign-board");
-    const chip = document.getElementById("assign-chip");
-    if (!select || !chip) return;
-    chip.value = select.selectedOptions.length
-      ? select.selectedOptions[0].getAttribute("data-chip") || ""
-      : "";
-  }
-
-  // **Re-enrolling is the migration path, not a mistake** — the same shape
-  // as re-declaring a signal to move its route (decision 10), so an occupied
-  // role opens the ordinary dialog rather than refusing the drop. Two
-  // consequences are deliberate: the chip field arrives pre-filled from the
-  // enrolment being replaced, because a board that moved to another probe
-  // is the same chip and retyping it is the only way to get it wrong; and
-  // the dialog names what it displaces, so a mis-drop is visible before the
-  // button is pressed rather than after the row is gone.
-  let assignCloseTimer = null;
-  function openAssignDialog(serial, role) {
-    // A pending auto-close from the last enrol must not shut this one.
-    clearTimeout(assignCloseTimer);
-    const existing = findEnrolled(latestSnapshot || {}, role);
-    document.getElementById("assign-probe-label").textContent = probeLabel(serial);
-    document.getElementById("assign-role-label").textContent = roleLabel(role);
-    fillAssignBoards(role, existing && existing.name ? existing.name : "");
-    const note = document.getElementById("assign-replace-note");
-    if (existing && existing.probe_serial) {
-      note.style.display = "block";
-      note.textContent = "replaces the probe already bound to this role: " + existing.probe_serial;
-    } else {
-      note.style.display = "none";
-      note.textContent = "";
-    }
-    document.getElementById("assign-result").textContent = "";
-    const dialog = document.getElementById("assign-dialog");
-    dialog.dataset.serial = serial;
-    dialog.dataset.role = role;
-    dialog.style.display = "block";
-    document.getElementById("assign-dialog-backdrop").style.display = "block";
-  }
-
-  function closeAssignDialog() {
-    document.getElementById("assign-dialog").style.display = "none";
-    document.getElementById("assign-dialog-backdrop").style.display = "none";
-  }
-
-  async function confirmAssign() {
-    const dialog = document.getElementById("assign-dialog");
-    const serial = dialog.dataset.serial;
-    const role = dialog.dataset.role;
-    const chip = document.getElementById("assign-chip").value.trim();
-    const result = document.getElementById("assign-result");
-    const name = document.getElementById("assign-board").value;
-    if (!name || !chip) {
-      result.innerHTML = name
-        ? '<span style="color:var(--danger);">' + escapeHtml("'" + name + "'") +
-          " has no chip — set the chip on its row in Board types below; a probe attaches as it</span>"
-        : '<span style="color:var(--danger);">pick a board type for this role first — binding a ' +
-          "probe has to attach as some chip, and that is the board type's</span>";
-      return;
-    }
-    result.textContent = "enrolling…";
-    try {
-      const resp = await fetch("/api/enroll", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, chip, probe_serial: serial, name }),
-      });
-      const text = await resp.text();
-      if (!resp.ok) {
-        result.innerHTML = '<span style="color:var(--danger);">' + resp.status + " " + escapeHtml(text) + "</span>";
-        return;
-      }
-      const board = JSON.parse(text);
-      result.innerHTML =
-        '<span style="color:var(--success);">enrolled ' + escapeHtml(roleLabel(board.role)) +
-        " — " + escapeHtml(board.name || "unnamed") + ", chip " + escapeHtml(board.chip) + "</span>" +
-        // What this enrol moved (decision 61): Core's mirror words it once.
-        (board.moved_roles_note
-          ? '<div id="assign-moved-note" style="color:var(--warning);margin-top:4px;">' +
-            escapeHtml(board.moved_roles_note) + "</div>"
-          : "");
-      selectedSerial = null;
-      // A new probe binding is a new thing to check; whatever the last
-      // Validate said about this role described the old one.
-      dropRoleStatus(role);
-      // Long enough to read a sentence about a moved role.
-      assignCloseTimer = setTimeout(closeAssignDialog, board.moved_roles_note ? 6000 : 700);
-    } catch (e) {
-      result.innerHTML = '<span style="color:var(--danger);">' + escapeHtml(String(e)) + "</span>";
-    }
-  }
-
-  // Listeners live on the `<svg>`, never on a node: `renderTopologyDiagram`
-  // rewrites the whole picture on every snapshot, so anything bound to a
-  // role box is gone within five seconds of being bound. Delegation also
-  // means a box that does not exist yet — the diagram before the first
-  // snapshot lands — becomes droppable the moment it is drawn.
-  function initEnrollOnDiagram() {
-    const svg = document.getElementById("topology-diagram");
-    if (svg) {
-      const roleAt = (ev) => {
-        const g = ev.target && ev.target.closest && ev.target.closest("[data-enroll-role]");
-        return g ? g.getAttribute("data-enroll-role") : null;
-      };
-      const clearHighlight = () => {
-        svg.querySelectorAll(".topo-drop.dragover").forEach((g) => g.classList.remove("dragover"));
-        dragoverRole = null;
-      };
-      svg.addEventListener("dragover", (ev) => {
-        const role = roleAt(ev);
-        if (!role) return;
-        // Only a node accepts the drop. Without the `preventDefault` the
-        // browser treats the whole SVG as a non-target and no `drop` ever
-        // fires; calling it unconditionally would make the empty space
-        // between the boxes look droppable and then swallow the drop.
-        ev.preventDefault();
-        if (role !== dragoverRole) {
-          clearHighlight();
-          dragoverRole = role;
-          const g = ev.target.closest("[data-enroll-role]");
-          if (g) g.classList.add("dragover");
-        }
-      });
-      svg.addEventListener("dragleave", (ev) => {
-        if (roleAt(ev) === dragoverRole) clearHighlight();
-      });
-      svg.addEventListener("drop", (ev) => {
-        const role = roleAt(ev);
-        clearHighlight();
-        if (!role) return;
-        ev.preventDefault();
-        const serial = ev.dataTransfer.getData("text/plain");
-        if (serial) openAssignDialog(serial, role);
-      });
-      // Click-to-assign fallback for anyone who'd rather select-then-click
-      // than drag — same flow, different trigger; also what makes this
-      // usable on touch devices, where native drag-and-drop is patchy.
-      svg.addEventListener("click", (ev) => {
-        const role = roleAt(ev);
-        if (role && selectedSerial) openAssignDialog(selectedSerial, role);
-      });
-    }
-    const cancelBtn = document.getElementById("assign-cancel");
-    const confirmBtn = document.getElementById("assign-confirm");
-    const backdrop = document.getElementById("assign-dialog-backdrop");
-    const boardSelect = document.getElementById("assign-board");
-    if (boardSelect) boardSelect.addEventListener("change", syncAssignChip);
-    if (cancelBtn) cancelBtn.addEventListener("click", closeAssignDialog);
-    if (confirmBtn) confirmBtn.addEventListener("click", confirmAssign);
-    if (backdrop) backdrop.addEventListener("click", closeAssignDialog);
-  }
 
   function renderSnapshot(snapshot) {
     latestSnapshot = snapshot;
@@ -6458,9 +6066,10 @@
     if (body) body.innerHTML = boardCatalogRows();
     markLinkedBoard();
     if (typeof sdRenderRoleBoard === "function") sdRenderRoleBoard();
-    // The pickers read the same catalog, so a board type added here is
-    // offered on the diagram without a reload.
-    loadRolePickers();
+    // The canvas's board-type picker reads what the catalog offers (through
+    // /api/topology/pickers), so a board type added or rescanned here is
+    // offered there without a reload.
+    document.dispatchEvent(new CustomEvent("embarch:boards-changed"));
   }
 
   async function loadBoardCatalog() {
@@ -6578,7 +6187,6 @@
       // board types, and what each one can be built as is the half this
       // response does not carry.
       await loadBoardCatalog();
-      await loadRolePickers();
       // Said out loud, both halves: what the scan added, and what is in the
       // file that the scan did not find — a board type on a branch that is
       // not checked out is kept, not deleted, so the count is worth seeing.
@@ -6636,11 +6244,11 @@
     const log = check.log
       ? '<pre class="topo-check-log">' + escapeHtml(check.log) + "</pre>"
       : "";
-    // **A leftover role is the one finding this report can act on.** It is
-    // not drawn on the diagram — the picture has two boxes, and that row is
-    // in neither — so without a control here the only surface that can see
-    // it could not clear it, which is the gap decision 44 closed for the
-    // roles table and the fold would otherwise have reopened.
+    // **A leftover role is the one finding this report can act on.** No part
+    // on the canvas holds it, so without a control here the only surface
+    // that can see it could not clear it, which is the gap decision 44 closed
+    // for the roles table and the fold would otherwise have reopened. (A
+    // live bench's report lists it too, with its own Retract.)
     const action =
       check.id.indexOf("foreign:") === 0
         ? '<span style="flex:1;"></span><button class="btn btn-icon-danger" data-unenroll-role="' +
@@ -6673,9 +6281,8 @@
         return;
       }
       const body = JSON.parse(text);
-      // Feed the diagram from the same answer the report is drawn from —
-      // one source, two renderings, the rule the signal rows and the signal
-      // lanes are already under.
+      // Feed the canvas's verdicts from the same answer the report is drawn
+      // from — one source, two renderings.
       roleStatus = {};
       benchStatus = {};
       passCount += 1;
@@ -6689,7 +6296,6 @@
         if (c.id.indexOf("role:") === 0) roleStatus[c.id.slice("role:".length)] = entry;
         else if (c.id.indexOf("bench:") === 0 && c.id.length > "bench:".length) benchStatus[c.id.slice("bench:".length)] = entry;
       });
-      if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
       publishVerdicts();
       const reopen = topoEl("topo-report");
       if (reopen) reopen.hidden = false;
@@ -6937,221 +6543,13 @@
     }
   }
 
-  // ---- picking the board type in a role ----
-  //
-  // Two lists with two owners (decision 45): the DUT's comes from the open
-  // project's catalog, the dev bench's from the suite's supported set.
-  // Both are **served**, never restated here — the same rule every other
-  // vocabulary in this tab is under.
-  let rolePickers = { dut: [], "dev-bench": [], builds: { available: false, by_board: {} } };
-
-  // A dev-bench board type is a west qualifier — `nrf54l15dk/nrf54l15/cpuapp`
-  // — and that is what Core stores and what a build is for, so it stays the
-  // value everywhere it is *sent*. It is not what a human reads on a
-  // diagram, though: the picture answers "which board is on the desk", and a
-  // slash-separated path answers a different question. The label comes from
-  // the served supported list (decision 45), never from a table typed here,
-  // and a type the list does not carry renders unchanged.
-  function boardTypeLabel(role, name) {
-    if (!name) return name;
-    if (role !== "dev-bench") return name;
-    const found = (rolePickers["dev-bench"] || []).find((o) => o.board === name);
-    return found && found.label ? found.label : name;
-  }
-
-  async function loadRolePickers() {
-    try {
-      const resp = await fetch("/api/topology/pickers");
-      if (!resp.ok) return;
-      rolePickers = await resp.json();
-      // The bench box takes its label from this answer, so redraw now
-      // instead of showing the raw qualifier until the next snapshot.
-      if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
-    } catch (e) {
-      /* the picker falls back to whatever it last had; the box still draws */
-    }
-  }
-
-  // How one scanned combination reads in the picker: **the two axes it is
-  // being chosen between, and nothing after them** (decision 49). The west
-  // qualifier used to close every line and the apps followed it, which made
-  // a list of `nrf54l15dk@0.9.0/nrf54l15/cpuapp/ns` differing from its
-  // neighbour in one character — the string the picker exists to spare a
-  // human — and repeated an app list that this dialog decides nothing about.
-  // The qualifier is on the option's tooltip, where a value you check once
-  // belongs, the way a dev-bench board type keeps its own.
-  function comboLabel(combo) {
-    const bits = [];
-    bits.push(combo.revision ? "rev " + combo.revision : "no revision");
-    bits.push(combo.variant ? "variant " + combo.variant : "no variant");
-    return bits.join(" · ");
-  }
-
-  // The combinations offered for whatever board type is selected right now.
-  //
-  // **Only combinations the repo's own scan reports**, never a revision list
-  // crossed with a variant list: a revision can be backed only *with* a
-  // named variant and a variant only at one revision, so a cross product
-  // offers targets `west build` then refuses. Where there is nothing to
-  // offer — a dev-bench board, a repo that cannot be scanned, a board type
-  // the scan does not have — the field goes away and the note says which of
-  // those it is, because "no combinations" and "could not look" are not the
-  // same sentence.
-  function renderRoleCombos(role) {
-    const field = topoEl("role-board-combo-field");
-    const select = topoEl("role-board-combo");
-    const note = topoEl("role-board-combo-note");
-    if (!field || !select || !note) return;
-    const builds = rolePickers.builds || { available: false, by_board: {} };
-    const board = topoEl("role-board-select").value;
-    const entry = role === "dut" && builds.available ? (builds.by_board || {})[board] : null;
-    const combos = entry ? entry.combos || [] : [];
-
-    if (!combos.length) {
-      field.style.display = "none";
-      select.innerHTML = "";
-      let text = "";
-      if (role === "dut" && !builds.available) {
-        text = "This repo's build targets could not be scanned, so no combination is offered " +
-          "and the board type is set on its own." + (builds.reason ? " " + builds.reason : "");
-      } else if (role === "dut" && board) {
-        text = "Nothing in this repo's target scan builds for this board type — press Rescan " +
-          "in Board types below, or check what it builds as.";
-      }
-      note.textContent = text;
-      note.style.display = text ? "" : "none";
-      return;
-    }
-
-    const picked = (rolePickers[role] || []).find((o) => o.board === board) || {};
-    select.innerHTML = combos
-      .map(function (c, i) {
-        return '<option value="' + i + '" title="' + escapeHtml(c.qualifier) + '">' +
-          escapeHtml(comboLabel(c)) + "</option>";
-      })
-      .join("");
-    // Opens on what `embarch/boards.toml` already pins for this board, so
-    // confirming the dialog is not silently a change of target.
-    const current = combos.findIndex(function (c) {
-      return c.revision === (picked.revision || "") && c.variant === (picked.variant || "");
-    });
-    select.value = String(current >= 0 ? current : 0);
-    field.style.display = "";
-    // **Only the two states that are a refusal keep a note.** Saying "3
-    // combinations in this repo's scan" beside a list of three is the list
-    // read aloud; what could not be scanned, and what the scan does not
-    // have, are the two a human cannot see from the select itself.
-    note.textContent = "";
-    note.style.display = "none";
-  }
-
-  function openBoardPicker(role) {
-    const options = rolePickers[role] || [];
-    const dialog = topoEl("role-board-dialog");
-    if (!dialog) return;
-    topoEl("role-board-title").textContent = "Board type in " + roleLabel(role);
-    const select = topoEl("role-board-select");
-    if (!options.length) {
-      select.innerHTML =
-        '<option value="">' +
-        (role === "dut"
-          ? "no board type in this project yet — add or rescan below"
-          : "no supported dev-bench board") +
-        "</option>";
-    } else {
-      select.innerHTML = options
-        .map(function (o) {
-          return '<option value="' + escapeHtml(o.board) + '" data-chip="' + escapeHtml(o.chip) +
-            '">' + escapeHtml(o.label) + (o.chip ? " — " + escapeHtml(o.chip) : "") + "</option>";
-        })
-        .join("");
-    }
-    const current = findEnrolled(latestSnapshot || {}, role);
-    if (current && current.name) select.value = current.name;
-    renderRoleCombos(role);
-    showError(topoEl("role-board-result"), null);
-    dialog.dataset.role = role;
-    dialog.style.display = "block";
-    topoEl("role-board-backdrop").style.display = "block";
-  }
-
-  function closeBoardPicker() {
-    topoEl("role-board-dialog").style.display = "none";
-    topoEl("role-board-backdrop").style.display = "none";
-  }
-
-  async function retractRole() {
-    const dialog = topoEl("role-board-dialog");
-    const role = dialog.dataset.role;
-    if (!window.confirm(
-      "Retract " + roleLabel(role) + "? Its board type and its probe binding both go; the " +
-        "hardware is untouched."
-    )) {
-      return;
-    }
-    const resp = await fetch("/api/enrolled/" + encodeURIComponent(role), { method: "DELETE" });
-    if (!resp.ok && resp.status !== 404) {
-      showError(topoEl("role-board-result"), resp.status + " " + (await resp.text()));
-      return;
-    }
-    dropRoleStatus(role);
-    closeBoardPicker();
-  }
-
-  async function saveRoleBoard() {
-    const dialog = topoEl("role-board-dialog");
-    const role = dialog.dataset.role;
-    const select = topoEl("role-board-select");
-    const board = select.value;
-    const chip = select.selectedOptions.length
-      ? select.selectedOptions[0].getAttribute("data-chip") || ""
-      : "";
-    if (!board) {
-      showError(topoEl("role-board-result"), "there is no board type to pick yet");
-      return;
-    }
-    // One request, so the role and the combination cannot half-apply. The
-    // combination is sent only when one was actually offered: a request that
-    // named an empty revision and variant would *clear* the board's pin,
-    // which is a decision nobody made by picking a board type.
-    const body = { board: board, chip: chip };
-    const comboField = topoEl("role-board-combo-field");
-    if (comboField && comboField.style.display !== "none") {
-      const builds = rolePickers.builds || { by_board: {} };
-      const entry = (builds.by_board || {})[board];
-      const combo = entry && entry.combos ? entry.combos[Number(topoEl("role-board-combo").value)] : null;
-      if (combo) {
-        body.revision = combo.revision;
-        body.variant = combo.variant;
-      }
-    }
-    const resp = await fetch("/api/topology/roles/" + encodeURIComponent(role) + "/board", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      showError(topoEl("role-board-result"), resp.status + " " + (await resp.text()));
-      return;
-    }
-    // The pin the server just wrote is on the catalog row, which the list
-    // above and the picker both render from.
-    await loadBoardCatalog();
-    await loadRolePickers();
-    // The board in this role changed, so whatever the last Validate said
-    // about it describes a different board. Dropped rather than kept: a
-    // stale badge is a claim nobody made.
-    dropRoleStatus(role);
-    closeBoardPicker();
-  }
-
   // --- The Topology tab's panels --------------------------------------------
   //
   // Every card but the canvas opens over it as a panel, one at a time,
   // anchored under the bar and scrolling inside itself. Esc, its own button
   // or a pointer press outside closes it — outside meaning neither the panel,
-  // a panel button, Validate, nor a dialog a panel opened (the signal, board
-  // and enrol dialogs sit above it and must not close what they belong to).
+  // a panel button, Validate, nor a dialog a panel opened (the signal and
+  // board dialogs sit above it and must not close what they belong to).
   //
   // Opening one moves focus into it; closing one with focus inside returns
   // focus to the button that opened it (a press outside keeps the focus the
@@ -7240,7 +6638,6 @@
     roleStatus = {};
     benchStatus = {};
     passStamp = null;
-    if (latestSnapshot) renderTopologyDiagram(latestSnapshot);
     publishVerdicts();
   }
 
@@ -7262,9 +6659,7 @@
   // does — the topmost thing first, so a panel under a dialog stays open.
   const TOPO_DIALOGS = [
     ["sig-dialog", "sig-cancel"],
-    ["assign-dialog", "assign-cancel"],
     ["board-dialog", "board-cancel"],
-    ["role-board-dialog", "role-board-cancel"],
     ["topo-save-dialog", "topo-save-cancel"],
     ["part-dialog", "part-cancel"],   // bench-parts.js builds it
   ];
@@ -7390,40 +6785,6 @@
       });
     }
 
-    const svg = document.getElementById("topology-diagram");
-    if (svg) {
-      // Delegated, like the drop target it sits on: the whole picture is
-      // rebuilt on every snapshot, so a listener bound to a node here would
-      // be gone within five seconds (decision 43's first load-bearing
-      // property, which this inherits).
-      svg.addEventListener("click", function (ev) {
-        const pick = ev.target.closest && ev.target.closest("[data-board-role]");
-        if (!pick) return;
-        // Stop the click reaching the box's own enrol-on-click handler:
-        // picking a board and binding a probe are different actions on the
-        // same box, and one gesture must not do both.
-        ev.stopPropagation();
-        openBoardPicker(pick.getAttribute("data-board-role"));
-      });
-    }
-    // Changing the board type changes which combinations exist, so the
-    // second select is rebuilt rather than left showing the previous
-    // board's revisions.
-    const pickSelect = topoEl("role-board-select");
-    if (pickSelect) {
-      pickSelect.addEventListener("change", function () {
-        renderRoleCombos(topoEl("role-board-dialog").dataset.role);
-      });
-    }
-    const pickCancel = topoEl("role-board-cancel");
-    if (pickCancel) pickCancel.addEventListener("click", closeBoardPicker);
-    const pickBackdrop = topoEl("role-board-backdrop");
-    if (pickBackdrop) pickBackdrop.addEventListener("click", closeBoardPicker);
-    const pickSave = topoEl("role-board-save");
-    if (pickSave) pickSave.addEventListener("click", saveRoleBoard);
-    const pickRetract = topoEl("role-board-retract");
-    if (pickRetract) pickRetract.addEventListener("click", retractRole);
-
     // The validate report carries the only control a leftover role has.
     const report = topoEl("topo-validate-report");
     if (report) {
@@ -7438,7 +6799,6 @@
 
     loadBoardCatalog();
     loadProfiles();
-    loadRolePickers();
   }
 
   function initSignals() {
@@ -11193,7 +10553,6 @@
   document.addEventListener("DOMContentLoaded", () => {
     initNav();
     initProjectPicker();
-    initEnrollOnDiagram();
     initSignals();
     initTopologyTab();
     initTopologyPanels();

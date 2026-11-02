@@ -14,8 +14,15 @@
 // and what the bench breaks comes from `POST /api/bench/check` after every
 // edit. Edits stay in the browser, undoable, until Save writes the file with
 // `PUT /api/bench/benches/{slug}` naming the `version` it read (owner,
-// 2026-11-01); a `409` offers a reload, never an overwrite. Nothing here calls
-// Core: write-through and making a bench live are phase 4.
+// 2026-11-01); a `409` offers a reload, never an overwrite.
+//
+// **Making a bench live** (phase 4) is the one way this file reaches Core,
+// and only through the UI server's routes: Make live applies what the saved
+// bench declares, answers a report — applied, proposed (each confirmed
+// through the ordinary enrol), not proposed, and what Core holds that the
+// bench does not name, each retracted only by its own click — and a save of
+// the live bench declares it again. Which bench is live is the UI's record
+// for the repo, never the repo's; switching config tabs never calls Core.
 //
 // Two things come from app.js as document events. **The snapshot**
 // (`embarch:snapshot`) lights a glow: a `usb-host` connector whose bound probe,
@@ -64,6 +71,12 @@
   var binClose = document.getElementById("bench-bin-close");
   var trayEl = document.getElementById("bench-tray");
   insEl.tabIndex = -1;
+  var liveEl2 = document.getElementById("bench-live");
+  var makeLiveBtn = document.getElementById("bench-make-live");
+  var stopLiveBtn = document.getElementById("bench-stop-live");
+  var liveBtn = document.getElementById("bench-live-btn");
+  var liveHead = document.getElementById("bench-live-head");
+  var liveBody = document.getElementById("bench-live-body");
   var dlg = {
     box: document.getElementById("bench-dialog"),
     backdrop: document.getElementById("bench-dialog-backdrop"),
@@ -84,6 +97,9 @@
   var ROUTE_CHECK = "/api/bench/check";
   var ROUTE_CANDIDATES = "/api/bench/candidates";
   var ROUTE_PICKERS = "/api/topology/pickers";
+  var ROUTE_LIVE = "/api/bench/live";
+  var ROUTE_RETRACT = "/api/bench/live/retract";
+  var ROUTE_ENROLL = "/api/enroll";
   var BENCH_KEY = "embarch-ui.bench";
   var NEW_BENCH = "+new";       // the picker's "New bench…": no slug has a `+`
   var AUTO_CONFIG = "A";        // the config a first part-to-part cable creates (owner)
@@ -156,6 +172,16 @@
   var leaveParts = false;    // the leave confirmed also drops the part editor's draft, once it lands
   var lastPass;              // the stamp of the Validate pass the verdicts are from
   var benchLoads = 0;        // which bench is on screen: a new number each time one loads or goes
+  var live = null;           // GET /api/bench/live's `live`: which bench and config are live for this repo
+  var liveState = "unknown"; // unknown | known | unavailable (no such route) | error
+  var liveError = null;
+  var liveReport = null;     // the last make-live answer: applied, proposals, not_proposed, leftovers
+  var liveRows = { proposals: [], leftovers: [] };   // what each row's button last said
+  var liveBusy = false;
+  var liveSeq = 0;
+  var linkBoard = null;      // a `#topology?board=` link's board, marked on the parts it names
+  var linkPanned = false;
+  var settledOnce = false;   // a load has finished, bench or no bench
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -965,6 +991,7 @@
     var deco = LOOKS[look](p, g);
     var s = '<g class="bn-part' + (isSel ? " bn-sel" : "") + (hoverPart === p.key ? " bn-hover" : "") +
       (p.missing ? " bn-part-missing" : "") + (drag && drag.moved && drag.key === p.key ? " bn-dragging" : "") +
+      (!previewing && linkBoard != null && linkMatches().indexOf(p.key) >= 0 ? " bn-link-focus" : "") +
       '" data-part="' + esc(p.key) + '" data-look="' + look + '" data-template="' + esc(p.inst.template) + '">';
     // The ring a finding about this part lights (applyFindings toggles it).
     s += rect("bn-flag", g.x - 5, g.y - 5, g.w + 10, g.h + 10, 9).replace("/>", ' data-flag="' + esc(p.key) + '"/>');
@@ -1552,6 +1579,13 @@
     });
   }
 
+  // The Board types panel changed the catalog: what the pickers offer is
+  // read again the next time a role part is inspected — now, if one is.
+  document.addEventListener("embarch:boards-changed", function () {
+    pickers = null; pickersError = null; pickersAsked = false;
+    if (selPart() && selPart().inst.role) renderInspector();
+  });
+
   function comboText(c) {
     return (c.revision ? "rev " + c.revision : "no revision") + " · " + (c.variant ? "variant " + c.variant : "no variant");
   }
@@ -1732,8 +1766,12 @@
   // ---------------------------------------------------------------- the frame
   function renderConfigs() {
     var cfgs = (bench && bench.configs) || [];
+    var liveCfg = isLiveBench() ? live.config : undefined;
     cfgEl.innerHTML = cfgs.map(function (c, i) {
-      return '<button type="button" class="bench-cfg" role="tab" aria-selected="' + (i === cfgIx) + '" data-cfg="' + i + '">' + esc(c && c.name) + "</button>";
+      var wired = liveCfg !== undefined && c && c.name === liveCfg;
+      return '<button type="button" class="bench-cfg' + (wired ? " bench-cfg-live" : "") + '" role="tab" aria-selected="' + (i === cfgIx) + '" data-cfg="' + i + '"' +
+        (wired ? ' data-live-config title="The live wiring: the config this bench was made live with"' : "") + ">" +
+        (wired ? '<span class="bench-cfg-dot" aria-hidden="true"></span>' : "") + esc(c && c.name) + "</button>";
     }).join("");
     cfgRow.hidden = !cfgs.length;
     refit();
@@ -1780,6 +1818,7 @@
     undoBtn.disabled = !on || !undoStack.length;
     redoBtn.disabled = !on || !redoStack.length;
     card.classList.toggle("bench-unsaved", dirty);
+    renderLiveBar();
     refit();
   }
 
@@ -1803,6 +1842,13 @@
     noticeEl.hidden = !text;
   }
   noticeEl.addEventListener("click", function () { notice("", "info"); });
+
+  // A load finished, with a bench or without: a link waiting on it can say
+  // now whether the canvas has what it names.
+  function settled() {
+    settledOnce = true;
+    if (linkBoard != null) document.dispatchEvent(new CustomEvent("embarch:bench-marked", { detail: { count: linkMatches().length } }));
+  }
 
   function clearBench() {
     benchLoads++;
@@ -1840,6 +1886,7 @@
     if (e && e.status === 409) showState(e.message, false);
     else showState((e && e.route ? e.route + ": " : "") + (e && e.message ? e.message : String(e)), true);
     renderNotes();
+    settled();
   }
 
   function failed(route) {
@@ -1900,6 +1947,7 @@
     keep = keep === true;
     var seq = ++loadSeq;
     ++benchSeq;   // a bench still loading from before this answers into nothing
+    readLive();
     Promise.all([api(ROUTE_VOCAB), api(ROUTE_PARTS), api(ROUTE_BENCHES)]).then(function (res) {
       if (seq !== loadSeq) return;
       vocab = res[0] || {};
@@ -1923,6 +1971,7 @@
         // A list emptied by bench files it could not read is not "no benches".
         showState(benchErrors.length ? "no saved bench could be read" : "no saved benches", false);
         renderNotes();
+        settled();
         return;
       }
       // A reload keeps the bench on screen when it is still listed.
@@ -1977,6 +2026,8 @@
       renderTray();
       scheduleCheck();
       if (!keep) fit();
+      if (linkBoard != null) showLinked();
+      settled();
     }).catch(function (e) {
       if (seq !== benchSeq) return;
       // A bench that would not open leaves the one on screen, edits and all,
@@ -2637,9 +2688,14 @@
   }
 
   // ---------------------------------------------------------------- saving
-  function save() {
-    if (!bench || !model || saving) return;
-    if (!isDirty()) { notice("Nothing to save: embarch/topologies/" + bench.slug + ".toml already says this.", "info"); return; }
+  // Resolves true once the file says what is on screen. `quiet`: the caller
+  // goes on (Save and make live), so the live bench is not re-applied here.
+  function save(quiet) {
+    if (!bench || !model || saving) return Promise.resolve(false);
+    if (!isDirty()) {
+      if (!quiet) notice("Nothing to save: embarch/topologies/" + bench.slug + ".toml already says this.", "info");
+      return Promise.resolve(true);
+    }
     saving = true;
     renderDirty();
     var sent = snapshotContent(), slug = bench.slug, mine = benchLoads;
@@ -2650,6 +2706,7 @@
     // nothing for the next leave to quote.
     var gone = function () { return !bench || benchLoads !== mine; };
     lastSaveError = null;
+    var landed = false;
     saveInFlight = send("PUT", ROUTE_BENCHES + "/" + encodeURIComponent(slug), benchBody()).then(function (b) {
       saving = false;
       saveInFlight = null;
@@ -2664,6 +2721,10 @@
       changed();
       notice("Saved embarch/topologies/" + slug + ".toml", "ok");
       document.dispatchEvent(new CustomEvent("embarch:bench-saved", { detail: { slug: slug } }));
+      landed = true;
+      // **Write-through** (owner): the live bench's file is what Core was
+      // told, so a save of it is declared again, and the report says how.
+      if (!quiet && isLiveBench()) goLive(live.config, "Saved, and declared again");
     }).catch(function (e) {
       saving = false;
       saveInFlight = null;
@@ -2673,6 +2734,7 @@
       if (e && e.status === 409) { conflict(e); return; }
       notice("Not saved: " + errText(e), "error");
     });
+    return saveInFlight.then(function () { return landed; }, function () { return false; });
   }
 
   // A 409 on a save. The server names which it is in a header
@@ -2719,6 +2781,330 @@
       loadAll(false, made.slug);
     });
   }
+
+  // ---------------------------------------------------------------- making a bench live
+  // Phase 4 (embarch-bench-editor-proposal.md, "Making a bench live"): which
+  // bench and config are live is this UI's record for the open repo, never
+  // the repo's. **Make live** applies what the bench *as saved* declares to
+  // Core — board types, signals, the dev-bench link, instruments, bootload
+  // ports — and answers a report: what applied, the enrolments it proposes
+  // (a file is not evidence about what is plugged in, so each is confirmed
+  // here and reads the probe's hardware ID), what it could not propose, and
+  // what Core holds that the bench does not name, each with its own Retract.
+  // **Nothing is retracted without a click.** Switching config tabs never
+  // calls Core; a save of the live bench declares again (write-through).
+  function isLiveBench() {
+    return !!live && !live.missing && !!bench && live.slug === bench.slug;
+  }
+
+  function readLive() {
+    var seq = ++liveSeq;
+    return api(ROUTE_LIVE).then(function (r) {
+      if (seq !== liveSeq) return;
+      live = (r && r.live) || null;
+      liveState = "known";
+      liveError = null;
+      renderLiveBar();
+      renderConfigs();
+      renderLiveReport();
+    }).catch(function (e) {
+      if (seq !== liveSeq) return;
+      live = null;
+      // A server without the routes: no live controls, no claim either way.
+      liveState = e && e.status === 404 ? "unavailable" : "error";
+      liveError = errText(e);
+      renderLiveBar();
+      renderConfigs();
+    });
+  }
+
+  function sinceText(ms) {
+    if (!ms) return "";
+    try { return new Date(ms).toLocaleString(); } catch (_) { return String(ms); }
+  }
+
+  function renderLiveBar() {
+    var on = !!bench && !!model && liveState !== "unavailable" && liveState !== "unknown";
+    liveEl2.hidden = !on && !(liveState === "known" && live && live.missing);
+    makeLiveBtn.hidden = true;
+    stopLiveBtn.hidden = true;
+    liveBtn.hidden = !liveReport || liveState === "unavailable";
+    if (liveState === "unavailable" || liveState === "unknown") { liveEl2.hidden = true; return; }
+    var cls = "bench-live", text, title = "";
+    if (liveState === "error") {
+      cls += " bench-live-unknown";
+      text = "live: unknown";
+      title = "Which bench is live could not be read: " + liveError;
+    } else if (!live) {
+      cls += " bench-live-none";
+      text = "not live";
+      title = "No bench is live for this repo";
+    } else if (live.missing) {
+      cls += " bench-live-missing";
+      text = "live: " + live.slug + " — its file is gone";
+      title = "The record names embarch/topologies/" + live.slug + ".toml, which is not there any more";
+    } else if (isLiveBench()) {
+      cls += " bench-live-here";
+      text = "live" + (live.config ? " · " + live.config : "");
+      title = "This bench is live" + (live.config ? ", wired as config " + live.config : ", its bench-level cables alone") +
+        (live.since_utc_ms ? ", since " + sinceText(live.since_utc_ms) : "");
+    } else {
+      cls += " bench-live-other";
+      text = "live: " + live.slug;
+      title = "Another bench is live for this repo";
+    }
+    liveEl2.className = cls;
+    liveEl2.textContent = text;
+    liveEl2.title = title;
+    if (!bench || !model || liveState === "error") return;
+    var here = isLiveBench(), dirty = isDirty(), cfg = cfgName();
+    if (!here || cfg !== live.config) {
+      makeLiveBtn.hidden = false;
+      makeLiveBtn.textContent = (dirty ? "Save and make " : "Make ") + (here && cfg != null ? cfg + " " : "") + "live";
+      makeLiveBtn.title = here
+        ? "Declare this bench again, wired as config " + cfg + ", and record that config as the live wiring"
+        : "Declare what this bench says to Core and record it as the live bench for this repo" + (dirty ? " — saved first" : "");
+    }
+    makeLiveBtn.disabled = liveBusy || saving;
+    if (here || (live && live.missing)) {
+      stopLiveBtn.hidden = false;
+      stopLiveBtn.disabled = liveBusy;
+    }
+  }
+
+  // Saved first when edits are on screen, then declared with the version the
+  // save answered; the config is the tab on screen.
+  function makeLive() {
+    if (!bench || !model || liveBusy) return;
+    var cfg = cfgName();
+    save(true).then(function (ok) { if (ok) goLive(cfg, null); });
+  }
+
+  // `config`: what is recorded live; `said`: the first words of the report.
+  function goLive(config, said) {
+    if (!bench) return;
+    var slug = bench.slug, mine = benchLoads;
+    liveBusy = true;
+    renderLiveBar();
+    notice("Declaring " + slug + " to Core…", "info");
+    send("POST", ROUTE_BENCHES + "/" + encodeURIComponent(slug) + "/live", { config: config, version: bench.version }).then(function (r) {
+      liveBusy = false;
+      live = (r && r.live) || { slug: slug, config: config, since_utc_ms: Date.now(), missing: false };
+      liveState = "known";
+      liveReport = r || {};
+      liveRows = { proposals: [], leftovers: [] };
+      liveReport.said = said;
+      if (benchLoads === mine) notice(said ? said : slug + " is live", "ok");
+      renderLiveBar();
+      renderConfigs();
+      renderLiveReport();
+      openLivePanel();
+      document.dispatchEvent(new CustomEvent("embarch:live-changed", { detail: { slug: live.slug, config: live.config == null ? null : live.config } }));
+    }).catch(function (e) {
+      liveBusy = false;
+      renderLiveBar();
+      if (benchLoads !== mine) return;
+      if (e && e.status === 409 && e.code === "version-changed") { conflict(e); return; }
+      notice("Not made live: " + errText(e), "error");
+    });
+  }
+
+  // The record goes; Core is not touched.
+  function stopLive() {
+    if (liveBusy) return;
+    liveBusy = true;
+    renderLiveBar();
+    fetch(ROUTE_LIVE, { method: "DELETE" }).then(function (r) {
+      liveBusy = false;
+      if (!r.ok && r.status !== 204) return r.text().then(function (t) { throw new Error(t || "HTTP " + r.status); });
+      live = null;
+      notice("No bench is live for this repo now; Core holds what it held", "info");
+      renderLiveBar();
+      renderConfigs();
+      renderLiveReport();
+      document.dispatchEvent(new CustomEvent("embarch:live-changed", { detail: { slug: null, config: null } }));
+    }).catch(function (e) {
+      liveBusy = false;
+      renderLiveBar();
+      notice("Still live: " + errText(e), "error");
+    });
+  }
+
+  function openLivePanel() {
+    if (!liveBtn.classList.contains("is-open")) liveBtn.click();
+  }
+
+  function liveRow(badge, cls, head, text, extra) {
+    return '<div class="topo-check bench-live-row' + (cls ? " " + cls : "") + '"><div class="topo-check-head">' + badge +
+      '<span class="topo-check-label">' + head + "</span>" + (extra || "") + "</div>" +
+      (text ? '<p class="placeholder-note" style="margin:4px 0 0;">' + esc(text) + "</p>" : "") + "</div>";
+  }
+
+  function badge(kind, text) { return '<span class="badge badge-' + kind + '">' + esc(text) + "</span>"; }
+
+  function renderLiveReport() {
+    var r = liveReport;
+    if (!r) {
+      liveHead.textContent = "Live";
+      liveBody.innerHTML = '<p class="placeholder-note">No bench has been made live here yet.</p>';
+      liveBtn.hidden = true;
+      return;
+    }
+    var l = r.live || {};
+    var still = live && live.slug === l.slug && !live.missing;
+    liveHead.textContent = still ? "Live: " + l.slug + (l.config ? " · config " + l.config : "") : "Last made live: " + l.slug;
+    var h = '<div class="topo-check-summary">' + (r.said ? '<span class="badge badge-neutral">' + esc(r.said) + "</span> " : "") +
+      '<span class="placeholder-note">' + esc(still ? "since " + sinceText(l.since_utc_ms) : "no longer the live bench") + "</span></div>";
+    var applied = r.applied || [], props = r.proposals || [], notp = r.not_proposed || [], left = r.leftovers || [];
+    h += '<div class="card-title bench-live-sec">Applied · ' + applied.length + "</div>";
+    h += applied.length ? applied.map(function (a) {
+      return liveRow(a.ok ? badge("success", "applied") : badge("danger", "failed"), a.ok ? "" : "bench-live-failed",
+        esc(a.what) + (a.route ? ' <span class="mono bench-live-route">' + esc(a.route) + "</span>" : ""), a.text);
+    }).join("") : '<p class="placeholder-note">This bench declares nothing to apply.</p>';
+    h += '<div class="card-title bench-live-sec">Proposed · ' + props.length + "</div>";
+    if (props.length) {
+      h += '<p class="placeholder-note bench-live-why">Each enrolment is yours to confirm: Confirm binds the probe to ' +
+        "the board and reads its hardware ID through it, the ordinary enrol.</p>";
+    }
+    h += props.length ? props.map(function (pr, i) {
+      var done = liveRows.proposals[i];
+      var who = pr.role ? pr.role : "bench board " + (pr.name || pr.part || "");
+      var btn = done && done.ok ? badge("success", "enrolled")
+        : '<button type="button" class="btn btn-primary" data-live-confirm="' + i + '"' + (done && done.busy ? " disabled" : "") + ">Confirm</button>";
+      var text = (pr.text || "") + " · chip " + (pr.chip || "?") + " · probe " + (pr.probe_serial || "?") +
+        (done && done.text ? " — " + done.text : "");
+      return liveRow(badge("neutral", who), done && done.ok === false ? "bench-live-failed" : "",
+        esc(pr.name || pr.part || ""), text, '<span style="flex:1;"></span>' + btn);
+    }).join("") : '<p class="placeholder-note">Nothing to enrol.</p>';
+    if (notp.length) {
+      h += '<div class="card-title bench-live-sec">Not proposed · ' + notp.length + "</div>";
+      h += notp.map(function (n) { return liveRow(badge("warning", "not proposed"), "", esc(n.part || ""), n.text); }).join("");
+    }
+    h += '<div class="card-title bench-live-sec">In Core, not on this bench · ' + left.length + "</div>";
+    if (left.length) {
+      h += '<p class="placeholder-note bench-live-why">Core&rsquo;s store is this machine&rsquo;s, not this repo&rsquo;s: ' +
+        "nothing here is retracted unless you press its Retract.</p>";
+    }
+    h += left.length ? left.map(function (lo, i) {
+      var done = liveRows.leftovers[i];
+      return liveRow(badge("neutral", lo.kind), done && done.ok === false ? "bench-live-failed" : "", '<span class="mono">' + esc(lo.id) + "</span>",
+        (lo.text || "") + (done && done.text ? " — " + done.text : ""),
+        '<span style="flex:1;"></span><button type="button" class="btn btn-icon-danger" data-live-retract="' + i + '"' + (done && done.busy ? " disabled" : "") + ">Retract</button>");
+    }).join("") : '<p class="placeholder-note">Nothing: Core holds only what this bench names.</p>';
+    liveBody.innerHTML = h;
+    liveBtn.hidden = false;
+  }
+
+  // The ordinary enrol, with the proposal's fields as the server wrote them —
+  // for a role its `name` is the board type, never the part's label
+  // (decision 45). Core's answer is said, the role it moved included
+  // (decision 61). Then the live bench is declared again: what waited on
+  // that role holding its board (the dev-bench link) lands without a second
+  // click, and the report is the fresh one.
+  function confirmProposal(i) {
+    var pr = liveReport && (liveReport.proposals || [])[i];
+    if (!pr) return;
+    liveRows.proposals[i] = { busy: true, text: "enrolling — reading the hardware ID through probe " + (pr.probe_serial || "?") + "…" };
+    renderLiveReport();
+    send("POST", ROUTE_ENROLL, { role: pr.role || "", chip: pr.chip || "", probe_serial: pr.probe_serial || null, name: pr.name || null }).then(function (b) {
+      var who = pr.role ? pr.role : pr.name || pr.part || "the bench board";
+      var said = "Enrolled " + who + (b && b.chip ? " as " + b.chip : "") + (b && b.moved_roles_note ? " — " + b.moved_roles_note : "");
+      liveRows.proposals[i] = { ok: true, text: said };
+      renderLiveReport();
+      // A new probe binding is a new thing to check (decision 45).
+      document.dispatchEvent(new CustomEvent("embarch:role-changed", { detail: { role: pr.role || null, probe_serial: pr.probe_serial || null } }));
+      if (isLiveBench() && liveReport && liveReport.live && liveReport.live.slug === bench.slug) goLive(live.config, said + "; declared again");
+    }).catch(function (e) {
+      liveRows.proposals[i] = { ok: false, text: "not enrolled: " + errText(e) };
+      renderLiveReport();
+    });
+  }
+
+  // One leftover, by its own click; the list comes back from the answer.
+  function retractLeftover(i) {
+    var lo = liveReport && (liveReport.leftovers || [])[i];
+    if (!lo) return;
+    liveRows.leftovers[i] = { busy: true, text: "retracting…" };
+    renderLiveReport();
+    send("POST", ROUTE_RETRACT, { kind: lo.kind, id: lo.id }).then(function (r) {
+      if (r && Array.isArray(r.leftovers)) {
+        liveReport.leftovers = r.leftovers;
+        liveRows.leftovers = [];
+        if (r.ok === false) {
+          var at = -1;
+          r.leftovers.forEach(function (x, j) { if (x.kind === lo.kind && x.id === lo.id) at = j; });
+          if (at >= 0) liveRows.leftovers[at] = { ok: false, text: "not retracted: " + (r.text || "Core refused") };
+        }
+      } else {
+        liveRows.leftovers[i] = { ok: !!(r && r.ok), text: (r && r.ok ? "retracted" : "not retracted: ") + (r && r.text ? " " + r.text : "") };
+      }
+      notice(r && r.ok ? "Retracted " + lo.kind + " " + lo.id : "Not retracted: " + ((r && r.text) || "Core refused"), r && r.ok ? "ok" : "error");
+      renderLiveReport();
+      if (r && r.ok && lo.kind === "role") {
+        document.dispatchEvent(new CustomEvent("embarch:role-changed", { detail: { role: lo.id, probe_serial: null } }));
+      }
+    }).catch(function (e) {
+      liveRows.leftovers[i] = { ok: false, text: "not retracted: " + errText(e) };
+      renderLiveReport();
+    });
+  }
+
+  liveBody.addEventListener("click", function (e) {
+    var c = closest(e.target, "[data-live-confirm]");
+    if (c) { confirmProposal(+c.getAttribute("data-live-confirm")); return; }
+    var r = closest(e.target, "[data-live-retract]");
+    if (r) retractLeftover(+r.getAttribute("data-live-retract"));
+  });
+
+  // ---------------------------------------------------------------- a link to a board
+  // `#topology?board=<…>` (decision 58) names a role or a board type; on the
+  // canvas it marks the parts of the bench on screen that hold that role or
+  // that board type — the slot by its wire spelling or as shown, then the
+  // board exactly, then the board's own name before a `/` or `@`. app.js
+  // marks the catalog rows and says when nothing anywhere matched.
+  function linkKey(v) { return String(v == null ? "" : v).trim().toLowerCase(); }
+  function linkBase(v) { return linkKey(v).split(/[/@]/)[0]; }
+  function linkMatches() {
+    if (linkBoard == null || !model) return [];
+    var want = linkKey(linkBoard), base = linkBase(linkBoard);
+    var tier = function (same, bySlot) {
+      return model.order.filter(function (p) {
+        if (p.dup) return false;
+        var role = p.inst.role ? String(p.inst.role) : "";
+        if (bySlot && role && (want === role || want === role.replace("-", " ") || want === role.replace("-", "_"))) return true;
+        return !!p.inst.board && same(p.inst.board);
+      }).map(function (p) { return p.key; });
+    };
+    var exact = tier(function (v) { return linkKey(v) === want; }, true);
+    if (exact.length || !base) return exact;
+    return tier(function (v) { return linkBase(v) === base; }, false);
+  }
+  function showLinked() {
+    var keys = linkMatches();
+    render();
+    if (keys.length && !linkPanned) {
+      linkPanned = true;
+      var p = model.parts[keys[0]];
+      if (p) {
+        var g = geom(p), r = wrapSize();
+        view.x = g.x + g.w / 2 - r.w / view.k / 2;
+        view.y = g.y + g.h / 2 - r.h / view.k / 2;
+        setViewBox();
+      }
+    }
+    document.dispatchEvent(new CustomEvent("embarch:bench-marked", { detail: { count: keys.length } }));
+  }
+  document.addEventListener("embarch:route", function (ev) {
+    var d = (ev && ev.detail) || {};
+    linkBoard = d.tab === "topology" && d.params && d.params.board ? String(d.params.board) : null;
+    linkPanned = false;
+    if (model) showLinked();
+  });
+  document.addEventListener("embarch:route-done", function () {
+    if (linkBoard == null) return;
+    linkBoard = null;
+    if (model) render();
+  });
 
   // ---------------------------------------------------------------- view
   function wrapSize() {
@@ -2924,7 +3310,9 @@
   document.getElementById("bench-fit").addEventListener("click", fit);
   undoBtn.addEventListener("click", undo);
   redoBtn.addEventListener("click", redo);
-  saveBtn.addEventListener("click", save);
+  saveBtn.addEventListener("click", function () { save(); });
+  makeLiveBtn.addEventListener("click", makeLive);
+  stopLiveBtn.addEventListener("click", stopLive);
 
   cfgEl.addEventListener("click", function (e) {
     var b = closest(e.target, "[data-cfg]");
@@ -2937,6 +3325,7 @@
     render();
     renderInspector();
     renderNotes();
+    renderLiveBar();   // a view change: what the live bench offers follows the tab, Core is not called
     scheduleCheck();
   });
 
@@ -3072,7 +3461,11 @@
     previewTemplate: previewTemplate,
     unsaved: function () { return isDirty() || partsUnsaved(); },
     confirmLeave: confirmLeave,
-    leaveDone: leaveDone
+    leaveDone: leaveDone,
+    // The parts of the bench on screen a `#topology?board=` link marks, and
+    // whether a load has finished so "none" means none.
+    markedParts: function () { return linkMatches().slice(); },
+    settled: function () { return settledOnce; }
   };
 
   // A project switch reloads — the parts and benches are the open repo's — and
@@ -3097,6 +3490,10 @@
     // are not the new repo's: they go before anything is drawn.
     vocab = null; templates = dict(); unreadable = dict(); partErrors = []; benchErrors = []; benchList = [];
     verdicts = { roles: dict(), boards: dict() }; homes = dict(); verdictDrops = [];
+    live = null; liveState = "unknown"; liveReport = null; liveRows = { proposals: [], leftovers: [] };
+    if (liveBtn.classList.contains("is-open")) liveBtn.click();
+    renderLiveReport();
+    renderLiveBar();
     renderBin();
     picker.hidden = true;
     showState("reading…", false);
