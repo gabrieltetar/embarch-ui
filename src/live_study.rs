@@ -752,6 +752,9 @@ fn prompt_json(study_id: &str, p: &PendingPrompt) -> Value {
         "step_name": p.step_name,
         "step_index": p.step_index,
         "text": p.text,
+        // The bench configuration the step names, unresolved (`embarch-core` decision 107); the
+        // modal shows it as text until the bench editor's phase 5 draws the change.
+        "bench_config": p.bench_config,
         "opened_utc_ms": p.opened_utc_ms,
         "deadline_utc_ms": p.deadline_utc_ms,
         "remaining_ms": p.deadline_utc_ms.saturating_sub(now_utc_ms()),
@@ -2186,6 +2189,22 @@ mod tests {
             opened_utc_ms: 1_000,
             deadline_utc_ms: deadline,
         }
+    }
+
+    #[test]
+    fn a_pending_prompt_carries_its_bench_config_to_the_browser_as_text() {
+        let session = LiveSession::new("abc".to_string());
+        let far = now_utc_ms() + 60_000;
+        let mut event = prompt_event(1, far);
+        if let StudyEvent::PromptPending { bench_config, .. } = &mut event {
+            *bench_config = Some("analyzer in line".to_string());
+        }
+        let v: Value = serde_json::from_str(&ingest(&session, FollowItem::Event(event)).unwrap()).unwrap();
+        assert_eq!(v["pending"]["bench_config"], "analyzer in line");
+        // A prompt that names none says so as null.
+        let session = LiveSession::new("abc".to_string());
+        let v: Value = serde_json::from_str(&ingest(&session, FollowItem::Event(prompt_event(1, far))).unwrap()).unwrap();
+        assert!(v["pending"]["bench_config"].is_null(), "{v}");
     }
 
     #[test]

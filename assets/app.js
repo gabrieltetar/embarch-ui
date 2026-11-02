@@ -10282,7 +10282,9 @@
       deadlineAt: performance.now() + (p.remaining_ms || 0),
       resolved: false,
     };
-    pmEl("prompt-step").textContent = "Step '" + (p.step_name || "") + "'";
+    // The config a step names is shown as text until the bench editor draws the change (phase 5).
+    pmEl("prompt-step").textContent = "Step '" + (p.step_name || "") + "'" +
+      (p.bench_config ? " \u2014 bench config '" + p.bench_config + "'" : "");
     pmEl("prompt-text").textContent = p.text || "";
     pmEl("prompt-result").style.display = "none";
     pmEl("prompt-open-live").setAttribute("href", "#live-study?study=" + encodeURIComponent(p.study_id));
