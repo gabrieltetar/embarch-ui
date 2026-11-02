@@ -59,6 +59,7 @@ use crate::AppState;
 
 /// Which repo took over the machine from this one, and with what.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Superseded {
     pub repo: String,
     pub slug: String,
@@ -67,6 +68,7 @@ pub struct Superseded {
 
 /// One repo's last live bench.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LiveRecord {
     pub slug: String,
     pub config: Option<String>,
@@ -81,6 +83,7 @@ pub struct LiveRecord {
 
 /// The machine-wide entry: the one bench live on this machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MachineLive {
     pub repo: String,
     pub slug: String,
@@ -88,8 +91,11 @@ pub struct MachineLive {
     pub since_utc_ms: u64,
 }
 
-/// The whole record file.
+/// The whole record file. **Strict**: a file in an older shape (the first
+/// phase-4 build kept a bare map of repos) does not parse, and so is never
+/// read as empty and overwritten.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Records {
     #[serde(default)]
     pub repos: BTreeMap<String, LiveRecord>,
@@ -109,6 +115,9 @@ pub struct LiveView {
     /// any more (renamed or removed): nothing can be applied or retracted
     /// against it until a config is made live again.
     pub config_missing: bool,
+    /// The bench file is there and does not parse: nothing can be applied
+    /// or retracted until it is fixed by hand.
+    pub unparseable: bool,
 }
 
 /// `live-benches.json` beside the recent-projects list: in the directory of
@@ -226,13 +235,10 @@ pub fn clear_record(path: &Path, repo: &Path) -> Result<(), String> {
 /// takeover left, or a machine entry pointing elsewhere.
 fn superseded(records: &Records, key: &str) -> Option<Superseded> {
     let entry = records.repos.get(key)?;
-    entry.superseded_by.clone().or_else(|| {
-        records
-            .machine
-            .as_ref()
-            .filter(|m| m.repo != key)
-            .map(|m| Superseded { repo: m.repo.clone(), slug: m.slug.clone(), config: m.config.clone() })
-    })
+    match records.machine.as_ref() {
+        Some(m) if m.repo != key => Some(Superseded { repo: m.repo.clone(), slug: m.slug.clone(), config: m.config.clone() }),
+        _ => entry.superseded_by.clone(),
+    }
 }
 
 /// A record as `GET` serves it. **An I/O error telling whether the file is
@@ -242,9 +248,20 @@ fn view(repo: &Path, record: &LiveRecord) -> Result<LiveView, String> {
     let present = file
         .try_exists()
         .map_err(|e| format!("could not tell whether {} is there: {e}", files::bench_file(&record.slug)))?;
-    let config_missing = present
-        && record.config.as_deref().is_some_and(|name| matches!(files::load(repo, &record.slug), Ok(b) if b.config(name).is_none()));
-    Ok(LiveView { slug: record.slug.clone(), config: record.config.clone(), since_utc_ms: record.since_utc_ms, missing: !present, config_missing })
+    let loaded = if present { Some(files::load(repo, &record.slug)) } else { None };
+    let unparseable = matches!(loaded, Some(Err(LoadError::Unparseable(_))));
+    let config_missing = record
+        .config
+        .as_deref()
+        .is_some_and(|name| matches!(&loaded, Some(Ok(b)) if b.config(name).is_none()));
+    Ok(LiveView {
+        slug: record.slug.clone(),
+        config: record.config.clone(),
+        since_utc_ms: record.since_utc_ms,
+        missing: !present,
+        config_missing,
+        unparseable,
+    })
 }
 
 fn record_path(state: &AppState) -> Result<&Path, Box<Response>> {
@@ -370,8 +387,41 @@ fn role_holders(bench: &Bench) -> BTreeMap<Role, &Part> {
 /// What a role's part names, for the leftovers and the differences.
 struct RoleNamed {
     probe: Option<String>,
+    /// Every probe serial the role's part reaches over raw cable endpoints —
+    /// its own, and any part's at the far end of a cable from it, bench-level
+    /// or in the live config — **read without templates**.
+    reachable: BTreeSet<String>,
+    /// The holder's or a far end's template is missing: which probe the role
+    /// is on cannot be told, so no probe-mismatch leftover is offered.
+    probe_unknown: bool,
     board: Option<String>,
     link: (Option<String>, Option<u8>),
+}
+
+/// The probe serials a part reaches over raw cable endpoints — its own and
+/// those of every part at the far end of a cable from it (bench-level or in
+/// the live config) — and whether any of those parts' templates is missing.
+/// **No template is read to follow a cable**: with one missing, an SWD lead
+/// to the probe Core holds in the role would otherwise read as no lead, and
+/// its Retract would delete the right enrolment.
+fn raw_reach(part: &Part, bench: &Bench, configs: &[Config], templates: &Templates) -> (BTreeSet<String>, bool) {
+    let mut serials: BTreeSet<String> = part.probe_serial().map(str::to_string).into_iter().collect();
+    let mut unknown = !templates.contains_key(&part.template);
+    let ends = bench
+        .cables
+        .iter()
+        .map(|c| (c.from.as_str(), c.to.as_str()))
+        .chain(configs.iter().flat_map(|c| c.cables.iter().map(|[a, b]| (a.as_str(), b.as_str()))));
+    let part_of = |end: &str| end.split('.').next().unwrap_or(end).to_string();
+    for (a, b) in ends {
+        let (pa, pb) = (part_of(a), part_of(b));
+        let far = if pa == part.id { pb } else if pb == part.id { pa } else { continue };
+        if let Some(other) = bench.parts.iter().find(|p| p.id == far) {
+            unknown |= !templates.contains_key(&other.template);
+            serials.extend(other.probe_serial().map(str::to_string));
+        }
+    }
+    (serials, unknown)
 }
 
 /// What the live bench names, for the leftovers. **From its raw bindings**,
@@ -407,7 +457,9 @@ fn named(bench: &Bench, templates: &Templates, config: Option<&Config>) -> Named
                 let binding = files::role_binding_in(&bench.parts, &bench.cables, configs, *r, templates);
                 let probe = binding.as_ref().map(|b| b.probe_serial.clone()).filter(|s| !s.is_empty()).or_else(|| reach(p));
                 let link = binding.map(|b| (b.link_port_serial, b.link_port_interface)).unwrap_or_default();
-                (r.as_str().to_string(), RoleNamed { probe, board: p.board.clone().filter(|b| !b.trim().is_empty()), link })
+                let (mut reachable, probe_unknown) = raw_reach(p, bench, configs, templates);
+                reachable.extend(probe.clone());
+                (r.as_str().to_string(), RoleNamed { probe, reachable, probe_unknown, board: p.board.clone().filter(|b| !b.trim().is_empty()), link })
             })
             .collect(),
         bench_boards,
@@ -493,7 +545,10 @@ async fn leftovers(state: &AppState, named: &Named) -> LeftoverPass {
                     });
                     continue;
                 };
-                if probe.is_some() && bench_role.probe != probe {
+                // Offered only when Core's probe is none the role's part
+                // reaches over a raw cable, and only when every template on
+                // the way is known.
+                if probe.as_ref().is_some_and(|s| !bench_role.reachable.contains(s)) && !bench_role.probe_unknown {
                     pass.leftovers.push(Leftover {
                         kind: "role",
                         text: format!(
@@ -637,7 +692,28 @@ fn template_rows(bench: &Bench, catalog: &Catalog) -> Vec<Row> {
                     Some(c) if !c.carries(*function) => format!("{} · {} does not carry `{}`", part.display(), c.label, function.as_str()),
                     Some(_) => continue,
                 };
-                out.push(row(format!("binding {} · {cid} · {}", part.display(), function.as_str()), NOT_SENT, false, format!("{why}, so it was not declared")));
+                // A probe and a VCOM are found by their binding alone, so the
+                // role and bench-board steps still use one; say that rather
+                // than "not declared".
+                let what_happens = match function {
+                    Function::Probe => "it is still read as the part's probe".to_string(),
+                    Function::Vcom => "it is still read as the part's VCOM".to_string(),
+                    _ => "so it was not declared".to_string(),
+                };
+                out.push(row(format!("binding {} · {cid} · {}", part.display(), function.as_str()), NOT_SENT, false, format!("{why}; {what_happens}")));
+            }
+        }
+    }
+    let dut = role_holders(bench).get(&Role::Dut).map(|p| p.id.clone());
+    for part in bench.parts.iter().filter(|p| Some(&p.id) != dut.as_ref()) {
+        for function in [Function::BootloadApp, Function::BootloadBootloader] {
+            if names_function(part, function) {
+                out.push(row(
+                    format!("binding {} · {}", part.display(), function.as_str()),
+                    NOT_SENT,
+                    false,
+                    format!("{} binds `{}`, but only the DUT's bootload pair is declared, and it does not hold the dut role; not declared", part.display(), function.as_str()),
+                ));
             }
         }
     }
@@ -890,13 +966,17 @@ async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config:
         let foreign = pre.and_then(|b| b.probe_serial.as_deref()).filter(|s| *s != binding.probe_serial);
         let has_link = binding.link_port_serial.is_some() || binding.link_port_interface.is_some();
         if let (true, Some(other)) = (has_link, foreign) {
+            let proposed = out.proposals.iter().any(|p| p.role.as_deref() == Some("dev-bench"));
+            let next = if proposed {
+                "confirm this bench's dev-bench enrolment below, and the page applies this bench again"
+            } else {
+                "this bench proposes no dev-bench enrolment (its row says why); enrol dev-bench, then make this bench live again"
+            };
             out.applied.push(row(
                 "dev-bench link",
                 "POST /dev-bench/link",
                 false,
-                format!(
-                    "not declared: Core's dev-bench row holds probe {other}, which this bench does not bind there, and the link would amend that board's row — confirm this bench's dev-bench enrolment, and the bench is applied again"
-                ),
+                format!("not declared: Core's dev-bench row holds probe {other}, which this bench does not bind there, and the link would amend that board's row — {next}"),
             ));
         } else {
             let row_exists = pre.is_some() || board_written;
@@ -941,6 +1021,7 @@ pub async fn api_live(State(state): State<AppState>, OpenRepo(repo): OpenRepo) -
 /// `DELETE /api/bench/live` — clears the open repo's entry, and the
 /// machine's only when it points here. **Touches nothing in Core.**
 pub async fn api_clear_live(State(state): State<AppState>, OpenRepo(repo): OpenRepo) -> Response {
+    let _live = state.bench_live_lock.lock().await;
     let path = match record_path(&state) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -960,9 +1041,11 @@ pub struct MakeLiveRequest {
     /// `true` for the write-through after a Save (or after confirming the
     /// dev-bench enrolment): it re-applies **only the bench already live in
     /// this repo, and only while this repo holds the machine**. `false` — an
-    /// explicit make-live — takes the machine.
+    /// explicit make-live — takes the machine. **Required**: a call that
+    /// does not say which it is is refused, rather than taking the machine
+    /// by default.
     #[serde(default)]
-    pub write_through: bool,
+    pub write_through: Option<bool>,
 }
 
 /// `POST /api/bench/benches/{slug}/live` — applies the bench **as saved**
@@ -975,8 +1058,14 @@ pub struct MakeLiveRequest {
 /// explicit call takes the machine (one bench live per machine); a
 /// `write_through` call is refused `409` (`not-live`) for a bench that is not
 /// this repo's live one and (`superseded`) once another repo took the
-/// machine, and (`config-missing`) when the live config is gone from the
-/// bench.
+/// machine, and (`config-differs`) when it names another config than the
+/// live one; (`config-missing`) when the live config is gone from the bench.
+///
+/// **One make-live, retract or clear at a time** (`AppState::bench_live_lock`,
+/// held across the whole call, Core included, with every check made after
+/// taking it): a write-through checked against the record and then
+/// overtaken by an explicit make-live while Core answered would otherwise
+/// take the machine back.
 pub async fn api_make_live(
     State(state): State<AppState>,
     OpenRepo(repo): OpenRepo,
@@ -987,10 +1076,17 @@ pub async fn api_make_live(
         Ok(s) => s.to_string(),
         Err(resp) => return *resp,
     };
+    let Some(write_through) = req.write_through else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "a make-live names `write_through`: false for an explicit make-live, which takes the machine; true for the write-through after a save",
+        );
+    };
     let path = match record_path(&state) {
         Ok(p) => p.to_path_buf(),
         Err(resp) => return *resp,
     };
+    let _live = state.bench_live_lock.lock().await;
     let (file, current) = match files::read_file(&repo, &slug) {
         Ok(read) => read,
         Err(LoadError::Missing) => return refuse(StatusCode::NOT_FOUND, format!("no saved bench `{slug}`")),
@@ -1019,19 +1115,27 @@ pub async fn api_make_live(
     };
     let key = repo_key(&repo);
     let previous = records.repos.get(&key);
-    if req.write_through {
-        match previous {
-            Some(p) if p.slug == slug => {}
-            _ => {
-                return refuse_as(
-                    StatusCode::CONFLICT,
-                    "not-live",
-                    format!("`{slug}` is not this repo's live bench, so a save does not write it through; make it live explicitly"),
-                )
-            }
-        }
+    if write_through {
+        let Some(p) = previous.filter(|p| p.slug == slug) else {
+            return refuse_as(
+                StatusCode::CONFLICT,
+                "not-live",
+                format!("`{slug}` is not this repo's live bench, so a save does not write it through; make it live explicitly"),
+            );
+        };
         if let Some(s) = superseded(&records, &key) {
             return *superseded_refusal(&s, "a save writes nothing through; make it live explicitly to take the machine back");
+        }
+        if p.config != req.config {
+            return refuse_as(
+                StatusCode::CONFLICT,
+                "config-differs",
+                format!(
+                    "a write-through re-applies the live config ({}), and this one names {}; make that config live explicitly",
+                    p.config.as_deref().map(|c| format!("`{c}`")).unwrap_or_else(|| "no config".to_string()),
+                    req.config.as_deref().map(|c| format!("`{c}`")).unwrap_or_else(|| "no config".to_string())
+                ),
+            );
         }
     }
     let bench = files::bench_from_file(&slug, file, Some(current));
@@ -1136,6 +1240,7 @@ fn live_bench(state: &AppState, repo: &Path) -> Result<(Bench, Option<String>), 
 /// (`not-offered`): retract only what was offered. When Core did not answer
 /// the read for that kind, nothing is retracted and the answer says so.
 pub async fn api_retract(State(state): State<AppState>, OpenRepo(repo): OpenRepo, Json(req): Json<RetractRequest>) -> Response {
+    let _live = state.bench_live_lock.lock().await;
     let (bench, config_name) = match live_bench(&state, &repo) {
         Ok(b) => b,
         Err(resp) => return *resp,
@@ -1179,12 +1284,24 @@ pub async fn api_retract(State(state): State<AppState>, OpenRepo(repo): OpenRepo
             let binding = files::role_binding_in(&bench.parts, &bench.cables, &config.map(|c| vec![c.clone()]).unwrap_or_default(), *role, &templates);
             if let Some(binding) = binding.filter(|b| !b.board.is_empty()) {
                 let chip = role_chip(&state, &item.id, &binding).await;
-                text.push_str(&match write_role_board(&state, &item.id, &binding, &chip).await {
+                let written = write_role_board(&state, &item.id, &binding, &chip).await;
+                text.push_str(&match &written {
                     Some(BoardWrite::Applied { chip }) => format!("; its board type {} ({chip}) was written again, since this bench names it", binding.board),
                     Some(BoardWrite::Refused { error, .. }) => format!("; writing its board type {} again was refused: {error}", binding.board),
                     Some(BoardWrite::NoChip(sentence)) => format!("; its board type {} was not written again: {sentence}", binding.board),
                     None => String::new(),
                 });
+                // dev-bench's link lived on the row the retract removed.
+                let link = (binding.link_port_serial.clone(), binding.link_port_interface);
+                if *role == Role::DevBench && (link.0.is_some() || link.1.is_some()) {
+                    text.push_str(&match written {
+                        Some(BoardWrite::Applied { .. }) => match state.core.set_dev_bench_link(link.0.as_deref(), link.1).await {
+                            Ok(()) => format!("; its link ({}) was declared again", link_text(&link.0, link.1)),
+                            Err(e) => format!("; declaring its link ({}) again was refused: {e:#}", link_text(&link.0, link.1)),
+                        },
+                        _ => format!("; its link ({}) went with the row, and comes back once dev-bench holds its board again", link_text(&link.0, link.1)),
+                    });
+                }
             }
         }
     }
@@ -1245,6 +1362,20 @@ mod tests {
         take_machine(&path, &b, "two", None).unwrap();
         clear_record(&path, &a).unwrap();
         assert_eq!(read_records(&path).unwrap().machine.unwrap().repo, repo_key(&b));
+        // The machine entry wins over an older mark: `a` was taken over by `b`,
+        // and `c` then took the machine from `b`.
+        let c = dir.join("c");
+        std::fs::create_dir_all(&c).unwrap();
+        take_machine(&path, &a, "one", None).unwrap();
+        take_machine(&path, &b, "two", None).unwrap();
+        take_machine(&path, &c, "three", None).unwrap();
+        assert_eq!(superseded(&read_records(&path).unwrap(), &repo_key(&a)).unwrap().repo, repo_key(&c));
+        // The first phase-4 build's bare map of repos does not parse, and is not overwritten.
+        let old = format!("{{ \"{}\": {{ \"slug\": \"one\", \"config\": null, \"since_utc_ms\": 1 }} }}", repo_key(&a));
+        std::fs::write(&path, &old).unwrap();
+        assert!(read_records(&path).unwrap_err().contains("does not parse"));
+        assert!(take_machine(&path, &a, "one", None).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
         std::fs::write(&path, "{ not json").unwrap();
         assert!(record_for(&path, &b).unwrap_err().contains("does not parse"));
         assert!(clear_record(&path, &b).is_err(), "an unreadable record is not replaced by an empty one");

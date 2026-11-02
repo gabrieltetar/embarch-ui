@@ -183,6 +183,9 @@ pub(crate) struct AppState {
     /// `None` when there is no per-user data directory, and the live routes
     /// say so.
     bench_live_path: Option<std::path::PathBuf>,
+    /// One make-live, retract or clear at a time (`bench::live`), held
+    /// across Core's answers so a check is never overtaken before its write.
+    bench_live_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// One decoded capture, keyed by the study and tap it was decoded from.
@@ -266,6 +269,7 @@ async fn async_main() -> anyhow::Result<()> {
         build_runs: firmware_build::BuildRuns::new(),
         build_config_path,
         bench_live_path: bench::live::default_record_path(),
+        bench_live_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     let app = app(state);
@@ -1204,6 +1208,7 @@ mod tests {
             build_runs: firmware_build::BuildRuns::new(),
             build_config_path: None,
             bench_live_path,
+            bench_live_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1771,6 +1776,9 @@ mod tests {
         refuse_writes: Option<String>,
         /// GET paths answered `500`, as a Core that did not answer.
         fail_reads: Vec<&'static str>,
+        /// A signal whose `POST /signals` answers 1.5 s late, to hold a
+        /// make-live inside Core while another call arrives.
+        slow_signal: Option<String>,
     }
 
     type Stub = Arc<std::sync::Mutex<StubCore>>;
@@ -1807,6 +1815,10 @@ mod tests {
                     stub_read(&s, "/signals", serde_json::Value::Array(s.signals.clone()))
                 })
                 .post(|S(s): S<Stub>, J(v): J<serde_json::Value>| async move {
+                    let slow = s.lock().unwrap().slow_signal.clone();
+                    if slow.is_some_and(|n| v["name"] == n.as_str()) {
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    }
                     let mut s = s.lock().unwrap();
                     s.writes.push(format!("POST /signals {}", v["name"].as_str().unwrap_or_default()));
                     if let Some(r) = stub_refusal(&s) {
@@ -2062,7 +2074,7 @@ port_serial = "C1"
     }
 
     async fn make_live(http: &reqwest::Client, base: &str, version: &str) -> reqwest::Response {
-        live_call(http, base, "pd", serde_json::json!({ "config": "A", "version": version })).await
+        live_call(http, base, "pd", serde_json::json!({ "config": "A", "version": version, "write_through": false })).await
     }
 
     fn refusal_code(resp: &reqwest::Response) -> Option<String> {
@@ -2277,7 +2289,27 @@ template = "this-machine"
 id = "dut"
 template = "gone-dut"
 role = "dut"
-usb = { usb = { probe = "Z9", bootload-bootloader = { vid = 1, pid = 2 } } }
+usb = { usb = { bootload-bootloader = { vid = 1, pid = 2 } } }
+
+[[parts]]
+id = "pod"
+template = "debug-probe"
+usb = { usb = { probe = "Z9" } }
+
+[[parts]]
+id = "bench"
+template = "nrf54l15dk"
+role = "dev-bench"
+
+[[parts]]
+id = "ghost-pod"
+template = "gone-pod"
+usb = { usb = { probe = "Q1" } }
+
+[[parts]]
+id = "pod2"
+template = "debug-probe"
+usb = { swd = { probe = "PP" } }
 
 [[parts]]
 id = "ghost-load"
@@ -2293,23 +2325,37 @@ usb = { usb = { probe = "OLD1" } }
 [[parts]]
 id = "dk"
 template = "nrf54l15dk"
-usb = { usb = { scpi = { vid = 3, pid = 4 } } }
+usb = { usb = { scpi = { vid = 3, pid = 4 }, bootload-app = { vid = 5, pid = 6 } } }
+
+[[configs]]
+name = "A"
+cables = [["pod.swd", "dut.swd"], ["ghost-pod.swd", "bench.radio"]]
 "#;
+        stub.lock().unwrap().enrolled.push(serde_json::json!({ "role": "dev-bench", "name": "nrf54l15dk/nrf54l15/cpuapp", "chip": "nRF54L15", "probe_serial": "OTHER" }));
         let (repo, record) = live_repo("live-ghosts", "ghosts", bench);
         std::fs::write(repo.join("embarch/parts/broken.toml"), "id = \"broken\"\n[[connectors]\n").unwrap();
         let base = serve_app_live(&core, Some(repo.clone()), Some(record)).await;
         let http = reqwest::Client::new();
         let version = version_of_bench(&http, &base, "ghosts").await;
-        let report: serde_json::Value = live_call(&http, &base, "ghosts", serde_json::json!({ "config": null, "version": version })).await.json().await.unwrap();
-        for part in ["dut", "ghost-load", "ghost-board"] {
+        let report: serde_json::Value = live_call(&http, &base, "ghosts", serde_json::json!({ "config": "A", "version": version, "write_through": false })).await.json().await.unwrap();
+        for part in ["dut", "ghost-load", "ghost-board", "ghost-pod"] {
             let r = row_in(&report, &format!("part {part}"));
             assert_eq!((r["ok"].clone(), r["route"].as_str()), (serde_json::json!(false), Some("(not sent)")), "{r}");
             assert!(r["text"].as_str().unwrap().contains("is drawn from the part template"), "{r}");
         }
         assert!(row_in(&report, "part template embarch/parts/broken.toml")["text"].as_str().unwrap().contains("line"), "{report}");
         assert!(row_in(&report, "binding dk · usb · scpi")["text"].as_str().unwrap().contains("does not carry `scpi`"), "{report}");
+        assert_eq!(
+            row_in(&report, "binding pod2 · swd · probe")["text"],
+            "`swd` is not a usb-host connector of a Debug probe; it is still read as the part's probe"
+        );
+        assert!(row_in(&report, "binding dk · bootload-app")["text"].as_str().unwrap().contains("only the DUT's bootload pair is declared"), "{report}");
         let left = leftover_ids(&report["leftovers"]);
-        for (kind, id) in [("instrument", "old-load"), ("bench-board", "OLD1"), ("bootload", "dut"), ("role", "dut")] {
+        // The DUT's template is missing, and the pod at the far end of its
+        // lead holds Z9 — the probe Core enrols as dut — so no Retract is
+        // offered for it; and dev-bench's lead ends at a part whose template is
+        // missing, so which probe it is on cannot be told.
+        for (kind, id) in [("instrument", "old-load"), ("bench-board", "OLD1"), ("bootload", "dut"), ("role", "dut"), ("role", "dev-bench")] {
             assert!(!left.contains(&(kind.to_string(), id.to_string())), "{kind} {id} offered as a leftover: {left:?}");
         }
         assert!(stub.lock().unwrap().writes.iter().all(|w| !w.starts_with("PUT /instruments") && !w.starts_with("PUT /bootload")), "nothing declared for them");
@@ -2378,7 +2424,7 @@ cables = [["pod.swd", "dut.swd"]]
         let base = serve_app_live(&core, Some(repo.clone()), Some(record)).await;
         let http = reqwest::Client::new();
         let version = version_of_bench(&http, &base, "swd").await;
-        let go = |config: serde_json::Value| live_call(&http, &base, "swd", serde_json::json!({ "config": config, "version": version }));
+        let go = |config: serde_json::Value| live_call(&http, &base, "swd", serde_json::json!({ "config": config, "version": version, "write_through": false }));
         let dut_proposal = |r: &serde_json::Value| r["proposals"].as_array().unwrap().iter().find(|p| p["part"] == "dut").cloned();
 
         let a: serde_json::Value = go("A".into()).await.json().await.unwrap();
@@ -2419,7 +2465,14 @@ cables = [["pod.swd", "dut.swd"]]
         let link = row_in(&report, "dev-bench link");
         assert_eq!(link["ok"], false);
         assert!(link["text"].as_str().unwrap().starts_with("not declared: Core's dev-bench row holds probe OTHER"), "{link}");
+        assert!(link["text"].as_str().unwrap().ends_with("confirm this bench's dev-bench enrolment below, and the page applies this bench again"), "a proposal exists: {link}");
         assert!(stub.lock().unwrap().writes.iter().all(|w| !w.starts_with("POST /dev-bench/link")));
+        // Retracting the dev-bench role writes its board type back and declares its link again.
+        let body: serde_json::Value = http.post(format!("{base}/api/bench/live/retract")).json(&serde_json::json!({ "kind": "role", "id": "dev-bench" })).send().await.unwrap().json().await.unwrap();
+        assert_eq!(body["ok"], true, "{body}");
+        assert!(body["text"].as_str().unwrap().ends_with("; its link (serial B1V, interface 2) was declared again"), "{body}");
+        let row = stub.lock().unwrap().enrolled.iter().find(|r| r["role"] == "dev-bench").cloned().unwrap();
+        assert_eq!((row["link_port_serial"].as_str(), row["link_port_interface"].as_u64(), row.get("probe_serial")), (Some("B1V"), Some(2), None));
         assert!(row_in(&report, "dev-bench link (Core)")["text"].as_str().unwrap().contains("this bench binds serial B1V, interface 2"), "{report}");
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -2436,10 +2489,24 @@ cables = [["pod.swd", "dut.swd"]]
         let base = serve_app_live(&core, Some(repo.clone()), Some(record)).await;
         let http = reqwest::Client::new();
         let version = version_of_bench(&http, &base, "pd").await;
-        assert_eq!(live_call(&http, &base, "pd", serde_json::json!({ "config": "A" })).await.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(live_call(&http, &base, "pd", serde_json::json!({ "config": "Z", "version": version })).await.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(live_call(&http, &base, "nope", serde_json::json!({ "config": null, "version": version })).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(live_call(&http, &base, "pd", serde_json::json!({ "config": "A", "write_through": false })).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(live_call(&http, &base, "pd", serde_json::json!({ "config": "Z", "version": version, "write_through": false })).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(live_call(&http, &base, "nope", serde_json::json!({ "config": null, "version": version, "write_through": false })).await.status(), StatusCode::NOT_FOUND);
+        let unsaid = live_call(&http, &base, "pd", serde_json::json!({ "config": "A", "version": version })).await;
+        assert_eq!(unsaid.status(), StatusCode::BAD_REQUEST);
+        assert!(unsaid.text().await.unwrap().contains("`write_through`"), "the refusal names the field");
         assert_eq!(make_live(&http, &base, &version).await.status(), StatusCode::OK);
+        let differs = live_call(&http, &base, "pd", serde_json::json!({ "config": null, "version": version, "write_through": true })).await;
+        assert_eq!((differs.status(), refusal_code(&differs).as_deref()), (StatusCode::CONFLICT, Some("config-differs")));
+        let same = live_call(&http, &base, "pd", serde_json::json!({ "config": "A", "version": version, "write_through": true })).await;
+        assert_eq!(same.status(), StatusCode::OK, "a write-through naming the live config re-applies");
+        std::fs::write(repo.join("embarch/topologies/other.toml"), PD_BENCH.replace("name = \"pd\"", "name = \"other\"")).unwrap();
+        let other_version = version_of_bench(&http, &base, "other").await;
+        let not_live = live_call(&http, &base, "other", serde_json::json!({ "config": "A", "version": other_version, "write_through": true })).await;
+        assert_eq!((not_live.status(), refusal_code(&not_live).as_deref()), (StatusCode::CONFLICT, Some("not-live")));
+        std::fs::write(repo.join("embarch/topologies/other.toml"), "name = \"other\"\n[[parts]\n").unwrap();
+        let broken = live_call(&http, &base, "other", serde_json::json!({ "config": null, "version": "v", "write_through": false })).await;
+        assert_eq!((broken.status(), refusal_code(&broken).as_deref()), (StatusCode::CONFLICT, Some("unparseable")));
 
         let path = repo.join("embarch/topologies/pd.toml");
         std::fs::write(&path, PD_BENCH.replace("name = \"A\"", "name = \"A renamed\"")).unwrap();
@@ -2452,8 +2519,11 @@ cables = [["pod.swd", "dut.swd"]]
         assert_eq!((reapply.status(), refusal_code(&reapply).as_deref()), (StatusCode::CONFLICT, Some("config-missing")));
         let retract = http.post(format!("{base}/api/bench/live/retract")).json(&serde_json::json!({ "kind": "signal", "id": "stale-sig" })).send().await.unwrap();
         assert_eq!((retract.status(), refusal_code(&retract).as_deref()), (StatusCode::CONFLICT, Some("config-missing")));
-        let other = live_call(&http, &base, "pd", serde_json::json!({ "config": "A renamed", "version": fresh })).await;
+        let other = live_call(&http, &base, "pd", serde_json::json!({ "config": "A renamed", "version": fresh, "write_through": false })).await;
         assert_eq!(other.status(), StatusCode::OK, "making a config that exists live is the way out");
+        std::fs::write(&path, "name = \"pd\"\n[[parts]\n").unwrap();
+        let live: serde_json::Value = http.get(format!("{base}/api/bench/live")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((live["live"]["unparseable"].as_bool(), live["live"]["missing"].as_bool()), (Some(true), Some(false)));
         let _ = std::fs::remove_dir_all(&repo);
     }
 
@@ -2512,6 +2582,35 @@ cables = [["pod.swd", "dut.swd"]]
         assert_eq!(stub.lock().unwrap().writes.len(), writes, "clearing touches nothing in Core");
         let _ = std::fs::remove_dir_all(&repo_a);
         let _ = std::fs::remove_dir_all(&repo_b);
+    }
+
+    /// One make-live, retract or clear at a time: a write-through held inside
+    /// Core by a slow signal, then a clear arriving meanwhile. The clear
+    /// waits, so the bench is not live afterwards — without the lock the
+    /// write-through, checked before the clear, would record it live again.
+    #[tokio::test]
+    async fn a_clear_racing_a_write_through_waits_for_it_and_wins() {
+        let stub = stub_with_leftovers();
+        let core = serve_stub_core(stub.clone()).await;
+        let (repo, record) = live_repo("live-race", "pd", PD_BENCH);
+        let base = serve_app_live(&core, Some(repo.clone()), Some(record)).await;
+        let http = reqwest::Client::new();
+        let version = version_of_bench(&http, &base, "pd").await;
+        assert_eq!(make_live(&http, &base, &version).await.status(), StatusCode::OK);
+        stub.lock().unwrap().slow_signal = Some("console".to_string());
+        let slow = {
+            let (http, base, version) = (http.clone(), base.clone(), version.clone());
+            tokio::spawn(async move {
+                live_call(&http, &base, "pd", serde_json::json!({ "config": "A", "version": version, "write_through": true })).await.status()
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let cleared = http.delete(format!("{base}/api/bench/live")).send().await.unwrap();
+        assert_eq!(cleared.status(), StatusCode::NO_CONTENT);
+        assert_eq!(slow.await.unwrap(), StatusCode::OK, "the write-through finished first");
+        let live: serde_json::Value = http.get(format!("{base}/api/bench/live")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(live, serde_json::json!({ "live": null, "superseded": null }), "the clear came last and stands");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// The record is this UI's, on this machine: it survives a restart over
