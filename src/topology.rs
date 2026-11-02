@@ -1852,24 +1852,8 @@ pub(crate) async fn apply_role(
     enrolled: &[embarch_core_client::EnrolledBoardResponse],
     probes: &[embarch_core_client::ProbeInfo],
 ) -> RoleApplied {
-    let chip = if binding.board.is_empty() {
-        // No board to look a chip up for: only a chip recorded for no board
-        // either is usable (fix round 3).
-        recorded_chip(&binding.chip, binding.chip_board.as_deref(), "").map(Option::unwrap_or_default)
-    } else {
-        pick_chip(lookup_chip(state, role, &binding.board).await, &binding.chip, binding.chip_board.as_deref(), &binding.board)
-    };
-    let board = if binding.board.is_empty() {
-        None
-    } else {
-        Some(match &chip {
-            Ok(chip) => match state.core.set_role_board(role, &binding.board, chip).await {
-                Ok(_) => BoardWrite::Applied { chip: chip.clone() },
-                Err(e) => BoardWrite::Refused { chip: chip.clone(), error: format!("{e:#}") },
-            },
-            Err(why) => BoardWrite::NoChip(no_chip_sentence(&binding.board, why)),
-        })
-    };
+    let chip = role_chip(state, role, binding).await;
+    let board = write_role_board(state, role, binding, &chip).await;
     if binding.probe_serial.is_empty() {
         let why = match &binding.probe_note {
             Some(note) => format!("{role}: {note} — not proposed"),
@@ -1902,6 +1886,32 @@ pub(crate) async fn apply_role(
             displaces: current.map(|b| json!({ "board": b.name, "chip": b.chip, "probe_serial": b.probe_serial })),
         }),
     }
+}
+
+/// The chip a role's binding attaches as: looked up first, the recorded chip
+/// a fallback under decision 73's rule; with no board, only a chip recorded
+/// for no board either (fix round 3). `Ok("")` is no board and no chip.
+pub(crate) async fn role_chip(state: &AppState, role: &str, binding: &RoleBinding) -> Result<String, String> {
+    if binding.board.is_empty() {
+        recorded_chip(&binding.chip, binding.chip_board.as_deref(), "").map(Option::unwrap_or_default)
+    } else {
+        pick_chip(lookup_chip(state, role, &binding.board).await, &binding.chip, binding.chip_board.as_deref(), &binding.board)
+    }
+}
+
+/// Writes a role's board type with the chip [`role_chip`] found; `None`
+/// when the binding names no board.
+pub(crate) async fn write_role_board(state: &AppState, role: &str, binding: &RoleBinding, chip: &Result<String, String>) -> Option<BoardWrite> {
+    if binding.board.is_empty() {
+        return None;
+    }
+    Some(match chip {
+        Ok(chip) => match state.core.set_role_board(role, &binding.board, chip).await {
+            Ok(_) => BoardWrite::Applied { chip: chip.clone() },
+            Err(e) => BoardWrite::Refused { chip: chip.clone(), error: format!("{e:#}") },
+        },
+        Err(why) => BoardWrite::NoChip(no_chip_sentence(&binding.board, why)),
+    })
 }
 
 /// What declaring dev-bench's link did, or why it waits.
