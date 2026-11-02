@@ -135,9 +135,11 @@ def running_rail():
 # drive's own control surface). Then it is `running` with a `pending_prompt`,
 # its event stream carries `PromptPending`/`PromptResolved`, and
 # `POST /study/<id>/prompt` answers it (or returns 409 in `conflict` mode).
-# `start` takes an optional `bench_config`, carried on the pending prompt.
+# `start` takes an optional `bench_config`, carried on the pending prompt;
+# `answer_delay {ms}` holds the answer's reply that long after its resolve
+# frame is queued, so the frame reaches the UI first.
 PROMPTING = "a1" * 16
-PROMPT = {"on": False, "pending": None, "frames": [], "answers": [], "conflict": False}
+PROMPT = {"on": False, "pending": None, "frames": [], "answers": [], "conflict": False, "answer_delay_ms": 0}
 PROMPT_LOCK = threading.Lock()
 
 
@@ -282,10 +284,12 @@ class Handler(BaseHTTPRequestHandler):
                 prompt_resolve(body["prompt_id"], body["answer"], body.get("answered_by"))
             elif op == "conflict":
                 PROMPT["conflict"] = bool(body.get("on", True))
+            elif op == "answer_delay":
+                PROMPT["answer_delay_ms"] = int(body.get("ms", 0))
             elif op == "answers":
                 return self._json({"answers": PROMPT["answers"]})
             elif op == "reset":
-                PROMPT.update(on=False, pending=None, frames=[], answers=[], conflict=False)
+                PROMPT.update(on=False, pending=None, frames=[], answers=[], conflict=False, answer_delay_ms=0)
             return self._json({"ok": True})
         if self.headers.get("authorization") != "Bearer " + TOKEN:
             return self._text("unauthorized", 401)
@@ -296,6 +300,8 @@ class Handler(BaseHTTPRequestHandler):
                     or PROMPT["pending"]["prompt_id"] != body.get("prompt_id"):
                 return self._text("prompt %s is not the one waiting" % body.get("prompt_id"), 409)
             prompt_resolve(body["prompt_id"], body["answer"], body.get("answered_by"))
+            if PROMPT["answer_delay_ms"]:
+                time.sleep(PROMPT["answer_delay_ms"] / 1000.0)
             return self._json({"study_id": PROMPTING, "prompt_id": body["prompt_id"],
                                "answer": body["answer"], "answered_by": body.get("answered_by"),
                                "status": "running"})

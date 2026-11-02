@@ -10213,9 +10213,9 @@
   var pmQueue = [];
   // A step naming a bench config (`embarch-core` decision 107, the bench
   // editor's phase 5): what the live bench lookup found for the prompt on
-  // screen, the config each run picked for a name its bench lacks (an inline
-  // study keeps the pick for that run), and a mark that failed after its
-  // modal had gone, said on the next one.
+  // screen, the choice each run made for a name its bench lacks — a config,
+  // or "" for the text alone (an inline study keeps it for that run) — and a
+  // mark that failed with no modal up, said on the next one's own line.
   var pmBench = null;
   var pmBenchSeq = 0;
   var pmPicks = {};
@@ -10290,6 +10290,7 @@
       prompt_id: p.prompt_id,
       deadlineAt: performance.now() + (p.remaining_ms || 0),
       resolved: false,
+      p: p,
     };
     // The config a step names, as the study wrote it; the section under the
     // text draws the change on the live bench, or says why it cannot.
@@ -10298,11 +10299,9 @@
     pmEl("prompt-text").textContent = p.text || "";
     pmEl("prompt-result").style.display = "none";
     if (pmCarry) {
-      pmEl("prompt-result").textContent = pmCarry;
-      pmEl("prompt-result").style.display = "";
+      pmNote(pmCarry);
       pmCarry = "";
     }
-    pmBenchShow(p);
     pmEl("prompt-open-live").setAttribute("href", "#live-study?study=" + encodeURIComponent(p.study_id));
     pmSetButtons(true);
     pmEl("prompt-backdrop").style.display = "";
@@ -10312,11 +10311,19 @@
     if (pmTimer) clearInterval(pmTimer);
     pmTimer = setInterval(pmTick, 500);
     pmTick();
+    // The bench section last, once the prompt is on screen and answerable:
+    // nothing in it can hold or break the answer.
+    try {
+      pmBenchShow(p);
+    } catch (e) {
+      pmBenchFailed(e);
+    }
   }
 
   function pmHide() {
     pmEl("prompt-backdrop").style.display = "none";
     pmEl("prompt-dialog").style.display = "none";
+    pmNote("");
     if (pmTimer) clearInterval(pmTimer);
     pmTimer = null;
     pmCurrent = null;
@@ -10339,6 +10346,7 @@
     r.textContent = text;
     r.style.display = "";
     pmSetButtons(false);
+    pmPickLock(true);
     pmEl("prompt-close").focus();
   }
 
@@ -10361,9 +10369,11 @@
     var by = r.answered_by;
     if (r.answer === "confirmed" || r.answer === "cancelled") {
       if (by === "ui" && pmCurrent.answeredHere) {
-        // The answer stands either way; the modal stays only to say how the
-        // bench mark went — and gives way at once to the next prompt.
-        if (pmCurrent.marking) { pmCurrent.closeWhenMarked = true; return pmSettle(pmCurrent); }
+        // Core's frame can beat this page's own answer back, and the bench
+        // mark comes after both: while either is on its way the frame is
+        // held, the prompt ends on screen (the next one may show at once),
+        // and the answer or the mark decides how the modal closes.
+        if (pmCurrent.sending || pmCurrent.marking) { pmCurrent.heldResolve = r; return pmHold(pmCurrent); }
         if (pmCurrent.markFailed) return pmSettle(pmCurrent);
         return pmHide();
       }
@@ -10402,39 +10412,70 @@
     var cur = pmCurrent;
     pmEl("prompt-confirm").disabled = true;
     pmEl("prompt-cancel").disabled = true;
+    pmPickLock(true);
     cur.answeredHere = true;
+    cur.sending = true;
+    var here = function () { return pmCurrent === cur; };
+    var unlock = function () {
+      if (!here()) return;
+      pmEl("prompt-confirm").disabled = false;
+      pmEl("prompt-cancel").disabled = false;
+      pmPickLock(false);
+    };
     try {
       var resp = await fetch("/api/live/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer }),
       });
+      cur.sending = false;
       if (resp.ok) {
         // The resolve frame closes it; if that frame is slow, say so rather
         // than leave two live-looking buttons.
-        pmEl("prompt-result").textContent = "Sent: " + answer + ".";
-        pmEl("prompt-result").style.display = "";
+        if (here()) {
+          pmEl("prompt-result").textContent = "Sent: " + answer + ".";
+          pmEl("prompt-result").style.display = "";
+        }
         // Then, and only then, the bench: the answer never waits on it.
-        if (answer === "confirmed") pmBenchConfirmed(cur);
+        if (answer === "confirmed") {
+          try {
+            pmBenchConfirmed(cur);
+          } catch (e) {
+            cur.marking = false;
+            pmMarkFailed(cur, "the bench could not be marked: " + (e && e.message ? e.message : String(e)));
+          }
+        }
+        // Core's frame came first and nothing is left to wait for.
+        if (cur.heldResolve && !cur.marking && here()) {
+          if (cur.markFailed) pmSettle(cur); else pmHide();
+        }
         return;
       }
       cur.answeredHere = false;
       var text = await resp.text();
+      if (cur.heldResolve && here()) {
+        // Another surface's answer under this page's name, then this page's refused.
+        var held = cur.heldResolve;
+        cur.resolved = false;
+        pmEnded("Already " + held.answer + (held.answered_by ? " from " + held.answered_by : "") + ". " + text);
+        return;
+      }
+      if (!here()) return;
       if (resp.status === 409) {
         // The prompt had already ended: shown, not swallowed.
         pmEnded("Not taken - the prompt had already ended. " + text);
       } else {
         pmEl("prompt-result").textContent = "The answer did not reach embarch-core: " + text;
         pmEl("prompt-result").style.display = "";
-        pmEl("prompt-confirm").disabled = false;
-        pmEl("prompt-cancel").disabled = false;
+        unlock();
       }
     } catch (e) {
+      cur.sending = false;
       cur.answeredHere = false;
+      if (!here()) return;
       pmEl("prompt-result").textContent = "The answer did not reach embarch-ui: " + e;
       pmEl("prompt-result").style.display = "";
-      pmEl("prompt-confirm").disabled = false;
-      pmEl("prompt-cancel").disabled = false;
+      unlock();
     }
   }
 
@@ -10471,6 +10512,36 @@
     return parts.length ? parts[parts.length - 1] : String(path || "another repo");
   }
 
+  // A line of its own in the modal, under the result: a mark that failed for
+  // a prompt no longer on screen. It stays until the modal closes.
+  function pmNote(text) {
+    var n = pmEl("prompt-mark-note");
+    n.textContent = text || "";
+    n.hidden = !text;
+  }
+
+  // Once a prompt is answered or ended, its pick is what it was answered with.
+  function pmPickLock(on) {
+    Array.prototype.forEach.call(pmEl("prompt-bench-pick").querySelectorAll("input"), function (r) { r.disabled = !!on; });
+  }
+
+  // Bench code that threw: the section says so, and the prompt is untouched.
+  function pmBenchFailed(e) {
+    try {
+      var box = pmEl("prompt-bench");
+      box.hidden = false;
+      box.setAttribute("data-state", "none");
+      pmEl("prompt-bench-head").textContent = "The bench could not be drawn (" + (e && e.message ? e.message : String(e)) + "): the text alone.";
+      pmEl("prompt-bench-svg").setAttribute("hidden", "");
+      pmEl("prompt-bench-lists").textContent = "";
+      pmEl("prompt-bench-pick").hidden = true;
+    } catch (_) {
+      /* nothing more to say */
+    }
+  }
+
+  function pmRunKey(b) { return b.study_id + "\u0000" + b.name; }
+
   function pmBenchShow(p) {
     var box = pmEl("prompt-bench");
     var b = { seq: ++pmBenchSeq, key: pmKey(p), study_id: p.study_id, name: p.bench_config || null, state: "loading",
@@ -10479,7 +10550,7 @@
     if (pmCurrent && pmKey(pmCurrent) === b.key) pmCurrent.bench = b;
     if (!b.name) { box.hidden = true; return; }
     box.hidden = false;
-    pmBenchRender(b);
+    pmBenchDraw(b);
     pmBenchJson("/api/bench/live").then(function (r) {
       var live = r && r.live;
       if (r && r.superseded) return pmBenchWhy(b, "this repo's bench is not the machine's live one — " + pmRepoName(r.superseded.repo) + " · " + r.superseded.slug + " went live after it");
@@ -10500,11 +10571,16 @@
           b.state = "has";
         } else {
           b.state = "missing";
-          var kept = pmPicks[b.study_id + "\u0000" + b.name];
-          b.pick = kept && names.indexOf(kept) >= 0 ? kept : null;
-          b.kept = !!b.pick;
+          // The run's earlier choice for this name: a config it still has,
+          // or "" for the text alone — both kept, so a Confirm made while
+          // this lookup was on its way marks what the run chose, or nothing.
+          var key = pmRunKey(b);
+          if (Object.prototype.hasOwnProperty.call(pmPicks, key) && (pmPicks[key] === "" || names.indexOf(pmPicks[key]) >= 0)) {
+            b.pick = pmPicks[key] || null;
+            b.kept = true;
+          }
         }
-        pmBenchRender(b);
+        pmBenchDraw(b);
         pmBenchLanded(b);
       });
     }).catch(function (e) {
@@ -10516,8 +10592,17 @@
   function pmBenchWhy(b, why) {
     b.state = "none";
     b.why = why;
-    pmBenchRender(b);
+    pmBenchDraw(b);
     pmBenchLanded(b);
+  }
+
+  // A drawing that throws says so in the section; the prompt goes on.
+  function pmBenchDraw(b) {
+    try {
+      pmBenchRender(b);
+    } catch (e) {
+      if (pmBench === b) pmBenchFailed(e);
+    }
   }
 
   // Drawn only while it is the prompt on screen; a later lookup's answer
@@ -10547,21 +10632,24 @@
         head.appendChild(w);
       }
     };
-    if (b.state === "loading") { line("Bench config " + b.name, " \u2014 reading the live bench\u2026"); return; }
-    if (b.state === "none") { line("Bench config " + b.name, " \u2014 the text alone: " + b.why + "."); return; }
+    if (b.state === "loading") { line("Bench config " + b.name, " — reading the live bench…"); return; }
+    if (b.state === "none") { line("Bench config " + b.name, " — the text alone: " + b.why + "."); return; }
     var target = b.state === "has" ? b.name : b.pick;
     if (b.state === "missing") {
-      line("Config " + b.name + " isn't on this bench", " (" + b.slug + ")" + (b.kept ? " \u2014 " + b.pick + " was picked for it earlier in this run" : "") +
+      line("Config " + b.name + " isn't on this bench", " (" + b.slug + ")" +
+        (b.kept ? " — " + (b.pick ? b.pick + " was picked" : "the text alone was chosen") + " for it earlier in this run" : "") +
         ". Pick the config to wire, or go on with the text alone.");
       var names = (b.bench.configs || []).map(function (c) { return c && c.name; }).filter(function (n) { return n != null; });
+      var answered = !!(pmCurrent.answeredHere || pmCurrent.resolved);
       if (pick.getAttribute("data-for") !== String(b.seq)) names.concat([null]).forEach(function (n) {
         var lab = document.createElement("label"), r = document.createElement("input"), t = document.createElement("span");
         r.type = "radio";
         r.name = "prompt-bench-pick";
         r.value = n == null ? "" : n;
         r.checked = n == null ? !b.pick : b.pick === n;
+        r.disabled = answered;
         r.setAttribute("data-pick", n == null ? "" : n);
-        t.textContent = n == null ? "Text only \u2014 leave which config is live as it is" : n + (n === b.from && !b.fromMissing ? " (live now)" : "");
+        t.textContent = n == null ? "Text only — leave which config is live as it is" : n + (n === b.from && !b.fromMissing ? " (live now)" : "");
         lab.appendChild(r);
         lab.appendChild(t);
         pick.appendChild(lab);
@@ -10573,8 +10661,8 @@
       line("The bench is wired as config " + b.name + " already", " (" + b.slug + "): nothing to re-cable.");
     } else {
       line("Re-cable " + b.slug + " to config " + b.name,
-        b.fromMissing ? " \u2014 the live config " + b.from + " is not on the bench any more, so what to unplug cannot be told: wire " + b.name + " as drawn."
-          : b.from == null ? " \u2014 no config is live, so every cable of " + b.name + " is to plug." : " from config " + b.from + ".");
+        b.fromMissing ? " — the live config " + b.from + " is not on the bench any more, so what to unplug cannot be told: wire " + b.name + " as drawn."
+          : b.from == null ? " — no config is live, so every cable of " + b.name + " is to plug." : " from config " + b.from + ".");
     }
     if (!eb || typeof eb.configChange !== "function") return;
     var from = b.fromMissing ? null : b.from;
@@ -10582,11 +10670,11 @@
     var list = function (cls, title, rows) {
       var d = document.createElement("div"), h = document.createElement("h4"), ul = document.createElement("ul");
       d.className = "prompt-bench-list " + cls;
-      h.textContent = title + " \u00b7 " + rows.length;
+      h.textContent = title + " · " + rows.length;
       d.appendChild(h);
       rows.forEach(function (r) {
         var li = document.createElement("li");
-        li.textContent = r.a.part + (r.a.connector ? " \u00b7 " + r.a.connector : "") + "  \u2194  " + r.b.part + (r.b.connector ? " \u00b7 " + r.b.connector : "");
+        li.textContent = r.a.part + (r.a.connector ? " · " + r.a.connector : "") + "  ↔  " + r.b.part + (r.b.connector ? " · " + r.b.connector : "");
         ul.appendChild(li);
       });
       if (!rows.length) {
@@ -10598,7 +10686,7 @@
       d.appendChild(ul);
       lists.appendChild(d);
     };
-    if (b.state === "missing" && b.from === target && !b.fromMissing) {
+    if (b.from === target && !b.fromMissing) {
       var same = document.createElement("p");
       same.className = "placeholder-note";
       same.textContent = target + " is the live wiring already: nothing to re-cable.";
@@ -10612,7 +10700,13 @@
 
   // The lookup landed; a Confirm pressed before it marks now.
   function pmBenchLanded(b) {
-    if (b.confirmed) pmBenchMark(b.confirmed, b);
+    if (!b.confirmed) return;
+    try {
+      pmBenchMark(b.confirmed, b);
+    } catch (e) {
+      b.confirmed.marking = false;
+      pmMarkFailed(b.confirmed, "the bench could not be marked: " + (e && e.message ? e.message : String(e)));
+    }
   }
 
   function pmBenchConfirmed(cur) {
@@ -10623,13 +10717,16 @@
   }
 
   // **Confirm marks the config the bench is now wired as**: the one the step
-  // names when the bench has it, the pick when it lacks it (kept for the
-  // run), none for the text alone. Record-only — Core was told the answer,
-  // and is told nothing about cables. A failed mark is said; the answer stands.
+  // names when the bench has it, the pick when it lacks it, none for the text
+  // alone; the run keeps the choice, the text alone included. Always sent,
+  // even for the config a lookup saw live — the record may have moved since,
+  // and the server keeps `since` for the config already live. Record-only —
+  // Core was told the answer, and is told nothing about cables. A failed
+  // mark is said; the answer stands.
   function pmBenchMark(cur, b) {
+    if (b.state === "missing") pmPicks[pmRunKey(b)] = b.pick || "";
     var target = b.state === "has" ? b.name : b.state === "missing" ? b.pick : null;
-    if (b.state === "missing" && b.pick) pmPicks[b.study_id + "\u0000" + b.name] = b.pick;
-    if (!target || (target === b.from && !b.fromMissing)) return;
+    if (!target) return;
     cur.marking = true;
     var here = function () { return pmCurrent === cur; };
     var say = function (t) {
@@ -10637,7 +10734,7 @@
       pmEl("prompt-result").textContent = t;
       pmEl("prompt-result").style.display = "";
     };
-    say("Confirmed. Marking config " + target + " live on " + b.slug + "\u2026");
+    say("Confirmed. Marking config " + target + " live on " + b.slug + "…");
     fetch("/api/bench/live/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -10647,24 +10744,54 @@
     }).then(function () {
       cur.marking = false;
       document.dispatchEvent(new CustomEvent("embarch:live-changed", { detail: { slug: b.slug, config: target, source: "prompt" } }));
-      say("Confirmed. Config " + target + " is marked live on " + b.slug + " \u2014 recorded here, nothing sent to embarch-core.");
-      if (cur.closeWhenMarked && here()) pmHide();
+      say("Confirmed. Config " + target + " is marked live on " + b.slug + " — recorded here, nothing sent to embarch-core.");
+      if (cur.heldResolve && !cur.sending && here()) pmHide();
     }, function (e) {
       cur.marking = false;
-      var text = "Confirmed \u2014 the answer stands. Config " + target + " was not marked live: " + (e && e.message ? e.message : String(e));
-      cur.markFailed = text;
-      if (here()) {
-        say(text);
-        if (cur.closeWhenMarked) pmSettle(cur);
-      } else {
-        pmCarry = "The last prompt was confirmed; config " + target + " was not marked live: " + (e && e.message ? e.message : String(e));
-      }
+      pmMarkFailed(cur, "config " + target + " was not marked live: " + (e && e.message ? e.message : String(e)));
     });
   }
 
-  // Answered here, and the bench mark still on its way or failed: the modal
-  // stays with Close, saying so, and counts as ended, so the next prompt
-  // replaces it at once.
+  // A mark that did not land: said in its own modal when that is still on
+  // screen, else on the line of the prompt on screen now, else on the next.
+  function pmMarkFailed(cur, why) {
+    var text = "Confirmed — the answer stands. " + why.charAt(0).toUpperCase() + why.slice(1);
+    cur.markFailed = text;
+    cur.markWhy = why;
+    if (pmCurrent === cur) {
+      pmEl("prompt-result").textContent = text;
+      pmEl("prompt-result").style.display = "";
+      if (cur.heldResolve && !cur.sending) pmSettle(cur);
+      return;
+    }
+    if (pmCurrent) pmNote(pmEarlier(cur));
+    else pmCarry = pmEarlier(cur);
+  }
+
+  function pmEarlier(cur) {
+    var step = cur.p && cur.p.step_name ? "step '" + cur.p.step_name + "'" : "the last prompt";
+    return "An earlier prompt (" + step + ") was confirmed; " + cur.markWhy;
+  }
+
+  // Answered here, and Core's frame in, while the answer's own reply or the
+  // bench mark is still on its way: the prompt ends on screen — countdown
+  // stopped, Close offered, the pick locked — and the next prompt replaces
+  // it at once; the reply or the mark closes it, or says why it did not.
+  function pmHold(cur) {
+    cur.resolved = true;
+    if (pmTimer) clearInterval(pmTimer);
+    pmTimer = null;
+    pmEl("prompt-countdown").textContent = "";
+    pmSetButtons(false);
+    pmPickLock(true);
+    pmEl("prompt-close").focus();
+    var next = pmQueue.shift();
+    if (next) pmShow(next);
+  }
+
+  // Answered here, and the bench mark failed: the modal stays with Close,
+  // saying so — unless another prompt is waiting, which shows at once with
+  // the failure on its own line.
   function pmSettle(cur) {
     cur.resolved = true;
     if (pmTimer) clearInterval(pmTimer);
@@ -10675,18 +10802,35 @@
       pmEl("prompt-result").style.display = "";
     }
     pmSetButtons(false);
+    pmPickLock(true);
     pmEl("prompt-close").focus();
     var next = pmQueue.shift();
-    if (next) pmShow(next);
+    if (next) {
+      pmShow(next);
+      if (cur.markFailed) pmNote(pmEarlier(cur));
+    }
   }
+
+  // Another repo opened while a prompt is up: what was drawn is the old
+  // repo's, so it is looked up again (and a mark names the new lookup's bench).
+  document.addEventListener("embarch:project", function (ev) {
+    if (ev && ev.detail && ev.detail.initial) return;
+    if (!pmCurrent || pmCurrent.answeredHere || pmCurrent.resolved || !pmCurrent.p) return;
+    try {
+      pmBenchShow(pmCurrent.p);
+    } catch (e) {
+      pmBenchFailed(e);
+    }
+  });
 
   function initPromptModal() {
     pmEl("prompt-bench-pick").addEventListener("change", function (e) {
       var r = e.target;
       if (!r || r.name !== "prompt-bench-pick" || !pmBench || pmBench.state !== "missing") return;
+      if (pmCurrent && (pmCurrent.answeredHere || pmCurrent.resolved)) return;
       pmBench.pick = r.value || null;
       pmBench.kept = false;
-      pmBenchRender(pmBench);
+      pmBenchDraw(pmBench);
     });
     pmEl("prompt-confirm").addEventListener("click", function () { pmAnswer("confirmed"); });
     pmEl("prompt-cancel").addEventListener("click", function () { pmAnswer("cancelled"); });

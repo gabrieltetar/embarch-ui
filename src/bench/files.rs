@@ -1047,7 +1047,8 @@ port_serial = "FT9ABCDE"
     /// browser judges a name from `config_name`'s runs and byte cap; every
     /// character, in the middle of a name and at each end, is judged here by
     /// the served data and by [`check_config_name`] (study-designer's own
-    /// validation), and they must agree — so a character study-designer
+    /// validation), and so is each character alone as a whole name, and they
+    /// must agree — so a character study-designer
     /// starts or stops refusing fails `cargo test` instead of letting the
     /// dialog accept a name the save then refuses.
     #[test]
@@ -1063,6 +1064,7 @@ port_serial = "FT9ABCDE"
             assert_eq!(check_config_name(&format!("a{c}a")).is_ok(), inner, "U+{:04X} inside a name", c as u32);
             assert_eq!(check_config_name(&format!("{c}a")).is_ok(), edge, "U+{:04X} first", c as u32);
             assert_eq!(check_config_name(&format!("a{c}")).is_ok(), edge, "U+{:04X} last", c as u32);
+            assert_eq!(check_config_name(&c.to_string()).is_ok(), edge, "U+{:04X} alone, first and last at once", c as u32);
             checked += 1;
         }
         assert_eq!(checked, 0x110000 - 0x800, "every scalar value, the surrogates excepted");

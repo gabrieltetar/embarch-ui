@@ -947,7 +947,9 @@ try:
         cm = wait_for("var l=document.getElementById('bench-live'); return l.textContent.indexOf('gone') >= 0 ? l.textContent : '';", 6)
         b4 = bar()
         check("a record whose config is gone says so", cm == "live config A is gone", b4)
-        check("and offers Make live with a config that is there, no Declare again", b4["make"] == "Make live" and not b4["again"] and b4["stop"], b4)
+        # The tab on screen carries the gone config's name (a config re-added
+        # under it): recording it is record-only (phase 5), no Declare again yet.
+        check("and offers to make the config on screen live, record-only, no Declare again", b4["make"] == "Make A live" and not b4["again"] and b4["stop"], b4)
         STATE["live"] = dict(STATE["live"], config_missing=False)
 
         # --- a project switch while a make-live is on its way ----------------------------------------

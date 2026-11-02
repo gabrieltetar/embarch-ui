@@ -380,8 +380,11 @@ it leaving the bar saying the config is gone, Make <config> live the way out;
 a bench board picking a board type from the project's catalog in the
 inspector (an analyzer is offered none), proposed on the save's write-through
 and confirmed with no role and its label as the name; a bench with no config
-keeping the row; a file holding a name a host study cannot write refused on
-Save in the server's words. Three ports from `EMBARCH_UI_PORT` (the UI, the
+keeping the row; a file holding a name a host study cannot write a finding
+before Save and refused on Save in the server's words; an added config
+renamed, made live, and the rename undone and redone across saves carrying
+the record each way with its `since` kept; Save and make <config> live with
+unsaved edits; clearing a board's role keeping its board type. Three ports from `EMBARCH_UI_PORT` (the UI, the
 stub Core at +2, an unused desk port at +3); `EMBARCH_BENCH_SHOTS=<dir>` saves
 the config row and the add dialog in both themes.
 
@@ -395,8 +398,13 @@ Confirm answers, then records the config live; lacking it offers the bench's
 configs and the text alone, a pick drawn and recorded, kept for the next
 prompt of the run; no live bench, another repo's or an unreadable record is
 the text alone and one line why. A slow lookup never holds the answer, a
-refused mark is said while the answer stands, and a prompt naming no config
-shows no bench section. Ports: `EMBARCH_UI_PORT`, the proxy at +1,
+refused mark is said while the answer stands — also when Core's resolve frame
+beats the answer's own reply (`stub_core.py`'s `answer_delay`) — a prompt
+arriving while a mark is on its way shows at once with a refusal on its own
+line, the run keeps the text alone as its choice, a project switch reads the
+bench again, the already-wired case still records, a live config gone from
+the bench draws every cable to plug, and a prompt naming no config shows no
+bench section. Ports: `EMBARCH_UI_PORT`, the proxy at +1,
 `stub_core.py` at +2; `EMBARCH_BENCH_SHOTS=<dir>` saves the change and the pick
 in both themes.
 

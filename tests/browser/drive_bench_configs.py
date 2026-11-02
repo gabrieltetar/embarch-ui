@@ -465,6 +465,62 @@ try:
         "return !!document.querySelector('#bench-inspector select[data-ed=\"board\"]');"),
         script("var i=document.getElementById('bench-inspector'); return i.hidden ? 'inspector hidden' : i.innerText.slice(0, 120);"))
 
+    # --- an added config renamed, made live, the rename undone and redone across saves ------------------
+    key(ESC)
+    script("document.getElementById('bench-cfg-add').click();")
+    wait_for("return document.getElementById('bench-dialog').style.display === 'block';", 4)
+    dialog_ok("B", False)
+    wait_for("return document.getElementById('bench-dialog').style.display !== 'block';", 4)
+    script("document.getElementById('bench-cfg-rename').click();")
+    wait_for("return document.getElementById('bench-dialog').style.display === 'block';", 4)
+    dialog_ok("C", None)
+    wait_for("return document.getElementById('bench-dialog').style.display !== 'block';", 4)
+    save()
+    check("an added config renamed before its first save is written under its new name",
+          [c["name"] for c in file("cfg-bench").get("configs", [])] == ["A", "C"], file("cfg-bench").get("configs"))
+    writes = list(CORE_WRITES)
+    click("#bench-make-live")
+    wait_for("return document.getElementById('bench-live').textContent === 'live \u00b7 C';", 6)
+    check("Make C live says the proposals for C come with the next Declare again, and sends Core nothing",
+          "Declare again to see C's proposals" in notice() and CORE_WRITES == writes, notice())
+    since_c = (live() or {}).get("since_utc_ms")
+    script("document.getElementById('bench-undo').click();")
+    check("undo takes the rename back on screen", [t[0] for t in tabs()] == ["A", "B"], tabs())
+    save()
+    back = wait_for("return document.getElementById('bench-live').textContent === 'live \u00b7 B';", 8)
+    check("saving the undone rename carries the record back to B: the same config, told by its own id",
+          bool(back) and (live() or {}).get("config") == "B", [live(), bar(), notice()])
+    check("and a rename keeps the record's since: the wiring did not change", (live() or {}).get("since_utc_ms") == since_c, [since_c, live()])
+    script("document.getElementById('bench-redo').click();")
+    save()
+    again = wait_for("return document.getElementById('bench-live').textContent === 'live \u00b7 C';", 8)
+    check("redoing it and saving carries the record to C again", bool(again) and (live() or {}).get("config") == "C", live())
+
+    # --- Save and make <config> live, with unsaved edits -------------------------------------------
+    tab(0)
+    click('#bench-svg [data-part="brk"] .bn-body', -30, 4)
+    key("f")
+    wait_for("return !document.getElementById('bench-dirty').hidden;", 4)
+    b3 = bar()
+    check("with unsaved edits on another config of the live bench the button saves first", b3["make"] == "Save and make A live", b3)
+    writes = len(CORE_WRITES)
+    click("#bench-make-live")
+    done = wait_for("return document.getElementById('bench-live').textContent === 'live \u00b7 A';", 8)
+    wait_for("var w=document.getElementById('bench-live-wt'); return !w.hidden && w.textContent.indexOf('declared') === 0;", 8)
+    flipped = next(p for p in file("cfg-bench")["parts"] if p["id"] == "brk")
+    check("it saves, records A, and the save itself is declared (write-through), as every save of the live bench is",
+          bool(done) and not dirty() and flipped.get("flip") is True and (live() or {}).get("config") == "A" and len(CORE_WRITES) > writes and
+          (bar()["wt"] or "").startswith("declared"), [bar(), live(), CORE_WRITES[writes:]])
+
+    # --- clearing a role on a board keeps its board type (a bench board takes one now) -------------------
+    script("document.getElementById('bench-inspector').hidden = true;")
+    click('#bench-svg [data-part="dut"] .bn-body', -30, 4)
+    wait_for("var s=document.querySelector('#bench-inspector [data-ed=\"role\"]'); return !!s;", 4)
+    script("var s=document.querySelector('#bench-inspector [data-ed=\"role\"]'); s.value=''; s.dispatchEvent(new Event('change', {bubbles:true}));")
+    kept = wait_for("var s=document.querySelector('#bench-inspector select[data-ed=\"board\"]'); return s && !s.disabled ? s.value : '';", 6)
+    check("clearing the role on a board keeps its board type, offered as a bench board's", kept == "nrf54l15dk/nrf54l15/cpuapp", kept)
+    script("document.getElementById('bench-undo').click();")
+
     # --- a bench with no config, and a file holding a name a study cannot write -------------------------
     pick_bench("bare-bench")
     on_bench("bare-bench")
@@ -480,6 +536,10 @@ try:
 
     pick_bench("odd-bench")
     on_bench("odd-bench")
+    finding = wait_for("return Array.from(document.querySelectorAll('#bench-checks-list [data-finding]')).map(function(l){return l.textContent;})"
+                       ".filter(function(t){return t.indexOf('cannot be saved') >= 0;})[0] || '';", 6)
+    check("a config name a save refuses is a finding on screen before Save, in the save's words",
+          "config ` A` cannot be saved" in (finding or "") and "Rename it to save the bench" in (finding or ""), finding)
     click('#bench-svg [data-part="spare"] .bn-body', -30, 4)
     key("f")
     wait_for("return !document.getElementById('bench-dirty').hidden;", 4)

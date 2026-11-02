@@ -2484,11 +2484,12 @@ cables = [["pod.swd", "dut.swd"]]
 
     /// **Switching configs never calls Core** (owner, 2026-11-01): `POST
     /// /api/bench/live/config` moves the live record's config and sends Core
-    /// nothing, keeps `since` for the config already live, follows a config
-    /// renamed in the file (the way out of `config_missing`), and refuses
-    /// each case naming which it is: nothing live, another bench, a config the
-    /// saved bench lacks, a broken or missing file, another repo holding the
-    /// machine, no `config` key at all.
+    /// nothing, keeps `since` for the config already live and for a rename
+    /// (`renamed_from` gone from the bench), follows a config renamed in the
+    /// file (the way out of `config_missing`), and refuses each case naming
+    /// which it is: nothing live, another bench, a config the saved bench
+    /// lacks, a broken or missing file, another repo holding the machine, no
+    /// `config` or `slug` key at all.
     #[tokio::test]
     async fn a_config_change_moves_the_live_record_and_sends_core_nothing() {
         let stub = stub_with_leftovers();
@@ -2505,11 +2506,14 @@ cables = [["pod.swd", "dut.swd"]]
             let (http, base) = (http.clone(), base.clone());
             async move { http.get(format!("{base}/api/bench/live")).send().await.unwrap().json::<serde_json::Value>().await.unwrap() }
         };
-        let nothing = set(serde_json::json!({ "config": "A" })).await;
+        let nothing = set(serde_json::json!({ "config": "A", "slug": "pd" })).await;
         assert_eq!((nothing.status(), refusal_code(&nothing).as_deref()), (StatusCode::CONFLICT, Some("not-live")));
         let unsaid = set(serde_json::json!({ "slug": "pd" })).await;
         assert_eq!(unsaid.status(), StatusCode::BAD_REQUEST);
         assert!(unsaid.text().await.unwrap().contains("`config`"), "the refusal names the key");
+        let no_slug = set(serde_json::json!({ "config": "A" })).await;
+        assert_eq!(no_slug.status(), StatusCode::BAD_REQUEST);
+        assert!(no_slug.text().await.unwrap().contains("`slug`"), "the refusal names the key");
 
         let version = version_of_bench(&http, &base, "pd").await;
         assert_eq!(make_live(&http, &base, &version).await.status(), StatusCode::OK);
@@ -2528,10 +2532,10 @@ cables = [["pod.swd", "dut.swd"]]
         let through = live_call(&http, &base, "pd", serde_json::json!({ "config": "B", "version": version, "write_through": true })).await;
         assert_eq!(through.status(), StatusCode::OK, "a write-through then names the config recorded");
         let writes = stub.lock().unwrap().writes.len();
-        let none = set(serde_json::json!({ "config": null })).await;
+        let none = set(serde_json::json!({ "config": null, "slug": "pd" })).await;
         assert_eq!((none.status(), get().await["live"]["config"].clone()), (StatusCode::OK, serde_json::Value::Null), "null is the bench-level cables alone");
 
-        let unknown = set(serde_json::json!({ "config": "Z" })).await;
+        let unknown = set(serde_json::json!({ "config": "Z", "slug": "pd" })).await;
         assert_eq!((unknown.status(), refusal_code(&unknown).as_deref()), (StatusCode::CONFLICT, Some("config-missing")));
         let other = set(serde_json::json!({ "config": "A", "slug": "other" })).await;
         assert_eq!((other.status(), refusal_code(&other).as_deref()), (StatusCode::CONFLICT, Some("not-live")));
@@ -2540,12 +2544,21 @@ cables = [["pod.swd", "dut.swd"]]
         // A config renamed in the file: the record reads config_missing until
         // the new name is recorded, which needs no make-live.
         let file = repo.join("embarch/topologies/pd.toml");
-        assert_eq!(set(serde_json::json!({ "config": "B" })).await.status(), StatusCode::OK);
+        assert_eq!(set(serde_json::json!({ "config": "B", "slug": "pd" })).await.status(), StatusCode::OK);
+        let since_b = get().await["live"]["since_utc_ms"].as_u64().unwrap();
         std::fs::write(&file, bench.replace("name = \"B\"", "name = \"B renamed\"")).unwrap();
         assert_eq!(get().await["live"]["config_missing"], true);
-        let renamed = set(serde_json::json!({ "config": "B renamed", "slug": "pd" })).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let renamed = set(serde_json::json!({ "config": "B renamed", "slug": "pd", "renamed_from": "B" })).await;
         assert_eq!(renamed.status(), StatusCode::OK);
-        assert_eq!((get().await["live"]["config"].as_str(), get().await["live"]["config_missing"].as_bool()), (Some("B renamed"), Some(false)));
+        let now = get().await["live"].clone();
+        assert_eq!((now["config"].as_str(), now["config_missing"].as_bool()), (Some("B renamed"), Some(false)));
+        assert_eq!(now["since_utc_ms"].as_u64(), Some(since_b), "a rename is the same wiring: since is kept");
+        // A renamed_from the bench still has is other wiring: since moves.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert_eq!(set(serde_json::json!({ "config": "A", "slug": "pd", "renamed_from": "B renamed" })).await.status(), StatusCode::OK);
+        assert!(get().await["live"]["since_utc_ms"].as_u64().unwrap() > since_b, "a config still on the bench is not a rename");
+        assert_eq!(set(serde_json::json!({ "config": "B renamed", "slug": "pd" })).await.status(), StatusCode::OK);
         assert_eq!(stub.lock().unwrap().writes.len(), writes, "still nothing sent to Core");
 
         // Another repo takes the machine: this one's record is superseded.
@@ -2553,20 +2566,20 @@ cables = [["pod.swd", "dut.swd"]]
         let b = serve_app_live(&core, Some(repo_b.clone()), Some(record.clone())).await;
         let vb = version_of_bench(&http, &b, "pd").await;
         assert_eq!(make_live(&http, &b, &vb).await.status(), StatusCode::OK);
-        let taken = set(serde_json::json!({ "config": "A" })).await;
+        let taken = set(serde_json::json!({ "config": "A", "slug": "pd" })).await;
         assert_eq!((taken.status(), refusal_code(&taken).as_deref()), (StatusCode::CONFLICT, Some("superseded")));
         // Repo b's config change follows into the machine entry a supersede names.
-        let resp = http.post(format!("{b}/api/bench/live/config")).json(&serde_json::json!({ "config": "B" })).send().await.unwrap();
+        let resp = http.post(format!("{b}/api/bench/live/config")).json(&serde_json::json!({ "config": "B", "slug": "pd" })).send().await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(get().await["superseded"]["config"], "B", "the repo that took the machine is named with its config now");
         let back = version_of_bench(&http, &base, "pd").await;
         assert_eq!(live_call(&http, &base, "pd", serde_json::json!({ "config": "A", "version": back, "write_through": false })).await.status(), StatusCode::OK);
 
         std::fs::write(&file, "name = \"pd\"\n[[parts]\n").unwrap();
-        let broken = set(serde_json::json!({ "config": "A" })).await;
+        let broken = set(serde_json::json!({ "config": "A", "slug": "pd" })).await;
         assert_eq!((broken.status(), refusal_code(&broken).as_deref()), (StatusCode::CONFLICT, Some("unparseable")));
         std::fs::remove_file(&file).unwrap();
-        let gone = set(serde_json::json!({ "config": "A" })).await;
+        let gone = set(serde_json::json!({ "config": "A", "slug": "pd" })).await;
         assert_eq!((gone.status(), refusal_code(&gone).as_deref()), (StatusCode::CONFLICT, Some("not-live")));
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&repo_b);

@@ -2187,6 +2187,8 @@ table.data-table {
 /* A step naming a bench config (phase 5): the change drawn and listed, or the pick. */
 .prompt-bench { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-surface-2); max-height: 46vh; overflow: auto; }
 .prompt-bench[hidden] { display: none; }
+.prompt-mark-note { margin: 6px 0 0; }
+.prompt-mark-note[hidden] { display: none; }
 .prompt-bench-head { font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; }
 .prompt-bench-head .prompt-bench-why { font-weight: 400; color: var(--text-secondary); }
 .prompt-bench-svg { display: block; width: 100%; height: 220px; margin: 6px 0 10px; border-radius: 8px; background: var(--bg-surface); }

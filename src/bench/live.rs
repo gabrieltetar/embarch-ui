@@ -214,17 +214,22 @@ pub fn take_machine(path: &Path, repo: &Path, slug: &str, config: Option<&str>) 
 }
 
 /// The config this repo's live bench is wired as, **and nothing else**: the
-/// entry's config (its `since` moved only when the config changes), the
-/// machine's when it points at this repo's bench, and the mark a takeover
-/// left on another repo's entry. Refused when the entry is gone or names
-/// another bench by the time the record is written.
-pub fn set_live_config(path: &Path, repo: &Path, slug: &str, config: Option<&str>) -> Result<LiveRecord, String> {
+/// entry's config, the machine's when it points at this repo's bench, and
+/// the mark a takeover left on another repo's entry. `since` moves only when
+/// the wiring changes: not for the config already live, nor for a rename
+/// (`renamed`: the entry named the config's old name, which the bench no
+/// longer has). Refused when the entry is gone or names another bench by
+/// the time the record is written.
+pub fn set_live_config(path: &Path, repo: &Path, slug: &str, config: Option<&str>, renamed: Option<&str>) -> Result<LiveRecord, String> {
     let key = repo_key(repo);
     update_records(path, |r| {
         let entry = r.repos.get_mut(&key).filter(|e| e.slug == slug).ok_or_else(|| format!("`{slug}` is no longer this repo's live bench"))?;
         if entry.config.as_deref() != config {
+            let same_wiring = renamed.is_some() && entry.config.as_deref() == renamed;
             entry.config = config.map(str::to_string);
-            entry.since_utc_ms = now_utc_ms();
+            if !same_wiring {
+                entry.since_utc_ms = now_utc_ms();
+            }
         }
         let record = entry.clone();
         if let Some(m) = r.machine.as_mut().filter(|m| m.repo == key && m.slug == slug) {
@@ -1108,28 +1113,43 @@ pub struct LiveConfigRequest {
     /// bench-level cables alone. **Required**.
     #[serde(default, deserialize_with = "present")]
     pub config: Option<Option<String>>,
-    /// The bench the caller believes is live: when given, a record naming
-    /// another bench is `409 not-live` rather than a config set on it.
+    /// The bench the caller believes is live: a record naming another bench
+    /// is `409 not-live` rather than a config set on it. **Required**.
     #[serde(default)]
     pub slug: Option<String>,
+    /// The config's name before a rename the caller just saved: when the
+    /// record names it and the bench no longer has it, this is the same
+    /// wiring under a new name, and `since` is kept.
+    #[serde(default)]
+    pub renamed_from: Option<String>,
 }
 
 /// `POST /api/bench/live/config` — **records which config the live bench is
 /// wired as, and calls nothing in Core** (owner, 2026-11-01: switching
-/// configs never calls Core; a config is a named set of part-to-part
-/// cables, which declare nothing). Answers the record as `GET` does.
+/// configs never calls Core). Answers the record as `GET` does.
 ///
-/// The config must be in the bench **as saved**. Refused `409`: no record,
-/// its file gone, or `slug` naming another bench (`not-live`); another repo
-/// holding the machine (`superseded`); the file broken (`unparseable`); the
-/// config not in it (`config-missing`). A rename of the live config on the
-/// canvas lands here after its save; a prompt naming a config marks it here
-/// once it is answered. Under the same lock as a make-live, a retract and a
-/// clear, with every check made after taking it. Declaring again is still
-/// an explicit make-live or a write-through.
+/// **Why nothing is applied.** A config is a named set of part-to-part
+/// cables, and nothing a make-live *applies* comes from one: board types,
+/// the dev-bench link, signals, instruments and the bootload pair are all
+/// read from the parts and the bench-level cables. A config does change
+/// which probe a role's part reaches over an SWD lead, so the enrolment
+/// *proposals* and the role leftovers for the new config are worked out at
+/// the next Declare again (or write-through), which the browser says.
+///
+/// The config must be in the bench **as saved**. Refused `400` without
+/// `config` or `slug`; `409`: no record, its file gone, or `slug` naming
+/// another bench (`not-live`); another repo holding the machine
+/// (`superseded`); the file broken (`unparseable`); the config not in it
+/// (`config-missing`). A rename of the live config on the canvas lands here
+/// after its save, naming `renamed_from` so `since` is kept; a prompt naming
+/// a config marks it here once it is answered. Under the same lock as a
+/// make-live, a retract and a clear, with every check made after taking it.
 pub async fn api_live_config(State(state): State<AppState>, OpenRepo(repo): OpenRepo, Json(req): Json<LiveConfigRequest>) -> Response {
     let Some(config) = req.config else {
         return refuse(StatusCode::BAD_REQUEST, "a config change names `config`: a config of the live bench, or null for its bench-level cables alone");
+    };
+    let Some(slug) = req.slug.clone() else {
+        return refuse(StatusCode::BAD_REQUEST, "a config change names `slug`, the live bench it is for, so a change meant for another bench is refused");
     };
     let path = match record_path(&state) {
         Ok(p) => p.to_path_buf(),
@@ -1148,7 +1168,7 @@ pub async fn api_live_config(State(state): State<AppState>, OpenRepo(repo): Open
     let Some(record) = records.repos.get(&key) else {
         return refuse_as(StatusCode::CONFLICT, "not-live", "no bench is live in this repo, so no config is recorded as its wiring; make a bench live first");
     };
-    if let Some(slug) = req.slug.as_deref().filter(|s| *s != record.slug) {
+    if slug != record.slug {
         return refuse_as(
             StatusCode::CONFLICT,
             "not-live",
@@ -1177,8 +1197,10 @@ pub async fn api_live_config(State(state): State<AppState>, OpenRepo(repo): Open
             format!("`{}` as saved has no config named `{name}`; save the bench first, or pick a config it has", record.slug),
         );
     }
-    let slug = record.slug.clone();
-    match set_live_config(&path, &repo, &slug, config.as_deref()).and_then(|r| view(&repo, &r)) {
+    // A rename only when the old name is gone from the bench: a config of
+    // that name still there is other wiring.
+    let renamed = req.renamed_from.as_deref().filter(|old| bench.config(old).is_none());
+    match set_live_config(&path, &repo, &slug, config.as_deref(), renamed).and_then(|r| view(&repo, &r)) {
         Ok(live) => Json(serde_json::json!({ "live": live, "superseded": null })).into_response(),
         Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
     }

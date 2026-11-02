@@ -756,6 +756,12 @@ pub fn check(bench: &Bench, templates: &Templates, config: Option<&Config>) -> V
     // ---- configs ----
     let mut config_names: BTreeSet<&str> = BTreeSet::new();
     for c in &bench.configs {
+        // A name a host study could not write (a hand edit): drawn and
+        // checked, and refused on save in the same sentence, said here so the
+        // refusal is on screen before Save (decision 72). Renaming fixes it.
+        if let Err(why) = super::files::check_config_name(&c.name) {
+            out.push(finding(Level::Error, "config-name-refused", format!("{why}. Rename it to save the bench."), vec![], vec![]));
+        }
         if !config_names.insert(&c.name) {
             out.push(finding(Level::Error, "config-name-twice",
                 format!("Two configs are named `{}`; a study naming it could mean either.", c.name), vec![], vec![]));
@@ -1221,6 +1227,21 @@ power = "drp"
             let f = check(&bench, &templates(), Some(config));
             assert!(f.is_empty(), "config {}: {f:#?}", config.name);
         }
+    }
+
+    /// A config name a save refuses (a hand edit) is an error finding in the
+    /// save's own sentence, so the refusal is on screen before Save.
+    #[test]
+    fn a_config_name_a_save_refuses_is_a_finding_in_its_words() {
+        let mut bench = pd_bench();
+        bench.configs[0].name = "A ".into();
+        let f = check(&bench, &templates(), Some(&bench.configs[1]));
+        let refused = f.iter().find(|f| f.code == "config-name-refused").expect("found");
+        assert_eq!(refused.level, Level::Error);
+        let said = crate::bench::files::check_config_name("A ").unwrap_err();
+        assert_eq!(refused.text, format!("{said}. Rename it to save the bench."));
+        bench.configs[0].name = "A".into();
+        assert!(!codes(&check(&bench, &templates(), Some(&bench.configs[1]))).contains(&"config-name-refused"));
     }
 
     #[test]

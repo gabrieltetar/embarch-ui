@@ -104,7 +104,7 @@ name = "B"
 cables = [["dut.usb-c", "an.in"], ["an.out", "brk.usb-c"]]
 """
 
-FAULT = {"delay_live": 0.0, "refuse_mark": False}
+FAULT = {"delay_live": 0.0, "refuse_mark": False, "delay_mark": 0.0}
 MARKS = []
 
 LISTEN = (b"<script>window.__errs=[];addEventListener('error',function(e){__errs.push(String(e.message))});"
@@ -136,6 +136,8 @@ class Proxy(BaseHTTPRequestHandler):
             time.sleep(FAULT["delay_live"])
         if path == "/api/bench/live/config" and self.command == "POST":
             MARKS.append(json.loads(data or b"{}"))
+            if FAULT["delay_mark"]:
+                time.sleep(FAULT["delay_mark"])
             if FAULT["refuse_mark"]:
                 return self._send(409, b"this repo's bench is not live: another repo went live later", headers={"x-embarch-refusal": "superseded"})
         up = http.client.HTTPConnection("127.0.0.1", int(UI_PORT), timeout=120)
@@ -385,6 +387,24 @@ try:
     check("the text alone just answers: no mark, the record as it was",
           answers()[-1].get("prompt_id") == 3 and len(MARKS) == marks and live_config() == "A", [answers()[-1:], MARKS[marks:]])
 
+    # The text alone replaces the run's pick: the next prompt naming C has it
+    # chosen, and a Confirm while the lookup is on its way marks nothing.
+    FAULT["delay_live"] = 2.0
+    stub("start", {"prompt_id": 31, "text": "Sink-only, third time", "bench_config": "C", "deadline_in_ms": 120000})
+    wait_modal(lambda m: m["open"] and m["state"] == "loading", 8)
+    click("#prompt-confirm")
+    wait_modal(lambda m: not m["open"], 6)
+    FAULT["delay_live"] = 0.0
+    time.sleep(2.8)
+    check("the run keeps the text alone: a Confirm made while the lookup was on its way marks nothing",
+          answers()[-1].get("prompt_id") == 31 and len(MARKS) == marks and live_config() == "A", [answers()[-1:], MARKS[marks:]])
+    stub("start", {"prompt_id": 32, "text": "Sink-only, fourth time", "bench_config": "C", "deadline_in_ms": 120000})
+    m = wait_modal(lambda m: m["open"] and m["state"] == "missing")
+    check("and the next prompt naming C has the text alone chosen, saying so",
+          m["picks"] == [["A", False], ["B", False], ["", True]] and "the text alone was chosen for it earlier in this run" in m["head"], m)
+    click("#prompt-cancel")
+    wait_modal(lambda m: not m["open"])
+
     # --- 3. a slow lookup never holds the answer -----------------------------------------
     FAULT["delay_live"] = 3.0
     stub("start", {"prompt_id": 4, "text": "Analyzer back in line", "bench_config": "B", "deadline_in_ms": 120000})
@@ -413,6 +433,77 @@ try:
     check("the answer reached Core all the same", answers()[-1].get("prompt_id") == 5 and answers()[-1].get("answer") == "confirmed", answers()[-1:])
     FAULT["refuse_mark"] = False
     click("#prompt-close")
+
+    # --- 4b. Core's resolve frame before the answer's own reply -----------------------------
+    stub("answer_delay", {"ms": 1200})
+    FAULT["refuse_mark"] = True
+    stub("start", {"prompt_id": 6, "text": "Analyzer in line, frame first", "bench_config": "B", "deadline_in_ms": 120000})
+    wait_modal(lambda m: m["open"] and m["state"] == "has")
+    click("#prompt-confirm")
+    m = wait_modal(lambda m: m["close"] and not m["confirm"], 4)
+    check("frame first: the frame ends the prompt on screen while the answer is on its way, Close offered", m["open"] and m["close"], m)
+    m = wait_modal(lambda m: "not marked live" in m["result"], 6)
+    check("frame first: a refused mark is still said in that prompt's own modal, the answer standing",
+          m["open"] and "the answer stands" in m["result"] and answers()[-1].get("prompt_id") == 6 and m["close"], m)
+    FAULT["refuse_mark"] = False
+    click("#prompt-close")
+    stub("start", {"prompt_id": 7, "text": "Analyzer in line, frame first again", "bench_config": "B", "deadline_in_ms": 120000})
+    wait_modal(lambda m: m["open"] and m["state"] == "has")
+    click("#prompt-confirm")
+    m = wait_modal(lambda m: not m["open"], 6)
+    time.sleep(0.4)
+    check("frame first: a mark that lands closes the modal, the config marked", not m["open"] and live_config() == "B" and
+          MARKS[-1] == {"slug": "pd-bench", "config": "B"}, [m, live_config()])
+    stub("answer_delay", {"ms": 0})
+
+    # --- 4c. a prompt that arrives while a mark is on its way shows at once --------------------
+    FAULT["delay_mark"] = 2.5
+    FAULT["refuse_mark"] = True
+    stub("start", {"prompt_id": 8, "text": "Direct cable, slow record", "bench_config": "A", "deadline_in_ms": 120000})
+    wait_modal(lambda m: m["open"] and m["state"] == "has")
+    click("#prompt-confirm")
+    wait_modal(lambda m: m["close"], 4)
+    stub("start", {"prompt_id": 9, "text": "Press the reset button", "deadline_in_ms": 120000})
+    t0 = time.time()
+    m = wait_modal(lambda m: m["open"] and "reset button" in m["text"], 6)
+    check("a prompt arriving while the last one's mark is on its way shows at once, not after it",
+          "reset button" in m["text"] and time.time() - t0 < 2.0 and m["confirm"], [time.time() - t0, m])
+    note = wait_for("var n=document.getElementById('prompt-mark-note'); return !n.hidden ? n.textContent : '';", 6)
+    check("and the mark's refusal is said on that prompt's own line, naming the earlier step",
+          "An earlier prompt (step 'swap the cable') was confirmed" in (note or "") and "not marked live" in (note or "") and
+          modal()["text"] == "Press the reset button" and not modal()["result"], [note, modal()["result"]])
+    FAULT["delay_mark"] = 0.0
+    FAULT["refuse_mark"] = False
+    click("#prompt-confirm")
+    wait_modal(lambda m: not m["open"])
+
+    # --- 4d. a project switch while a prompt is up looks the bench up again ---------------------
+    record("A")
+    stub("start", {"prompt_id": 10, "text": "Analyzer in line, after a switch", "bench_config": "B", "deadline_in_ms": 120000})
+    m = wait_modal(lambda m: m["open"] and m["state"] == "has")
+    check("before the switch: the change from A is drawn", "from config A" in m["head"], m["head"])
+    record("B")
+    script("document.dispatchEvent(new CustomEvent('embarch:project', {detail: {path: arguments[0]}}));", [str(fw)])
+    m = wait_modal(lambda m: "already" in m["head"], 8)
+    check("a project switch mid-prompt reads the live bench again (now wired as B)", "wired as config B already" in m["head"], m["head"])
+
+    # --- 4e. the already-wired case still records, and a config_missing record ---------------------
+    marks = len(MARKS)
+    click("#prompt-confirm")
+    wait_modal(lambda m: not m["open"])
+    time.sleep(0.5)
+    check("already wired: Confirm still sends the config, the record keeping it", MARKS[marks:] == [{"slug": "pd-bench", "config": "B"}] and
+          live_config() == "B", MARKS[marks:])
+    record("Z")
+    stub("start", {"prompt_id": 11, "text": "Analyzer in line, from a gone config", "bench_config": "B", "deadline_in_ms": 120000})
+    m = wait_modal(lambda m: m["open"] and m["state"] == "has")
+    check("a live config gone from the bench: what to unplug cannot be told, every cable of B is to plug",
+          "the live config Z is not on the bench any more" in m["head"] and m["unplug"] == ["nothing"] and len(m["plug"]) == 2 and
+          m["drawnPlug"] == 2 and m["drawnUnplug"] == 0, m)
+    click("#prompt-confirm")
+    wait_modal(lambda m: not m["open"])
+    time.sleep(0.5)
+    check("and Confirm records B, which the bench has", live_config() == "B", live_config())
 
     # --- 5. no live bench, another repo's, unreadable: the text alone and one line why -----------
     for label, setup, words in (
