@@ -685,6 +685,9 @@
   window.embarchParts = {
     // A dialog open on a draft that differs from what it opened as.
     unsaved: function () { return shown() && changed(); },
+    // The canvas's leave guard asked and the user chose Discard: the draft
+    // goes without a second question.
+    discard: function () { if (shown()) close(); },
   };
 
   // ---------------------------------------------------------------- open, close
