@@ -1,0 +1,13 @@
+# The sample tab behind embarch-ui's tab folder tests. Those tests and
+# tests/browser/drive_tab.py copy this folder and fill in the backend's address
+# and the token file.
+label = "Sample"
+icon = "icon.svg"
+panel = "panel.html"
+scripts = ["tab.js"]
+styles = ["tab.css"]
+
+[[backends]]
+name = "echo"
+url = "http://127.0.0.1:4999"
+token_file = "/path/to/token"

@@ -195,6 +195,20 @@ geckodriver --port 4444 &
 python3 tests/browser/drive_links.py
 ```
 
+`drive_tab.py` drives a tab folder (`embarch-ui` decision 100). It copies
+`tests/fixtures/sample-tab`, points a scratch UI's `[[tabs]]` at the copy and
+brings its own stand-in backend, then checks that the tab sits beside Desk and
+opens by fragment and click, that its files, calls and event stream arrive with
+the token added and kept out of what is served, that another origin is refused,
+that a broken manifest leaves the UI up without the tab, and that a browser
+remembering a tab that has gone lands on Desk.
+
+```sh
+cargo build
+geckodriver --port 4444 &
+python3 tests/browser/drive_tab.py
+```
+
 `drive_race.py` and `drive_switch.py` are the Live Study tab's two staleness
 guards (`embarch-ui` decision 60). `drive_race.py` delays the browser's own
 `fetch` of one study record, opens a second study meanwhile, and checks only

@@ -93,7 +93,7 @@
   // A flash stays its full time whatever view arrives meanwhile: a pushed
   // view used to clear it within seconds, so a failed Start work vanished
   // before it could be read. Only an unreachable desk — said by load() or
-  // by the server's desk-error push — is cleared by the next good view.
+  // by the server's view-error push — is cleared by the next good view.
   var unreachable = false;
 
   function showError(msg) {
@@ -1348,7 +1348,7 @@
       if (unreachable) showError(null);
       if (!editing()) render();
     });
-    source.addEventListener("desk-error", function (ev) { showError(ev.data); unreachable = true; });
+    source.addEventListener("view-error", function (ev) { showError(ev.data); unreachable = true; });
   }
   document.querySelectorAll('.nav-item[data-tab="desk"]').forEach(function (el) { el.addEventListener("click", load); });
   load();

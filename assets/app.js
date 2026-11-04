@@ -186,6 +186,9 @@
     } catch (_) {
       /* best effort */
     }
+    // A remembered tab can be gone: a tab folder left the config, or it stopped
+    // being readable. Showing it would leave no panel on screen at all.
+    if (!document.querySelector(`.nav-item[data-tab="${CSS.escape(initial)}"]`)) initial = "desk";
     // The fragment outranks the remembered tab — it was typed or clicked
     // just now, the stored one is from some previous session. Its
     // parameters wait for `followRouteParams` at the end of start-up, once

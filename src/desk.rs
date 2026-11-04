@@ -16,6 +16,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream::Stream;
 use std::convert::Infallible;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -60,7 +61,7 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
 ///
 /// What this closes: a page elsewhere posting plain text, which needs no CORS
 /// preflight, to `/api/desk/mailbox` or `/api/desk/tiles/{id}/approve`.
-fn same_origin(method: &Method, headers: &HeaderMap) -> bool {
+pub(crate) fn same_origin(method: &Method, headers: &HeaderMap) -> bool {
     if let Some(site) = headers.get("sec-fetch-site") {
         return site.as_bytes() == b"same-origin";
     }
@@ -91,14 +92,7 @@ pub async fn proxy(method: Method, headers: HeaderMap, Path(rest): Path<String>,
 /// `Content-Type`. The type is passed through, never made JSON here: the
 /// desk's JSON routes then refuse a body the browser sent as something else.
 async fn forward(url: String, token: &str, method: Method, content_type: Option<HeaderValue>, body: Bytes) -> Response {
-    let mut req = client().request(method, url).bearer_auth(token);
-    if let Some(ct) = content_type {
-        req = req.header(header::CONTENT_TYPE, ct);
-    }
-    if !body.is_empty() {
-        req = req.body(body);
-    }
-    match req.send().await {
+    match send(client(), url, token, method, content_type, body).await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -112,8 +106,28 @@ async fn forward(url: String, token: &str, method: Method, content_type: Option<
     }
 }
 
-/// How often the server asks the desk for a fresh view while a Desk tab
-/// is listening. The desk refreshes its own sources on slower clocks.
+/// The request itself, shared with a tab's backends (`tabs.rs`): the token, the
+/// body, the body's type, and no other header from the browser.
+pub(crate) async fn send(
+    client: &reqwest::Client,
+    url: String,
+    token: &str,
+    method: Method,
+    content_type: Option<HeaderValue>,
+    body: Bytes,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut req = client.request(method, url).bearer_auth(token);
+    if let Some(ct) = content_type {
+        req = req.header(header::CONTENT_TYPE, ct);
+    }
+    if !body.is_empty() {
+        req = req.body(body);
+    }
+    req.send().await
+}
+
+/// How often the server asks for a fresh view while a page is listening. The
+/// desk refreshes its own sources on slower clocks.
 const VIEW_EVERY: Duration = Duration::from_secs(10);
 
 fn desk_token() -> Option<String> {
@@ -138,15 +152,25 @@ async fn fetch_view() -> Result<String, String> {
 /// server-side, so the browser holds one `EventSource` and no interval
 /// (decision 6) — the same rule every other live surface follows.
 pub async fn events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = futures_util::stream::unfold(true, |first| async move {
+    pushed_view(fetch_view)
+}
+
+/// What `fetch` answers, pushed now and on every `VIEW_EVERY` until the page
+/// goes away: `view` with the body, or `view-error` with why there is none.
+pub(crate) fn pushed_view<F, Fut>(fetch: F) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<String, String>> + Send + 'static,
+{
+    let stream = futures_util::stream::unfold((fetch, true), |(fetch, first)| async move {
         if !first {
             tokio::time::sleep(VIEW_EVERY).await;
         }
-        let ev = match fetch_view().await {
+        let ev = match fetch().await {
             Ok(body) => Event::default().event("view").data(body),
-            Err(msg) => Event::default().event("desk-error").data(msg),
+            Err(msg) => Event::default().event("view-error").data(msg),
         };
-        Some((Ok(ev), false))
+        Some((Ok(ev), (fetch, false)))
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

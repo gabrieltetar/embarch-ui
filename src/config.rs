@@ -33,6 +33,18 @@ pub struct Config {
     /// projects table of its own.
     #[serde(default)]
     pub build: Option<BuildConfig>,
+    /// Tab folders this UI adds to its page (`tabs.rs`). Empty is the ordinary
+    /// case, and the page is then the built-in one.
+    #[serde(default)]
+    pub tabs: Vec<TabConfig>,
+}
+
+/// One `[[tabs]]` entry: the tab's id, and the folder holding its `tab.toml`
+/// and files. The folder is absolute or starts with `~/`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TabConfig {
+    pub id: String,
+    pub folder: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,7 +76,7 @@ fn default_core() -> CoreConfig {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { core: default_core(), study_designer: None, build: None }
+        Config { core: default_core(), study_designer: None, build: None, tabs: Vec::new() }
     }
 }
 

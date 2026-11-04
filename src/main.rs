@@ -20,6 +20,7 @@ mod logs;
 mod snapshot;
 mod studies_api;
 mod study_designer;
+mod tabs;
 mod time_chart;
 mod topology;
 mod trace;
@@ -183,9 +184,18 @@ pub(crate) struct AppState {
     /// `None` when there is no per-user data directory, and the live routes
     /// say so.
     bench_live_path: Option<std::path::PathBuf>,
+    /// The tab folders the config names (`tabs.rs`). Empty on most machines.
+    tabs: Arc<tabs::Tabs>,
     /// One make-live, retract or clear at a time (`bench::live`), held
     /// across Core's answers so a check is never overtaken before its write.
     bench_live_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// The tab routes need only the tabs, so their tests run without a Core.
+impl axum::extract::FromRef<AppState> for Arc<tabs::Tabs> {
+    fn from_ref(state: &AppState) -> Self {
+        state.tabs.clone()
+    }
 }
 
 /// One decoded capture, keyed by the study and tap it was decoded from.
@@ -270,6 +280,7 @@ async fn async_main() -> anyhow::Result<()> {
         build_config_path,
         bench_live_path: bench::live::default_record_path(),
         bench_live_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tabs: Arc::new(tabs::Tabs::new(config.tabs)),
     };
 
     let app = app(state);
@@ -293,6 +304,7 @@ fn app(state: AppState) -> Router {
         .route("/bench-parts.js", get(bench_parts_js))
         .route("/api/desk-events", get(desk::events))
         .route("/api/desk/{*rest}", axum::routing::any(desk::proxy))
+        .merge(tabs::routes())
         .route("/favicon.png", get(favicon_png))
         .route("/favicon.svg", get(favicon_svg))
         .route("/fonts/{file}", get(font))
@@ -554,6 +566,18 @@ fn revalidating_asset(
             .clone()
     };
 
+    revalidating_answer(headers, content_type, etag, axum::body::Body::from(body))
+}
+
+/// The same answer for bytes read at request time: a tab's files, and the page
+/// once tabs are drawn into it. The tag is worked out each time, because these
+/// bytes are not the binary's and can change while it runs.
+fn revalidating_bytes(headers: &header::HeaderMap, content_type: &str, body: Vec<u8>) -> Response {
+    let etag = asset_etag(&body);
+    revalidating_answer(headers, content_type, etag, axum::body::Body::from(body))
+}
+
+fn revalidating_answer(headers: &header::HeaderMap, content_type: &str, etag: String, body: axum::body::Body) -> Response {
     let unchanged = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -576,8 +600,13 @@ fn revalidating_asset(
         .into_response()
 }
 
-async fn index(headers: header::HeaderMap) -> Response {
-    revalidating_asset(&headers, "text/html; charset=utf-8", INDEX_HTML.as_bytes())
+/// The built-in page, unless the config names a tab that can be drawn into it.
+async fn index(State(state): State<AppState>, headers: header::HeaderMap) -> Response {
+    const HTML: &str = "text/html; charset=utf-8";
+    match state.tabs.render_index(INDEX_HTML) {
+        Some(page) => revalidating_bytes(&headers, HTML, page.into_bytes()),
+        None => revalidating_asset(&headers, HTML, INDEX_HTML.as_bytes()),
+    }
 }
 
 async fn style_css(headers: header::HeaderMap) -> Response {
@@ -1167,6 +1196,22 @@ mod tests {
         serve_app_over("http://127.0.0.1:1").await
     }
 
+    /// With no tab configured the page is the built-in one, byte for byte, and
+    /// the tab routes are there and answer that there is no such tab.
+    #[tokio::test]
+    async fn with_no_tab_configured_the_page_is_unchanged() {
+        let base = serve_app_over("http://127.0.0.1:1").await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let page = http.get(format!("{base}/")).send().await.unwrap();
+        assert_eq!(page.headers()["x-frame-options"], "DENY");
+        assert_eq!(page.text().await.unwrap(), INDEX_HTML);
+        for path in ["tab/dev/tab.js", "api/tab/dev/desk/view", "api/tab-events/dev/desk/view"] {
+            let resp = http.get(format!("{base}/{path}")).send().await.unwrap();
+            assert_eq!(resp.status(), 404, "{path}");
+            assert_eq!(resp.headers()["x-frame-options"], "DENY", "{path}");
+        }
+    }
+
     async fn serve_app_over(core_url: &str) -> String {
         serve_app_in(core_url, None).await
     }
@@ -1213,6 +1258,7 @@ mod tests {
             build_config_path: None,
             bench_live_path,
             bench_live_lock: Arc::new(tokio::sync::Mutex::new(())),
+            tabs: Arc::new(tabs::Tabs::default()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
