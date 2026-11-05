@@ -502,13 +502,19 @@
     draftsEl.hidden = false;
     draftsEl.innerHTML = '<div class="card-title">Drafts from agents — nothing is sent until you press Send</div>' +
       drafts.map(function (d) {
-        var what = d.kind === "linear_issue"
-          ? "New Linear issue in <b>" + esc(d.team_key) + "</b>"
-          : "Comment on <b>" + esc(d.issue_key) + "</b>";
+        var replies = d.replies || [];
+        var what = d.kind === "linear_issue" ? "New Linear issue in <b>" + esc(d.team_key) + "</b>"
+          : d.kind === "linear_edit" ? "Change to <b>" + esc(d.issue_key) + "</b>"
+          : (d.reply_to ? "Reply in a thread on <b>" : "Comment on <b>") + esc(d.issue_key) + "</b>" +
+            (replies.length ? ", then " + replies.length + (replies.length === 1 ? " reply" : " replies") + " under it" : "");
+        // An edit's title box and description box both stand for "leave as
+        // it is" when empty (embarch-desk decision 75).
+        var keep = d.kind === "linear_edit" ? " placeholder=\"empty keeps the current one\"" : "";
         return '<div class="desk-draft" data-draft-id="' + esc(d.id) + '">' +
           '<div class="desk-draft-head">' + what + ' <span class="desk-detail">' + esc(new Date(d.created_ms).toLocaleString()) + "</span></div>" +
-          (d.kind === "linear_issue" ? '<input class="desk-input desk-draft-title" type="text" value="' + esc(d.title || "") + '" />' : "") +
-          '<textarea class="desk-input desk-textarea desk-draft-body" rows="4">' + esc(d.body) + "</textarea>" +
+          (d.kind === "linear_issue" || d.kind === "linear_edit" ? '<input class="desk-input desk-draft-title" type="text"' + keep + ' value="' + esc(d.title || "") + '" />' : "") +
+          '<textarea class="desk-input desk-textarea desk-draft-body" rows="4"' + keep + ">" + esc(d.body) + "</textarea>" +
+          replies.map(function (r) { return '<textarea class="desk-input desk-textarea desk-draft-reply" rows="3">' + esc(r) + "</textarea>"; }).join("") +
           '<div class="desk-form"><button class="btn btn-primary btn-tiny" type="button" data-draft-send="' + esc(d.id) + '">Send</button>' +
           '<button class="btn btn-tiny" type="button" data-draft-discard="' + esc(d.id) + '">Discard</button></div></div>';
       }).join("");
@@ -1346,6 +1352,8 @@
       var patch = { body: box.querySelector(".desk-draft-body").value };
       var titleEl = box.querySelector(".desk-draft-title");
       if (titleEl) patch.title = titleEl.value;
+      var replyEls = box.querySelectorAll(".desk-draft-reply");
+      if (replyEls.length) patch.replies = Array.prototype.map.call(replyEls, function (r) { return r.value; });
       t.disabled = true;
       api("PATCH", "/drafts/" + encodeURIComponent(id), patch).then(function () {
         return api("POST", "/drafts/" + encodeURIComponent(id) + "/send");
