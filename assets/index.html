@@ -122,6 +122,22 @@
           <button class="btn btn-tiny" id="desk-edit" type="button">Edit desk</button>
           <button class="btn btn-tiny" id="desk-create" type="button">New desk</button>
         </div>
+        <!-- Desk notes (embarch-desk decision 74): the open desk's standing
+             working agreements, which the desk gives every session in its
+             repos when it starts. Never a tile line, never Harvest. Drawn
+             from the view's desk_notes; hidden with no desk open. -->
+        <section id="desk-dnotes" class="card desk-dnotes" aria-labelledby="desk-dnotes-title" hidden>
+          <div class="card-title"><span id="desk-dnotes-title">Desk notes</span><span class="desk-detail" id="desk-dnotes-count"></span></div>
+          <p class="desk-help">Standing rules for every session in this desk's repos, given to each one when it starts. Never a tile line, never in Harvest.</p>
+          <ul id="desk-dnotes-list" class="desk-dnotes-list"></ul>
+          <div class="desk-dnotes-add">
+            <textarea id="desk-dnotes-new" class="desk-input desk-textarea" rows="2" spellcheck="true" aria-label="A new desk note"
+              placeholder="One rule per note, e.g. &quot;in repo X, the only build that matters is app Y on board Z&quot;"></textarea>
+            <div class="desk-form"><button class="btn btn-tiny btn-primary" id="desk-dnotes-add" type="button" disabled>Add note</button>
+              <span class="desk-detail" id="desk-dnotes-len"></span>
+              <span class="desk-detail desk-dnotes-err" id="desk-dnotes-status" role="status"></span></div>
+          </div>
+        </section>
         <div class="desk-bar">
           <!-- Left empty for a Promptu section (embarch-desk decision 65). -->
           <span id="desk-waiting" class="badge badge-warning" hidden></span>

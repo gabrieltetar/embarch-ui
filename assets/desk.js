@@ -527,6 +527,159 @@
     newDeskSel.value = keep || (d ? d.id : "");
   }
 
+  // ---------------------------------------------------------------- desk notes
+  //
+  // The open desk's standing notes (embarch-desk decision 74): working
+  // agreements for every session in the desk's repos, which the desk puts
+  // into each session's context when it starts. Never a tile line, never part
+  // of a Harvest note. The user writes them here and an agent through
+  // desk_add_desk_note (badged "agent"); only this strip edits or deletes one.
+  // The limits come with the view. A note over max_note_chars is refused here
+  // before it is sent, and nothing is cut; the desk still checks it, and
+  // refuses one that takes the desk past max_chars in its own words, shown
+  // where the note was typed. Every write reads the view again.
+  var dnotesEl = document.getElementById("desk-dnotes");
+  var dnotesList = document.getElementById("desk-dnotes-list");
+  var dnotesNew = document.getElementById("desk-dnotes-new");
+  var dnotesAdd = document.getElementById("desk-dnotes-add");
+  var dnotesCount = document.getElementById("desk-dnotes-count");
+  var dnotesLen = document.getElementById("desk-dnotes-len");
+  var dnotesStatus = document.getElementById("desk-dnotes-status");
+  var dnotesDesk;            // the desk the strip was last drawn for
+  var dnoteEdit = null;      // {id, text, error}: the note in the inline editor, kept across pushed views
+  var dnoteAdding = false;   // an add is on its way
+
+  // Characters as the desk counts them: Unicode scalar values, not UTF-16
+  // units or bytes, of the text it keeps, which is trimmed.
+  function chars(s) {
+    return Array.from(String(s == null ? "" : s).trim()).length;
+  }
+
+  function thousands(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function tooLong(len, max) {
+    return "A desk note holds at most " + thousands(max) + " characters; this one has " + thousands(len) + ".";
+  }
+
+  function findDeskNote(id) {
+    var dn = view && view.desk_notes;
+    return (dn && dn.notes || []).filter(function (n) { return n.id === id; })[0] || null;
+  }
+
+  function deskNoteRow(n, max) {
+    if (dnoteEdit && dnoteEdit.id === n.id) {
+      var len = chars(dnoteEdit.text);
+      return '<li class="desk-dnote editing" data-dnote="' + esc(n.id) + '">' +
+        '<textarea class="desk-input desk-textarea desk-dnote-edit" rows="2" aria-label="Edit the desk note">' + esc(dnoteEdit.text) + "</textarea>" +
+        '<div class="desk-form"><button class="btn btn-tiny btn-primary" type="button" data-dnote-save="' + esc(n.id) + '"' + (len && len <= max ? "" : " disabled") + ">Save</button>" +
+        '<button class="btn btn-tiny" type="button" data-dnote-cancel="1">Cancel</button>' +
+        '<span class="desk-detail desk-dnote-len' + (len > max ? " over" : "") + '">' + thousands(len) + " of " + thousands(max) + "</span>" +
+        '<span class="desk-detail desk-dnotes-err" role="status">' + esc(dnoteEdit.error || (len > max ? tooLong(len, max) : "")) + "</span></div></li>";
+    }
+    var agent = n.source === "agent"
+      ? '<span class="badge badge-neutral desk-dnote-agent" title="Written by an agent' + (n.session_id ? " in session " + esc(n.session_id) : "") + '">agent</span>'
+      : "";
+    return '<li class="desk-dnote" data-dnote="' + esc(n.id) + '"><span class="desk-dnote-text">' + esc(n.text) + "</span>" + agent +
+      '<span class="desk-dnote-acts"><button class="btn btn-tiny" type="button" data-dnote-edit="' + esc(n.id) + '">Edit</button>' +
+      '<button class="btn btn-tiny desk-no" type="button" data-dnote-delete="' + esc(n.id) + '">Delete</button></span></li>';
+  }
+
+  function renderDeskNotes() {
+    var dn = view.desk_notes;
+    if (!dn) { dnotesEl.hidden = true; dnoteEdit = null; return; }
+    if (dn.desk_id !== dnotesDesk) {
+      // Another desk: what was typed was meant for the one before.
+      if (dnotesDesk !== undefined) { dnotesNew.value = ""; dnotesStatus.textContent = ""; }
+      dnoteEdit = null;
+      dnotesDesk = dn.desk_id;
+    }
+    var list = dn.notes || [];
+    if (dnoteEdit && !findDeskNote(dnoteEdit.id)) dnoteEdit = null;   // deleted meanwhile
+    dnotesEl.hidden = false;
+    dnotesList.innerHTML = list.length ? list.map(function (n) { return deskNoteRow(n, dn.max_note_chars); }).join("")
+      : '<li class="placeholder-note">No desk notes. A rule written here reaches every session in this desk\'s repos when it starts.</li>';
+    deskNoteCounts();
+  }
+
+  // The running count: the desk's characters with the editor's text in place
+  // of its note's and the add box's on top, against the desk's limit; and
+  // each box's own length against a note's.
+  function deskNoteCounts() {
+    var dn = view && view.desk_notes;
+    if (!dn) return;
+    var max = dn.max_note_chars;
+    var typed = chars(dnotesNew.value);
+    var used = dn.used_chars + typed;
+    var was = dnoteEdit && findDeskNote(dnoteEdit.id);
+    if (was) used += chars(dnoteEdit.text) - chars(was.text);
+    dnotesCount.textContent = thousands(used) + " of " + thousands(dn.max_chars);
+    dnotesCount.title = "Characters in this desk's notes, counting what is typed; a desk holds " + thousands(dn.max_chars);
+    dnotesCount.classList.toggle("over", used > dn.max_chars);
+    dnotesLen.textContent = typed ? thousands(typed) + " of " + thousands(max) : "";
+    dnotesLen.classList.toggle("over", typed > max);
+    dnotesAdd.disabled = dnoteAdding || !typed || typed > max;
+    if (typed > max) dnotesStatus.textContent = tooLong(typed, max);
+    var row = dnoteEdit && dnotesList.querySelector("li.editing");
+    if (row) {
+      var len = chars(dnoteEdit.text);
+      var lenEl = row.querySelector(".desk-dnote-len");
+      lenEl.textContent = thousands(len) + " of " + thousands(max);
+      lenEl.classList.toggle("over", len > max);
+      row.querySelector("[data-dnote-save]").disabled = !len || len > max;
+      row.querySelector(".desk-dnotes-err").textContent = dnoteEdit.error || (len > max ? tooLong(len, max) : "");
+    }
+  }
+
+  function addDeskNote() {
+    var dn = view && view.desk_notes;
+    if (!dn) return;
+    var text = dnotesNew.value;
+    var len = chars(text);
+    if (!len) return;
+    if (len > dn.max_note_chars) { dnotesStatus.textContent = tooLong(len, dn.max_note_chars); return; }
+    dnoteAdding = true;
+    dnotesAdd.disabled = true;
+    dnotesStatus.textContent = "";
+    api("POST", "/desks/" + encodeURIComponent(dn.desk_id) + "/notes", { text: text }).then(function () {
+      if (dnotesNew.value === text) dnotesNew.value = "";
+      dnoteAdding = false;
+      return load();
+    }).catch(function (e) {
+      dnoteAdding = false;
+      dnotesStatus.textContent = e.message;
+      deskNoteCounts();
+    });
+  }
+
+  function saveDeskNote(id, btn) {
+    var dn = view && view.desk_notes;
+    if (!dn || !dnoteEdit || dnoteEdit.id !== id) return;
+    var edit = dnoteEdit;
+    var len = chars(edit.text);
+    if (!len || len > dn.max_note_chars) return;
+    btn.disabled = true;
+    api("PATCH", "/desks/" + encodeURIComponent(dn.desk_id) + "/notes/" + encodeURIComponent(id), { text: edit.text }).then(function () {
+      if (dnoteEdit === edit) dnoteEdit = null;
+      return load();
+    }).catch(function (e) {
+      if (dnoteEdit !== edit) return;
+      edit.error = e.message;
+      renderDeskNotes();
+    });
+  }
+
+  function deleteDeskNote(id) {
+    var dn = view && view.desk_notes;
+    var n = findDeskNote(id);
+    if (!dn || !n) return;
+    var head = Array.from(n.text);
+    var quote = head.slice(0, 60).join("") + (head.length > 60 ? "…" : "");
+    if (!window.confirm("Delete the desk note \"" + quote + "\"? Sessions in this desk's repos stop getting it when they start.")) return;
+    api("DELETE", "/desks/" + encodeURIComponent(dn.desk_id) + "/notes/" + encodeURIComponent(id)).then(load).catch(function (e) { flash(e.message); });
+  }
+
   // "Today's work": every work item with time, a line, bench activity or a
   // session that day, grouped by desk, the open one first — links out, what
   // was done, status and sessions. A picked date is fetched; today is pushed.
@@ -833,6 +986,7 @@
     if (!view) return;
     renderWaiting();
     renderHead();
+    renderDeskNotes();
     renderHand();
     if (!pickedDay) renderDay(view.day);
     var openId = view.open_desk ? view.open_desk.id : null;
@@ -1076,6 +1230,18 @@
       return;
     }
     if (d.notes) { openNotes(d.notes); return; }
+    if (d.dnoteEdit) {
+      var dnote = findDeskNote(d.dnoteEdit);
+      if (!dnote) return;
+      dnoteEdit = { id: dnote.id, text: dnote.text, error: "" };
+      renderDeskNotes();
+      var editBox = dnotesList.querySelector("li.editing textarea");
+      if (editBox) { editBox.focus(); editBox.setSelectionRange(editBox.value.length, editBox.value.length); }
+      return;
+    }
+    if (d.dnoteCancel) { dnoteEdit = null; renderDeskNotes(); return; }
+    if (d.dnoteSave) { saveDeskNote(d.dnoteSave, t); return; }
+    if (d.dnoteDelete) { deleteDeskNote(d.dnoteDelete); return; }
     if (d.timerStart) { api("POST", "/timer/start", { item_id: d.timerStart }).then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.timerStop) { api("POST", "/timer/stop").then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.draftSend || d.draftDiscard) {
@@ -1158,6 +1324,9 @@
     switch (t.id) {
       case "desk-pickup-refresh":
         loadPickup();
+        break;
+      case "desk-dnotes-add":
+        addDeskNote();
         break;
       case "desk-notes-close":
         closeNotes();
@@ -1259,6 +1428,18 @@
     if (ev.target.id === "desk-hours") delete ev.target.dataset.clear;
   });
 
+  // A desk note's count runs as it is typed; what a refusal said goes with
+  // the text it was about.
+  dnotesEl.addEventListener("input", function (ev) {
+    if (ev.target === dnotesNew) {
+      dnotesStatus.textContent = "";
+    } else if (dnoteEdit && ev.target.classList.contains("desk-dnote-edit")) {
+      dnoteEdit.text = ev.target.value;
+      dnoteEdit.error = "";
+    }
+    deskNoteCounts();
+  });
+
   dialogEl.addEventListener("click", function (ev) {
     var t = ev.target.closest("button");
     if (!t) return;
@@ -1326,10 +1507,11 @@
 
   // Live by SSE, like every other tab (decision 6): the server asks the desk
   // for its view and pushes it. A pushed view never re-renders under an open
-  // editor — the dialog, a draft and the connector form keep what the user
-  // is typing until they finish. In the settings panel only text entry
-  // counts: a view leaves its form alone, and focus on the chat setting's box
-  // must not hold every pushed view back.
+  // editor — the dialog, a draft, the connector form and a desk note keep
+  // what the user is typing until they finish. In the settings panel and the
+  // desk notes only text entry counts: a view keeps what their boxes hold, and
+  // focus on the chat setting's box or a note's button must not hold every
+  // pushed view back.
   function typing(el) {
     var tag = el && el.tagName;
     if (tag === "TEXTAREA" || tag === "SELECT") return true;
@@ -1338,7 +1520,7 @@
 
   function editing() {
     var a = document.activeElement;
-    return dialogEl.contains(a) || (settingsEl.contains(a) && typing(a)) ||
+    return dialogEl.contains(a) || (settingsEl.contains(a) && typing(a)) || (dnotesEl.contains(a) && typing(a)) ||
       draftsEl.contains(a) || formEl.contains(a) || dayBody.contains(a);
   }
   if (window.EventSource) {

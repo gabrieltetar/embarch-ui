@@ -16,7 +16,11 @@ the chat setting from the desk's view, saved on a click or Space without
 touching what is typed in the panel or moving focus, Start work with and
 without a prompt link, a proxy that answers only the UI's own page — a
 bodyless POST from another origin included — and a page no other site can
-frame.
+frame. Desk notes (embarch-desk decision 74): the open desk's strip, a note
+added, edited and deleted there and given to a session starting in the desk's
+repo, an agent's badged, none of them a tile line, an item note or part of
+the day, markup shown as text, and both limits: 500 refused in the box, the
+desk's 4,000 refused in the desk's own words.
 
 No connector is configured, so nothing reaches Linear or Harvest;
 GitHub falls back to the machine's `gh` login for a read-only identity check.
@@ -64,7 +68,8 @@ def desk(method, path, body=None, token=None):
     req = urllib.request.Request(DESK + path, data=data, method=method,
                                  headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
     with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode())
+        raw = r.read()
+        return json.loads(raw.decode()) if raw else None   # a 204 has no body
 
 
 def wait_for(url, secs=20):
@@ -75,6 +80,198 @@ def wait_for(url, secs=20):
         except Exception:
             time.sleep(0.1)
     return False
+
+
+def drive_desk_notes(js, until, settle, reload_view, real_click, type_into, replace_text, token, desk_id, repo, item, today):
+    """Desk notes (embarch-desk decision 74): the open desk's standing rules,
+    a strip under the head. Written, edited and deleted there; given to every
+    session starting in the desk's repos; never a tile line, an item note or
+    part of the day; their text never markup; a note over 500 characters
+    refused in the box, a desk over 4,000 refused in the desk's own words."""
+    notes_path = "/desks/%s/notes" % desk_id
+
+    def stored():
+        return desk("GET", notes_path, token=token)
+
+    def strip_texts():
+        return js("return Array.from(document.querySelectorAll('#desk-dnotes-list .desk-dnote-text')).map(function (e) { return e.textContent; })")
+
+    def shows(text, secs=20):
+        return until("return Array.from(document.querySelectorAll('#desk-dnotes-list .desk-dnote-text'))"
+                     ".some(function (e) { return e.textContent === %s; })" % json.dumps(text), secs)
+
+    def start_context(sid):
+        return desk("POST", "/hook", {"hook_event_name": "SessionStart", "session_id": sid, "cwd": str(repo)}, token).get("context") or ""
+
+    def count():
+        return js("var c = document.getElementById('desk-dnotes-count'); return [c.textContent, c.classList.contains('over')]")
+
+    strip = until("var s = document.getElementById('desk-dnotes'); return !s.hidden && s.textContent")
+    check("the open desk draws its Desk notes strip under the head, with the desk's count of 4,000",
+          bool(strip) and js("var n = document.querySelector('.desk-head').nextElementSibling; return n && n.id") == "desk-dnotes"
+          and count() == ["0 of 4,000", False], [strip, count()])
+
+    # Added in the strip: the count runs as it is typed, and the desk keeps it as the user's.
+    rule = "In repo X, the only build that matters is app Y on board Z."
+    type_into("#desk-dnotes-new", rule)
+    running = js("return [document.getElementById('desk-dnotes-count').textContent, document.getElementById('desk-dnotes-len').textContent]")
+    check("the add box's count runs as it is typed, the desk's and the note's",
+          running == ["%d of 4,000" % len(rule), "%d of 500" % len(rule)], running)
+    real_click("#desk-dnotes-add")
+    shown = shows(rule)
+    kept = stored()
+    check("a note added in the strip shows there, kept by the desk as the user's, and the box empties",
+          shown is True and [(n["text"], n["source"]) for n in kept["notes"]] == [(rule, "user")]
+          and kept["used_chars"] == len(rule) and js("return document.getElementById('desk-dnotes-new').value") == "", kept)
+    note_id = kept["notes"][0]["id"] if kept["notes"] else "missing"
+
+    ctx = start_context("dn1")
+    check("a session starting in the desk's repo is given the note, under the desk's name",
+          ('standing notes for the desk "Bench client"' in ctx) and ("- " + rule) in ctx, ctx[-400:])
+
+    # An agent's note, written through the session, carries a badge; the user's none.
+    agent_rule = "File F is owned by another engineer: report findings, never open a fix branch."
+    by_agent = desk("POST", "/sessions/dn1/desk-note", {"text": agent_rule}, token)
+    reload_view()
+    shows(agent_rule)
+    badges = js("return Array.from(document.querySelectorAll('#desk-dnotes-list .desk-dnote')).map(function (r) {"
+                " return [r.querySelector('.desk-dnote-text').textContent, !!r.querySelector('.desk-dnote-agent')]; })")
+    check("an agent's note shows with an agent badge, the user's without one",
+          by_agent.get("desk_id") == desk_id and by_agent["note"]["source"] == "agent"
+          and badges == [[rule, False], [agent_rule, True]], [by_agent, badges])
+
+    # Never a tile line, an item note or part of the day: a tile with a line of
+    # its own, a card's notes and the day are read with both notes on the desk.
+    view = desk("GET", "/view", token=token)
+    weekly = [c["id"] for c in view["cards"] if c["title"] == "Weekly call"][0]
+    tile = desk("PATCH", "/tiles/%s@%s" % (weekly, today), {"hours": 0.5}, token)["id"]
+    desk("POST", "/tiles/%s/line" % urllib.parse.quote(tile), {"text": "A line of the tile's own"}, token)
+    reload_view()
+    opened = until("var b = document.querySelector('#desk-hand [data-open-tile=%s]'); if (b && document.getElementById('desk-dialog').hidden) b.click();"
+                   " var l = document.querySelector('#desk-dialog .desk-lines'); return !!l && l.textContent.indexOf(\"A line of the tile's own\") >= 0" % json.dumps(tile))
+    dialog = js("var d = document.getElementById('desk-dialog'), n = document.getElementById('desk-note');"
+                " return d.textContent + ' ' + (n ? n.value : '')")
+    check("the notes are never a tile line: the tile's dialog holds its own line and neither note",
+          opened is True and rule not in dialog and agent_rule not in dialog, dialog[:300])
+    js("document.getElementById('desk-dialog-close').click(); return true")
+    desk("POST", "/tiles/%s/discard" % urllib.parse.quote(tile), {}, token)
+    js("document.querySelector('[data-notes=%s]').click(); return true" % json.dumps(item))
+    card_notes = until("var b = document.getElementById('desk-notes-body'); return b && b.querySelector('.desk-notes-list') && b.textContent")
+    check("nor an item note: the card's notes dialog reads its notes and neither desk note",
+          bool(card_notes) and "Read once when a note moves" in card_notes and rule not in card_notes and agent_rule not in card_notes,
+          (card_notes or "")[:300])
+    js("document.getElementById('desk-notes-close').click(); return true")
+    day = json.dumps(desk("GET", "/day/" + today, token=token))
+    view = json.dumps({k: v for k, v in desk("GET", "/view", token=token).items() if k != "desk_notes"})
+    shown_day = js("return document.getElementById('desk-day-body').textContent")
+    check("nor part of the day: /day, the view outside desk_notes and Today's work hold neither",
+          "Client sync call" in day and all(t not in x for t in (rule, agent_rule) for x in (day, view, shown_day)))
+
+    # Edited in place. A view read while the editor is open keeps it and what
+    # is typed in it; Save sends it as it stands.
+    edited = "In repo X, only app Y on board Z is built; report another build's failures, never fix them."
+    real_click('#desk-dnotes-list [data-dnote-edit="%s"]' % note_id)
+    box = until("var b = document.querySelector('#desk-dnotes-list li.editing textarea'); return !!b && document.activeElement === b && b.value")
+    check("Edit opens the note's text in place, focused", box == rule, box)
+    replace_text("#desk-dnotes-list li.editing textarea", edited)
+    js("window.__dnoteBox = document.querySelector('#desk-dnotes-list li.editing textarea'); document.activeElement.blur(); return true")
+    reload_view()
+    held = until("var b = document.querySelector('#desk-dnotes-list li.editing textarea'); return !!b && b !== window.__dnoteBox && b.value")
+    check("a view read while the editor is open draws it again with what was typed", held == edited, held)
+    check("and the count runs with the edit in place of the note",
+          count() == ["{:,} of 4,000".format(len(edited) + len(agent_rule)), False], count())
+    real_click('#desk-dnotes-list [data-dnote-save="%s"]' % note_id)
+    shown = shows(edited)
+    after = stored()["notes"]
+    check("Save puts the edit on the strip and in the desk, the same note still the user's",
+          shown is True and [(n["id"], n["text"], n["source"]) for n in after][:1] == [(note_id, edited, "user")]
+          and not js("return !!document.querySelector('#desk-dnotes-list li.editing')"), after)
+    ctx = start_context("dn2")
+    check("the next session to start is given the edit, not the old text", edited in ctx and rule not in ctx, ctx[-400:])
+
+    # What a note says renders as text, in the strip and in its editor.
+    markup = "<b>x</b> stays text <img src=q onerror=window.__dn=1>"
+    type_into("#desk-dnotes-new", markup)
+    real_click("#desk-dnotes-add")
+    shows(markup)
+    got = js("return {el: document.querySelectorAll('#desk-dnotes b, #desk-dnotes img').length, p: window.__dn === undefined ? 0 : 1}")
+    check("a note holding <b>x</b> renders as text, not HTML", got == {"el": 0, "p": 0} and markup in strip_texts(), [got, strip_texts()])
+    markup_id = ([n["id"] for n in stored()["notes"] if n["text"] == markup] or ["missing"])[0]
+    real_click('#desk-dnotes-list [data-dnote-edit="%s"]' % markup_id)
+    in_box = until("var b = document.querySelector('#desk-dnotes-list li.editing textarea'); return !!b && b.value")
+    check("and its editor holds the same text", in_box == markup
+          and js("return document.querySelectorAll('#desk-dnotes b, #desk-dnotes img').length") == 0, in_box)
+    real_click("#desk-dnotes-list [data-dnote-cancel]")
+    check("Cancel puts the note back as it was", shows(markup, 5) is True and not js("return !!document.querySelector('#desk-dnotes-list li.editing')"))
+
+    # 501 characters are refused in the box, and nothing is cut: Add is off,
+    # the box says why, and even a click that reaches the handler sends nothing.
+    before = stored()["used_chars"]
+    type_into("#desk-dnotes-new", "a" * 501)
+    box_state = ("return {off: document.getElementById('desk-dnotes-add').disabled, len: document.getElementById('desk-dnotes-len').textContent,"
+                 " over: document.getElementById('desk-dnotes-len').classList.contains('over'),"
+                 " why: document.getElementById('desk-dnotes-status').textContent, kept: document.getElementById('desk-dnotes-new').value.length}")
+    refused = js(box_state)
+    js("var b = document.getElementById('desk-dnotes-add'); b.disabled = false; b.click(); return true")
+    settle()
+    check("the add box refuses 501 characters: Add is off, the box says why and keeps all 501, and nothing reaches the desk",
+          refused["off"] and refused["len"] == "501 of 500" and refused["over"] and "at most 500" in refused["why"]
+          and refused["kept"] == 501 and stored()["used_chars"] == before, refused)
+    type_into("#desk-dnotes-new", "\ue003")   # Backspace: 500 is a note
+    at_limit = js(box_state)
+    check("one character fewer is a note again", not at_limit["off"] and at_limit["len"] == "500 of 500" and not at_limit["over"]
+          and at_limit["why"] == "", at_limit)
+    js("var b = document.getElementById('desk-dnotes-new'); b.value = ''; b.dispatchEvent(new Event('input', {bubbles: true})); return true")
+
+    # The desk's 4,000: filled to under one note's room through its own surface,
+    # then a note one character over it typed here. The desk refuses it, and
+    # the box says so in the desk's words and keeps the text.
+    fillers = []
+    used = stored()["used_chars"]
+    while used + 500 <= 4000:
+        fillers.append(desk("POST", notes_path, {"text": "f" * 500}, token)["note"]["id"])
+        used += 500
+    over = "o" * (4000 - used + 1)
+    reload_view()
+    until("return document.getElementById('desk-dnotes-count').textContent === %s" % json.dumps("{:,} of 4,000".format(used)))
+    js("var b = document.getElementById('desk-dnotes-new'); b.value = arguments[0]; b.dispatchEvent(new Event('input', {bubbles: true})); return true", over)
+    running = count()
+    real_click("#desk-dnotes-add")
+    said = until("return document.getElementById('desk-dnotes-status').textContent")
+    try:
+        desk("POST", notes_path, {"text": over}, token)
+        direct = None
+    except urllib.error.HTTPError as e:
+        direct = (e.code, json.loads(e.read().decode()).get("error"))
+    check("a note past the desk's 4,000 shows the count over, then the desk's own refusal under the box, the text kept",
+          running == ["4,001 of 4,000", True] and direct is not None and direct[0] == 400 and said == direct[1]
+          and js("return document.getElementById('desk-dnotes-new').value") == over and stored()["used_chars"] == used,
+          [running, said, direct])
+    js("var b = document.getElementById('desk-dnotes-new'); b.value = ''; b.dispatchEvent(new Event('input', {bubbles: true})); return true")
+    for f in fillers:
+        desk("DELETE", "%s/%s" % (notes_path, f), token=token)
+
+    # Deleted here, after a confirm; a no keeps it.
+    js("window.__asked = []; window.confirm = function (m) { window.__asked.push(m); return false; }; return true")
+    real_click('#desk-dnotes-list [data-dnote-delete="%s"]' % note_id)
+    settle()
+    asked = js("return window.__asked")
+    check("Delete asks first, quoting the note, and a no keeps it",
+          len(asked) == 1 and edited[:40] in asked[0] and note_id in [n["id"] for n in stored()["notes"]], asked)
+    js("window.confirm = function (m) { window.__asked.push(m); return true; }; return true")
+    real_click('#desk-dnotes-list [data-dnote-delete="%s"]' % note_id)
+    gone = until("return !document.querySelector('#desk-dnotes-list [data-dnote=%s]')" % json.dumps(note_id))
+    check("a yes takes it off the strip and out of the desk",
+          gone is True and note_id not in [n["id"] for n in stored()["notes"]] and edited not in strip_texts(), strip_texts())
+    ctx = start_context("dn3")
+    check("and the next session to start is not given it", edited not in ctx and agent_rule in ctx, ctx[-400:])
+
+    for n in stored()["notes"]:
+        desk("DELETE", "%s/%s" % (notes_path, n["id"]), token=token)
+    for sid in ("dn1", "dn2", "dn3"):
+        desk("POST", "/hook", {"hook_event_name": "SessionEnd", "session_id": sid, "cwd": str(repo)}, token)
+    reload_view()
+    until("return document.getElementById('desk-dnotes-count').textContent === '0 of 4,000'")
 
 
 def main():
@@ -165,6 +362,13 @@ def main():
 
             def unstub_fetch():
                 js("if (window.__realFetch) window.fetch = window.__realFetch; return true")
+
+            def replace_text(css, text):
+                # Ctrl+A, then the text over the selection: the keyboard's way.
+                # Two calls, because geckodriver holds a modifier to the end of
+                # one, and a NULL key inside it does not let go.
+                type_into(css, "\ue009a")
+                type_into(css, text)
 
             wd("POST", S + "/window/rect", {"width": 1400, "height": 950})
             wd("POST", S + "/url", {"url": UI + "/#desk"})
@@ -554,6 +758,7 @@ def main():
                 time.sleep(0.2)
             check("closing the desk from outside the page reaches the sidebar", followed,
                   js("return document.getElementById('project-current-path').textContent"))
+            check("with no desk open, no Desk notes strip is drawn", js("return document.getElementById('desk-dnotes').hidden") is True)
             ks = desk("GET", "/desks", token=token)["desks"]
             k = [d for d in ks if d["name"] == "Bench client"][0]
             desk("POST", "/desks", {"id": k["id"], "name": "Bench client", "firmware_repos": [str(repo)], "bench": "two-boards"}, token)
@@ -567,6 +772,7 @@ def main():
             check("opening a desk proposes its saved bench and touches nothing", banner and
                   js("return !!document.getElementById('desk-bench-review')"))
             js("document.getElementById('desk-bench-later').click(); return true")
+            drive_desk_notes(js, until, settle, reload_view, real_click, type_into, replace_text, token, k["id"], repo, item, today)
 
             js("document.getElementById('desk-settings-toggle').click(); return true")
             settle()
