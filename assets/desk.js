@@ -538,6 +538,13 @@
   // before it is sent, and nothing is cut; the desk still checks it, and
   // refuses one that takes the desk past max_chars in its own words, shown
   // where the note was typed. Every write reads the view again.
+  //
+  // Every write goes to the desk the strip was drawn for, and only while the
+  // view still shows that desk. A pushed view replaces `view` while a box here
+  // has focus and leaves the strip as it was (`editing`), so a desk switched
+  // elsewhere meanwhile would otherwise get a rule typed for the one on
+  // screen (review M2). A write that finds the open desk moved on draws the
+  // tab again and writes nothing, and says so.
   var dnotesEl = document.getElementById("desk-dnotes");
   var dnotesList = document.getElementById("desk-dnotes-list");
   var dnotesNew = document.getElementById("desk-dnotes-new");
@@ -545,9 +552,16 @@
   var dnotesCount = document.getElementById("desk-dnotes-count");
   var dnotesLen = document.getElementById("desk-dnotes-len");
   var dnotesStatus = document.getElementById("desk-dnotes-status");
-  var dnotesDesk;            // the desk the strip was last drawn for
-  var dnoteEdit = null;      // {id, text, error}: the note in the inline editor, kept across pushed views
+  var dnotesDesk;            // the desk the strip was last drawn for: every write goes to it
+  var dnotesDeskName = "";
+  var dnotesShown = null;    // the view's desk_notes the strip was drawn from, which its counts follow
+  // The note in the inline editor, kept across pushed views: {desk, id, text,
+  // error, gone}. Drawn only while its desk is the one on screen; `gone` once
+  // the note has been deleted elsewhere, when the typed text stays with Add
+  // again rather than vanishing.
+  var dnoteEdit = null;
   var dnoteAdding = false;   // an add is on its way
+  var DNOTE_GONE = "This note was deleted elsewhere. Add again keeps this text as a new note.";
 
   // Characters as the desk counts them: Unicode scalar values, not UTF-16
   // units or bytes, of the text it keeps, which is trimmed.
@@ -568,16 +582,51 @@
     return (dn && dn.notes || []).filter(function (n) { return n.id === id; })[0] || null;
   }
 
-  function deskNoteRow(n, max) {
-    if (dnoteEdit && dnoteEdit.id === n.id) {
-      var len = chars(dnoteEdit.text);
-      return '<li class="desk-dnote editing" data-dnote="' + esc(n.id) + '">' +
-        '<textarea class="desk-input desk-textarea desk-dnote-edit" rows="2" aria-label="Edit the desk note">' + esc(dnoteEdit.text) + "</textarea>" +
-        '<div class="desk-form"><button class="btn btn-tiny btn-primary" type="button" data-dnote-save="' + esc(n.id) + '"' + (len && len <= max ? "" : " disabled") + ">Save</button>" +
-        '<button class="btn btn-tiny" type="button" data-dnote-cancel="1">Cancel</button>' +
-        '<span class="desk-detail desk-dnote-len' + (len > max ? " over" : "") + '">' + thousands(len) + " of " + thousands(max) + "</span>" +
-        '<span class="desk-detail desk-dnotes-err" role="status">' + esc(dnoteEdit.error || (len > max ? tooLong(len, max) : "")) + "</span></div></li>";
+  function deskNameOf(id) {
+    var d = (view.desks || []).filter(function (k) { return k.id === id; })[0] || (view.open_desk && view.open_desk.id === id ? view.open_desk : null);
+    return d ? d.name : id;
+  }
+
+  function deskNotesPath(id) {
+    return "/desks/" + encodeURIComponent(dnotesDesk) + "/notes" + (id ? "/" + encodeURIComponent(id) : "");
+  }
+
+  // The editor on screen: the one in dnoteEdit, when its desk is the strip's.
+  function shownEdit() {
+    return dnoteEdit && dnoteEdit.desk === dnotesDesk ? dnoteEdit : null;
+  }
+
+  // True, having drawn the tab again, when the view no longer shows the desk
+  // the strip was drawn for. `what` names the write for the flash; the add
+  // box says it beside its own text instead (renderDeskNotes).
+  function deskMoved(what) {
+    var dn = view && view.desk_notes;
+    if (dn && dn.desk_id === dnotesDesk) return false;
+    var from = dnotesDeskName;
+    render();
+    if (what && !(what === "Add" && dn)) {
+      flash((dn ? "The open desk changed from " + from + " to " + dnotesDeskName : "The desk " + from + " was closed") +
+        " before " + what + ", so nothing was written." + (what === "Save" ? " The edit is kept for when " + from + " is open again." : ""), 15000);
     }
+    return true;
+  }
+
+  // The editor's row; its length, its message and whether its button is on
+  // are deskNoteCounts' to set, here and as it is typed.
+  function editorRow(edit) {
+    var act = edit.gone
+      ? '<button class="btn btn-tiny btn-primary desk-dnote-go" type="button" data-dnote-readd="1">Add again</button>'
+      : '<button class="btn btn-tiny btn-primary desk-dnote-go" type="button" data-dnote-save="' + esc(edit.id) + '">Save</button>';
+    return '<li class="desk-dnote editing' + (edit.gone ? " gone" : "") + '" data-dnote="' + esc(edit.id) + '">' +
+      '<textarea class="desk-input desk-textarea desk-dnote-edit" rows="2" aria-label="' + (edit.gone ? "The text of a deleted desk note" : "Edit the desk note") + '">' +
+      esc(edit.text) + "</textarea>" +
+      '<div class="desk-form">' + act + '<button class="btn btn-tiny" type="button" data-dnote-cancel="1">Cancel</button>' +
+      '<span class="desk-detail desk-dnote-len"></span><span class="desk-detail desk-dnotes-err" role="status"></span></div></li>';
+  }
+
+  function deskNoteRow(n) {
+    var edit = shownEdit();
+    if (edit && !edit.gone && edit.id === n.id) return editorRow(edit);
     var agent = n.source === "agent"
       ? '<span class="badge badge-neutral desk-dnote-agent" title="Written by an agent' + (n.session_id ? " in session " + esc(n.session_id) : "") + '">agent</span>'
       : "";
@@ -588,32 +637,44 @@
 
   function renderDeskNotes() {
     var dn = view.desk_notes;
-    if (!dn) { dnotesEl.hidden = true; dnoteEdit = null; return; }
+    if (!dn) { dnotesEl.hidden = true; return; }
     if (dn.desk_id !== dnotesDesk) {
-      // Another desk: what was typed was meant for the one before.
-      if (dnotesDesk !== undefined) { dnotesNew.value = ""; dnotesStatus.textContent = ""; }
-      dnoteEdit = null;
+      // Another desk. What is in the add box stays, said to have been typed
+      // for the one before, so Add is a choice made knowing it; an unsaved
+      // edit waits for its own desk to be open again.
+      var was = dnotesDeskName;
       dnotesDesk = dn.desk_id;
+      dnotesDeskName = deskNameOf(dn.desk_id);
+      dnotesStatus.textContent = was && dnotesNew.value.trim()
+        ? "The open desk changed from " + was + " to " + dnotesDeskName + " while this was typed, so nothing was added. Add puts it on " + dnotesDeskName + "."
+        : "";
     }
+    dnotesShown = dn;
     var list = dn.notes || [];
-    if (dnoteEdit && !findDeskNote(dnoteEdit.id)) dnoteEdit = null;   // deleted meanwhile
+    var edit = shownEdit();
+    if (edit && !edit.gone && !findDeskNote(edit.id)) { edit.gone = true; edit.error = ""; }
+    var rows = list.map(deskNoteRow);
+    if (edit && edit.gone) rows.push(editorRow(edit));   // where Add again puts it: last
     dnotesEl.hidden = false;
-    dnotesList.innerHTML = list.length ? list.map(function (n) { return deskNoteRow(n, dn.max_note_chars); }).join("")
+    dnotesList.innerHTML = rows.length ? rows.join("")
       : '<li class="placeholder-note">No desk notes. A rule written here reaches every session in this desk\'s repos when it starts.</li>';
     deskNoteCounts();
   }
 
   // The running count: the desk's characters with the editor's text in place
-  // of its note's and the add box's on top, against the desk's limit; and
-  // each box's own length against a note's.
+  // of its note's (or on top, for a note deleted elsewhere) and the add box's
+  // on top, against the desk's limit; and each box's own length against a
+  // note's. All of it as the strip was drawn: a view pushed while a box has
+  // focus is not on screen yet.
   function deskNoteCounts() {
-    var dn = view && view.desk_notes;
+    var dn = dnotesShown;
     if (!dn) return;
     var max = dn.max_note_chars;
     var typed = chars(dnotesNew.value);
     var used = dn.used_chars + typed;
-    var was = dnoteEdit && findDeskNote(dnoteEdit.id);
-    if (was) used += chars(dnoteEdit.text) - chars(was.text);
+    var edit = shownEdit();
+    var was = edit && !edit.gone && (dn.notes || []).filter(function (n) { return n.id === edit.id; })[0];
+    if (edit) used += chars(edit.text) - (was ? chars(was.text) : 0);
     dnotesCount.textContent = thousands(used) + " of " + thousands(dn.max_chars);
     dnotesCount.title = "Characters in this desk's notes, counting what is typed; a desk holds " + thousands(dn.max_chars);
     dnotesCount.classList.toggle("over", used > dn.max_chars);
@@ -621,28 +682,28 @@
     dnotesLen.classList.toggle("over", typed > max);
     dnotesAdd.disabled = dnoteAdding || !typed || typed > max;
     if (typed > max) dnotesStatus.textContent = tooLong(typed, max);
-    var row = dnoteEdit && dnotesList.querySelector("li.editing");
+    var row = edit && dnotesList.querySelector("li.editing");
     if (row) {
-      var len = chars(dnoteEdit.text);
+      var len = chars(edit.text);
       var lenEl = row.querySelector(".desk-dnote-len");
       lenEl.textContent = thousands(len) + " of " + thousands(max);
       lenEl.classList.toggle("over", len > max);
-      row.querySelector("[data-dnote-save]").disabled = !len || len > max;
-      row.querySelector(".desk-dnotes-err").textContent = dnoteEdit.error || (len > max ? tooLong(len, max) : "");
+      row.querySelector(".desk-dnote-go").disabled = !len || len > max;
+      row.querySelector(".desk-dnotes-err").textContent = edit.error || (len > max ? tooLong(len, max) : edit.gone ? DNOTE_GONE : "");
     }
   }
 
   function addDeskNote() {
-    var dn = view && view.desk_notes;
-    if (!dn) return;
+    if (!view || deskMoved("Add")) return;
+    var max = view.desk_notes.max_note_chars;
     var text = dnotesNew.value;
     var len = chars(text);
     if (!len) return;
-    if (len > dn.max_note_chars) { dnotesStatus.textContent = tooLong(len, dn.max_note_chars); return; }
+    if (len > max) { dnotesStatus.textContent = tooLong(len, max); return; }
     dnoteAdding = true;
     dnotesAdd.disabled = true;
     dnotesStatus.textContent = "";
-    api("POST", "/desks/" + encodeURIComponent(dn.desk_id) + "/notes", { text: text }).then(function () {
+    api("POST", deskNotesPath(), { text: text }).then(function () {
       if (dnotesNew.value === text) dnotesNew.value = "";
       dnoteAdding = false;
       return load();
@@ -653,31 +714,47 @@
     });
   }
 
-  function saveDeskNote(id, btn) {
-    var dn = view && view.desk_notes;
-    if (!dn || !dnoteEdit || dnoteEdit.id !== id) return;
-    var edit = dnoteEdit;
+  function openDeskNoteEditor(id) {
+    if (deskMoved()) return;
+    var n = findDeskNote(id);
+    if (!n) { renderDeskNotes(); return; }
+    dnoteEdit = { desk: dnotesDesk, id: n.id, text: n.text, error: "", gone: false };
+    renderDeskNotes();
+    var box = dnotesList.querySelector("li.editing textarea");
+    if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  }
+
+  // Save, or Add again for a note deleted elsewhere: the editor's text as it
+  // stands, to the strip's desk.
+  function sendDeskNoteEdit(btn) {
+    var edit = shownEdit();
+    if (!view || !edit || deskMoved(edit.gone ? "Add again" : "Save")) return;
     var len = chars(edit.text);
-    if (!len || len > dn.max_note_chars) return;
+    if (!len || len > view.desk_notes.max_note_chars) return;
     btn.disabled = true;
-    api("PATCH", "/desks/" + encodeURIComponent(dn.desk_id) + "/notes/" + encodeURIComponent(id), { text: edit.text }).then(function () {
+    var call = edit.gone ? api("POST", deskNotesPath(), { text: edit.text }) : api("PATCH", deskNotesPath(edit.id), { text: edit.text });
+    call.then(function () {
       if (dnoteEdit === edit) dnoteEdit = null;
       return load();
     }).catch(function (e) {
       if (dnoteEdit !== edit) return;
-      edit.error = e.message;
+      // A 404 on Save is the note deleted elsewhere: its text stays, with
+      // Add again; the view is read again so the list shows it gone.
+      var gone = !edit.gone && e.status === 404;
+      if (gone) { edit.gone = true; edit.error = ""; } else { edit.error = e.message; }
       renderDeskNotes();
+      if (gone) load();
     });
   }
 
   function deleteDeskNote(id) {
-    var dn = view && view.desk_notes;
+    if (!view || deskMoved("Delete")) return;
     var n = findDeskNote(id);
-    if (!dn || !n) return;
+    if (!n) { renderDeskNotes(); return; }
     var head = Array.from(n.text);
     var quote = head.slice(0, 60).join("") + (head.length > 60 ? "…" : "");
     if (!window.confirm("Delete the desk note \"" + quote + "\"? Sessions in this desk's repos stop getting it when they start.")) return;
-    api("DELETE", "/desks/" + encodeURIComponent(dn.desk_id) + "/notes/" + encodeURIComponent(id)).then(load).catch(function (e) { flash(e.message); });
+    api("DELETE", deskNotesPath(id)).then(load).catch(function (e) { flash(e.message); });
   }
 
   // "Today's work": every work item with time, a line, bench activity or a
@@ -1230,17 +1307,9 @@
       return;
     }
     if (d.notes) { openNotes(d.notes); return; }
-    if (d.dnoteEdit) {
-      var dnote = findDeskNote(d.dnoteEdit);
-      if (!dnote) return;
-      dnoteEdit = { id: dnote.id, text: dnote.text, error: "" };
-      renderDeskNotes();
-      var editBox = dnotesList.querySelector("li.editing textarea");
-      if (editBox) { editBox.focus(); editBox.setSelectionRange(editBox.value.length, editBox.value.length); }
-      return;
-    }
-    if (d.dnoteCancel) { dnoteEdit = null; renderDeskNotes(); return; }
-    if (d.dnoteSave) { saveDeskNote(d.dnoteSave, t); return; }
+    if (d.dnoteEdit) { openDeskNoteEditor(d.dnoteEdit); return; }
+    if (d.dnoteCancel) { dnoteEdit = null; if (!deskMoved()) renderDeskNotes(); return; }
+    if (d.dnoteSave || d.dnoteReadd) { sendDeskNoteEdit(t); return; }
     if (d.dnoteDelete) { deleteDeskNote(d.dnoteDelete); return; }
     if (d.timerStart) { api("POST", "/timer/start", { item_id: d.timerStart }).then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.timerStop) { api("POST", "/timer/stop").then(load).catch(function (e) { flash(e.message); }); return; }
@@ -1317,8 +1386,21 @@
     if (d.formClose) { closeForm(); return; }
     if (d.formSave !== undefined) { saveForm(d.formSave); return; }
     if (d.formDelete) {
-      if (!window.confirm("Delete this desk? Its work items keep their time and become deskless.")) return;
-      api("DELETE", "/desks/" + encodeURIComponent(d.formDelete)).then(function () { closeForm(); return load(); }).catch(function (e) { flash(e.message); });
+      // A desk's notes go with it, for good (embarch-desk decision 74), so the
+      // question names them: read from the desk, since the view carries only
+      // the open desk's. Unread, the question still says they go.
+      var gone = d.formDelete;
+      t.disabled = true;
+      api("GET", "/desks/" + encodeURIComponent(gone) + "/notes").then(function (r) {
+        var n = (r.notes || []).length;
+        return n ? " Its " + n + " desk note" + (n === 1 ? " is" : "s are") + " deleted with it, for good." : "";
+      }, function () {
+        return " Any desk notes it has are deleted with it, for good.";
+      }).then(function (notesSay) {
+        t.disabled = false;
+        if (!window.confirm("Delete this desk? Its work items keep their time and become deskless." + notesSay)) return;
+        return api("DELETE", "/desks/" + encodeURIComponent(gone)).then(function () { closeForm(); return load(); });
+      }).catch(function (e) { t.disabled = false; flash(e.message); });
       return;
     }
     switch (t.id) {

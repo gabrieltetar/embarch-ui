@@ -20,7 +20,9 @@ frame. Desk notes (embarch-desk decision 74): the open desk's strip, a note
 added, edited and deleted there and given to a session starting in the desk's
 repo, an agent's badged, none of them a tile line, an item note or part of
 the day, markup shown as text, and both limits: 500 refused in the box, the
-desk's 4,000 refused in the desk's own words.
+desk's 4,000 refused in the desk's own words; an Add or Save made after the
+desk was switched elsewhere writes nothing, an edit of a note deleted
+elsewhere keeps its text, and Delete desk names the notes it deletes.
 
 No connector is configured, so nothing reaches Linear or Harvest;
 GitHub falls back to the machine's `gh` login for a read-only identity check.
@@ -265,6 +267,99 @@ def drive_desk_notes(js, until, settle, reload_view, real_click, type_into, repl
           gone is True and note_id not in [n["id"] for n in stored()["notes"]] and edited not in strip_texts(), strip_texts())
     ctx = start_context("dn3")
     check("and the next session to start is not given it", edited not in ctx and agent_rule in ctx, ctx[-400:])
+
+    # The open desk switched elsewhere while a note is typed (review M2). With
+    # a box in the strip focused a pushed view is held back, so the strip still
+    # shows the desk it was drawn for; a write then draws the tab again, writes
+    # nothing and says so. The page's own view comes with the server's push
+    # every 10 s, so each switch waits that long with the focus kept in the box.
+    beta = desk("POST", "/desks", {"name": "Desk Beta"}, token)["id"]
+    beta_path = "/desks/%s/notes" % beta
+
+    def switched_while_typing(to):
+        desk("POST", "/open", {"desk": to}, token)
+        time.sleep(13)
+        return js("return document.getElementById('desk-head-name').textContent")
+
+    def head_is(name):
+        return "document.getElementById('desk-head-name').textContent === %s" % json.dumps(name)
+
+    before = [n["id"] for n in stored()["notes"]]
+    raced = "Typed while the open desk was Bench client."
+    type_into("#desk-dnotes-new", raced)
+    stale = switched_while_typing(beta)
+    real_click("#desk-dnotes-add")
+    said = until("return %s && document.getElementById('desk-dnotes-status').textContent" % head_is("Desk Beta"))
+    check("a note typed while the desk is switched elsewhere is not written: Add draws the tab again, keeps the text and says why",
+          stale == "Bench client" and bool(said) and "from Bench client to Desk Beta" in said and "nothing was added" in said
+          and js("return document.getElementById('desk-dnotes-new').value") == raced
+          and [n["id"] for n in stored()["notes"]] == before and desk("GET", beta_path, token=token)["notes"] == [], [stale, said])
+    real_click("#desk-dnotes-add")
+    check("and Add once more, the new desk on screen, puts it on that desk",
+          shows(raced) is True and [n["text"] for n in desk("GET", beta_path, token=token)["notes"]] == [raced]
+          and [n["id"] for n in stored()["notes"]] == before)
+
+    agent_id = by_agent["note"]["id"]
+    desk("POST", "/open", {"desk": desk_id}, token)
+    reload_view()
+    until("return %s && !document.getElementById('desk-dnotes').hidden" % head_is("Bench client"))
+    js("var b = document.getElementById('desk-bench-later'); if (b) b.click(); return true")
+    real_click('#desk-dnotes-list [data-dnote-edit="%s"]' % agent_id)
+    until("var b = document.querySelector('#desk-dnotes-list li.editing textarea'); return !!b && document.activeElement === b")
+    reworded = "File F belongs to another engineer: report findings to them, never open a fix branch."
+    replace_text("#desk-dnotes-list li.editing textarea", reworded)
+    stale = switched_while_typing(beta)
+    real_click('#desk-dnotes-list [data-dnote-save="%s"]' % agent_id)
+    said = until("return %s && document.getElementById('desk-error').textContent" % head_is("Desk Beta"))
+    check("an edit saved after the desk was switched elsewhere is not written: the tab is drawn again and the flash says so",
+          stale == "Bench client" and bool(said) and "before Save, so nothing was written" in said
+          and [n["text"] for n in stored()["notes"] if n["id"] == agent_id] == [agent_rule]
+          and not js("return !!document.querySelector('#desk-dnotes-list li.editing')"), [stale, said])
+    desk("POST", "/open", {"desk": desk_id}, token)
+    reload_view()
+    back = until("var b = document.querySelector('#desk-dnotes-list li.editing textarea'); return %s && !!b && b.value" % head_is("Bench client"))
+    js("var b = document.getElementById('desk-bench-later'); if (b) b.click(); return true")
+    check("the edit is back with its text once its desk is open again", back == reworded, back)
+    real_click('#desk-dnotes-list [data-dnote-save="%s"]' % agent_id)
+    check("and Save then writes it to that note",
+          shows(reworded) is True and [n["text"] for n in stored()["notes"] if n["id"] == agent_id] == [reworded])
+
+    # A note deleted elsewhere while its editor is open: Save keeps the typed
+    # text and says what happened, and Add again keeps it as a new note.
+    real_click('#desk-dnotes-list [data-dnote-edit="%s"]' % agent_id)
+    until("return !!document.querySelector('#desk-dnotes-list li.editing textarea')")
+    kept_text = "Kept although the note went: report findings, never open a fix branch."
+    replace_text("#desk-dnotes-list li.editing textarea", kept_text)
+    desk("DELETE", "%s/%s" % (notes_path, agent_id), token=token)
+    real_click('#desk-dnotes-list [data-dnote-save="%s"]' % agent_id)
+    orphan = until("var r = document.querySelector('#desk-dnotes-list li.editing.gone');"
+                   " return !!r && !document.querySelector('#desk-dnotes-list [data-dnote-edit=%s]') && {text: r.querySelector('textarea').value,"
+                   " why: r.querySelector('.desk-dnotes-err').textContent, again: !!r.querySelector('[data-dnote-readd]')}" % json.dumps(agent_id))
+    check("Save on a note deleted elsewhere keeps the typed text, says the note went, and offers Add again",
+          bool(orphan) and orphan["text"] == kept_text and "deleted elsewhere" in orphan["why"] and orphan["again"], orphan)
+    real_click("#desk-dnotes-list [data-dnote-readd]")
+    check("Add again keeps it as a new note on the desk",
+          shows(kept_text) is True and not js("return !!document.querySelector('#desk-dnotes-list li.editing')")
+          and [n["source"] for n in stored()["notes"] if n["text"] == kept_text] == ["user"])
+
+    # Deleting a desk deletes its notes for good, and the question says so (review, low 2).
+    js("window.__asked = []; window.confirm = function (m) { window.__asked.push(m); return false; }; return true")
+    js("document.dispatchEvent(new CustomEvent('embarch:desk-form', {detail: {id: arguments[0]}})); return true", beta)
+    until("return !!document.querySelector('[data-form-delete]')", 40)
+    real_click("[data-form-delete]")
+    asked = until("return window.__asked.length && window.__asked")
+    check("Delete desk names the notes it deletes with the desk",
+          bool(asked) and "Its 1 desk note is deleted with it, for good." in asked[0] and beta in [d["id"] for d in desk("GET", "/desks", token=token)["desks"]], asked)
+    js("window.confirm = function (m) { window.__asked.push(m); return true; }; return true")
+    real_click("[data-form-delete]")
+    until("return document.getElementById('desk-form').hidden")
+    try:
+        desk("GET", beta_path, token=token)
+        beta_notes = "still there"
+    except urllib.error.HTTPError as e:
+        beta_notes = e.code
+    check("and a yes deletes the desk and its notes", beta not in [d["id"] for d in desk("GET", "/desks", token=token)["desks"]] and beta_notes == 404,
+          beta_notes)
 
     for n in stored()["notes"]:
         desk("DELETE", "%s/%s" % (notes_path, n["id"]), token=token)
