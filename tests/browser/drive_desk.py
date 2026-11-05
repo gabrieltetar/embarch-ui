@@ -113,18 +113,21 @@ def drive_desk_notes(js, until, settle, reload_view, real_click, type_into, repl
           bool(strip) and js("var n = document.querySelector('.desk-head').nextElementSibling; return n && n.id") == "desk-dnotes"
           and count() == ["0 of 4,000", False], [strip, count()])
 
-    # Added in the strip: the count runs as it is typed, and the desk keeps it as the user's.
+    # Added in the strip: the count runs as it is typed, and the desk keeps it
+    # as the user's. The desk's count is the list a session hears: each item
+    # its "- ", its text and a line break, and an agent's its mark too.
     rule = "In repo X, the only build that matters is app Y on board Z."
     type_into("#desk-dnotes-new", rule)
     running = js("return [document.getElementById('desk-dnotes-count').textContent, document.getElementById('desk-dnotes-len').textContent]")
-    check("the add box's count runs as it is typed, the desk's and the note's",
-          running == ["%d of 4,000" % len(rule), "%d of 500" % len(rule)], running)
+    check("the add box's count runs as it is typed, the desk's as a session hears it and the note's",
+          running == ["%d of 4,000" % (len(rule) + 3), "%d of 500" % len(rule)], running)
     real_click("#desk-dnotes-add")
     shown = shows(rule)
     kept = stored()
     check("a note added in the strip shows there, kept by the desk as the user's, and the box empties",
           shown is True and [(n["text"], n["source"]) for n in kept["notes"]] == [(rule, "user")]
-          and kept["used_chars"] == len(rule) and js("return document.getElementById('desk-dnotes-new').value") == "", kept)
+          and kept["used_chars"] == len(rule) + 3 and count()[0] == "%d of 4,000" % (len(rule) + 3)
+          and js("return document.getElementById('desk-dnotes-new').value") == "", kept)
     note_id = kept["notes"][0]["id"] if kept["notes"] else "missing"
 
     ctx = start_context("dn1")
@@ -141,6 +144,10 @@ def drive_desk_notes(js, until, settle, reload_view, real_click, type_into, repl
     check("an agent's note shows with an agent badge, the user's without one",
           by_agent.get("desk_id") == desk_id and by_agent["note"]["source"] == "agent"
           and badges == [[rule, False], [agent_rule, True]], [by_agent, badges])
+    agent_mark = " (added by an agent)"
+    with_agent = len(rule) + 3 + len(agent_rule) + len(agent_mark) + 3
+    check("and the desk's count takes the agent's mark too, as the strip shows it",
+          stored()["used_chars"] == with_agent and count()[0] == "{:,} of 4,000".format(with_agent), count())
 
     # Never a tile line, an item note or part of the day: a tile with a line of
     # its own, a card's notes and the day are read with both notes on the desk.
@@ -181,7 +188,7 @@ def drive_desk_notes(js, until, settle, reload_view, real_click, type_into, repl
     held = until("var b = document.querySelector('#desk-dnotes-list li.editing textarea'); return !!b && b !== window.__dnoteBox && b.value")
     check("a view read while the editor is open draws it again with what was typed", held == edited, held)
     check("and the count runs with the edit in place of the note",
-          count() == ["{:,} of 4,000".format(len(edited) + len(agent_rule)), False], count())
+          count() == ["{:,} of 4,000".format(with_agent - len(rule) + len(edited)), False], count())
     real_click('#desk-dnotes-list [data-dnote-save="%s"]' % note_id)
     shown = shows(edited)
     after = stored()["notes"]
@@ -225,18 +232,45 @@ def drive_desk_notes(js, until, settle, reload_view, real_click, type_into, repl
           and at_limit["why"] == "", at_limit)
     js("var b = document.getElementById('desk-dnotes-new'); b.value = ''; b.dispatchEvent(new Event('input', {bubbles: true})); return true")
 
-    # The desk's 4,000: filled to under one note's room through its own surface,
-    # then a note one character over it typed here. The desk refuses it, and
-    # the box says so in the desk's words and keeps the text.
+    def set_new(text):
+        js("var b = document.getElementById('desk-dnotes-new'); b.value = arguments[0]; b.dispatchEvent(new Event('input', {bubbles: true})); return true", text)
+
+    # A line break counts 3 against the 500, for the indent a session reads;
+    # and a note counts as the desk keeps it: blank lines and trailing blanks
+    # dropped. The box's count before Add is the desk's after it.
+    set_new("x" * 249 + "\n" + "x" * 249)
+    two = js(box_state)
+    check("a line break counts 3: 499 characters on two lines are refused in the box as 501",
+          two["off"] and two["len"] == "501 of 500" and "a line break counting 3" in two["why"], two)
+    used0 = stored()["used_chars"]
+    set_new("Line one, rule X.  \n\n   \nLine two, rule Y.\t\n")
+    typed = [count()[0], js("return document.getElementById('desk-dnotes-len').textContent")]
+    real_click("#desk-dnotes-add")
+    kept_as = "Line one, rule X.\nLine two, rule Y."
+    shows(kept_as)
+    after = stored()
+    check("a note with blank lines and trailing blanks counts as the desk keeps it, before Add as after",
+          typed == ["{:,} of 4,000".format(used0 + len(kept_as) + 2 + 3), "%d of 500" % (len(kept_as) + 2)]
+          and after["used_chars"] == used0 + len(kept_as) + 2 + 3 and kept_as in [n["text"] for n in after["notes"]], [typed, after["used_chars"]])
+    for n in after["notes"]:
+        if n["text"] == kept_as:
+            desk("DELETE", "%s/%s" % (notes_path, n["id"]), token=token)
+
+    # The desk's 4,000: filled through its own surface to 100 under, then a
+    # note one character too long for what is left typed here. The desk
+    # refuses it, and the box says so in the desk's words and keeps the text.
     fillers = []
     used = stored()["used_chars"]
-    while used + 500 <= 4000:
+    while used + 503 <= 3900:
         fillers.append(desk("POST", notes_path, {"text": "f" * 500}, token)["note"]["id"])
-        used += 500
-    over = "o" * (4000 - used + 1)
+        used = stored()["used_chars"]
+    if 3900 - used - 3 > 0:
+        fillers.append(desk("POST", notes_path, {"text": "f" * (3900 - used - 3)}, token)["note"]["id"])
+        used = stored()["used_chars"]
+    over = "o" * (4000 - used - 3 + 1)
     reload_view()
     until("return document.getElementById('desk-dnotes-count').textContent === %s" % json.dumps("{:,} of 4,000".format(used)))
-    js("var b = document.getElementById('desk-dnotes-new'); b.value = arguments[0]; b.dispatchEvent(new Event('input', {bubbles: true})); return true", over)
+    set_new(over)
     running = count()
     real_click("#desk-dnotes-add")
     said = until("return document.getElementById('desk-dnotes-status').textContent")

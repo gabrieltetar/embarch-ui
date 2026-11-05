@@ -534,10 +534,13 @@
   // into each session's context when it starts. Never a tile line, never part
   // of a Harvest note. The user writes them here and an agent through
   // desk_add_desk_note (badged "agent"); only this strip edits or deletes one.
-  // The limits come with the view. A note over max_note_chars is refused here
-  // before it is sent, and nothing is cut; the desk still checks it, and
-  // refuses one that takes the desk past max_chars in its own words, shown
-  // where the note was typed. Every write reads the view again.
+  // The limits come with the view, and count as a session reads the notes:
+  // the list it hears is the desk's used_chars against max_chars, and a note
+  // is its text with each line break counting 3 against max_note_chars. A
+  // note over that is refused here before it is sent, and nothing is cut; the
+  // desk still checks it, and refuses one that takes the desk past max_chars
+  // in its own words, shown where the note was typed. Every write reads the
+  // view again.
   //
   // Every write goes to the desk the strip was drawn for, and only while the
   // view still shows that desk. A pushed view replaces `view` while a box here
@@ -563,10 +566,29 @@
   var dnoteAdding = false;   // an add is on its way
   var DNOTE_GONE = "This note was deleted elsewhere. Add again keeps this text as a new note.";
 
-  // Characters as the desk counts them: Unicode scalar values, not UTF-16
-  // units or bytes, of the text it keeps, which is trimmed.
-  function chars(s) {
-    return Array.from(String(s == null ? "" : s).trim()).length;
+  // A note's text as the desk keeps it (embarch-desk store.rs,
+  // clean_desk_note): one kind of line ending, no trailing blanks, no blank
+  // line, trimmed.
+  function cleanNote(s) {
+    return String(s == null ? "" : s).replace(/\r\n?/g, "\n").split("\n")
+      .map(function (l) { return l.replace(/\s+$/, ""); })
+      .filter(function (l) { return l.trim() !== ""; }).join("\n").trim();
+  }
+
+  // Its length as the desk counts it against max_note_chars: Unicode scalar
+  // values, not UTF-16 units or bytes, and each line break 3, for the indent
+  // that keeps the next line inside its item in the list a session hears.
+  function noteLen(s) {
+    var t = cleanNote(s);
+    return Array.from(t).length + 2 * (t.split("\n").length - 1);
+  }
+
+  // What a new note takes of the desk's max_chars, as used_chars counts it:
+  // its length, the item's "- " and the line break after it. (An agent's mark
+  // is the desk's: no note this strip adds carries one, and an edit keeps it.)
+  function newNoteCost(s) {
+    var len = noteLen(s);
+    return len ? len + 3 : 0;
   }
 
   function thousands(n) {
@@ -574,7 +596,7 @@
   }
 
   function tooLong(len, max) {
-    return "A desk note holds at most " + thousands(max) + " characters; this one has " + thousands(len) + ".";
+    return "A desk note holds at most " + thousands(max) + " characters, a line break counting 3; this one has " + thousands(len) + ".";
   }
 
   function findDeskNote(id) {
@@ -661,20 +683,21 @@
     deskNoteCounts();
   }
 
-  // The running count: the desk's characters with the editor's text in place
-  // of its note's (or on top, for a note deleted elsewhere) and the add box's
-  // on top, against the desk's limit; and each box's own length against a
+  // The running count: the desk's used_chars with the editor's text in place
+  // of its note's (or added, for a note deleted elsewhere) and the add box's
+  // added, against the desk's limit; and each box's own length against a
   // note's. All of it as the strip was drawn: a view pushed while a box has
   // focus is not on screen yet.
   function deskNoteCounts() {
     var dn = dnotesShown;
     if (!dn) return;
     var max = dn.max_note_chars;
-    var typed = chars(dnotesNew.value);
-    var used = dn.used_chars + typed;
+    var typed = noteLen(dnotesNew.value);
+    var used = dn.used_chars + newNoteCost(dnotesNew.value);
     var edit = shownEdit();
     var was = edit && !edit.gone && (dn.notes || []).filter(function (n) { return n.id === edit.id; })[0];
-    if (edit) used += chars(edit.text) - (was ? chars(was.text) : 0);
+    if (was) used += noteLen(edit.text) - noteLen(was.text);
+    else if (edit) used += newNoteCost(edit.text);
     dnotesCount.textContent = thousands(used) + " of " + thousands(dn.max_chars);
     dnotesCount.title = "Characters in this desk's notes, counting what is typed; a desk holds " + thousands(dn.max_chars);
     dnotesCount.classList.toggle("over", used > dn.max_chars);
@@ -684,7 +707,7 @@
     if (typed > max) dnotesStatus.textContent = tooLong(typed, max);
     var row = edit && dnotesList.querySelector("li.editing");
     if (row) {
-      var len = chars(edit.text);
+      var len = noteLen(edit.text);
       var lenEl = row.querySelector(".desk-dnote-len");
       lenEl.textContent = thousands(len) + " of " + thousands(max);
       lenEl.classList.toggle("over", len > max);
@@ -697,7 +720,7 @@
     if (!view || deskMoved("Add")) return;
     var max = view.desk_notes.max_note_chars;
     var text = dnotesNew.value;
-    var len = chars(text);
+    var len = noteLen(text);
     if (!len) return;
     if (len > max) { dnotesStatus.textContent = tooLong(len, max); return; }
     dnoteAdding = true;
@@ -729,7 +752,7 @@
   function sendDeskNoteEdit(btn) {
     var edit = shownEdit();
     if (!view || !edit || deskMoved(edit.gone ? "Add again" : "Save")) return;
-    var len = chars(edit.text);
+    var len = noteLen(edit.text);
     if (!len || len > view.desk_notes.max_note_chars) return;
     btn.disabled = true;
     var call = edit.gone ? api("POST", deskNotesPath(), { text: edit.text }) : api("PATCH", deskNotesPath(edit.id), { text: edit.text });
