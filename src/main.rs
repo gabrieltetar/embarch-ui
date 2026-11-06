@@ -17,6 +17,7 @@ mod desk;
 mod firmware_build;
 mod live_study;
 mod logs;
+mod service;
 mod snapshot;
 mod studies_api;
 mod study_designer;
@@ -51,13 +52,12 @@ const BIND_PORT: u16 = 4890;
 
 /// `EMBARCH_UI_HOST`/`EMBARCH_UI_PORT` override the two constants above.
 ///
-/// Added because the VS Code launcher extension already exposed `host`/`port`
-/// settings and built the browser URL it opens from them, while this binary
-/// hardcoded `127.0.0.1:4890` and the extension passed neither through — so
-/// changing that setting opened a URL nothing was listening on. The
-/// extension now forwards both as env vars (the same channel it already used
-/// for `EMBARCH_UI_CONFIG`), rather than growing a CLI flag surface this
-/// binary otherwise has none of.
+/// Added because the VS Code launcher exposed `host`/`port` settings and
+/// built the browser URL it opens from them, while this binary hardcoded
+/// `127.0.0.1:4890` — so changing that setting opened a URL nothing was
+/// listening on. The service unit carries both as env vars, the same channel
+/// as `EMBARCH_UI_CONFIG` (decision 101), rather than a CLI flag surface
+/// this binary otherwise has none of.
 ///
 /// An unparseable value falls back to the default rather than refusing to
 /// start: a typo'd port shouldn't leave an engineer with no UI at all, and
@@ -220,7 +220,14 @@ struct CachedTrace {
 /// threads — not the thread that called `block_on` — are what actually
 /// poll a spawned task (every axum request handler among them), each at
 /// tokio's own default stack size unless told otherwise.
+///
+/// With no arguments it serves; `service …` manages its systemd user unit
+/// and serves nothing (decision 101).
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        return service::command(&args);
+    }
     std::thread::Builder::new()
         .stack_size(512 * 1024 * 1024)
         .spawn(|| {
@@ -238,6 +245,13 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+
+    // Bound before anything starts: a second copy on the same address fails
+    // here, before its Core poll and `watch_running` follow a study and show
+    // its prompts beside the first's (decision 101).
+    let addr = bind_address();
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!("embarch-ui listening on http://{addr}");
 
     let config = config::load()?;
     let core = Arc::new(embarch_core_client::CoreClient::new(&config.core)?);
@@ -285,9 +299,6 @@ async fn async_main() -> anyhow::Result<()> {
 
     let app = app(state);
 
-    let addr = bind_address();
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("embarch-ui listening on http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -36,8 +36,8 @@ embarch-ui (one Rust binary, axum, zero-build — no bundler, assets include_str
   |
   +-- HTTP + Bearer --> embarch-core --probe-rs/serialport--> hardware
 
-vscode-extension/ (thin, TypeScript)
-  spawns/stops the binary, opens the system browser, renders nothing itself
+embarch-ui.service (systemd user unit, `embarch-ui service install`)
+  runs the binary, one per machine, with or without a VS Code window
 ```
 
 **Every hardware-adjacent call, read or write, goes over HTTP+Bearer to Core**, and that is structural rather than a convention: `embarch-topology` is in the tree transitively via `embarch-core-client`, but only its `software` feature — never `hardware` — so neither `probe-rs` nor `serialport` appears in `cargo tree -e normal`. A board read done in-process would enumerate whichever machine `embarch-ui` runs on, not Core's.
@@ -100,11 +100,19 @@ firmware_repo_path = "/path/to/firmware"   # its embarch/study-actions.toml is t
 
 Omitting `[study_designer]` does not disable the tab — "Open project" can pick a firmware repo at runtime.
 
+## Running it as a service
+
+```sh
+embarch-ui service install     # writes, enables and starts embarch-ui.service
+embarch-ui service status
+embarch-ui service uninstall
+```
+
+The unit runs the binary that installed it, so installing from `target/debug` makes `cargo build && systemctl --user restart embarch-ui` the restart. It carries `PATH` and any `EMBARCH_UI_HOST`, `EMBARCH_UI_PORT`, `EMBARCH_UI_CONFIG` and `WSL_DISTRO_NAME` set in the installing shell, nothing else. Its log is `journalctl --user -u embarch-ui`.
+
 ## The VS Code launcher
 
-[`vscode-extension/`](vscode-extension) is a thin launcher: it starts and stops the binary and opens your system browser. It renders nothing inside the editor. Install it with `./reinstall.sh` from that directory, then reload the window.
-
-**You will need that script again.** The launcher is not on any marketplace, so nothing reinstalls it: when the VS Code server re-provisions its extensions directory — a server update does — the extension is dropped silently while the `embarchUi.*` settings survive. The symptom is the three "EmbArch UI:" commands quietly missing from the palette, with no error anywhere. See [vscode-extension/README.md](vscode-extension/README.md).
+The launcher lives in [`embarch-chat`](../embarch-chat)'s extension and spawns nothing: its status bar item shows the unit's state, and `EmbArch UI: Start`, `Stop` and `Restart` drive it through `systemctl --user`. Start also focuses the tab already showing the UI, or opens one. It renders nothing inside the editor.
 
 ## Testing
 

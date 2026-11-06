@@ -16,7 +16,6 @@ from the repo root (the master is found beside this script either way):
     python3 $B 1.6 union  /tmp/mark-paths.txt                # -> index.html
     python3 $B 1.6 layers assets/brand/embarch-mark.svg
     python3 $B 1.6 layers assets/brand/favicon-64.png    64
-    python3 $B 1.6 layers vscode-extension/icon.png     128
 
 Tracing a 256px raster costs half a pixel of edge placement and there is no
 getting it back: measured across four scanlines of the A's left edge, the cut
