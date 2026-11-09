@@ -1002,11 +1002,12 @@
   }
 
   // ---------------------------------------------------------------- the desk form
-  var formData = { projects: null, targets: null, repos: null };
+  var formData = { projects: null, teams: null, targets: null, repos: null };
 
   function loadFormData() {
     var jobs = [];
     if (!formData.projects) jobs.push(api("GET", "/linear/projects").then(function (r) { formData.projects = r.projects || []; }).catch(function () { formData.projects = []; }));
+    if (!formData.teams) jobs.push(api("GET", "/linear/teams").then(function (r) { formData.teams = r.teams || []; }).catch(function () { formData.teams = []; }));
     if (!formData.targets) jobs.push(api("GET", "/harvest/targets").then(function (r) { formData.targets = r.targets || []; }).catch(function () { formData.targets = []; }));
     if (!formData.repos) jobs.push(api("GET", "/github/repos").then(function (r) { formData.repos = r.repos || []; }).catch(function () { formData.repos = []; }));
     return Promise.all(jobs);
@@ -1016,11 +1017,18 @@
     // A desk binds one Linear project, or a whole team when the client's work
     // spans several of its projects.
     var opts = ['<option value="">— no Linear —</option>'];
+    // Every team, a new client's with no project yet included (embarch-desk
+    // decision 34); a project's teams still count if the team list failed.
     var teams = {};
+    (formData.teams || []).forEach(function (t) { teams[t.account + "|" + t.id] = { account: t.account, team: t }; });
     (formData.projects || []).forEach(function (p) {
-      (p.teams || []).forEach(function (t) { teams[p.account + "|" + t.id] = { account: p.account, team: t }; });
+      (p.teams || []).forEach(function (t) {
+        var k = p.account + "|" + t.id;
+        if (!teams[k]) teams[k] = { account: p.account, team: t };
+      });
     });
-    Object.keys(teams).sort().forEach(function (k) {
+    var byKey = function (k) { return teams[k].account + "|" + teams[k].team.key; };
+    Object.keys(teams).sort(function (a, b) { return byKey(a) < byKey(b) ? -1 : byKey(a) > byKey(b) ? 1 : 0; }).forEach(function (k) {
       var x = teams[k];
       var v = JSON.stringify({ account: x.account, project_id: "", project_name: "", team_id: x.team.id, team_key: x.team.key });
       var sel = cur && !cur.project_id && cur.team_id === x.team.id;

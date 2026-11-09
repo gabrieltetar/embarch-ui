@@ -24,7 +24,9 @@ repo, an agent's badged, none of them a tile line, an item note or part of
 the day, markup shown as text, and both limits: 500 refused in the box, the
 desk's 4,000 refused in the desk's own words; an Add or Save made after the
 desk was switched elsewhere writes nothing, an edit of a note deleted
-elsewhere keeps its text, and Delete desk names the notes it deletes.
+elsewhere keeps its text, and Delete desk names the notes it deletes. The
+desk form offers every Linear team as a whole team, one with no project too,
+and saving one binds its id and key with no project (EMB-93).
 
 No connector is configured, so nothing reaches Linear or Harvest;
 GitHub falls back to the machine's `gh` login for a read-only identity check.
@@ -491,6 +493,14 @@ def main():
                    "window.fetch = function (u) { if (re.test(u)) return Promise.resolve(new Response(JSON.stringify({error: msg}), {status: st}));"
                    " return window.__realFetch.apply(window, arguments); }; return true", pattern, status, error)
 
+            def stub_answers(answers):
+                # Answer each route pattern with its JSON body, until unstub_fetch().
+                js("var answers = arguments[0];"
+                   "window.__realFetch = window.__realFetch || window.fetch;"
+                   "window.fetch = function (u) { for (var p in answers) if (new RegExp(p).test(u))"
+                   " return Promise.resolve(new Response(JSON.stringify(answers[p]), {status: 200}));"
+                   " return window.__realFetch.apply(window, arguments); }; return true", answers)
+
             def unstub_fetch():
                 js("if (window.__realFetch) window.fetch = window.__realFetch; return true")
 
@@ -890,11 +900,27 @@ def main():
 
             # --- desks: one per project, one open suite-wide -------------------
             (repo / "CMakeLists.txt").write_text("project(fw)\n")
+            # No connector is configured, so Linear's answers are stubbed: a
+            # team on a project, and a new client's team with no project yet.
+            # The form keeps what it read, so the Edit below sees them too.
+            stub_answers({
+                "/api/desk/linear/projects$": {"projects": [{"account": "personal", "id": "p-old", "name": "Old work",
+                                                             "state": "started", "teams": [{"id": "t-old", "key": "OLD", "name": "Old client"}]}]},
+                "/api/desk/linear/teams$": {"teams": [{"account": "personal", "id": "t-new", "key": "NEW", "name": "New client"},
+                                                      {"account": "personal", "id": "t-old", "key": "OLD", "name": "Old client"}]},
+            })
             js("document.getElementById('desk-create').click(); return true")
             for _ in range(150):  # the form waits on Linear, Harvest and GitHub
                 if js("return !!document.getElementById('df-name')"):
                     break
                 time.sleep(0.2)
+            unstub_fetch()
+            linear_opts = js("return Array.from(document.querySelectorAll('#df-linear option')).map(function (o) { return o.textContent; })")
+            check("the form offers a team with no project as a whole team (EMB-93)",
+                  "Whole team NEW · New client (personal)" in linear_opts, linear_opts)
+            check("a team on a project is offered once, beside its project",
+                  sum(o.startswith("Whole team OLD") for o in linear_opts) == 1 and "OLD · Old work — started (personal)" in linear_opts,
+                  linear_opts)
             js("document.getElementById('df-name').value = 'Bench client';"
                "document.getElementById('df-repo').value = arguments[0];"
                "document.querySelector('[data-form-save]').click(); return true", str(repo))
@@ -917,6 +943,27 @@ def main():
             settle()
             check("a standalone card lands on the desk picked for it (the open one by default)",
                   "Weekly call" in js("return document.getElementById('desk-cards').textContent"))
+
+            # Binding the team with no project: Edit, pick it, Save.
+            js("document.getElementById('desk-edit').click(); return true")
+            for _ in range(150):
+                if js("return !!document.getElementById('df-linear')"):
+                    break
+                time.sleep(0.2)
+            js("var s = document.getElementById('df-linear');"
+               "s.value = Array.from(s.options).find(function (o) { return o.textContent.indexOf('Whole team NEW') === 0; }).value;"
+               "document.querySelector('[data-form-save]').click(); return true")
+            bound = None
+            for _ in range(50):
+                bound = [d for d in desk("GET", "/desks", token=token)["desks"] if d["name"] == "Bench client"][0].get("linear")
+                if bound:
+                    break
+                time.sleep(0.2)
+            check("saving binds the whole team: its id and key, and no project",
+                  bool(bound) and (bound["team_id"], bound["team_key"], bound["project_id"]) == ("t-new", "NEW", ""), bound)
+            check("the form closes on the save", js("return document.getElementById('desk-form').hidden") is True)
+            bench_id = [d for d in desk("GET", "/desks", token=token)["desks"] if d["name"] == "Bench client"][0]["id"]
+            desk("POST", "/desks", {"id": bench_id, "name": "Bench client", "firmware_repos": [str(repo)]}, token)
 
             # A switch made elsewhere (an agent, the CLI) reaches the page by itself.
             desk("POST", "/open", {"desk": "none"}, token)
