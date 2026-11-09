@@ -80,7 +80,7 @@
          be a card on the Study Designer, which made "which repo am I looking
          at?" a question you answered by leaving the tab you were on. -->
     <button id="project-button" class="sidebar-project" type="button"
-            title="The open desk — its firmware repo is what every tab reads and writes">
+            title="The desk the UI shows — its firmware repo is what every tab reads and writes. Claude Code sessions each work on their own desk.">
       <span class="sidebar-project-label">Desk</span>
       <span class="sidebar-project-name" id="project-current-name">no desk</span>
       <span class="sidebar-project-path mono" id="project-current-path">pick a desk or a repo</span>
@@ -117,7 +117,7 @@
            /api/desk proxy; desk.js renders it. -->
       <section class="tab-panel" data-tab="desk">
         <div class="desk-head">
-          <div><div class="desk-label" style="margin:0;">Open desk</div><div class="desk-head-name" id="desk-head-name">no desk</div></div>
+          <div><div class="desk-label" style="margin:0;">Desk shown</div><div class="desk-head-name" id="desk-head-name">no desk</div></div>
           <button class="btn btn-tiny" id="desk-switch" type="button">Switch…</button>
           <button class="btn btn-tiny" id="desk-edit" type="button">Edit desk</button>
           <button class="btn btn-tiny" id="desk-create" type="button">New desk</button>
@@ -811,9 +811,9 @@
            explicit human pick is the way in when it is absent. -->
       <div id="project-dialog-backdrop" class="dialog-backdrop" style="display:none;"></div>
       <div id="project-dialog" class="dialog" style="display:none; width:min(640px,92vw);">
-        <div class="card-title">Open a desk — the whole suite follows it</div>
+        <div class="card-title">Show a desk — its cards and its repo, here only</div>
         <div id="desk-switch-list" class="desk-switch-list"><p class="placeholder-note">reading the desks…</p></div>
-        <div class="desk-label" style="margin-top:16px;">No desk — a bare firmware repo, nothing tracked or scoped</div>
+        <div class="desk-label" style="margin-top:16px;">Or a firmware repo — the desk shown stays</div>
         <label class="sd-field" style="margin-top:6px;">
           <span>Firmware repo path</span>
           <input id="project-path" type="text" class="sd-input mono" spellcheck="false" placeholder="/home/you/src/your-firmware" />

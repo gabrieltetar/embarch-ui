@@ -28,9 +28,9 @@
   var pickupBody = document.getElementById("desk-pickup-body");
   var pickupTitle = document.getElementById("desk-pickup-title");
   var pickupQ = document.getElementById("desk-pickup-q");
-  var pickupDesk;          // the open desk the list was read for
+  var pickupDesk;          // the desk shown when the list was read
   var pickedDay = null;    // a date the user picked; null follows today
-  var lastOpenId;          // the open desk the last pushed view named
+  var lastOpenId;          // the desk shown in the last pushed view
   var timerEl = document.getElementById("desk-timer");
   var dialogEl = document.getElementById("desk-dialog");
   var backdropEl = document.getElementById("desk-dialog-backdrop");
@@ -585,7 +585,7 @@
 
   // ---------------------------------------------------------------- desk notes
   //
-  // The open desk's standing notes (embarch-desk decision 74): working
+  // The shown desk's standing notes (embarch-desk decision 74): working
   // agreements for every session in the desk's repos, which the desk puts
   // into each session's context when it starts. Never a tile line, never part
   // of a Harvest note. The user writes them here and an agent through
@@ -602,7 +602,7 @@
   // view still shows that desk. A pushed view replaces `view` while a box here
   // has focus and leaves the strip as it was (`editing`), so a desk switched
   // elsewhere meanwhile would otherwise get a rule typed for the one on
-  // screen (review M2). A write that finds the open desk moved on draws the
+  // screen (review M2). A write that finds the desk shown moved on draws the
   // tab again and writes nothing, and says so.
   var dnotesEl = document.getElementById("desk-dnotes");
   var dnotesList = document.getElementById("desk-dnotes-list");
@@ -683,8 +683,8 @@
     var from = dnotesDeskName;
     render();
     if (what && !(what === "Add" && dn)) {
-      flash((dn ? "The open desk changed from " + from + " to " + dnotesDeskName : "The desk " + from + " was closed") +
-        " before " + what + ", so nothing was written." + (what === "Save" ? " The edit is kept for when " + from + " is open again." : ""), 15000);
+      flash((dn ? "The desk shown changed from " + from + " to " + dnotesDeskName : "The desk " + from + " is no longer shown") +
+        " before " + what + ", so nothing was written." + (what === "Save" ? " The edit is kept for when " + from + " is shown again." : ""), 15000);
     }
     return true;
   }
@@ -724,7 +724,7 @@
       dnotesDesk = dn.desk_id;
       dnotesDeskName = deskNameOf(dn.desk_id);
       dnotesStatus.textContent = was && dnotesNew.value.trim()
-        ? "The open desk changed from " + was + " to " + dnotesDeskName + " while this was typed, so nothing was added. Add puts it on " + dnotesDeskName + "."
+        ? "The desk shown changed from " + was + " to " + dnotesDeskName + " while this was typed, so nothing was added. Add puts it on " + dnotesDeskName + "."
         : "";
     }
     dnotesShown = dn;
@@ -1097,7 +1097,7 @@
     api("POST", "/desks", body).then(function (r) {
       closeForm();
       if (!id) {
-        // A new desk opens: that is what making one is for.
+        // A new desk is shown: that is what making one is for.
         return api("POST", "/open", { desk: r.id }).then(function () {
           document.dispatchEvent(new CustomEvent("embarch:desk-switched"));
         });
@@ -1111,7 +1111,7 @@
       '<div class="card desk-empty"><div class="card-title">No work items yet</div>' +
       '<p class="placeholder-note">' + (view.open_desk
         ? "Add a card from a Linear issue key above, or start a Claude Code session in this desk's repos and answer which work item it is."
-        : "Open a desk with Switch…, or make one with New desk.") + "</p></div>";
+        : "Show a desk with Switch…, or make one with New desk.") + "</p></div>";
     readNotes(cards);
     markLinkedCard();
   }
@@ -1484,7 +1484,7 @@
     if (d.formDelete) {
       // A desk's notes go with it, for good (embarch-desk decision 74), so the
       // question names them: read from the desk, since the view carries only
-      // the open desk's. Unread, the question still says they go.
+      // the shown desk's. Unread, the question still says they go.
       var gone = d.formDelete;
       t.disabled = true;
       api("GET", "/desks/" + encodeURIComponent(gone) + "/notes").then(function (r) {

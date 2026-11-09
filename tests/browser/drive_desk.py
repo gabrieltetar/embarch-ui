@@ -898,7 +898,7 @@ def main():
             settle()
             check("Stop ends it", js("return document.getElementById('desk-timer').hidden"))
 
-            # --- desks: one per project, one open suite-wide -------------------
+            # --- desks: one per project, one shown in the UI --------------------
             (repo / "CMakeLists.txt").write_text("project(fw)\n")
             # No connector is configured, so Linear's answers are stubbed: a
             # team on a project, and a new client's team with no project yet.
@@ -965,7 +965,7 @@ def main():
             bench_id = [d for d in desk("GET", "/desks", token=token)["desks"] if d["name"] == "Bench client"][0]["id"]
             desk("POST", "/desks", {"id": bench_id, "name": "Bench client", "firmware_repos": [str(repo)]}, token)
 
-            # A switch made elsewhere (an agent, the CLI) reaches the page by itself.
+            # A selection made elsewhere (another UI window) reaches the page by itself.
             desk("POST", "/open", {"desk": "none"}, token)
             followed = False
             for _ in range(70):

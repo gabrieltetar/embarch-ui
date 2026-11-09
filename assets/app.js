@@ -5221,14 +5221,15 @@
     }
   }
 
-  // ---------------------------------------------------------------- the open desk
+  // ---------------------------------------------------------------- the UI's desk
   //
-  // The sidebar control names the open desk, not a repo
-  // (embarch-open-desk-proposal.md): one desk per project, open suite-wide.
-  // Its firmware repo is what every tab reads, so following a desk opens its
-  // repo through the same path a typed repo takes. "No desk" is a bare repo.
-  // A switch made anywhere else — an agent, the CLI, a session's question —
-  // reaches this page through desk.js's pushed view as an `embarch:desk` event.
+  // The sidebar control names the desk the UI shows, not a repo
+  // (embarch-open-desk-proposal.md, EMB-94): one desk per project. Selecting
+  // one picks the Desk tab's cards and opens its firmware repo, which every
+  // tab reads, through the same path a typed repo takes. It moves no Claude
+  // Code session: each works on its own desk. A repo picked by hand keeps the
+  // desk. A selection made in another UI window reaches this page through
+  // desk.js's pushed view as an `embarch:desk` event.
   var shellDesk;           // undefined until the desk has answered; null = no desk
   var shellDeskKnown = false;
 
@@ -5247,7 +5248,7 @@
       name.textContent = repo ? projectShortName(repo) : "no desk";
       path.textContent = repo ? "no desk · " + projectPathDisplay(repo) : "pick a desk or a repo";
       button.classList.toggle("is-empty", !repo);
-      button.title = repo ? repo + " — no desk open" : "No desk open. Pick a desk, or a bare firmware repo.";
+      button.title = repo ? repo + " — no desk selected" : "No desk selected. Pick a desk, or a bare firmware repo.";
     }
   }
 
@@ -5273,7 +5274,7 @@
       renderShellDesk();
       return;
     }
-    // On page load the open desk is not a switch: no bench proposal.
+    // On page load the desk shown is not a switch: no bench proposal.
     followDesk(desk, !first);
   });
 
@@ -5323,10 +5324,10 @@
         return '<button type="button" class="desk-switch-item' + (body.open === d.id ? " current" : "") +
           '" data-open-desk="' + escapeHtml(d.id) + '" data-desk-repo="' + escapeHtml((d.firmware_repos || [])[0] || "") + '"><span><b>' + escapeHtml(d.name) + "</b><br>" +
           '<span class="desk-switch-sub">' + escapeHtml(sub) + "</span></span>" +
-          (body.open === d.id ? '<span class="badge badge-success">open</span>' : '<span class="badge badge-neutral">open it</span>') +
+          (body.open === d.id ? '<span class="badge badge-success">shown</span>' : '<span class="badge badge-neutral">show it</span>') +
           "</button>";
       }).join("") +
-      (body.open ? '<button type="button" class="desk-switch-item" data-open-desk="none"><span>Close the desk <span class="desk-switch-sub">— keep the repo, nothing scoped</span></span></button>' : "");
+      (body.open ? '<button type="button" class="desk-switch-item" data-open-desk="none"><span>No desk <span class="desk-switch-sub">— every desk\'s cards, keep the repo</span></span></button>' : "");
     } catch (e) {
       list.innerHTML = '<p class="sd-error">embarch-desk: ' + escapeHtml(String(e.message || e)) + "</p>";
     }
@@ -5418,16 +5419,6 @@
         return;
       }
       var state = JSON.parse(text);
-      if (!forDesk && shellDesk) {
-        // A repo picked by hand is "no desk" (decision 6 of the proposal).
-        await fetch("/api/desk/open", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ desk: "none" }),
-        }).catch(function () {});
-        shellDesk = null;
-        hideBenchBanner();
-      }
       var wasPath = projectState ? projectState.path : null;
       renderProject(state);
       // The same repo after all (the server's spelling of the path): no
