@@ -7,7 +7,9 @@ session that a hook puts on it, a commit-less line, a flash — then starts an
 embarch-ui pointed at that desk and a dead Core, and drives the tab: the card
 renders and its tile is dealt into the hand above the work cards, with a chip on
 the card that opens it, ✓ on a tile nobody has opened opens it instead of
-sending, the dialog shows the lines, ✕ discards, the Dashboard is gone. The
+sending, the dialog shows the lines, ✕ discards, earlier weeks' tiles wait
+behind a button in the hand's head and open as a row per week (embarch-desk
+decision 76), the Dashboard is gone. The
 chat's part (embarch-chat-desk-proposal.md): a session's row before the chat
 ships and its one line after, Open chat through the mailbox (an ended chat
 too), the card's notes from memory files written in a scratch Claude folder,
@@ -811,6 +813,45 @@ def main():
             settle()
             check("✕ discards the tile and it leaves the hand", js("return document.querySelectorAll('.desk-tile').length") == 0)
             check("an empty hand says so", "No time waiting" in js("return document.getElementById('desk-hand').textContent"))
+
+            # Earlier weeks (embarch-desk decision 76): only this week's tiles
+            # sit in the row. Two waiting from 2020 stay behind the head's
+            # button, which keeps their count, and open as a row per week,
+            # newest first.
+            old = [desk("PATCH", "/tiles/%s@%s" % (item, d), {"hours": h}, token)["id"]
+                   for d, h in (("2020-01-08", 2.0), ("2020-01-13", 0.5))]
+            older = until("var b = document.querySelector('#desk-hand [data-hand-older]'); return b && b.textContent")
+            check("earlier weeks' tiles stay out of the row, behind a button with their count and hours",
+                  bool(older) and "2 cards · 2h30" in older and js("return document.querySelectorAll('#desk-hand .desk-tile').length") == 0
+                  and "No time waiting this week" in js("return document.querySelector('#desk-hand .desk-hand-row').textContent"), older)
+            check("a work card's chip for an earlier week's tile says where it is",
+                  js("var m = document.querySelectorAll('.desk-card .desk-mini');"
+                     " return m.length === 2 && Array.prototype.every.call(m, function (b) { return /earlier weeks/.test(b.title); })"))
+            js("document.querySelector('#desk-hand [data-hand-older]').click(); return true")
+            settle()
+            weeks = js("return Array.from(document.querySelectorAll('#desk-hand .desk-hand-week')).map(function (w) {"
+                       " return [w.getAttribute('data-week'), w.nextElementSibling.querySelectorAll('.desk-tile').length]; })")
+            check("a click opens one row per earlier week, newest first, and keeps focus on the button",
+                  weeks == [["2020-01-13", 1], ["2020-01-06", 1]]
+                  and js("return document.querySelector('#desk-hand [data-hand-older]').getAttribute('aria-expanded')") == "true"
+                  and js("return document.activeElement === document.querySelector('#desk-hand [data-hand-older]')"), weeks)
+            if SHOT:
+                Path(SHOT.replace(".png", "-weeks.png")).write_bytes(base64.b64decode(wd("GET", S + "/screenshot")))
+            label = js("return document.querySelector('#desk-hand .desk-hand-week').textContent")
+            check("a week's label names its Monday, and the year when it is not this one",
+                  "Week of" in label and "13" in label and "2020" in label, label)
+            desk("PATCH", "/tiles/" + urllib.parse.quote(old[1]), {"hours": 0.75}, token)
+            check("a pushed view keeps the earlier weeks open",
+                  until("var b = document.querySelector('#desk-hand [data-hand-older]'); return !!b && b.textContent.indexOf('2h45') >= 0"
+                        " && document.querySelectorAll('#desk-hand .desk-hand-week').length === 2") is True)
+            js("document.querySelector('#desk-hand [data-hand-older]').click(); return true")
+            settle()
+            check("a second click closes them",
+                  js("return document.querySelectorAll('#desk-hand .desk-hand-week, #desk-hand .desk-tile').length") == 0)
+            for t in old:
+                desk("POST", "/tiles/%s/discard" % urllib.parse.quote(t), {}, token)
+            check("with nothing earlier waiting, the button goes",
+                  until("return !document.querySelector('#desk-hand [data-hand-older]')") is True)
 
             desk("POST", "/items", {"title": "Pushed card"}, token)
             pushed = False

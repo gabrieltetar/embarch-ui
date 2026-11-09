@@ -134,8 +134,36 @@
   // the work cards (embarch-desk decision 57): this desk's first, oldest
   // first. A card is dealt in once — a pushed view does not deal it again —
   // one sent flies to "Sent today", one discarded drops.
+  //
+  // Only this week's tiles sit in the row (embarch-desk decision 76). Earlier
+  // weeks' wait behind a button in the head that keeps their count and hours
+  // on screen, and open under it as one row per week, newest week first. A
+  // week runs Monday to Sunday, as Harvest's does.
   var dealt = {};
   var lastSent = null;
+  var olderOpen = false;     // earlier weeks shown; every load starts closed
+
+  // The Monday of a YYYY-MM-DD's week, as YYYY-MM-DD. Read as UTC, so no
+  // daylight-saving shift moves a day across midnight.
+  function weekOf(date) {
+    var d = new Date(date + "T00:00:00Z");
+    if (isNaN(d)) return date;
+    d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function weekLabel(monday) {
+    var d = new Date(monday + "T12:00:00");
+    if (isNaN(d)) return "Week of " + monday;
+    var opts = { month: "short", day: "numeric" };
+    if (monday.slice(0, 4) !== view.today.slice(0, 4)) opts.year = "numeric";
+    return "Week of " + d.toLocaleDateString(undefined, opts);
+  }
+
+  function tally(tiles) {
+    var h = tiles.reduce(function (n, t) { return n + (Number(t.hours) || 0); }, 0);
+    return tiles.length + " card" + (tiles.length === 1 ? "" : "s") + " · " + hours(h);
+  }
 
   function handCardHtml(t, i) {
     var lines = (t.lines || []).length;
@@ -163,17 +191,38 @@
 
   function renderHand() {
     var hand = view.hand || [];
-    var unsent = hand.reduce(function (n, t) { return n + (Number(t.hours) || 0); }, 0);
+    var thisWeek = weekOf(view.today);
+    var now = hand.filter(function (t) { return weekOf(t.date) === thisWeek; });
+    var weeks = [];          // [{monday, tiles}], newest week first; each keeps the hand's order
+    hand.forEach(function (t) {
+      var w = weekOf(t.date);
+      if (w === thisWeek) return;
+      var g = weeks.filter(function (x) { return x.monday === w; })[0];
+      if (!g) weeks.push(g = { monday: w, tiles: [] });
+      g.tiles.push(t);
+    });
+    weeks.sort(function (a, b) { return a.monday < b.monday ? 1 : -1; });
+    var older = [].concat.apply([], weeks.map(function (w) { return w.tiles; }));
+    if (!older.length) olderOpen = false;
     var sent = view.day && view.day.date === view.today ? view.day.logged_hours || 0 : 0;
     handEl.innerHTML =
       '<div class="desk-hand-head"><span class="desk-hand-title">Your hand</span>' +
-      '<span class="desk-detail">' + (hand.length ? hand.length + " card" + (hand.length === 1 ? "" : "s") + " · " + hours(unsent) + " unsent" : "nothing to pick") + "</span>" +
+      '<span class="desk-detail">' + (now.length ? tally(now) + " unsent this week" : "nothing to pick this week") + "</span>" +
+      (older.length ? '<button class="desk-hand-older" type="button" data-hand-older="1" aria-expanded="' + olderOpen + '"' +
+        ' title="' + (olderOpen ? "Hide" : "Show") + ' the cards still waiting from earlier weeks">Earlier weeks · ' + tally(older) + (olderOpen ? " ▴" : " ▾") + "</button>" : "") +
       '<span class="desk-hand-sent' + (lastSent !== null && sent > lastSent ? " bump" : "") + '" id="desk-hand-sent" title="Hours in Harvest today, every desk">Sent today <b>' + hours(sent) + "</b></span></div>" +
-      '<div class="desk-hand-row">' + (hand.length ? hand.map(handCardHtml).join("")
-        : '<div class="desk-hand-empty">No time waiting. A session\'s time is dealt here as a card, one per work item and day.</div>') + "</div>";
+      '<div class="desk-hand-row">' + (now.length ? now.map(handCardHtml).join("")
+        : older.length ? '<div class="desk-hand-empty">No time waiting this week. Earlier weeks still hold ' + tally(older) + ".</div>"
+        : '<div class="desk-hand-empty">No time waiting. A session\'s time is dealt here as a card, one per work item and day.</div>') + "</div>" +
+      (olderOpen ? weeks.map(function (w) {
+        return '<div class="desk-hand-week" data-week="' + esc(w.monday) + '"><span>' + esc(weekLabel(w.monday)) + '</span><span class="desk-detail">' + tally(w.tiles) + "</span></div>" +
+          '<div class="desk-hand-row">' + w.tiles.map(handCardHtml).join("") + "</div>";
+      }).join("") : "");
     lastSent = sent;
+    // Only what is on screen counts as dealt, so opening earlier weeks deals
+    // their cards in.
     dealt = {};
-    hand.forEach(function (t) { dealt[t.id] = true; });
+    (olderOpen ? now.concat(older) : now).forEach(function (t) { dealt[t.id] = true; });
   }
 
   // A card leaving the hand: "sent" flies it to the Sent today count,
@@ -387,7 +436,8 @@
     var mine = (view.hand || []).filter(function (t) { return t.item_id === c.id; });
     var time = mine.length
       ? '<div class="desk-card-time">' + mine.map(function (t) {
-          return '<button class="desk-mini" type="button" data-open-tile="' + esc(t.id) + '" title="In your hand above: open it">' +
+          var where = weekOf(t.date) === weekOf(view.today) ? "In your hand above" : "In your hand's earlier weeks";
+          return '<button class="desk-mini" type="button" data-open-tile="' + esc(t.id) + '" title="' + where + ': open it">' +
             esc(dayLabel(t.date)) + " · <b>" + hours(t.hours) + "</b></button>";
         }).join("") + '<span class="desk-detail">in your hand ↑</span></div>'
       : '<div class="desk-tile-empty">' + (c.logged_today
@@ -1317,6 +1367,13 @@
     if (!t || !panel.contains(t)) return;
     var d = t.dataset;
     if (d.openTile) { openDialog(d.openTile); return; }
+    if (d.handOlder) {
+      olderOpen = !olderOpen;
+      renderHand();
+      var back = handEl.querySelector("[data-hand-older]");
+      if (back) back.focus();
+      return;
+    }
     if (d.start) { startWork(d.start, t); return; }
     if (d.pickStart || d.pickAdd) {
       var key = d.pickStart || d.pickAdd;

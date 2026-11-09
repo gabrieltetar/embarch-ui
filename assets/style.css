@@ -2051,6 +2051,12 @@ table.data-table {
 .desk-hand-sent { margin-left: auto; display: inline-flex; gap: 6px; align-items: baseline; font-size: 12px; color: var(--text-tertiary); padding: 3px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-surface); }
 .desk-hand-sent b { font: 600 13px var(--font-mono); color: var(--success); }
 .desk-hand-sent.bump { animation: desk-bump 0.5s ease-out; }
+/* Earlier weeks' tiles (embarch-desk decision 76): a button that keeps their
+   count on screen, and one labelled row per week under this week's. */
+.desk-hand-older { display: inline-flex; align-items: baseline; font: inherit; font-size: 12px; color: var(--text-secondary); padding: 3px 11px; border: 1px dashed var(--border-strong); border-radius: 999px; background: none; cursor: pointer; }
+.desk-hand-older:hover, .desk-hand-older[aria-expanded="true"] { border-color: var(--accent); color: var(--text-primary); }
+.desk-hand-week { display: flex; align-items: baseline; gap: 10px; padding-top: 10px; border-top: 1px dashed var(--border); font-size: 10.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
+.desk-hand-week .desk-detail { font-weight: 400; letter-spacing: normal; text-transform: none; }
 .desk-hand-row { display: flex; justify-content: safe center; gap: 14px; overflow-x: auto; padding: 14px 4px 16px; }
 .desk-hand-empty { flex: 1; padding: 14px 16px; border: 1.5px dashed var(--border-strong); border-radius: 14px; font-size: 12px; color: var(--text-tertiary); text-align: center; }
 .desk-tile { flex: 0 0 auto; width: 156px; height: 214px; display: flex; flex-direction: column; border: 1px solid var(--border-strong); border-radius: 14px; background: linear-gradient(180deg, var(--bg-surface-2), var(--bg-surface)); box-shadow: var(--shadow-card); overflow: hidden; transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease; }
