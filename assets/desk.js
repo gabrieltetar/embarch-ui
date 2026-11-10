@@ -628,15 +628,25 @@
   // again rather than vanishing.
   var dnoteEdit = null;
   var dnoteAdding = false;   // an add is on its way
+  var dnotesAddTried = false;   // an Add is what found the desk had changed
+  var dnotesMoveWarn = "";   // the desk-change warning on show: typing does not clear it, an Add does
   var DNOTE_GONE = "This note was deleted elsewhere. Add again keeps this text as a new note.";
 
   // A note's text as the desk keeps it (embarch-desk store.rs,
   // clean_desk_note): one kind of line ending, no trailing blanks, no blank
   // line, trimmed.
+  // Rust's char::is_whitespace is the set the desk trims with, not
+  // JavaScript's \s: it has U+0085 and not U+FEFF.
+  var RUST_SPACE = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+  var RUST_TRIM_END = new RegExp("[" + RUST_SPACE + "]+$");
+  var RUST_TRIM = new RegExp("^[" + RUST_SPACE + "]+|[" + RUST_SPACE + "]+$", "g");
+  var RUST_BLANK = new RegExp("^[" + RUST_SPACE + "]*$");
+
+  // Rust's str::lines splits on \n alone, here after the endings are made one.
   function cleanNote(s) {
     return String(s == null ? "" : s).replace(/\r\n?/g, "\n").split("\n")
-      .map(function (l) { return l.replace(/\s+$/, ""); })
-      .filter(function (l) { return l.trim() !== ""; }).join("\n").trim();
+      .map(function (l) { return l.replace(RUST_TRIM_END, ""); })
+      .filter(function (l) { return !RUST_BLANK.test(l); }).join("\n").replace(RUST_TRIM, "");
   }
 
   // Its length as the desk counts it against max_note_chars: Unicode scalar
@@ -689,7 +699,9 @@
     var dn = view && view.desk_notes;
     if (dn && dn.desk_id === dnotesDesk) return false;
     var from = dnotesDeskName;
+    dnotesAddTried = what === "Add";
     render();
+    dnotesAddTried = false;
     if (what && !(what === "Add" && dn)) {
       flash((dn ? "The desk shown changed from " + from + " to " + dnotesDeskName : "The desk " + from + " is no longer shown") +
         " before " + what + ", so nothing was written." + (what === "Save" ? " The edit is kept for when " + from + " is shown again." : ""), 15000);
@@ -731,9 +743,11 @@
       var was = dnotesDeskName;
       dnotesDesk = dn.desk_id;
       dnotesDeskName = deskNameOf(dn.desk_id);
-      dnotesStatus.textContent = was && dnotesNew.value.trim()
-        ? "The desk shown changed from " + was + " to " + dnotesDeskName + " while this was typed, so nothing was added. Add puts it on " + dnotesDeskName + "."
+      dnotesMoveWarn = was && noteLen(dnotesNew.value)
+        ? "The desk shown changed from " + was + " to " + dnotesDeskName + " while this was typed, " +
+          (dnotesAddTried ? "so nothing was added. " : "and nothing has been added. ") + "Add puts it on " + dnotesDeskName + "."
         : "";
+      dnotesStatus.textContent = dnotesMoveWarn;
     }
     dnotesShown = dn;
     var list = dn.notes || [];
@@ -790,6 +804,7 @@
     dnoteAdding = true;
     dnotesAdd.disabled = true;
     dnotesStatus.textContent = "";
+    dnotesMoveWarn = "";
     api("POST", deskNotesPath(), { text: text }).then(function () {
       if (dnotesNew.value === text) dnotesNew.value = "";
       dnoteAdding = false;
@@ -1618,7 +1633,7 @@
   // the text it was about.
   dnotesEl.addEventListener("input", function (ev) {
     if (ev.target === dnotesNew) {
-      dnotesStatus.textContent = "";
+      if (!dnotesMoveWarn || dnotesStatus.textContent !== dnotesMoveWarn) dnotesStatus.textContent = "";
     } else if (dnoteEdit && ev.target.classList.contains("desk-dnote-edit")) {
       dnoteEdit.text = ev.target.value;
       dnoteEdit.error = "";

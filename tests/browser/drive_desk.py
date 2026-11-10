@@ -337,6 +337,14 @@ def drive_desk_notes(js, until, settle, reload_view, real_click, type_into, repl
           shows(raced) is True and [n["text"] for n in desk("GET", beta_path, token=token)["notes"]] == [raced]
           and [n["id"] for n in stored()["notes"]] == before)
 
+    # The count is the desk's: Rust's trim takes U+0085 and keeps U+FEFF, so
+    # "﻿ab\u0085" is 3 characters there (JavaScript's \s said 2).
+    counted = js("var b = document.getElementById('desk-dnotes-new'); b.value = '\\ufeffab\\u0085'; "
+                 "b.dispatchEvent(new Event('input', {bubbles: true})); "
+                 "var t = document.getElementById('desk-dnotes-len').textContent; b.value = ''; "
+                 "b.dispatchEvent(new Event('input', {bubbles: true})); return t")
+    check("a note holding U+FEFF and U+0085 is counted as the desk counts it", counted.startswith("3 of "), counted)
+
     agent_id = by_agent["note"]["id"]
     desk("POST", "/open", {"desk": desk_id}, token)
     reload_view()
