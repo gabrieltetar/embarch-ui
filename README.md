@@ -112,7 +112,15 @@ The unit runs the binary that installed it, so installing from `target/debug` ma
 
 ## The VS Code launcher
 
-The launcher lives in [`embarch-chat`](../embarch-chat)'s extension and spawns nothing: its status bar item shows the unit's state, and `EmbArch UI: Start`, `Stop` and `Restart` drive it through `systemctl --user`. Start also focuses the tab already showing the UI, or opens one. It renders nothing inside the editor.
+The launcher is part of [`embarch-chat`](../embarch-chat) and installs with it; this repo ships no extension of its own. It spawns nothing: it reads `embarch-ui.service` and drives it through `systemctl --user`, with the commands `EmbArch UI: Start`, `Stop`, `Restart` and `Open in Browser`. Start also focuses the tab already showing the UI, or opens one. It renders nothing inside the editor.
+
+Its status bar item has three states:
+
+- `embarch-ui` — the unit is running (ours).
+- `embarch-ui (external)` — a server answers on the address, but not as the unit.
+- `embarch-ui (stopped)` — the unit is stopped; clicking starts it.
+
+When the unit was never installed, the item reads `embarch-ui (not installed)` and its tooltip says to run `embarch-ui service install`.
 
 ## Testing
 
