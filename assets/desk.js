@@ -941,9 +941,9 @@
     pickupBody.innerHTML = '<p class="placeholder-note">reading Linear…</p>';
     var call = q ? api("POST", "/linear/search", { query: q }) : api("GET", "/pickup");
     return call.then(function (r) {
-      pickupTitle.textContent = q ? "Search" + (r.scope ? " in " + r.scope : "") : "Pick up — your open issues" + (r.scope ? " in " + r.scope : "") + " with no card";
+      pickupTitle.textContent = q ? "Search" + (r.scope ? " in " + r.scope : "") : "Pick up — your open issues" + (r.scope ? " in " + r.scope : "") + " with no card on the board";
       var rows = (r.issues || []).filter(function (i) { return i.key; });
-      pickupBody.innerHTML = rows.length ? rows.map(pickupRow).join("") : '<p class="placeholder-note">' + (q ? "Nothing matches." : "Every open issue of yours already has a card.") + "</p>";
+      pickupBody.innerHTML = rows.length ? rows.map(pickupRow).join("") : '<p class="placeholder-note">' + (q ? "Nothing matches." : "Every open issue of yours already has a card on the board.") + "</p>";
     }).catch(function (e) { pickupBody.innerHTML = '<p class="placeholder-note">' + esc(e.message) + "</p>"; });
   }
 
