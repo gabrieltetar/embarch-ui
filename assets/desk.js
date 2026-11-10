@@ -268,10 +268,16 @@
       '<div class="desk-session-head"><span class="desk-dot"></span><b>' + esc(r.name) + "</b> " +
       '<span class="desk-detail">' + esc(state) + "</span>" +
       '<span class="desk-session-acts"><a class="btn btn-tiny" href="' + esc(r.answer_url) + '" target="_blank" rel="noopener" title="Answer it on claude.ai (Remote Control)">Answer</a>' +
-      (r.folder_uri ? '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) + '" title="Open this chat in VS Code">Jump</button>' : "") +
+      (r.folder_uri ? '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) + '" title="Open this chat in VS Code">Jump</button>' : r.folder_missing ? folderGone(r) : "") +
       "</span></div>" +
       (r.last_reply ? '<div class="desk-session-reply">' + esc(r.last_reply) + "</div>" : "") +
       "</div>";
+  }
+
+  // desk/016: a folder deleted since the session ran comes back with
+  // folder_missing and no folder_uri; say so where the button would be.
+  function folderGone(r) {
+    return '<span class="desk-detail" title="' + esc(r.cwd || "") + ' no longer exists">folder gone</span>';
   }
 
   function sessionLine(r) {
@@ -283,6 +289,8 @@
     } else if (r.folder_uri) {
       act = '<button class="btn btn-tiny" type="button" data-jump-folder="' + esc(r.folder_uri) + '" data-jump-session="' + esc(r.session_uri) +
         '" title="Open ' + esc(r.cwd) + ' in VS Code, then this session">Jump</button>';
+    } else if (r.folder_missing) {
+      act = folderGone(r);
     }
     return '<div class="desk-session desk-session-line ' + esc(r.state) + '"><span class="desk-dot"></span>' +
       '<span class="desk-session-state">' + esc(r.state) + "</span>" +
