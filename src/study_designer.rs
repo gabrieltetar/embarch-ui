@@ -3665,14 +3665,32 @@ pub async fn api_bench_state(State(state): State<crate::AppState>) -> axum::resp
     )
     .await;
 
+    let dev_bench = bench_version(hello);
     Json(BenchStateResponse {
-        dev_bench: hello.as_ref().ok().map(|h| h.firmware_version.clone()),
-        dev_bench_error: hello.as_ref().err().map(|e| format!("{e:#}")),
+        dev_bench: dev_bench.as_ref().ok().cloned(),
+        dev_bench_error: dev_bench.err(),
         dut: dut.as_ref().ok().cloned(),
         dut_error: dut.as_ref().err().map(|e| format!("{e:#}")),
         any: REQUIREMENT_ANY,
     })
     .into_response()
+}
+
+/// The bench's build off a `GET /dev-bench/hello` answer, or why there is
+/// none. **A Core older than `embarch-core` decision 108 answers without
+/// `dev_bench_version`** (it served the value as `firmware_version`), and the
+/// client reads that as `None` (`embarch-api` decision 58). It reaches the
+/// browser as a reason, the same way a bench that did not answer does — never
+/// as a blank that prefills, and never as a value the pre-run check compares.
+fn bench_version(hello: anyhow::Result<embarch_core_client::HelloAckResponse>) -> Result<String, String> {
+    match hello {
+        Ok(ack) => ack.dev_bench_version.ok_or_else(|| {
+            "this Core did not send dev_bench_version, so the bench's build is unknown; a Core older \
+             than embarch-core decision 108 serves it as firmware_version — redeploy Core"
+                .to_string()
+        }),
+        Err(e) => Err(format!("{e:#}")),
+    }
 }
 
 /// Whether a `requires` field is satisfied by what the bench currently
@@ -3728,10 +3746,7 @@ pub async fn api_version_check(
     };
 
     Json(MismatchResponse {
-        dev_bench: field(
-            q.dev_bench_version.trim(),
-            hello.map(|h| h.firmware_version).map_err(|e| format!("{e:#}")),
-        ),
+        dev_bench: field(q.dev_bench_version.trim(), bench_version(hello)),
         dut: field(q.firmware_version.trim(), dut.map_err(|e| format!("{e:#}"))),
     })
     .into_response()
@@ -5361,6 +5376,29 @@ repeat = [{ name = "green", type = "i32le" }]
         // A file with no `requires` at all reads as unconstrained, which is
         // what such a study would in fact have done.
         assert_eq!(version_field(&serde_json::json!({}), "firmware_version"), REQUIREMENT_ANY);
+    }
+
+    /// The bench's build comes from `dev_bench_version` (`embarch-core`
+    /// decision 108). A Core that did not send it is a reason, never an empty
+    /// string that would prefill or compare as a version.
+    #[test]
+    fn the_bench_version_is_dev_bench_version_and_its_absence_is_a_reason() {
+        let ack = |v: Option<&str>| embarch_core_client::HelloAckResponse {
+            schema_version: 15,
+            compatible: true,
+            dev_bench_version: v.map(str::to_string),
+            self_reported_hardware_id: None,
+            link_identity: None,
+            probe_hardware_id: None,
+        };
+        assert_eq!(bench_version(Ok(ack(Some("g1a2b3c4")))), Ok("g1a2b3c4".to_string()));
+
+        let missing = bench_version(Ok(ack(None))).unwrap_err();
+        assert!(missing.contains("did not send dev_bench_version"), "{missing}");
+        assert!(missing.contains("decision 108"), "{missing}");
+
+        let failed = bench_version(Err(anyhow::anyhow!("no bench"))).unwrap_err();
+        assert_eq!(failed, "no bench");
     }
 
     // --- pre-flight -------------------------------------------------------
