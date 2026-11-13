@@ -103,8 +103,8 @@ pub struct BuildLogEntry {
 /// file. `embarch init` scaffolds exactly that path, so a repo the suite has
 /// been pointed at once needs **no configuration here at all**.
 ///
-/// It was not optional. The VS Code extension sets `EMBARCH_UI_CONFIG` and
-/// nothing else, so without this a real launch reached neither of the first
+/// It was not optional. A real launch sets `EMBARCH_UI_CONFIG` (from the
+/// service unit) and nothing else, so without this it reached neither of the first
 /// two sources and the Build card was unavailable on every bench that had not
 /// hand-edited a file for it — the feature shipped inert, which is
 /// [reversals](../embarch-decision-reversals.md) row 33's shape.

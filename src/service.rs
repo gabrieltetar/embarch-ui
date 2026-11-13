@@ -77,6 +77,17 @@ fn systemctl(args: &[&str]) -> Result<String> {
     Ok(text)
 }
 
+/// Which config the service will read, said at install: the variable the unit
+/// carries, else the default file the binary finds itself (decision 102), else
+/// none, which is the zero-config default and is worth saying aloud.
+fn config_note(carried: bool, found: Option<PathBuf>) -> String {
+    match (carried, found) {
+        (true, Some(p)) => format!("config: {} (EMBARCH_UI_CONFIG, carried into the unit)", p.display()),
+        (false, Some(p)) => format!("config: {} (the default path; EMBARCH_UI_CONFIG was not set)", p.display()),
+        _ => "config: none; the UI runs on its defaults, with no tabs. Put a file at the default path or set EMBARCH_UI_CONFIG and reinstall".into(),
+    }
+}
+
 /// Writes the unit for the binary running this, enables it and (re)starts
 /// it: installing from a dev build's `target/debug` makes `cargo build`
 /// plus `systemctl --user restart embarch-ui` the restart.
@@ -92,6 +103,7 @@ fn install() -> Result<()> {
     systemctl(&["enable", "--now", UNIT])?;
     systemctl(&["restart", UNIT])?;
     println!("installed {} → {}; it starts with your user session", p.display(), exe.display());
+    println!("{}", config_note(vars.iter().any(|(k, _)| *k == "EMBARCH_UI_CONFIG"), crate::config::resolve()));
     Ok(())
 }
 
@@ -135,6 +147,14 @@ mod tests {
         let u = super::unit_text("/h/bin/embarch-ui", "/usr/bin", &vars);
         assert!(u.contains("Environment=\"PATH=/usr/bin\"\nEnvironment=\"EMBARCH_UI_PORT=4890\"\nEnvironment=\"WSL_DISTRO_NAME=Ubuntu-24.04\"\n"), "{u}");
         assert!(!super::CARRIED.iter().any(|k| k.starts_with("EMBARCH_DESK") || k.starts_with("CLAUDE")));
+    }
+
+    #[test]
+    fn install_says_which_config_the_unit_will_read_including_none() {
+        let p = Some(std::path::PathBuf::from("/h/.config/embarch-ui/config.toml"));
+        assert!(super::config_note(false, p.clone()).contains("default path"));
+        assert!(super::config_note(true, p).contains("carried into the unit"));
+        assert!(super::config_note(false, None).contains("config: none"));
     }
 
     #[test]
