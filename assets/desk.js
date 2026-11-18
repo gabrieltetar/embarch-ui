@@ -554,12 +554,53 @@
 
   // What agents asked to write. Nothing here has been sent: Send posts the
   // text as it stands in the box, Discard drops it (decision 15).
+  //
+  // A github_replies draft (embarch-desk EMB-173) is a batch of replies, one
+  // box per review thread. Replies already posted (they carry a url) are shown
+  // as links and are not editable; Send posts the rest. A fully sent draft
+  // leaves the view, so its card is kept here as "Posted" until dismissed.
+  var postedCards = [];   // [{id, repo, pr, urls}]
+  function ghRepliesCard(d) {
+    var rs = d.gh_replies || [];
+    return '<div class="desk-draft" data-draft-id="' + esc(d.id) + '" data-draft-kind="github_replies">' +
+      '<div class="desk-draft-head">Replies on <b>' + esc(d.repo) + "#" + esc(d.pr) + '</b> <span class="desk-detail">' +
+      esc(new Date(d.created_ms).toLocaleString()) + "</span></div>" +
+      rs.map(function (r) {
+        var label = "Thread " + esc(r.comment_id);
+        if (r.url) {
+          return '<div class="desk-gh-reply desk-gh-posted" data-comment-id="' + esc(r.comment_id) + '"><label class="desk-detail">' + label +
+            ' — posted: <a href="' + esc(r.url) + '" target="_blank" rel="noopener">' + esc(r.url) + "</a></label>" +
+            '<div class="desk-detail">' + esc(r.body) + "</div></div>";
+        }
+        return '<div class="desk-gh-reply" data-comment-id="' + esc(r.comment_id) + '"><label class="desk-detail">' + label +
+          ' — emptying the box drops this thread</label>' +
+          '<textarea class="desk-input desk-textarea desk-gh-body" rows="3">' + esc(r.body) + "</textarea></div>";
+      }).join("") +
+      '<div class="desk-form"><button class="btn btn-primary btn-tiny" type="button" data-draft-send="' + esc(d.id) + '">Send</button>' +
+      '<button class="btn btn-tiny" type="button" data-draft-discard="' + esc(d.id) + '">Discard</button></div></div>';
+  }
+  // The PATCH body for the card as edited: the full list, comment ids as
+  // numbers, an already posted reply carried unchanged with its url.
+  function ghRepliesPatch(d, box) {
+    return { gh_replies: (d.gh_replies || []).map(function (r) {
+      if (r.url) return { comment_id: r.comment_id, body: r.body, url: r.url };
+      var el = box.querySelector('.desk-gh-reply[data-comment-id="' + CSS.escape(String(r.comment_id)) + '"] .desk-gh-body');
+      return { comment_id: r.comment_id, body: el ? el.value : r.body };
+    }) };
+  }
   function renderDrafts() {
     var drafts = view.drafts || [];
-    if (!drafts.length) { draftsEl.hidden = true; draftsEl.innerHTML = ""; return; }
+    if (!drafts.length && !postedCards.length) { draftsEl.hidden = true; draftsEl.innerHTML = ""; return; }
     draftsEl.hidden = false;
     draftsEl.innerHTML = '<div class="card-title">Drafts from agents — nothing is sent until you press Send</div>' +
+      postedCards.map(function (c) {
+        return '<div class="desk-draft desk-draft-posted" data-posted-id="' + esc(c.id) + '"><div class="desk-draft-head">Posted on <b>' +
+          esc(c.repo) + "#" + esc(c.pr) + "</b></div>" +
+          c.urls.map(function (u) { return '<div><a href="' + esc(u) + '" target="_blank" rel="noopener">' + esc(u) + "</a></div>"; }).join("") +
+          '<div class="desk-form"><button class="btn btn-tiny" type="button" data-posted-dismiss="' + esc(c.id) + '">Dismiss</button></div></div>';
+      }).join("") +
       drafts.map(function (d) {
+        if (d.kind === "github_replies") return ghRepliesCard(d);
         var replies = d.replies || [];
         var what = d.kind === "linear_issue" ? "New Linear issue in <b>" + esc(d.team_key) + "</b>"
           : d.kind === "linear_edit" ? "Change to <b>" + esc(d.issue_key) + "</b>"
@@ -1430,11 +1471,29 @@
     if (d.dnoteDelete) { deleteDeskNote(d.dnoteDelete); return; }
     if (d.timerStart) { api("POST", "/timer/start", { item_id: d.timerStart }).then(load).catch(function (e) { flash(e.message); }); return; }
     if (d.timerStop) { api("POST", "/timer/stop").then(load).catch(function (e) { flash(e.message); }); return; }
+    if (d.postedDismiss) {
+      postedCards = postedCards.filter(function (c) { return c.id !== d.postedDismiss; });
+      renderDrafts();
+      return;
+    }
     if (d.draftSend || d.draftDiscard) {
       var id = d.draftSend || d.draftDiscard;
       var box = draftsEl.querySelector('[data-draft-id="' + CSS.escape(id) + '"]');
       if (d.draftDiscard) {
         api("POST", "/drafts/" + encodeURIComponent(id) + "/discard").then(load).catch(function (e) { flash(e.message); });
+        return;
+      }
+      var ghDraft = ((view.drafts || []).filter(function (x) { return x.id === id && x.kind === "github_replies"; }))[0];
+      if (ghDraft) {
+        t.disabled = true;
+        api("PATCH", "/drafts/" + encodeURIComponent(id), ghRepliesPatch(ghDraft, box)).then(function () {
+          return api("POST", "/drafts/" + encodeURIComponent(id) + "/send");
+        }).then(function (r) {
+          var urls = r.urls || [];
+          postedCards.push({ id: id, repo: ghDraft.repo, pr: ghDraft.pr, urls: urls });
+          flash("Posted " + urls.length + (urls.length === 1 ? " reply" : " replies"));
+          return load();
+        }).catch(function (e) { flash(e.message); t.disabled = false; return load(); });
         return;
       }
       var patch = { body: box.querySelector(".desk-draft-body").value };

@@ -895,6 +895,36 @@ def main():
             settle()
             check("Discard drops the draft and nothing is left to send", js("return document.getElementById('desk-drafts').hidden"))
 
+            # A github_replies draft (EMB-205): one box per thread, the posted
+            # one read-only. PATCH and Send are stubbed in the page, so nothing
+            # can reach a repository.
+            desk("POST", "/drafts", {"kind": "github_replies", "repo": "owner/name", "pr": 7,
+                                     "gh_replies": [{"comment_id": 11, "body": "first"}, {"comment_id": 22, "body": "second"}]}, token)
+            until("return document.getElementById('desk-drafts').textContent.indexOf('owner/name#7') >= 0")
+            check("a github_replies draft names its repo and PR and has one box per thread",
+                  js("return document.querySelectorAll('.desk-gh-body').length") == 2 and
+                  "Thread 22" in js("return document.getElementById('desk-drafts').textContent") and
+                  js("return !document.querySelector('.desk-draft-body')"))
+            js("window.__realFetch = window.__realFetch || window.fetch; window.__calls = [];"
+               "window.fetch = function (u, o) { if (/\\/drafts\\//.test(u)) { window.__calls.push([o.method, u, o.body || '']);"
+               " return Promise.resolve(new Response(JSON.stringify(/send$/.test(u) ? {urls: ['https://example.invalid/r#1', 'https://example.invalid/r#2']} : {ok: true}), {status: 200})); }"
+               " return window.__realFetch.apply(window, arguments); }; return true")
+            js("document.querySelectorAll('.desk-gh-body')[1].value = 'second, edited';"
+               "document.querySelectorAll('.desk-gh-body')[0].value = ''; return true")
+            js("document.querySelector('[data-draft-send]').click(); return true")
+            calls = until("return window.__calls.length >= 2 ? window.__calls : null")
+            patch = json.loads(calls[0][2])
+            check("Send PATCHes the full list as edited, an emptied body included, then posts",
+                  calls[0][0] == "PATCH" and patch == {"gh_replies": [{"comment_id": 11, "body": ""}, {"comment_id": 22, "body": "second, edited"}]}
+                  and calls[1][0] == "POST" and calls[1][1].endswith("/send"), json.dumps(calls))
+            check("the posted URLs are shown on the card",
+                  until("return document.querySelector('.desk-draft-posted a') ? 1 : 0") == 1 and
+                  "https://example.invalid/r#2" in js("return document.querySelector('.desk-draft-posted').textContent"))
+            js("window.fetch = window.__realFetch; return true")
+            js("document.querySelector('[data-posted-dismiss]').click(); return true")
+            desk("POST", "/drafts/%s/discard" % desk("GET", "/view", token=token)["drafts"][0]["id"], {}, token)
+            settle()
+
             js("Array.from(document.querySelectorAll('.desk-card')).find(function (c) {"
                " return c.querySelector('.desk-card-title').textContent === 'Client sync call';"
                "}).querySelector('[data-timer-start]').click(); return true")
