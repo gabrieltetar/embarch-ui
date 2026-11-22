@@ -1278,7 +1278,7 @@
   var sdLogLevel = null;
   /* The loaded study's `measurements`, verbatim. The tab shows their names and
    * sends them back on every save, run and pre-flight; it does not author
-   * them (`ui` decision 31). */
+   * them (`ui` decision 104). */
   var sdMeasurements = [];
   /* The name the Study name box was last *filled* with — by a load, by New
    * study, or by the markup's own initial value. It is how "the box still

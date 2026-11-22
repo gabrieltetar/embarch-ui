@@ -1815,7 +1815,7 @@ pub struct RunRequest {
     #[serde(default)]
     dev_bench_log_level: Option<DevBenchLogLevel>,
     /// The study's `measurements`, handed back as the load route gave them
-    /// (`ui` decision 31): this tab does not author them, it keeps them.
+    /// (`ui` decision 104): this tab does not author them, it keeps them.
     #[serde(default)]
     measurements: Vec<serde_json::Value>,
 }
@@ -3254,7 +3254,7 @@ pub struct SaveStudyRequest {
     #[serde(default)]
     dev_bench_log_level: Option<DevBenchLogLevel>,
     /// The study's `measurements`, handed back as the load route gave them
-    /// (`ui` decision 31): this tab does not author them, it keeps them.
+    /// (`ui` decision 104): this tab does not author them, it keeps them.
     #[serde(default)]
     measurements: Vec<serde_json::Value>,
 }
@@ -3281,7 +3281,7 @@ struct LoadedStudy {
     /// re-saved must not gain an explicit level it never had.
     dev_bench_log_level: Option<String>,
     /// The file's `measurements`, verbatim; empty for a file that declares none.
-    /// The tab shows their names and hands them back on save (`ui` decision 31).
+    /// The tab shows their names and hands them back on save (`ui` decision 104).
     measurements: Vec<serde_json::Value>,
     /// Protocols the file carries that the repo's `.eap` no longer matches
     /// (decision 68). Advisory: the study still runs what it carries, and a
