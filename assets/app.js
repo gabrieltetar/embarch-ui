@@ -1276,6 +1276,10 @@
    * `null` means "not stated", which leaves the crate's own default in
    * place rather than this browser sending a level it invented. */
   var sdLogLevel = null;
+  /* The loaded study's `measurements`, verbatim. The tab shows their names and
+   * sends them back on every save, run and pre-flight; it does not author
+   * them (`ui` decision 31). */
+  var sdMeasurements = [];
   /* The name the Study name box was last *filled* with — by a load, by New
    * study, or by the markup's own initial value. It is how "the box still
    * holds the open study's name" is told apart from "somebody typed a name
@@ -2513,6 +2517,7 @@
         requires: sdRequiresPayload(),
         taps: sdTaps,
         dev_bench_log_level: sdLogLevelPayload(),
+        measurements: sdMeasurements,
       }),
     });
     var text = await resp.text();
@@ -2664,6 +2669,8 @@
     // monitor targets.
     sdLogLevel = loaded.dev_bench_log_level || null;
     renderSdLogLevels();
+    sdMeasurements = loaded.measurements || [];
+    renderSdBuildOptsSummary();
     sdTaps = (loaded.taps || []).map(function (tap) {
       if (tap.kind !== "gatt_notify") return tap;
       tap.record_magic = tap.record_magic || [];
@@ -4283,6 +4290,13 @@
     // study asserting it, and a summary that read the select would turn that
     // into a claim the file does not make.
     bits.push("log level " + (sdLogLevel || "unstated (server default)"));
+    if (sdMeasurements.length) {
+      bits.push(
+        sdMeasurements.length + " declared measurement" + (sdMeasurements.length === 1 ? "" : "s") +
+        " (" + sdMeasurements.map(function (m) { return m.name; }).join(", ") +
+        ") — kept as they are, not editable here"
+      );
+    }
     el.textContent = bits.join("  ·  ");
   }
 
@@ -5016,6 +5030,7 @@
           requires: sdRequiresPayload(),
           taps: sdTaps,
           dev_bench_log_level: sdLogLevelPayload(),
+        measurements: sdMeasurements,
         }),
       });
     } catch (e) {
@@ -5091,6 +5106,7 @@
           // Saved with the study, unlike the waiver below — decision 51
           // rejected making the level a property of anything but the study.
           dev_bench_log_level: sdLogLevelPayload(),
+        measurements: sdMeasurements,
           // A run parameter, never a study field: a saved study must not carry
           // a waiver into every later re-read of its own results.
           allow_version_mismatch: !!allowMismatch,
@@ -5432,6 +5448,7 @@
       // being watched on the Live Study tab.
       sdRows = [];
       sdTaps = [];
+      sdMeasurements = [];
       // Read out of the *previous* repo's source, down to the C identifiers
       // behind the names — the server drops its own copy on the same switch.
       sdEl("sd-static-result").innerHTML = "";

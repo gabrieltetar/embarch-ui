@@ -1814,6 +1814,10 @@ pub struct RunRequest {
     /// dialog field the way `reflash` and `allow_version_mismatch` are.
     #[serde(default)]
     dev_bench_log_level: Option<DevBenchLogLevel>,
+    /// The study's `measurements`, handed back as the load route gave them
+    /// (`ui` decision 31): this tab does not author them, it keeps them.
+    #[serde(default)]
+    measurements: Vec<serde_json::Value>,
 }
 
 /// Builds, taps, and seals one authored study — everything `run` and `save`
@@ -1856,6 +1860,20 @@ fn build_authored(
     Ok(study)
 }
 
+/// Puts the carried `measurements` on a built study and refuses what Core
+/// could not compute. Not part of `build_authored`: they are host-only and
+/// sealed by neither CRC, and a tab that never authors them only hands back
+/// what it loaded.
+fn apply_measurements(study: &mut Study, carried: &[serde_json::Value]) -> Result<(), (StatusCode, String)> {
+    if carried.is_empty() {
+        return Ok(());
+    }
+    study.measurements = serde_json::from_value(serde_json::Value::Array(carried.to_vec()))
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("measurements couldn't be read: {e}")))?;
+    embarch_study_designer::validate_measurements(study)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("measurements: {e}")))
+}
+
 pub async fn api_run(
     State(state): State<crate::AppState>,
     Json(req): Json<RunRequest>,
@@ -1882,7 +1900,7 @@ pub async fn api_run(
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let study = match build_authored(
+    let mut study = match build_authored(
         &req.name,
         &req.rows,
         &req.requires,
@@ -1895,6 +1913,9 @@ pub async fn api_run(
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
+    if let Err((code, e)) = apply_measurements(&mut study, &req.measurements) {
+        return (code, e).into_response();
+    }
     // **No slug**: this study is the table as it stands, which may never
     // have been saved. A build still runs and still reports what it
     // flashed; there is simply no file to write the built version back
@@ -2219,7 +2240,7 @@ pub async fn api_preflight(
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let study = match build_authored(
+    let mut study = match build_authored(
         &req.name,
         &req.rows,
         &req.requires,
@@ -2232,6 +2253,9 @@ pub async fn api_preflight(
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
+    if let Err((code, e)) = apply_measurements(&mut study, &req.measurements) {
+        return (code, e).into_response();
+    }
 
     let wire_len = match embarch_study_designer::protocols_wire_len(&study.protocols) {
         Ok(len) => len,
@@ -3229,6 +3253,10 @@ pub struct SaveStudyRequest {
     /// dialog field the way `reflash` and `allow_version_mismatch` are.
     #[serde(default)]
     dev_bench_log_level: Option<DevBenchLogLevel>,
+    /// The study's `measurements`, handed back as the load route gave them
+    /// (`ui` decision 31): this tab does not author them, it keeps them.
+    #[serde(default)]
+    measurements: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3252,6 +3280,9 @@ struct LoadedStudy {
     /// stated" distinguishable after a round trip — a study reloaded and
     /// re-saved must not gain an explicit level it never had.
     dev_bench_log_level: Option<String>,
+    /// The file's `measurements`, verbatim; empty for a file that declares none.
+    /// The tab shows their names and hands them back on save (`ui` decision 31).
+    measurements: Vec<serde_json::Value>,
     /// Protocols the file carries that the repo's `.eap` no longer matches
     /// (decision 68). Advisory: the study still runs what it carries, and a
     /// re-save resolves the current definitions.
@@ -3372,7 +3403,7 @@ pub async fn api_studies_save(
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let study = match build_authored(
+    let mut study = match build_authored(
         &req.name,
         &req.rows,
         &req.requires,
@@ -3385,6 +3416,9 @@ pub async fn api_studies_save(
         Ok(s) => s,
         Err((code, e)) => return (code, e).into_response(),
     };
+    if let Err((code, e)) = apply_measurements(&mut study, &req.measurements) {
+        return (code, e).into_response();
+    }
 
     let mut value = match serde_json::to_value(&study) {
         Ok(serde_json::Value::Object(map)) => map,
@@ -3500,6 +3534,11 @@ pub async fn api_studies_load(
             .get("dev_bench_log_level")
             .and_then(|l| l.as_str())
             .map(str::to_string),
+        measurements: value
+            .get("measurements")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default(),
         protocol_divergence: sd
             .protocol_defs()
             .map(|current| divergence_notes(&value, &current))

@@ -1500,6 +1500,68 @@ mod tests {
         dir
     }
 
+    /// `tasks/ui/112`: a study carrying `measurements`, loaded and saved
+    /// back through the tab's routes, keeps them byte for byte, and a save
+    /// whose declarations the crate refuses is refused with its message.
+    #[tokio::test]
+    async fn a_study_keeps_its_measurements_through_load_and_save() {
+        let repo = bench_repo("measurements");
+        let base = serve_app_with_repo(&repo).await;
+        let http = reqwest::Client::new();
+        let studies = format!("{base}/api/study-designer/studies");
+        let payload = |measurements: serde_json::Value| {
+            serde_json::json!({
+                "name": "declares",
+                "rows": [{
+                    "name": "monitor",
+                    "action": { "kind": "built_in", "which": "gatt_monitor_start", "role": "central" },
+                    "timeout_ms": 1000,
+                    "continue_on_fail": false,
+                    "delay_before_ms": 0
+                }],
+                "requires": {
+                    "dev_bench_version": "any", "firmware_version": "any"
+                },
+                "taps": [{
+                    "kind": "gatt_notify", "name": "ppg",
+                    "service_uuid": "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+                    "characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+                }],
+                "measurements": measurements,
+            })
+        };
+        let decl = serde_json::json!([
+            { "name": "notifications", "reducer": "count", "tap": 0 }
+        ]);
+
+        let saved = http.post(&studies).json(&payload(decl)).send().await.unwrap();
+        assert_eq!(saved.status(), StatusCode::OK, "{}", saved.text().await.unwrap());
+        let file = repo.join("embarch").join("studies").join("declares.json");
+        let first = std::fs::read(&file).unwrap();
+        let on_disk: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(on_disk["measurements"][0]["name"], "notifications");
+
+        // What the tab holds after Load is what it sends on Save.
+        let loaded: serde_json::Value =
+            http.get(format!("{studies}/declares")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(loaded["measurements"], on_disk["measurements"]);
+        let resaved = http.post(&studies).json(&payload(loaded["measurements"].clone())).send().await.unwrap();
+        assert_eq!(resaved.status(), StatusCode::OK);
+        assert_eq!(std::fs::read(&file).unwrap(), first, "a load and a save changed the file");
+
+        // A declaration Core could not compute is refused, and the file stays.
+        let refused = http
+            .post(&studies)
+            .json(&payload(serde_json::json!([{ "name": "x", "reducer": "count", "tap": 9 }])))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let message = refused.text().await.unwrap();
+        assert!(message.starts_with("measurements: "), "{message}");
+        assert_eq!(std::fs::read(&file).unwrap(), first);
+    }
+
     /// The bench editor's routes on a repo with nothing in it: the built-ins
     /// and the vocabulary are the binary's, and there are no benches.
     #[tokio::test]
