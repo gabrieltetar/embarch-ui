@@ -254,7 +254,7 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::info!("embarch-ui listening on http://{addr}");
 
     let config = config::load()?;
-    let core = Arc::new(embarch_core_client::CoreClient::new(&config.core)?);
+    let core = Arc::new(config::core_client(&config.core)?);
 
     let (tx, rx) = watch::channel(Snapshot::pending());
     let poke = Arc::new(Notify::new());
@@ -1245,8 +1245,8 @@ mod tests {
     /// so a test can restart the server over the same record.
     async fn serve_app_live(core_url: &str, repo: Option<std::path::PathBuf>, bench_live_path: Option<std::path::PathBuf>) -> String {
         let core_config: embarch_core_client::CoreConfig =
-            toml::from_str(&format!("base_url = \"{core_url}\"\ntoken = \"x\"\n")).unwrap();
-        let core = Arc::new(CoreClient::new(&core_config).unwrap());
+            toml::from_str(&format!("base_url = \"{core_url}\"\nperson_token = \"x\"\n")).unwrap();
+        let core = Arc::new(config::core_client(&core_config).unwrap());
         let (_snapshot_tx, snapshot_rx) = watch::channel(Snapshot::pending());
         let (_logs_tx, logs_rx) = watch::channel(Vec::new());
         let (_api_logs_tx, api_logs_rx) = watch::channel(Vec::new());

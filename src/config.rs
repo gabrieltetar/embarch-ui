@@ -3,7 +3,7 @@
 //! `config.rs` (embarch-ui never builds/flashes anything itself).
 
 use anyhow::{Context, Result};
-use embarch_core_client::CoreConfig;
+use embarch_core_client::{CoreClient, CoreConfig, TokenScope};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -133,9 +133,45 @@ pub fn load() -> Result<Config> {
     }
 }
 
+/// The UI's one Core client: it sends the **person's** token, because the UI
+/// is the person's surface (decision 103). A person token that cannot be
+/// resolved is an error naming where it was looked for; the agent's token is
+/// never used in its place.
+pub fn core_client(core: &CoreConfig) -> Result<CoreClient> {
+    CoreClient::new_with_scope(core, TokenScope::Person)
+        .context("embarch-ui calls embarch-core with the person's token and will not fall back to the agent's")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg(toml_text: &str) -> CoreConfig {
+        toml::from_str(toml_text).unwrap()
+    }
+
+    #[test]
+    fn the_core_client_is_built_with_the_person_token() {
+        let c = core_client(&cfg("base_url = \"http://x\"\ntoken = \"agent-t\"\nperson_token = \"person-t\"\n")).unwrap();
+        assert_eq!(c.scope(), TokenScope::Person);
+    }
+
+    #[test]
+    fn a_missing_person_token_is_an_error_even_with_an_agent_token() {
+        std::env::remove_var("EMBARCH_PERSON_TOKEN");
+        let var = "EMBARCH_UI_TEST_NO_SUCH_PERSON_TOKEN";
+        std::env::remove_var(var);
+        let err = core_client(&cfg(&format!(
+            "base_url = \"http://x\"\ntoken = \"agent-t\"\nperson_token_env = \"{var}\"\n"
+        )));
+        // Only a machine with a person-token file beside the token file can
+        // satisfy this; otherwise it must refuse, naming the person's sources.
+        if let Err(e) = err {
+            let msg = format!("{e:#}");
+            assert!(msg.contains("person"), "{msg}");
+            assert!(msg.contains("will not fall back to the agent's"), "{msg}");
+        }
+    }
 
     #[test]
     #[cfg(not(windows))]
