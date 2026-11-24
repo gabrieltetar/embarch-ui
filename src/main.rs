@@ -111,6 +111,35 @@ const FONT_SANS_VAR: &[u8] = include_bytes!("../assets/fonts/ibm-plex-sans-var-l
 const FONT_MONO_400: &[u8] = include_bytes!("../assets/fonts/ibm-plex-mono-400-latin.woff2");
 const FONT_MONO_600: &[u8] = include_bytes!("../assets/fonts/ibm-plex-mono-600-latin.woff2");
 
+impl AppState {
+    /// The state a terminal command runs the shared route bodies over: the
+    /// person's Core client, `repo` as the open project, and one poll of Core
+    /// standing in for the server's background poll. Nothing is served.
+    async fn headless(core: Arc<CoreClient>, repo: std::path::PathBuf, bench_live_path: Option<std::path::PathBuf>) -> AppState {
+        let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot::poll(&core).await);
+        let (_logs_tx, logs_rx) = watch::channel(Vec::new());
+        let (_api_logs_tx, api_logs_rx) = watch::channel(Vec::new());
+        AppState {
+            snapshot_rx,
+            core: core.clone(),
+            poke: Arc::new(Notify::new()),
+            study_designer: StudyDesigner::new(Some(config::StudyDesignerConfig { firmware_repo_path: repo }), core.clone()),
+            logs_rx,
+            api_logs_rx,
+            trace_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            table_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            time_chart_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            live: live_study::LiveStudies::new(core),
+            build_locks: Arc::new(embarch_firmware_build::build::BuildLocks::new()),
+            build_runs: firmware_build::BuildRuns::new(),
+            build_config_path: None,
+            bench_live_path,
+            bench_live_lock: Arc::new(tokio::sync::Mutex::new(())),
+            tabs: Arc::new(tabs::Tabs::default()),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     snapshot_rx: watch::Receiver<Snapshot>,
@@ -225,6 +254,9 @@ struct CachedTrace {
 /// and serves nothing (decision 101).
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "bench") {
+        return bench::cli::command(&args);
+    }
     if !args.is_empty() {
         return service::command(&args);
     }
@@ -748,6 +780,12 @@ struct EnrollRequest {
 /// Its caller is the Topology tab; the Enroll tab that used to own it was
 /// folded into Topology (decision 43) without the route changing at all.
 async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> Response {
+    enroll(&state, &req).await
+}
+
+/// The enrolment itself, shared by the route above and `embarch-ui bench
+/// make-live --bind` (`bench::cli`).
+async fn enroll(state: &AppState, req: &EnrollRequest) -> Response {
     // Waits for a running make-live, retract or clear (`bench::live`), so a
     // Confirm cannot land between a retract's check and its delete.
     let _live = state.bench_live_lock.lock().await;
@@ -755,7 +793,7 @@ async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest
     // 48) — an enrolment attaches, so it needs a chip, and the paths that
     // produce one must not disagree about where it comes from or what an
     // unanswerable one says. No Core call is made on a refusal.
-    let chip = match crate::topology::resolve_chip_or_refuse(&state, &req.role, req.name.as_deref().unwrap_or(""), &req.chip).await {
+    let chip = match crate::topology::resolve_chip_or_refuse(state, &req.role, req.name.as_deref().unwrap_or(""), &req.chip).await {
         Ok(chip) => chip,
         Err(refusal) => return refusal,
     };
@@ -1838,6 +1876,8 @@ mod tests {
         /// A signal whose `POST /signals` answers 1.5 s late, to hold a
         /// make-live inside Core while another call arrives.
         slow_signal: Option<String>,
+        /// The `Authorization` header of every request, in arrival order.
+        auth: Vec<String>,
     }
 
     type Stub = Arc<std::sync::Mutex<StubCore>>;
@@ -2001,6 +2041,18 @@ mod tests {
                 }),
             )
             .route(
+                "/probes/enroll",
+                post(|S(s): S<Stub>, J(v): J<serde_json::Value>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.writes.push(format!("POST /probes/enroll {v}"));
+                    axum::Json(serde_json::json!({
+                        "probe_serial": v["probe_serial"], "role": v["role"], "name": v["name"], "chip": v["chip"],
+                        "hardware_id": "ID1", "confirmed_at_utc_ms": 1,
+                    }))
+                    .into_response()
+                }),
+            )
+            .route(
                 "/dev-bench/link",
                 post(|S(s): S<Stub>, J(v): J<serde_json::Value>| async move {
                     let mut s = s.lock().unwrap();
@@ -2018,6 +2070,11 @@ mod tests {
                     }
                 }),
             )
+            .layer(axum::middleware::from_fn_with_state(stub.clone(), |S(s): S<Stub>, req: axum::extract::Request, next: axum::middleware::Next| async move {
+                let auth = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+                s.lock().unwrap().auth.push(auth);
+                next.run(req).await
+            }))
             .with_state(stub);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -2215,6 +2272,70 @@ port_serial = "C1"
         let live: serde_json::Value = http.get(format!("{base}/api/bench/live")).send().await.unwrap().json().await.unwrap();
         assert_eq!((live["live"]["slug"].as_str(), live["superseded"].clone()), (Some("pd"), serde_json::Value::Null));
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// `embarch-ui bench make-live` runs the route's own function: against the
+    /// same stub Core it sends the same writes (the route's, from a second
+    /// repo-and-record pair) with the person's token, prints every proposal
+    /// and applies only the one `--bind` confirms, and writes the record the
+    /// tab reads.
+    #[tokio::test]
+    async fn the_terminal_make_live_sends_what_the_route_sends_and_binds_only_what_is_named() {
+        // The route's writes, for comparison.
+        let route_stub = stub_with_leftovers();
+        let route_core = serve_stub_core(route_stub.clone()).await;
+        let (route_repo, route_record) = live_repo("cli-route", "pd", PD_BENCH);
+        let base = serve_app_live(&route_core, Some(route_repo.clone()), Some(route_record)).await;
+        let http = reqwest::Client::new();
+        let version = version_of_bench(&http, &base, "pd").await;
+        assert_eq!(make_live(&http, &base, &version).await.status(), StatusCode::OK);
+        let route_writes = route_stub.lock().unwrap().writes.clone();
+
+        // The terminal, over its own repo and record.
+        let stub = stub_with_leftovers();
+        let core_url = serve_stub_core(stub.clone()).await;
+        let (repo, record) = live_repo("cli-term", "pd", PD_BENCH);
+        let core_config: embarch_core_client::CoreConfig =
+            toml::from_str(&format!("base_url = \"{core_url}\"\nperson_token = \"person-secret\"\n")).unwrap();
+        let core = Arc::new(config::core_client(&core_config).unwrap());
+        let state = AppState::headless(core, repo.clone(), Some(record.clone())).await;
+        let args = bench::cli::parse(&["bench", "make-live", "pd", "--config", "A", "--bind", "dut=D1"].map(String::from)).unwrap();
+        let out = bench::cli::run(&state, &repo, &args).await.unwrap();
+        assert!(out.ok, "{}", out.text);
+
+        let term_writes: Vec<String> = stub.lock().unwrap().writes.iter().filter(|w| !w.starts_with("POST /probes/enroll")).cloned().collect();
+        assert_eq!(term_writes, route_writes, "the terminal sends the declarations the route sends");
+        assert!(stub.lock().unwrap().auth.iter().all(|a| a == "Bearer person-secret"), "the person's token on every call: {:?}", stub.lock().unwrap().auth);
+
+        // Named: applied. Not named: printed as proposed, never sent.
+        let enrols: Vec<String> = stub.lock().unwrap().writes.iter().filter(|w| w.starts_with("POST /probes/enroll")).cloned().collect();
+        assert_eq!(enrols.len(), 1, "{enrols:?}");
+        assert!(enrols[0].contains("\"probe_serial\":\"D1\"") && enrols[0].contains("\"role\":\"dut\""), "{}", enrols[0]);
+        assert!(out.text.contains("dut: Enrol probe D1") && out.text.contains("applied — enrolled on STM32G0B1VE"), "{}", out.text);
+        assert!(out.text.contains("dev-bench: Enrol probe B1") && out.text.contains("not applied — to apply: --bind dev-bench=B1"), "{}", out.text);
+        assert!(out.text.contains("not applied — to apply: --bind pd-bench=N1"), "{}", out.text);
+        assert!(out.text.contains("signal stale-sig"), "leftovers are listed: {}", out.text);
+
+        // The record the tab reads shows the bench live.
+        let records = bench::live::record_for(&record, &repo).unwrap().unwrap();
+        assert_eq!((records.slug.as_str(), records.config.as_deref()), ("pd", Some("A")));
+        let tab = serve_app_live(&core_url, Some(repo.clone()), Some(record.clone())).await;
+        let live: serde_json::Value = http.get(format!("{tab}/api/bench/live")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((live["live"]["slug"].as_str(), live["live"]["config"].as_str()), (Some("pd"), Some("A")), "{live}");
+
+        // A bind naming another serial, or a role nothing proposed, applies nothing and fails.
+        let before = stub.lock().unwrap().writes.len();
+        let wrong = bench::cli::parse(&["bench", "make-live", "pd", "--bind", "dut=ZZ", "--bind", "ghost=Q1"].map(String::from)).unwrap();
+        let out = bench::cli::run(&state, &repo, &wrong).await.unwrap();
+        assert!(!out.ok);
+        assert!(out.text.contains("the bench names probe D1, and --bind names ZZ") && out.text.contains("proposes no binding for `ghost`"), "{}", out.text);
+        assert!(stub.lock().unwrap().writes[before..].iter().all(|w| !w.starts_with("POST /probes/enroll")));
+
+        // A refusal is the route's own words, not a report.
+        let missing = bench::cli::parse(&["bench", "make-live", "nope"].map(String::from)).unwrap();
+        assert!(bench::cli::run(&state, &repo, &missing).await.err().unwrap().to_string().contains("no saved bench `nope`"));
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&route_repo);
     }
 
     /// A Core refusal is one row with Core's words and the rest still apply;

@@ -1245,7 +1245,15 @@ pub async fn api_make_live(
     UrlPath(slug): UrlPath<String>,
     Json(req): Json<MakeLiveRequest>,
 ) -> Response {
-    let slug = match path_slug(&slug) {
+    make_live(&state, &repo, &slug, &req).await
+}
+
+/// The make-live itself, **shared by the route above and `embarch-ui bench
+/// make-live`** (`bench::cli`), so the page and the terminal cannot disagree:
+/// the same checks, the same declarations, the same record. It answers what
+/// the route answers, status and body.
+pub async fn make_live(state: &AppState, repo: &Path, slug: &str, req: &MakeLiveRequest) -> Response {
+    let slug = match path_slug(slug) {
         Ok(s) => s.to_string(),
         Err(resp) => return *resp,
     };
@@ -1255,12 +1263,12 @@ pub async fn api_make_live(
             "a make-live names `write_through`: false for an explicit make-live, which takes the machine; true for the write-through after a save",
         );
     };
-    let path = match record_path(&state) {
+    let path = match record_path(state) {
         Ok(p) => p.to_path_buf(),
         Err(resp) => return *resp,
     };
     let _live = state.bench_live_lock.lock().await;
-    let (file, current) = match files::read_file(&repo, &slug) {
+    let (file, current) = match files::read_file(repo, &slug) {
         Ok(read) => read,
         Err(LoadError::Missing) => return refuse(StatusCode::NOT_FOUND, format!("no saved bench `{slug}`")),
         Err(LoadError::Unparseable(e)) => {
@@ -1286,7 +1294,7 @@ pub async fn api_make_live(
         Ok(r) => r,
         Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let key = repo_key(&repo);
+    let key = repo_key(repo);
     let previous = records.repos.get(&key);
     if write_through {
         let Some(p) = previous.filter(|p| p.slug == slug) else {
@@ -1326,15 +1334,15 @@ pub async fn api_make_live(
             None => return refuse(StatusCode::BAD_REQUEST, format!("the bench `{slug}` has no config named `{name}`")),
         },
     };
-    let catalog = catalog(Some(&repo));
+    let catalog = catalog(Some(repo));
     let templates = catalog.by_id();
-    let mut report = apply_bench(&state, &bench, &catalog, config).await;
+    let mut report = apply_bench(state, &bench, &catalog, config).await;
 
-    if let Err(e) = take_machine(&path, &repo, &slug, req.config.as_deref()) {
+    if let Err(e) = take_machine(&path, repo, &slug, req.config.as_deref()) {
         report.applied.push(row("live record", "(this UI)", false, format!("applied, but the record of which bench is live was not written: {e}")));
     }
-    let live = match record_for(&path, &repo) {
-        Ok(Some(r)) => match view(&repo, &r) {
+    let live = match record_for(&path, repo) {
+        Ok(Some(r)) => match view(repo, &r) {
             Ok(v) => Some(v),
             Err(e) => {
                 report.applied.push(row("live record", "(this UI)", false, e));
@@ -1348,7 +1356,7 @@ pub async fn api_make_live(
         }
     };
 
-    let pass = leftovers(&state, &named(&bench, &templates, config)).await;
+    let pass = leftovers(state, &named(&bench, &templates, config)).await;
     report.applied.extend(pass.unread_rows());
     report.applied.extend(pass.differs);
     state.poke.notify_one();

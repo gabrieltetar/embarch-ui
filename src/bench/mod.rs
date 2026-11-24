@@ -18,6 +18,7 @@
 //! description, never the bench in front of you.
 
 pub mod check;
+pub mod cli;
 pub mod files;
 pub mod live;
 pub mod routes;
