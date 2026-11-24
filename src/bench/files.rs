@@ -96,6 +96,12 @@ pub struct Part {
     /// Connector id → function → the identity it is bound to.
     #[serde(default)]
     pub usb: BTreeMap<String, BTreeMap<Function, Binding>>,
+    /// What Core sends this instrument to switch its outputs off, one command
+    /// per line (`embarch-topology` decision 49), declared with the part's
+    /// `scpi` line. Empty when none is stated: a make-live then keeps what
+    /// Core already holds (decision 90). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_off: Vec<String>,
 }
 
 impl Part {
@@ -264,6 +270,7 @@ fn legacy_part(id: &str, role: Role, binding: &RoleBinding) -> (Part, Option<Cab
             .filter(|c| !c.is_empty())
             .map(|chip| RecordedChip { board: board.to_string(), chip }),
         usb,
+        safe_off: Vec::new(),
     };
     let cable = connector.map(|c| Cable { from: format!("{id}.{c}"), to: LEGACY_HUB.to_string() });
     (part, cable)
@@ -282,6 +289,7 @@ pub fn legacy_layout(dut: Option<&RoleBinding>, dev_bench: Option<&RoleBinding>)
         board: None,
         chip: None,
         usb: BTreeMap::new(),
+        safe_off: Vec::new(),
     }];
     let mut cables = Vec::new();
     for (id, role, binding) in [("dev-bench", Role::DevBench, dev_bench), ("dut", Role::Dut, dut)] {
@@ -996,7 +1004,7 @@ port_serial = "FT9ABCDE"
 
     #[test]
     fn a_save_refuses_only_what_makes_the_file_ambiguous() {
-        let part = |id: &str| Part { id: id.into(), template: "cy4500".into(), label: None, at: None, role: None, mounted_on: None, flip: false, board: None, chip: None, usb: BTreeMap::new() };
+        let part = |id: &str| Part { id: id.into(), template: "cy4500".into(), label: None, at: None, role: None, mounted_on: None, flip: false, board: None, chip: None, usb: BTreeMap::new(), safe_off: Vec::new() };
         let mut bench = Bench { slug: String::new(), name: "B".into(), legacy: false, version: None, parts: vec![part("a"), part("b")], cables: vec![], configs: vec![], signals: vec![] };
         assert!(check_shape(&bench, &templates()).is_ok());
         bench.parts.push(part("a"));

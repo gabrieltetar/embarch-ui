@@ -788,6 +788,16 @@ fn template_rows(bench: &Bench, catalog: &Catalog) -> Vec<Row> {
     out
 }
 
+/// What a declaration says about its safe-off, for its row: the commands, or
+/// that none is declared, or that the ones Core already held were kept.
+fn safe_off_text(lines: &[String], kept: bool) -> String {
+    match (lines.len(), kept) {
+        (0, _) => "no safe-off declared".to_string(),
+        (n, true) => format!("safe-off kept from Core ({n} command{})", if n == 1 { "" } else { "s" }),
+        (n, false) => format!("safe-off declared ({n} command{})", if n == 1 { "" } else { "s" }),
+    }
+}
+
 /// Applies a bench's declarations and decides its proposals. Every Core
 /// write goes through `embarch-core-client`; each outcome is its own row.
 async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config: Option<&Config>) -> Applied {
@@ -810,8 +820,27 @@ async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config:
     };
     let probes: &[ProbeInfo] = &snapshot.probes;
 
-    for (name, outcome) in declare_signals(state, &bench.signals).await {
-        out.applied.push(row(format!("signal {name}"), "POST /signals", outcome.is_ok(), outcome.err().unwrap_or_else(|| "declared".to_string())));
+    // **A declaration replaces Core's row by name, so an empty safe-off would
+    // drop one declared by another path** (decision 90): what the bench states
+    // wins, and a bench that states none keeps what Core already holds.
+    let core_signals = state.core.list_signals().await;
+    let core_instruments = state.core.instruments().await;
+    let mut signals = bench.signals.clone();
+    let mut kept_signal: BTreeSet<String> = BTreeSet::new();
+    if let Ok(held) = &core_signals {
+        for s in signals.iter_mut().filter(|s| s.safe_off.is_none()) {
+            if let Some(line) = held.iter().find(|h| h.name == s.name).and_then(|h| h.safe_off.clone()) {
+                s.safe_off = Some(line);
+                kept_signal.insert(s.name.clone());
+            }
+        }
+    }
+    for (signal, (name, outcome)) in signals.iter().zip(declare_signals(state, &signals).await) {
+        let said = safe_off_text(signal.safe_off.as_slice(), kept_signal.contains(&name));
+        out.applied.push(match outcome {
+            Ok(()) => row(format!("signal {name}"), "POST /signals", true, format!("declared · {said}")),
+            Err(e) => row(format!("signal {name}"), "POST /signals", false, e),
+        });
     }
 
     // ---- the two roles, through the step the topology apply shares ----
@@ -975,7 +1004,7 @@ async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config:
             out.applied.push(row(what, "PUT /instruments", false, format!("the {} template states no baud for its scpi line, and Core needs one", part.template)));
             continue;
         };
-        let inst = Instrument {
+        let mut inst = Instrument {
             name: name.clone(),
             protocol: InstrumentProtocol::Scpi,
             port,
@@ -985,10 +1014,35 @@ async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config:
             min_interval_ms: f.min_interval_ms.unwrap_or(0),
             ack_ok: f.ack_ok.clone(),
             ack_err: f.ack_err.clone(),
-            safe_off: Vec::new(),
+            safe_off: part.safe_off.iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
         };
+        let mut kept = false;
+        if inst.safe_off.is_empty() {
+            match &core_instruments {
+                Ok(held) => {
+                    if let Some(h) = held.iter().find(|h| h.name == name).filter(|h| !h.safe_off.is_empty()) {
+                        inst.safe_off = h.safe_off.clone();
+                        kept = true;
+                    }
+                }
+                Err(e) => {
+                    out.applied.push(row(
+                        what,
+                        "PUT /instruments",
+                        false,
+                        format!("Core did not answer GET /instruments ({e:#}), and this bench states no safe-off, so one Core holds could not be kept; not declared"),
+                    ));
+                    continue;
+                }
+            }
+        }
         out.applied.push(match state.core.declare_instrument(&inst).await {
-            Ok(stored) => row(what, "PUT /instruments", true, format!("declared on {} at {} baud", port_text(&stored.port), stored.baud)),
+            Ok(stored) => row(
+                what,
+                "PUT /instruments",
+                true,
+                format!("declared on {} at {} baud · {}", port_text(&stored.port), stored.baud, safe_off_text(&inst.safe_off, kept)),
+            ),
             Err(e) => row(what, "PUT /instruments", false, format!("{e:#}")),
         });
     }

@@ -1633,6 +1633,13 @@
   }
   function benchBoard(p) { return !p.inst.role && boardCategory(p); }
 
+  // A part with an `scpi` binding is declared to Core as an instrument by a
+  // make-live (decision 90), so it takes a safe-off.
+  function declaresInstrument(p) {
+    var usb = p.inst.usb || {};
+    return Object.keys(usb).some(function (cid) { return usb[cid] && hasOwn(usb[cid], "scpi"); });
+  }
+
   // **A bench board picks from the project's catalog**, the DUT's list (the
   // repo's own board types, each with the chip a make-live looks up), and
   // writes only the part's `board`: a bench edit, never Core.
@@ -1726,6 +1733,13 @@
     if (!p.tpl.hub) {
       h += '<span>Role</span><select class="sd-input mono" data-ed="role">' + roleOptions(p.inst.role || "") + "</select>";
       if (p.inst.role || benchBoard(p)) h += boardEditor(p);
+    }
+    if (declaresInstrument(p)) {
+      var off = p.inst.safe_off || [];
+      h += '<span>Safe-off</span><textarea class="sd-input mono" rows="3" spellcheck="false" data-ed="safe_off" ' +
+        'placeholder="none: Make live keeps what Core holds" title="What Core sends this instrument to switch its outputs off at a graceful stop and at start: one command per line, sent with the declaration">' +
+        esc(off.join("\n")) + "</textarea>";
+      if (!off.length) h += '<div class="bn-ed-note">no safe-off declared</div>';
     }
     h += "</div>";
     h += '<div class="bn-ed-actions"><button type="button" class="btn" data-act="flip" title="Draw its left connectors on the right (F)">Flip</button>' +
@@ -1849,6 +1863,10 @@
         // keeps it as a bench board's (the coordinator's amendment of 86).
         if (!v && !boardCategory(p)) p.inst.board = null;
       } else if (what === "board") p.inst.board = v || null;
+      else if (what === "safe_off") {
+        var lines = v.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
+        if (lines.length) p.inst.safe_off = lines; else delete p.inst.safe_off;
+      }
     });
   });
   insEl.addEventListener("keydown", function (e) {

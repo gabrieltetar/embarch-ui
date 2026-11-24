@@ -2205,6 +2205,74 @@ port_serial = "C1"
         list.as_array().unwrap().iter().map(|l| (l["kind"].as_str().unwrap().to_string(), l["id"].as_str().unwrap().to_string())).collect()
     }
 
+    /// A safe-off the bench states goes to Core with the declaration, one
+    /// command per line for an instrument and one line for a signal; one it
+    /// does not state reads "no safe-off declared". **A bench that states none
+    /// keeps what Core already holds** (decision 90), for an instrument and a
+    /// signal alike, and says so; what the bench states wins.
+    #[tokio::test]
+    async fn make_live_declares_a_safe_off_and_carries_one_core_already_holds() {
+        let http = reqwest::Client::new();
+        let with = PD_BENCH
+            .replace("usb = { usb = { scpi = { vid = 6790, pid = 29987 } } }", "usb = { usb = { scpi = { vid = 6790, pid = 29987 } } }\nsafe_off = [\"OUTP OFF\", \" CURR 0 \", \"\"]")
+            .replace("direction = \"bidirectional\"\n\n[signals.route]", "direction = \"bidirectional\"\nsafe_off = \"gpio clear 4\"\n\n[signals.route]");
+        assert_ne!(with, PD_BENCH);
+
+        // Stated: it reaches Core, and the form's row says how many commands.
+        let stub = stub_with_leftovers();
+        let core = serve_stub_core(stub.clone()).await;
+        let (repo, record) = live_repo("live-safe-off", "pd", &with);
+        let base = serve_app_live(&core, Some(repo.clone()), Some(record)).await;
+        let version = version_of_bench(&http, &base, "pd").await;
+        let report: serde_json::Value = make_live(&http, &base, &version).await.json().await.unwrap();
+        assert_eq!(row_in(&report, "instrument eload")["text"], "declared on 1a86:7523 at 9600 baud · safe-off declared (2 commands)");
+        assert_eq!(row_in(&report, "signal console")["text"], "declared · safe-off declared (1 command)");
+        {
+            let s = stub.lock().unwrap();
+            let held = s.instruments.iter().find(|i| i["name"] == "eload").unwrap();
+            assert_eq!(held["safe_off"], serde_json::json!(["OUTP OFF", "CURR 0"]), "trimmed, an empty line dropped");
+            assert_eq!(s.signals.iter().find(|x| x["name"] == "console").unwrap()["safe_off"], "gpio clear 4");
+        }
+        // The saved file keeps it, so the terminal path sends the same field.
+        assert!(std::fs::read_to_string(repo.join("embarch/topologies/pd.toml")).unwrap().contains("OUTP OFF"));
+        let _ = std::fs::remove_dir_all(&repo);
+
+        // Not stated, Core holds one: kept, not dropped by the replace.
+        let stub = Arc::new(std::sync::Mutex::new(StubCore {
+            instruments: vec![serde_json::json!({ "name": "eload", "port": { "vid": 6790, "pid": 29987 }, "baud": 9600, "safe_off": ["INP OFF"] })],
+            signals: vec![serde_json::json!({ "name": "console", "origin_role": "dut", "direction": "bidirectional", "route": { "kind": "direct", "port_serial": "C1" }, "safe_off": "gpio clear 9" })],
+            ..StubCore::default()
+        }));
+        let core = serve_stub_core(stub.clone()).await;
+        let (repo, record) = live_repo("live-safe-off-carry", "pd", PD_BENCH);
+        let base = serve_app_live(&core, Some(repo.clone()), Some(record)).await;
+        let version = version_of_bench(&http, &base, "pd").await;
+        let report: serde_json::Value = make_live(&http, &base, &version).await.json().await.unwrap();
+        assert_eq!(row_in(&report, "instrument eload")["text"], "declared on 1a86:7523 at 9600 baud · safe-off kept from Core (1 command)");
+        assert_eq!(row_in(&report, "signal console")["text"], "declared · safe-off kept from Core (1 command)");
+        {
+            let s = stub.lock().unwrap();
+            assert_eq!(s.instruments.iter().find(|i| i["name"] == "eload").unwrap()["safe_off"], serde_json::json!(["INP OFF"]));
+            assert_eq!(s.signals.iter().find(|x| x["name"] == "console").unwrap()["safe_off"], "gpio clear 9");
+        }
+        // The bench states its own over Core's.
+        let (repo2, record2) = live_repo("live-safe-off-wins", "pd", &with);
+        let base2 = serve_app_live(&core, Some(repo2.clone()), Some(record2)).await;
+        let version = version_of_bench(&http, &base2, "pd").await;
+        let _ = make_live(&http, &base2, &version).await;
+        assert_eq!(stub.lock().unwrap().instruments.iter().find(|i| i["name"] == "eload").unwrap()["safe_off"], serde_json::json!(["OUTP OFF", "CURR 0"]));
+
+        // Core's instruments unread and none stated: not declared, said in a row.
+        stub.lock().unwrap().fail_reads = vec!["/instruments"];
+        let version = version_of_bench(&http, &base, "pd").await;
+        let report: serde_json::Value = make_live(&http, &base, &version).await.json().await.unwrap();
+        let r = row_in(&report, "instrument eload");
+        assert_eq!(r["ok"], false);
+        assert!(r["text"].as_str().unwrap().contains("could not be kept"), "{r}");
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&repo2);
+    }
+
     /// Phase 4: every kind of declaration applies through Core, each with its
     /// own row; enrolments come back as proposals (a role's named by its board
     /// type, a bench board's by its label); what Core holds that the bench
@@ -2223,11 +2291,11 @@ port_serial = "C1"
         assert_eq!(resp.status(), StatusCode::OK);
         let report: serde_json::Value = resp.json().await.unwrap();
 
-        assert_eq!(row_in(&report, "signal console"), serde_json::json!({ "what": "signal console", "route": "POST /signals", "ok": true, "text": "declared" }));
+        assert_eq!(row_in(&report, "signal console"), serde_json::json!({ "what": "signal console", "route": "POST /signals", "ok": true, "text": "declared · no safe-off declared" }));
         assert_eq!(row_in(&report, "dev-bench board")["what"], "dev-bench board nrf54l15dk/nrf54l15/cpuapp (nRF54L15)");
         assert_eq!(row_in(&report, "dev-bench board")["route"], "PUT /probes/enrolled/dev-bench/board");
         assert_eq!(row_in(&report, "dut board")["what"], "dut board plank (STM32G0B1VE)", "the recorded chip, its board still the part's");
-        assert_eq!(row_in(&report, "instrument eload")["text"], "declared on 1a86:7523 at 9600 baud");
+        assert_eq!(row_in(&report, "instrument eload")["text"], "declared on 1a86:7523 at 9600 baud · no safe-off declared");
         assert!(row_in(&report, "bootload ports")["ok"].as_bool().unwrap(), "{report}");
         let link = row_in(&report, "dev-bench link");
         assert_eq!((link["ok"].clone(), link["text"].clone()), (serde_json::json!(true), serde_json::json!("declared")), "the board write made the row the link amends");
