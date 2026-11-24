@@ -8,8 +8,7 @@
 //! signal, each role's board type, an instrument's line on an `scpi`
 //! binding, the DUT's bootload pair, dev-bench's link. Its **enrolments**
 //! come back as proposals, because a file is not evidence about what is
-//! plugged in (decision 44) — the same split, and for the two roles the same
-//! code, as `POST /api/topology/profiles/{slug}/apply` (decision 75).
+//! plugged in (decision 44) — the same split as the removed apply route (decision 75).
 //!
 //! **Nothing is retracted by making a bench live** (owner, 2026-11-01).
 //! Core's store is machine-wide, not this repo's, so what Core holds that the

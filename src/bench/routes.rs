@@ -3,8 +3,7 @@
 //! **No route here calls Core.** The vocabulary and the built-ins are served
 //! from the binary, the repo's templates and benches are files in the open
 //! repo, and the checks are pure. Making a bench live — the one place a
-//! bench reaches Core — is `bench::live`'s, which shares each role's apply
-//! with `/api/topology/profiles/{slug}/apply`.
+//! bench reaches Core — is `bench::live`'s.
 //!
 //! **Creating and updating are two routes.** `POST` creates and refuses `409`
 //! when anything is already at the derived path; `PUT` updates and names the

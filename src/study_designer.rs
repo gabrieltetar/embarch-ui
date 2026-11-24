@@ -3869,67 +3869,6 @@ pub async fn api_studies_delete(
     }
 }
 
-// ---- GATT transcript passthrough ------------------------------------------
-
-/// Serves a finished study's GATT transcript (`embarch-study-designer`
-/// decision 36) straight through from Core, so the browser downloads it
-/// over embarch-ui's own origin and never needs Core's bearer token — the
-/// same reason `/api/enroll` exists rather than the browser calling Core.
-///
-/// **Two calls, not one.** This used to be a single `get_study_gatt_data`
-/// over Core's `/gatt-data` alias; that alias is retired, and its one virtue
-/// — not needing the tap's name — is exactly what made it unable to report a
-/// truncated capture. So the tap is looked up by its declared
-/// `GattTranscript` encoding in the study's own stream index, and then
-/// fetched by name through the generic route.
-pub async fn api_gatt_data(
-    State(state): State<crate::AppState>,
-    axum::extract::Path(study_id): axum::extract::Path<String>,
-) -> axum::response::Response {
-    let sd = state.study_designer;
-    // A project is a precondition rather than an input here — this route
-    // reads nothing off it, but it has nothing to answer about without one.
-    if sd.project().is_none() {
-        return not_configured();
-    }
-
-    let index = match sd.0.core.study_streams(&study_id).await {
-        Ok(Some(index)) => index,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("study '{study_id}' recorded no streams"))
-                .into_response()
-        }
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
-    };
-    let Some(name) = index
-        .streams
-        .iter()
-        .find(|e| matches!(e.encoding, StreamEncoding::GattTranscript))
-        .map(|e| e.name.clone())
-    else {
-        return (
-            StatusCode::NOT_FOUND,
-            format!("study '{study_id}' declared no GATT transcript tap"),
-        )
-            .into_response();
-    };
-
-    match sd.0.core.get_study_stream(&study_id, &name, false).await {
-        Ok(bytes) => (
-            [
-                (axum::http::header::CONTENT_TYPE, "text/csv".to_string()),
-                (
-                    axum::http::header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"gatt-{study_id}.csv\""),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

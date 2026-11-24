@@ -339,12 +339,7 @@ fn app(state: AppState) -> Router {
             "/api/topology/boards/{name}",
             axum::routing::delete(topology::api_delete_board),
         )
-        .route("/api/topology/link", post(topology::api_link))
         .route("/api/topology/pickers", get(topology::api_pickers))
-        .route(
-            "/api/topology/roles/{role}/board",
-            post(topology::api_set_role_board),
-        )
         .route("/api/topology/boards/rescan", post(topology::api_rescan_boards))
         .route("/api/topology/validate", post(topology::api_validate))
         .route(
@@ -354,10 +349,6 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/topology/profiles/{slug}",
             axum::routing::delete(topology::api_delete_profile),
-        )
-        .route(
-            "/api/topology/profiles/{slug}/apply",
-            post(topology::api_apply_profile),
         )
         // ---- The bench editor: templates, benches, checks ---------------
         //
@@ -465,7 +456,6 @@ fn app(state: AppState) -> Router {
             get(study_designer::api_study_summary),
         )
         .route("/api/study-designer/studies/{slug}/run", post(study_designer::api_study_run))
-        .route("/api/study-designer/gatt/{study_id}", get(study_designer::api_gatt_data))
         // `.eap` protocol files. `/protocols/check` comes BEFORE
         // `/protocols/{stem}` for the same reason `new-study` is not
         // `/studies/new`: `check` is a perfectly good file stem, so a repo
@@ -761,7 +751,7 @@ async fn api_enroll(State(state): State<AppState>, Json(req): Json<EnrollRequest
     // Waits for a running make-live, retract or clear (`bench::live`), so a
     // Confirm cannot land between a retract's check and its delete.
     let _live = state.bench_live_lock.lock().await;
-    // The same lookup and the same refusal `POST .../board` has (decision
+    // The same lookup and the same refusal the removed role-board route had (decision
     // 48) — an enrolment attaches, so it needs a chip, and the paths that
     // produce one must not disagree about where it comes from or what an
     // unanswerable one says. No Core call is made on a refusal.
@@ -1689,14 +1679,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
-    /// Fix round 1, H1: a bench the editor saved records no chip for a
-    /// supported dev-bench board, so apply looks it up and the proposal
-    /// carries it; an enrol for the dev-bench role with no chip finds the same
-    /// one rather than refusing. A recorded chip is only the fallback, and a
-    /// role with no probe says so.
+    /// An enrol for the dev-bench role with no chip finds the supported board's
+    /// own rather than refusing; a DUT board no catalog row answers for is refused,
+    /// naming the row to set.
     #[tokio::test]
-    async fn apply_proposes_the_chip_it_looked_up_and_says_when_a_role_has_no_probe() {
-        let repo = bench_repo("apply");
+    async fn enrol_finds_the_chip_it_looked_up_and_refuses_a_board_nothing_answers_for() {
+        let repo = bench_repo("enrol");
         let dir = repo.join("embarch").join("topologies");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1706,18 +1694,6 @@ mod tests {
         .unwrap();
         let base = serve_app_with_repo(&repo).await;
         let http = reqwest::Client::new();
-        let report: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd/apply")).send().await.unwrap().json().await.unwrap();
-        let proposals = report["proposals"].as_array().unwrap();
-        assert_eq!(proposals.len(), 1, "{report}");
-        assert_eq!(proposals[0]["role"], "dev-bench");
-        assert_eq!(proposals[0]["chip"], "nRF54L15", "the looked-up chip, not the empty recorded one");
-        assert_eq!(proposals[0]["link_port_interface"], 2);
-        let applied = report["applied"].as_array().unwrap();
-        assert!(applied.iter().any(|a| a["detail"] == "dut: no probe on its part — not proposed"), "{report}");
-        // The DUT's board is in no catalog; the recorded chip is the fallback, so the
-        // board write reached Core (unreachable here) rather than being refused.
-        let dut_board = applied.iter().find(|a| a["what"] == "dut board").unwrap();
-        assert!(!dut_board["detail"].as_str().unwrap().contains("has no chip"), "{report}");
 
         let enrol = http
             .post(format!("{base}/api/enroll"))
@@ -1734,47 +1710,6 @@ mod tests {
             .unwrap();
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
         assert!(refused.text().await.unwrap().contains("it is not a row in embarch/boards.toml"), "the refusal says why");
-
-        // Fix round 2: a chip recorded for another board is not used, and an
-        // enrolment with no chip — or whose SWD leads reach two probes — is not
-        // proposed; each says why.
-        std::fs::create_dir_all(repo.join("embarch/parts")).unwrap();
-        std::fs::write(
-            repo.join("embarch/parts/swd-board.toml"),
-            "id = \"swd-board\"\nlabel = \"SWD board\"\ncategory = \"board\"\nlook = \"board\"\n[[connectors]]\nid = \"swd\"\nlabel = \"SWD\"\nkind = \"swd\"\nside = \"left\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("pd2.toml"),
-            "name = \"pd2\"\n\n[[parts]]\nid = \"host\"\ntemplate = \"this-machine\"\n\n[[parts]]\nid = \"p1\"\ntemplate = \"debug-probe\"\nusb.usb = { probe = \"J1\" }\n\n[[parts]]\nid = \"p2\"\ntemplate = \"debug-probe\"\nusb.usb = { probe = \"J2\" }\n\n[[parts]]\nid = \"bench\"\ntemplate = \"swd-board\"\nrole = \"dev-bench\"\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\n\n[[parts]]\nid = \"dut\"\ntemplate = \"generic-board\"\nrole = \"dut\"\nboard = \"plank\"\nchip = { board = \"wearable-rev6\", chip = \"nRF54L15\" }\nusb.usb = { probe = \"X1\" }\n\n[[configs]]\nname = \"A\"\ncables = [[\"p1.swd\", \"bench.swd\"]]\n\n[[configs]]\nname = \"B\"\ncables = [[\"p2.swd\", \"bench.swd\"]]\n",
-        )
-        .unwrap();
-        let report: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd2/apply")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(report["proposals"], serde_json::json!([]), "{report}");
-        let detail = |what: &str| report["applied"].as_array().unwrap().iter().find(|a| a["what"] == what).map(|a| a["detail"].as_str().unwrap().to_string()).unwrap_or_default();
-        assert_eq!(detail("dev-bench probe"), "dev-bench: its SWD leads reach different probes (J1 in config “A”; J2 in config “B”) — not proposed");
-        assert!(detail("dut board").contains("(recorded chip was for wearable-rev6, not used)"), "{report}");
-        assert!(detail("dut probe").starts_with("dut: not proposed — 'plank' has no chip"), "{report}");
-
-        // Fix round 3: the first bench proposed a dev-bench enrolment, so its
-        // link waits for it; a cleared board never keeps the old board's chip,
-        // and a dev-bench link with no enrolment proposed says what to do.
-        let first: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd/apply")).send().await.unwrap().json().await.unwrap();
-        let link = first["applied"].as_array().unwrap().iter().find(|a| a["what"] == "dev-bench link").unwrap().clone();
-        assert!(link["detail"].as_str().unwrap().starts_with("deferred:"), "{first}");
-        std::fs::write(
-            dir.join("pd3.toml"),
-            "name = \"pd3\"\n\n[[parts]]\nid = \"host\"\ntemplate = \"this-machine\"\n\n[[parts]]\nid = \"bench\"\ntemplate = \"nrf54l15dk\"\nrole = \"dev-bench\"\nboard = \"nrf54l15dk/nrf54l15/cpuapp\"\nusb.usb = { vcom = { serial = \"D607104\", interface = 2 } }\n\n[[parts]]\nid = \"dut\"\ntemplate = \"generic-board\"\nrole = \"dut\"\nchip = { board = \"wearable-rev6\", chip = \"nRF54L15\" }\nusb.usb = { probe = \"X1\" }\n",
-        )
-        .unwrap();
-        let third: serde_json::Value = http.post(format!("{base}/api/topology/profiles/pd3/apply")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(third["proposals"], serde_json::json!([]), "{third}");
-        let detail = |what: &str| third["applied"].as_array().unwrap().iter().find(|a| a["what"] == what).map(|a| a["detail"].as_str().unwrap().to_string()).unwrap_or_default();
-        assert_eq!(
-            detail("dut probe"),
-            "dut: not proposed — no board type to look a chip up for, and the recorded chip was for wearable-rev6, not used"
-        );
-        assert!(detail("dev-bench link").starts_with("not declared:") && detail("dev-bench link").contains("proposes no dev-bench enrolment"), "{third}");
         let _ = std::fs::remove_dir_all(&repo);
     }
 

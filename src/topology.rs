@@ -922,35 +922,6 @@ pub async fn api_delete_board(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SetRoleBoardRequest {
-    /// The board type. Empty is not a board: clearing which board is in a
-    /// role is done by retracting the role, not by naming nothing.
-    pub board: String,
-    /// The probe-rs chip that board type attaches as. The browser sends
-    /// what the picker's entry carries rather than deriving it, because the
-    /// two lists that fill that picker (the project catalog and the
-    /// supported-bench list) are both served from here.
-    ///
-    /// **Empty is answered here rather than relayed** (decision 48): the
-    /// chip is looked up the same way the picker's entry got one, and only
-    /// a board type nothing can answer for is refused.
-    #[serde(default)]
-    pub chip: String,
-    /// The combination picked alongside the board type, when the picker
-    /// offered one: a `(revision, variant)` pair the repo's own scan
-    /// reports, never a pair typed from two independent lists.
-    ///
-    /// `None` leaves the catalog row alone, which is what a dev-bench pick
-    /// and a repo that cannot be scanned both send. `Some("")` is a real
-    /// value — a board with no revisions declared builds at none, and
-    /// clearing a stale pin is the same gesture as setting one.
-    #[serde(default)]
-    pub revision: Option<String>,
-    #[serde(default)]
-    pub variant: Option<String>,
-}
-
 /// The chip a request names, or the one looked up for its board type — or
 /// the `400` that says where to put the answer (decision 48).
 ///
@@ -992,72 +963,6 @@ pub(crate) fn no_chip_sentence(board: &str, why: &str) -> String {
         "'{board}' has no chip: {why}. Set the chip on the row in Board types below — Core \
          attaches every probe bound to this role as it."
     )
-}
-
-/// `POST /api/topology/roles/{role}/board` — which board type is in a role,
-/// through Core's `PUT /probes/enrolled/{role}/board`.
-///
-/// A proxy for the same two reasons `/api/enroll` is: the write is Core's,
-/// and the browser holds no bearer token. **It opens no probe** — that is
-/// the whole point of the half it writes (decision 45).
-pub async fn api_set_role_board(
-    State(state): State<AppState>,
-    axum::extract::Path(role): axum::extract::Path<String>,
-    Json(req): Json<SetRoleBoardRequest>,
-) -> Response {
-    // **A chip nobody typed is looked up, not relayed as a refusal**
-    // (decision 48). Core needs one — it is what every later attach on this
-    // role opens as — and a request that arrives without one used to reach
-    // it and come back as `502 … 400 Bad Request: a role's board needs both
-    // a board type and the chip it attaches as`, which names the missing
-    // field and not the one thing a human could do about it. What survives
-    // the lookup is refused here, by the one refusal both enrol paths share.
-    let chip = match resolve_chip_or_refuse(&state, &role, &req.board, &req.chip).await {
-        Ok(chip) => chip,
-        Err(refusal) => return refusal,
-    };
-    match state.core.set_role_board(&role, &req.board, &chip).await {
-        Ok(row) => {
-            // **Core's write first, the project file second, and only ever
-            // in that order.** Which board type is in a role is Core's fact;
-            // which combination of it this repo builds is the project's
-            // (decision 44). Writing the file first would leave a catalog
-            // pinned to a combination for a role that was then refused.
-            let pinned = pin_combination(&state, &req);
-            state.poke.notify_one();
-            Json(json!({ "role": row, "pinned": pinned })).into_response()
-        }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
-    }
-}
-
-/// Records the picked combination on the catalog row, when one was picked.
-///
-/// Silent about a board that is not in the catalog and about a repo that is
-/// not open: both are states the picker already renders honestly (a
-/// dev-bench type is not a project board at all, and an unresolved name
-/// shows as *not in catalog*), and neither is a reason to fail a write to
-/// Core that has already happened.
-fn pin_combination(state: &AppState, req: &SetRoleBoardRequest) -> serde_json::Value {
-    let (Some(revision), Some(variant)) = (req.revision.as_ref(), req.variant.as_ref()) else {
-        return serde_json::Value::Null;
-    };
-    let Some(repo) = state.study_designer.repo_path() else {
-        return serde_json::Value::Null;
-    };
-    let Ok(mut catalog) = load_catalog(&repo) else {
-        return serde_json::Value::Null;
-    };
-    let Some(entry) = catalog.boards.iter_mut().find(|b| b.name == req.board) else {
-        return serde_json::Value::Null;
-    };
-    entry.revision = revision.clone();
-    entry.variant = variant.clone();
-    let pinned = json!({ "board": req.board, "revision": revision, "variant": variant });
-    match save_catalog(&repo, &catalog) {
-        Ok(()) => pinned,
-        Err(e) => json!({ "board": req.board, "error": format!("{e:#}") }),
-    }
 }
 
 /// `GET /api/topology/pickers` — what each role's board picker offers.
@@ -1148,31 +1053,6 @@ pub async fn api_unenroll(
             format!("no board is enrolled under the role '{role}'"),
         )
             .into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LinkRequest {
-    #[serde(default)]
-    pub serial: Option<String>,
-    #[serde(default)]
-    pub interface: Option<u8>,
-}
-
-/// `POST /api/topology/link` — declares dev-bench's runtime link, through
-/// Core's `POST /dev-bench/link`.
-///
-/// Its caller is applying a profile: the link is one of the two halves that
-/// carry no identity claim, so it is re-declared rather than proposed. Core
-/// requires dev-bench to be enrolled first, which is why the apply report
-/// below leaves this call to the confirmation step when the role is empty.
-pub async fn api_link(State(state): State<AppState>, Json(req): Json<LinkRequest>) -> Response {
-    match state.core.set_dev_bench_link(req.serial.as_deref(), req.interface).await {
-        Ok(()) => {
-            state.poke.notify_one();
-            Json(json!({ "linked": true })).into_response()
-        }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
 }
@@ -1698,100 +1578,6 @@ pub async fn api_delete_profile(
     }
 }
 
-/// `POST /api/topology/profiles/{slug}/apply` — loads a saved bench.
-///
-/// **Two halves, and only one of them applies.** The signals and the
-/// dev-bench link are declarations: re-stating them changes a file on Core
-/// and asserts nothing about silicon, so they go in now, and each one's
-/// outcome is reported individually rather than as one "applied". The
-/// enrolments are identity claims — a role is bound to a probe *after* a live
-/// hardware-ID read — so they come back as **proposals**, each carrying the
-/// role, board name, chip and probe serial the file holds, for a human to
-/// confirm through the ordinary enroll path. A file on disk is not evidence
-/// about what is plugged in, and a load that enrolled straight from one would
-/// be exactly the stale-declared-state failure this suite's topology crate
-/// exists to prevent.
-pub async fn api_apply_profile(
-    State(state): State<AppState>,
-    axum::extract::Path(slug): axum::extract::Path<String>,
-) -> Response {
-    let repo = match repo(&state) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    let slug = slugify(&slug);
-    let profile = match load_profile(&repo, &slug) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::NOT_FOUND, format!("{e:#}")).into_response(),
-    };
-
-    let snapshot = state.snapshot_rx.borrow().clone();
-    let mut applied: Vec<serde_json::Value> = Vec::new();
-
-    for (name, outcome) in declare_signals(&state, &profile.signals).await {
-        applied.push(json!({
-            "what": format!("signal {name}"),
-            "ok": outcome.is_ok(),
-            "detail": outcome.err().unwrap_or_else(|| "declared".to_string()),
-        }));
-    }
-
-    // Each role through the step making a bench live shares (`apply_role`),
-    // shaped here as this route has always answered.
-    let mut proposals: Vec<serde_json::Value> = Vec::new();
-    for (role, binding) in [("dev-bench", &profile.dev_bench), ("dut", &profile.dut)] {
-        let Some(binding) = binding else { continue };
-        let outcome = apply_role(&state, role, binding, &snapshot.enrolled, &snapshot.probes).await;
-        if let Some(board) = &outcome.board {
-            applied.push(json!({
-                "what": format!("{role} board"),
-                "ok": board.ok(),
-                "detail": match board {
-                    BoardWrite::Applied { chip } => format!("{} ({chip})", binding.board),
-                    BoardWrite::Refused { error, .. } => error.clone(),
-                    BoardWrite::NoChip(sentence) => sentence.clone(),
-                },
-            }));
-        }
-        match outcome.enrol {
-            Err(why) => applied.push(json!({ "what": format!("{role} probe"), "ok": false, "detail": why })),
-            Ok(p) => proposals.push(json!({
-                "role": role,
-                "board": binding.board,
-                "chip": p.chip,
-                "probe_serial": binding.probe_serial,
-                "link_port_serial": binding.link_port_serial,
-                "link_port_interface": binding.link_port_interface,
-                // Three separate facts, none of which is a decision: whether
-                // this role already holds this probe, whether the probe is even
-                // attached, and who would be displaced. The browser renders
-                // them; nothing here skips a proposal on their account.
-                "already_enrolled": p.already_enrolled,
-                "probe_attached": p.probe_attached,
-                "displaces": p.displaces,
-            })),
-        }
-    }
-
-    let bench_enrolled = snapshot.enrolled.iter().any(|b| b.role == "dev-bench");
-    let bench_proposed = proposals.iter().any(|p| p["role"] == "dev-bench");
-    if let Some(bench) = &profile.dev_bench {
-        let link = apply_link(&state, bench.link_port_serial.as_deref(), bench.link_port_interface, bench_enrolled, bench_proposed).await;
-        if let Some(link) = link {
-            applied.push(json!({ "what": "dev-bench link", "ok": link.ok(), "detail": link.text("apply this bench again") }));
-        }
-    }
-
-    state.poke.notify_one();
-    Json(json!({
-        "slug": slug,
-        "name": profile.name,
-        "applied": applied,
-        "proposals": proposals,
-    }))
-    .into_response()
-}
-
 /// Every signal declared to Core, each with its own outcome: `Err` is Core's
 /// own words.
 pub(crate) async fn declare_signals(state: &AppState, signals: &[SignalLink]) -> Vec<(String, Result<(), String>)> {
@@ -1817,13 +1603,12 @@ impl BoardWrite {
     }
 }
 
-/// An enrolment proposal's chip and the three facts it carries, none of them
+/// An enrolment proposal's chip and the two facts it carries, neither of them
 /// a decision.
 pub(crate) struct RoleProposal {
     pub chip: String,
     pub already_enrolled: bool,
     pub probe_attached: bool,
-    pub displaces: Option<serde_json::Value>,
 }
 
 /// One role applied: its board write, when the binding names a board, and an
@@ -1883,7 +1668,6 @@ pub(crate) async fn apply_role(
             chip,
             already_enrolled: current.is_some_and(|b| b.probe_serial.as_deref() == Some(binding.probe_serial.as_str())),
             probe_attached: probes.iter().any(|p| p.serial_number.as_deref() == Some(binding.probe_serial.as_str())),
-            displaces: current.map(|b| json!({ "board": b.name, "chip": b.chip, "probe_serial": b.probe_serial })),
         }),
     }
 }
