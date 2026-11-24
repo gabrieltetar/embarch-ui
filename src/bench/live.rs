@@ -985,6 +985,7 @@ async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config:
             min_interval_ms: f.min_interval_ms.unwrap_or(0),
             ack_ok: f.ack_ok.clone(),
             ack_err: f.ack_err.clone(),
+            safe_off: Vec::new(),
         };
         out.applied.push(match state.core.declare_instrument(&inst).await {
             Ok(stored) => row(what, "PUT /instruments", true, format!("declared on {} at {} baud", port_text(&stored.port), stored.baud)),
