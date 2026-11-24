@@ -767,22 +767,6 @@ fn build_taps(
                         )
                     })?;
 
-                // A tap whose characteristic no step subscribes captures
-                // nothing, passes, and looks fine — one instance of the
-                // "nothing captured, no error" family `embarch-study-designer`
-                // decisions 34/36/54/55 were each opened by; decision 54 names
-                // the family, decision 55 describes this exact case. Refused
-                // here, where the author can fix it, rather than discovered
-                // as an empty file after a run.
-                if !any_step_subscribes(steps, service_uuid, characteristic_uuid) {
-                    return Err(format!(
-                        "stream tap '{name}' captures {}, but no step in this study subscribes \
-                         to it — add a GattMonitorAll/GattMonitorStart step, or name it in a \
-                         selective monitor step's targets",
-                        characteristic_uuid.to_hyphenated()
-                    ));
-                }
-
                 // Resolved here, against the firmware repo's own
                 // `study-structs.toml`, so the submitted `Study` carries the
                 // layout rather than a name Core has no way to look up
@@ -855,26 +839,40 @@ fn build_taps(
         })?;
     }
 
+    // A tap whose characteristic no step subscribes captures nothing, passes,
+    // and looks fine — the "nothing captured, no error" family
+    // `embarch-study-designer` decisions 34/36/54/55 were each opened by.
+    // The crate computes the check (`Study::validate_stream_subscriptions`),
+    // so it runs on a scratch `Study` carrying just these steps and taps;
+    // the message keeps this tab's wording and names the tap by its name.
+    let scratch = Study {
+        name: HString::new(),
+        requires: Requirements::any(),
+        steps: steps.iter().cloned().collect(),
+        streams: out.clone(),
+        steps_crc: 0,
+        streams_crc: 0,
+        protocols: Default::default(),
+        protocols_crc: 0,
+        dev_bench_log_level: DevBenchLogLevel::default(),
+        decoders: Default::default(),
+        record_checks: Default::default(),
+        measurements: Default::default(),
+    };
+    scratch.validate_stream_subscriptions().map_err(|e| {
+        format!(
+            "stream tap '{}' captures {}, but no step in this study subscribes \
+             to it — add a GattMonitorAll/GattMonitorStart step, or name it in a \
+             selective monitor step's targets",
+            out[e.tap].name.as_str(),
+            e.characteristic_uuid.to_hyphenated()
+        )
+    })?;
+
     // The same pre-flight Core runs on submit, run here so an authoring
     // mistake is a message in this tab rather than a `400` from a round trip.
     validate_taps(&out, steps.len() as u32, decoders.len()).map_err(|e| format!("{e:?}"))?;
     Ok((out, decoders, record_checks))
-}
-
-/// Whether any step in `steps` subscribes to this characteristic — an
-/// unfiltered monitor action (which subscribes to everything notify- or
-/// indicate-capable) or a selective one that names it
-/// (`embarch-study-designer` decision 53).
-fn any_step_subscribes(steps: &[Step], service: Uuid, characteristic: Uuid) -> bool {
-    steps.iter().any(|step| match &step.action {
-        Action::GattMonitorAll {} | Action::GattMonitorStart {} => true,
-        Action::GattMonitorSelected { targets } | Action::GattMonitorSelectedStart { targets } => {
-            targets
-                .iter()
-                .any(|t| t.service_uuid == service && t.characteristic_uuid == characteristic)
-        }
-        _ => false,
-    })
 }
 
 /// The `GattTranscript` tap every study with a monitor step gets, appended
