@@ -2269,6 +2269,24 @@ port_serial = "C1"
         let r = row_in(&report, "instrument eload");
         assert_eq!(r["ok"], false);
         assert!(r["text"].as_str().unwrap().contains("could not be kept"), "{r}");
+
+        // Core's signals unread and none stated: not posted, said in a row; one
+        // the bench states a safe-off for is still posted.
+        {
+            let mut st = stub.lock().unwrap();
+            st.fail_reads = vec!["/signals"];
+            st.signals.iter_mut().find(|x| x["name"] == "console").unwrap()["safe_off"] = "gpio clear 9".into();
+        }
+        let version = version_of_bench(&http, &base, "pd").await;
+        let report: serde_json::Value = make_live(&http, &base, &version).await.json().await.unwrap();
+        let r = row_in(&report, "signal console");
+        assert_eq!((r["ok"].clone(), r["route"].as_str()), (serde_json::json!(false), Some("POST /signals")));
+        assert!(r["text"].as_str().unwrap().contains("could not be kept"), "{r}");
+        assert_eq!(stub.lock().unwrap().signals.iter().find(|x| x["name"] == "console").unwrap()["safe_off"], "gpio clear 9", "not replaced");
+        let version = version_of_bench(&http, &base2, "pd").await;
+        let report: serde_json::Value = make_live(&http, &base2, &version).await.json().await.unwrap();
+        assert_eq!(row_in(&report, "signal console")["text"], "declared · safe-off declared (1 command)");
+        assert_eq!(stub.lock().unwrap().signals.iter().find(|x| x["name"] == "console").unwrap()["safe_off"], "gpio clear 4");
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&repo2);
     }

@@ -827,13 +827,29 @@ async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config:
     let core_instruments = state.core.instruments().await;
     let mut signals = bench.signals.clone();
     let mut kept_signal: BTreeSet<String> = BTreeSet::new();
-    if let Ok(held) = &core_signals {
-        for s in signals.iter_mut().filter(|s| s.safe_off.is_none()) {
-            if let Some(line) = held.iter().find(|h| h.name == s.name).and_then(|h| h.safe_off.clone()) {
-                s.safe_off = Some(line);
-                kept_signal.insert(s.name.clone());
+    match &core_signals {
+        Ok(held) => {
+            for s in signals.iter_mut().filter(|s| s.safe_off.is_none()) {
+                if let Some(line) = held.iter().find(|h| h.name == s.name).and_then(|h| h.safe_off.clone()) {
+                    s.safe_off = Some(line);
+                    kept_signal.insert(s.name.clone());
+                }
             }
         }
+        // An unread list is not "Core holds none": a signal that states no
+        // safe-off is not posted, as an instrument is not.
+        Err(e) => signals.retain(|s| {
+            let stated = s.safe_off.is_some();
+            if !stated {
+                out.applied.push(row(
+                    format!("signal {}", s.name),
+                    "POST /signals",
+                    false,
+                    format!("Core did not answer GET /signals ({e:#}), and this bench states no safe-off, so one Core holds could not be kept; not declared"),
+                ));
+            }
+            stated
+        }),
     }
     for (signal, (name, outcome)) in signals.iter().zip(declare_signals(state, &signals).await) {
         let said = safe_off_text(signal.safe_off.as_slice(), kept_signal.contains(&name));
