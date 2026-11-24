@@ -2015,6 +2015,18 @@ table.data-table {
 #desk-new { width: 290px; }
 .desk-textarea { width: 100%; box-sizing: border-box; resize: vertical; font-family: var(--font-ui); line-height: 1.45; }
 .desk-error, .desk-panel { margin-bottom: 16px; }
+/* The Promptu sheet (shell decision 56): numbers, groups, lines, feel, Apply. */
+.pr-group { margin-top: 14px; }
+.pr-group-head { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.pr-group-head .pr-title { flex: 1; min-width: 0; }
+.pr-line { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border-strong); }
+.pr-line.cut .pr-text { text-decoration: line-through; color: var(--text-tertiary); }
+.pr-line .pr-text { flex: 1; min-width: 0; font-size: 12.5px; }
+.pr-note { width: 200px; }
+.pr-err { color: var(--danger); font-size: 12px; }
+.pr-feel { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.pr-feel .btn.on { border-color: var(--accent); background: var(--accent-soft-bg); }
+.pr-result { margin-top: 10px; font-size: 12.5px; }
 .desk-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; align-items: start; }
 .desk-card { display: flex; flex-direction: column; gap: 10px; }
 .desk-card.pinned { border-color: var(--accent); }

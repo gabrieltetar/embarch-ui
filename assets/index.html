@@ -139,7 +139,9 @@
           </div>
         </section>
         <div class="desk-bar">
-          <!-- Left empty for a Promptu section (embarch-desk decision 65). -->
+          <!-- The Promptu section (embarch-desk decision 65): hidden, and no
+               space on the tab, until the desk says a sheet has lines open. -->
+          <button class="btn" id="desk-promptu" type="button" aria-expanded="false" hidden></button>
           <span id="desk-waiting" class="badge badge-warning" hidden></span>
           <div class="desk-bar-actions">
             <input id="desk-new" class="desk-input" type="text" placeholder="Issue key, or a title for a standalone card" />
@@ -151,6 +153,7 @@
         </div>
         <div id="desk-timer" class="desk-timer" hidden></div>
         <div id="desk-error" class="card desk-error" hidden></div>
+        <div id="desk-promptu-panel" class="card desk-panel" hidden></div>
         <div id="desk-drafts" class="card desk-panel" hidden></div>
         <div id="desk-settings" class="card desk-panel" hidden></div>
         <section id="desk-hand" class="desk-hand" aria-label="Time waiting for a ✓ or ✕"></section>

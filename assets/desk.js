@@ -1227,6 +1227,7 @@
     renderDrafts();
     renderCards();
     renderSettings();
+    loadPromptu();
     if (openTileId) renderDialog();
   }
 
@@ -1240,6 +1241,158 @@
       unreachable = true;
     });
   }
+
+  // ---------------------------------------------------------------- Promptu
+
+  // The weekly sheet (embarch-desk decision 65, embarch-promptu contract §10).
+  // The bar button shows only while GET /promptu says lines are open; the panel
+  // is drawn from GET /promptu/sheet. Marks, the feel line and Apply are the
+  // owner's clicks; every call goes through the desk's own routes, and a
+  // refusal is shown in the desk's words with the panel left usable.
+  var promptuBtn = document.getElementById("desk-promptu");
+  var promptuEl = document.getElementById("desk-promptu-panel");
+  var promptuSummary = null;   // GET /promptu
+  var promptuSheet = null;     // GET /promptu/sheet
+  var promptuNotes = {};       // line id -> note text typed, kept across a redraw
+  var promptuMsg = "";         // the last refusal, in the desk's words
+  var promptuResult = null;    // the last Apply's per-line results
+  var promptuBusy = false;
+  var promptuLoading = false;
+
+  function promptuOpen() { return !promptuEl.hidden; }
+
+  function loadPromptu() {
+    if (promptuLoading) return;
+    promptuLoading = true;
+    api("GET", "/promptu").then(function (j) { promptuSummary = j; }).catch(function () { promptuSummary = null; })
+      .then(function () { promptuLoading = false; renderPromptuBar(); });
+  }
+
+  function renderPromptuBar() {
+    var open = promptuSummary && Number(promptuSummary.open) > 0 ? Number(promptuSummary.open) : 0;
+    if (!open && !promptuOpen()) { promptuBtn.hidden = true; return; }
+    promptuBtn.hidden = false;
+    var week = (promptuSummary && promptuSummary.week) || (promptuSheet && promptuSheet.week) || "";
+    promptuBtn.textContent = "Promptu" + (week ? " · " + week : "") + " · " + open + " waiting";
+    promptuBtn.setAttribute("aria-expanded", promptuOpen() ? "true" : "false");
+  }
+
+  function promptuCall(method, path, body) {
+    promptuMsg = "";
+    return api(method, path, body).catch(function (e) { promptuMsg = e.message; throw e; });
+  }
+
+  function loadSheet() {
+    return promptuCall("GET", "/promptu/sheet").then(function (j) {
+      promptuSheet = j.sheet || j;
+    }).catch(function () {}).then(renderPromptu);
+  }
+
+  function statusNote(v) { return v == null ? '<span class="desk-detail">no data</span>' : esc(v); }
+
+  function cutLine(g, l) { return g.cut || l.verdict === "cut" || l.status === "cut"; }
+
+  function approvable(sheet) {
+    var n = 0;
+    (sheet.groups || []).forEach(function (g) {
+      (g.lines || []).forEach(function (l) {
+        if ((l.status === "open" || l.status === "failed") && !cutLine(g, l) && l.kind !== "external" && l.kind !== "no-change") n++;
+      });
+    });
+    return n;
+  }
+
+  function renderPromptu() {
+    renderPromptuBar();
+    if (!promptuOpen()) return;
+    var sh = promptuSheet;
+    var html = '<div class="card-title"><span>Promptu' + (sh && sh.week ? " · " + esc(sh.week) : "") + '</span>' +
+      '<button class="btn btn-tiny" type="button" data-pr-close="1" style="margin-left:auto;">Close</button></div>';
+    if (promptuMsg) html += '<p class="pr-err" id="desk-promptu-error" role="alert">' + esc(promptuMsg) + "</p>";
+    if (!sh) { promptuEl.innerHTML = html + '<p class="desk-help">No sheet to show.</p>'; return; }
+    var nums = sh.numbers || [];
+    if (nums.length) {
+      html += '<table class="data-table pr-numbers"><thead><tr><th>Check</th><th>Value</th><th>Baseline</th><th>Target</th></tr></thead><tbody>' +
+        nums.map(function (n) {
+          return "<tr><td>" + esc(n.check) + "</td><td>" + statusNote(n.value) + "</td><td>" + statusNote(n.baseline) + "</td><td>" + statusNote(n.target) + "</td></tr>";
+        }).join("") + "</tbody></table>";
+    } else {
+      html += '<p class="desk-help">The week measured no numbers.</p>';
+    }
+    (sh.groups || []).forEach(function (g) {
+      var lines = g.lines || [];
+      html += '<div class="pr-group" data-group="' + esc(g.id) + '"><div class="pr-group-head"><span class="pr-title">' + esc(g.title) +
+        '</span><span class="desk-detail">' + lines.length + " line" + (lines.length === 1 ? "" : "s") + (g.cut ? " · cut" : "") + "</span>" +
+        '<button class="btn btn-tiny" type="button" data-pr-mark="cut" data-pr-id="' + esc(g.id) + '" title="Cut every line in this group">✕ group</button></div>';
+      lines.forEach(function (l) {
+        var cut = cutLine(g, l);
+        var note = promptuNotes[l.id] != null ? promptuNotes[l.id] : (l.note || "");
+        html += '<div class="pr-line' + (cut ? " cut" : "") + '" data-line="' + esc(l.id) + '">' +
+          '<button class="btn btn-tiny" type="button" data-pr-mark="approve" data-pr-id="' + esc(l.id) + '" title="Keep this line">✓</button>' +
+          '<button class="btn btn-tiny" type="button" data-pr-mark="cut" data-pr-id="' + esc(l.id) + '" title="Cut this line">✕</button>' +
+          '<div class="pr-text"><span class="badge badge-neutral">' + esc(l.kind) + "</span> " + esc(l.text) +
+          ' <span class="badge badge-neutral pr-status">' + esc(l.status) + "</span>" +
+          (l.error ? '<div class="pr-err">' + esc(l.error) + "</div>" : "") + "</div>" +
+          '<input class="desk-input pr-note" type="text" data-pr-note="' + esc(l.id) + '" placeholder="Note" value="' + esc(note) + '" />' +
+          "</div>";
+      });
+      html += "</div>";
+    });
+    html += '<div class="pr-feel"><span class="desk-detail">This week felt</span>' +
+      ["better", "same", "worse"].map(function (f) {
+        return '<button class="btn btn-tiny' + (sh.feel === f ? " on" : "") + '" type="button" data-pr-feel="' + f + '">' + f + "</button>";
+      }).join("") + '<button class="btn btn-primary" type="button" id="desk-promptu-apply" style="margin-left:auto;"' +
+      (promptuBusy ? " disabled" : "") + ">Apply ✓ (" + approvable(sh) + ")</button></div>";
+    if (promptuResult) {
+      html += '<div class="pr-result" id="desk-promptu-result">' + (promptuResult.lines || []).map(function (r) {
+        return '<div data-result="' + esc(r.id) + '">' + esc(r.id) + " · " + esc(r.status) +
+          (r.error ? ' · <span class="pr-err">' + esc(r.error) + "</span>" : "") + "</div>";
+      }).join("") + "</div>";
+    }
+    promptuEl.innerHTML = html;
+  }
+
+  function promptuMark(id, verdict) {
+    var body = { verdict: verdict };
+    var inp = promptuEl.querySelector('[data-pr-note="' + id + '"]');
+    if (inp && inp.value.trim()) body.note = inp.value.trim();
+    promptuCall("POST", "/promptu/sheet/" + encodeURIComponent(promptuSheet.week) + "/" + encodeURIComponent(id), body)
+      .then(function () { delete promptuNotes[id]; return loadSheet(); })
+      .catch(renderPromptu).then(loadPromptu);
+  }
+
+  promptuBtn.addEventListener("click", function () {
+    if (promptuOpen()) { promptuEl.hidden = true; renderPromptuBar(); return; }
+    promptuEl.hidden = false;
+    promptuResult = null;
+    promptuMsg = "";
+    renderPromptu();
+    loadSheet();
+  });
+
+  promptuEl.addEventListener("input", function (ev) {
+    var id = ev.target.getAttribute && ev.target.getAttribute("data-pr-note");
+    if (id) promptuNotes[id] = ev.target.value;
+  });
+
+  promptuEl.addEventListener("click", function (ev) {
+    var t = ev.target.closest("button");
+    if (!t || !promptuSheet && !t.hasAttribute("data-pr-close")) return;
+    if (t.hasAttribute("data-pr-close")) { promptuEl.hidden = true; renderPromptuBar(); return; }
+    if (t.hasAttribute("data-pr-mark")) { promptuMark(t.getAttribute("data-pr-id"), t.getAttribute("data-pr-mark")); return; }
+    if (t.hasAttribute("data-pr-feel")) {
+      promptuCall("POST", "/promptu/feel/" + encodeURIComponent(promptuSheet.week), { feel: t.getAttribute("data-pr-feel") })
+        .then(loadSheet).catch(renderPromptu);
+      return;
+    }
+    if (t.id === "desk-promptu-apply") {
+      promptuBusy = true;
+      renderPromptu();
+      promptuCall("POST", "/promptu/apply/" + encodeURIComponent(promptuSheet.week))
+        .then(function (r) { promptuResult = r; return loadSheet(); })
+        .catch(function () {}).then(function () { promptuBusy = false; renderPromptu(); loadPromptu(); });
+    }
+  });
 
   // ---------------------------------------------------------------- the tile dialog
 
@@ -1781,7 +1934,7 @@
   function editing() {
     var a = document.activeElement;
     return dialogEl.contains(a) || (settingsEl.contains(a) && typing(a)) || (dnotesEl.contains(a) && typing(a)) ||
-      draftsEl.contains(a) || formEl.contains(a) || dayBody.contains(a);
+      draftsEl.contains(a) || promptuEl.contains(a) || formEl.contains(a) || dayBody.contains(a);
   }
   if (window.EventSource) {
     var source = new EventSource("/api/desk-events");

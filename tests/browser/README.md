@@ -195,6 +195,8 @@ geckodriver --port 4444 &
 python3 tests/browser/drive_links.py
 ```
 
+`drive_desk_promptu.py` drives the Desk tab's Promptu section (`embarch-ui` decision 56) against a stand-in desk it serves itself on a scratch port (`DESK_PORT`, default 4997) with a scratch token, so no real desk or Promptu is touched. It checks that `open: 0` takes no space, the bar and the panel, a line's ✕ with its note, a group's cut, the feel line, Apply with a failed line kept open, and a 400 and a 503 in the desk's words, each against the recorded request's path and body. It needs only `cargo build` and geckodriver; `POST /promptu/feel/{week}` is `embarch-desk` task 043's route, answered by the stand-in in the shape that task fixed.
+
 `drive_tab.py` drives a tab folder (`embarch-ui` decision 100). It copies
 `tests/fixtures/sample-tab`, points a scratch UI's `[[tabs]]` at the copy and
 brings its own stand-in backend, then checks that the tab sits beside Desk and
