@@ -1031,6 +1031,8 @@ async fn apply_bench(state: &AppState, bench: &Bench, catalog: &Catalog, config:
             ack_ok: f.ack_ok.clone(),
             ack_err: f.ack_err.clone(),
             safe_off: part.safe_off.iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+            metrology: Vec::new(),
+            calibration: None,
         };
         let mut kept = false;
         if inst.safe_off.is_empty() {
