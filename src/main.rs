@@ -84,7 +84,7 @@ const APP_JS: &str = include_str!("../assets/app.js");
 /// five tabs, and the map is the one view that is mostly drawing code.
 const ATLAS_JS: &str = include_str!("../assets/atlas.js");
 const DESK_JS: &str = include_str!("../assets/desk.js");
-/// The Confirm tab's card, a file of its own (decision 113).
+/// The Confirm tab's card, a file of its own (decision 110).
 const CONFIRM_JS: &str = include_str!("../assets/confirm.js");
 /// The Topology tab's bench canvas, a file of its own like the Atlas map.
 const BENCH_JS: &str = include_str!("../assets/bench.js");
