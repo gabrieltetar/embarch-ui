@@ -147,7 +147,7 @@ def _prompt_frame(obj):
     PROMPT["frames"].append(b"data: " + json.dumps(obj).encode() + b"\n\n")
 
 
-def prompt_open(prompt_id, text, deadline_in_ms, bench_config=None):
+def prompt_open(prompt_id, text, deadline_in_ms, bench_config=None, session=None):
     now = int(time.time() * 1000)
     with PROMPT_LOCK:
         PROMPT["on"] = True
@@ -158,6 +158,10 @@ def prompt_open(prompt_id, text, deadline_in_ms, bench_config=None):
         # present only when the drive asks, as Core leaves it out for None.
         if bench_config is not None:
             PROMPT["pending"]["bench_config"] = bench_config
+        # A device study's session prompt (`embarch-core` decision 127): present
+        # only when the drive asks, as Core leaves it out for a host study.
+        if session is not None:
+            PROMPT["pending"]["session"] = session
         _prompt_frame(dict(PROMPT["pending"], kind="PromptPending", study_id=PROMPTING))
 
 
@@ -279,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
             op = path.rsplit("/", 1)[1]
             if op == "start":
                 prompt_open(body.get("prompt_id", 1), body.get("text", "Move the probe to J4, then confirm"),
-                            body.get("deadline_in_ms", 120000), body.get("bench_config"))
+                            body.get("deadline_in_ms", 120000), body.get("bench_config"), body.get("session"))
             elif op == "resolve":
                 prompt_resolve(body["prompt_id"], body["answer"], body.get("answered_by"))
             elif op == "conflict":
@@ -299,6 +303,18 @@ class Handler(BaseHTTPRequestHandler):
             if PROMPT["conflict"] or PROMPT["pending"] is None \
                     or PROMPT["pending"]["prompt_id"] != body.get("prompt_id"):
                 return self._text("prompt %s is not the one waiting" % body.get("prompt_id"), 409)
+            # Core's checks on a session answer (decision 127), the refusals
+            # leaving the prompt pending: `400` with the reason.
+            session = PROMPT["pending"].get("session")
+            if session and session["phase"] == "done" and body.get("answer") != "confirmed":
+                return self._text("a session's Done can only be confirmed", 400)
+            if session and session["phase"] == "start" and body.get("answer") == "confirmed":
+                given = {f.get("name"): f.get("value", "") for f in body.get("run_fields", [])}
+                for f in session["run_fields"]:
+                    if f["required"] and not given.get(f["name"], "").strip():
+                        return self._text("run field '%s' is required" % f["name"], 400)
+            elif body.get("run_fields"):
+                return self._text("run fields are only taken on a session Start", 400)
             prompt_resolve(body["prompt_id"], body["answer"], body.get("answered_by"))
             if PROMPT["answer_delay_ms"]:
                 time.sleep(PROMPT["answer_delay_ms"] / 1000.0)

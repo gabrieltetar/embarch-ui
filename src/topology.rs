@@ -1751,7 +1751,7 @@ pub(crate) async fn apply_link(
         return None;
     }
     Some(if bench_enrolled {
-        match state.core.set_dev_bench_link(serial, interface).await {
+        match state.core.set_dev_bench_link(serial, interface, None, false).await {
             Ok(()) => LinkOutcome::Declared,
             Err(e) => LinkOutcome::Refused(format!("{e:#}")),
         }

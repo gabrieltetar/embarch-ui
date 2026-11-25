@@ -222,7 +222,7 @@ nothing listens on and `EMBARCH_DESK_CONFIG_DIR` and `XDG_DATA_HOME` at scratch
 directories: the page proxies to the real desk and writes the recents list, and
 a click on "Open project" there posts to both.
 
-`drive_prompt.py` (ui/101) renders the operator-prompt modal (decision 69): `stub_core.py` serves a host study with a `pending_prompt` once `POST /_stub/prompt/start` is called (a control surface on the stub's own port, no token). Needs `EMBARCH_STUB_PORT` set to the stub's port (default 4901) as well as the two address variables.
+`drive_prompt.py` (ui/101) renders the operator-prompt modal (decision 69): `stub_core.py` serves a host study with a `pending_prompt` once `POST /_stub/prompt/start` is called (a control surface on the stub's own port, no token). Needs `EMBARCH_STUB_PORT` set to the stub's port (default 4901) as well as the two address variables. It also drives a session's Start and Done prompts (decision 107: `start` takes a `session {phase, run_fields}`): the fields, a refused Start keeping the modal open, Done with no Cancel. The UI's config needs a `person_token` (decision 103), here the stub's `stub-token`.
 
 `drive_bench.py` drives the Topology tab as the bench canvas fills it
 (`assets/bench.js`, the bench editor's read-only phase): the bar, the panels

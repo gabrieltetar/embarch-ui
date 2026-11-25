@@ -1555,7 +1555,7 @@ pub async fn api_retract(State(state): State<AppState>, OpenRepo(repo): OpenRepo
                 let link = (binding.link_port_serial.clone(), binding.link_port_interface);
                 if *role == Role::DevBench && (link.0.is_some() || link.1.is_some()) {
                     text.push_str(&match written {
-                        Some(BoardWrite::Applied { .. }) => match state.core.set_dev_bench_link(link.0.as_deref(), link.1).await {
+                        Some(BoardWrite::Applied { .. }) => match state.core.set_dev_bench_link(link.0.as_deref(), link.1, None, false).await {
                             Ok(()) => format!("; its link ({}) was declared again", link_text(&link.0, link.1)),
                             Err(e) => format!("; declaring its link ({}) again was refused: {e:#}", link_text(&link.0, link.1)),
                         },

@@ -1519,6 +1519,84 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), before);
     }
 
+    /// Decision 128: a session Start's run fields go to Core in the answer as
+    /// `[{name, value}]`; a host study's answer carries no `run_fields` key at
+    /// all; and Core's `400` and `403` come back as such with its reason alone,
+    /// so the modal can keep the prompt open and say why.
+    #[tokio::test]
+    async fn the_prompt_answer_route_forwards_run_fields_and_passes_a_refusal_on() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let log = seen.clone();
+        let stub = axum::Router::new().route(
+            "/study/{id}/prompt",
+            post(move |axum::extract::Json(body): axum::extract::Json<serde_json::Value>| {
+                let log = log.clone();
+                async move {
+                    log.lock().unwrap().push(body.clone());
+                    match body["prompt_id"].as_u64() {
+                        Some(7) => (StatusCode::BAD_REQUEST, "run field 'serial' is required").into_response(),
+                        Some(8) => (StatusCode::FORBIDDEN, "a session Start takes the person's token only").into_response(),
+                        _ => axum::Json(serde_json::json!({
+                            "study_id": "s1", "prompt_id": body["prompt_id"], "answer": body["answer"],
+                            "answered_by": body["answered_by"], "status": "running",
+                        }))
+                        .into_response(),
+                    }
+                }
+            }),
+        );
+        let core = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core_url = format!("http://{}", core.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(core, stub).await.unwrap() });
+        let base = serve_app_over(&core_url).await;
+        let http = reqwest::Client::new();
+        let route = format!("{base}/api/live/prompt");
+
+        let ok = http
+            .post(&route)
+            .json(&serde_json::json!({
+                "study_id": "s1", "prompt_id": 1, "answer": "confirmed",
+                "run_fields": [{ "name": "serial", "value": "SN-42" }, { "name": "room", "value": "" }],
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let sent = seen.lock().unwrap()[0].clone();
+        assert_eq!(sent["answered_by"], "ui");
+        assert_eq!(
+            sent["run_fields"],
+            serde_json::json!([{ "name": "serial", "value": "SN-42" }, { "name": "room", "value": "" }])
+        );
+
+        // A host study's answer is what it was: no `run_fields` key on the wire.
+        http.post(&route)
+            .json(&serde_json::json!({ "study_id": "s1", "prompt_id": 2, "answer": "confirmed" }))
+            .send()
+            .await
+            .unwrap();
+        let sent = seen.lock().unwrap()[1].clone();
+        assert!(sent.get("run_fields").is_none(), "{sent}");
+
+        let refused = http
+            .post(&route)
+            .json(&serde_json::json!({ "study_id": "s1", "prompt_id": 7, "answer": "confirmed", "run_fields": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(refused.text().await.unwrap(), "run field 'serial' is required");
+
+        let forbidden = http
+            .post(&route)
+            .json(&serde_json::json!({ "study_id": "s1", "prompt_id": 8, "answer": "confirmed" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(forbidden.text().await.unwrap(), "a session Start takes the person's token only");
+    }
+
     fn bench_repo(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "ebm-routes-{tag}-{}-{}",

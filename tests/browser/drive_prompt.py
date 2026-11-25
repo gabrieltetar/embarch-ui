@@ -125,6 +125,66 @@ def main():
         m = wait_modal(lambda m: m["resultShown"])
         check("a 409 says the prompt had already ended and does not close",
               m["open"] and "already ended" in m["result"] and m["close"] and not m["confirm"], m)
+
+        # 7. a host study's prompt shows no run fields and the same buttons (ui/107)
+        script("document.getElementById('prompt-close').click()")
+        stub("conflict", {"on": False})  # not a reset: the UI's follow reads the stub's frame list by position
+        stub("start", {"prompt_id": 4, "text": "Host prompt", "deadline_in_ms": 120000})
+        m = wait_modal(lambda m: m["open"] and m["text"] == "Host prompt")
+        f = script("return {hidden:document.getElementById('prompt-fields').hidden,"
+                   "n:document.querySelectorAll('#prompt-fields input').length,"
+                   "label:document.getElementById('prompt-confirm').textContent,"
+                   "cancel:document.getElementById('prompt-cancel').style.display}")
+        check("a host prompt has no run fields and says Confirm", f["hidden"] and f["n"] == 0
+              and f["label"] == "Confirm" and f["cancel"] != "none", f)
+        script("document.getElementById('prompt-confirm').click()")
+        wait_modal(lambda m: not m["open"])
+        sent = stub("answers")["answers"][-1]
+        check("a host prompt's answer carries no run_fields key", "run_fields" not in sent, sent)
+
+        # 8. a session Start renders its fields, a refusal keeps the modal open
+        stub("start", {"prompt_id": 1, "text": "Place the sensor, then press Start", "deadline_in_ms": 120000,
+                       "session": {"phase": "start", "run_fields": [
+                           {"name": "serial", "label": "Sensor serial", "required": True},
+                           {"name": "room", "label": "Room", "required": False}]}})
+        m = wait_modal(lambda m: m["open"] and "Place the sensor" in m["text"])
+        f = script("var i=document.querySelectorAll('#prompt-fields input');"
+                   "return {n:i.length,names:Array.prototype.map.call(i,function(e){return e.getAttribute('data-name')}),"
+                   "labels:Array.prototype.map.call(document.querySelectorAll('.prompt-field-label'),function(e){return e.textContent}),"
+                   "label:document.getElementById('prompt-confirm').textContent,"
+                   "focus:document.activeElement&&document.activeElement.id}")
+        check("a session Start renders one input per declared field, in order",
+              f["n"] == 2 and f["names"] == ["serial", "room"] and f["labels"][0].startswith("Sensor serial")
+              and f["labels"][0].endswith("*") and f["label"] == "Start" and f["focus"] == "prompt-field-0", f)
+        script("document.getElementById('prompt-confirm').click()")
+        m = wait_modal(lambda m: m["resultShown"])
+        check("a refused Start keeps the modal open with Core's reason",
+              m["open"] and "refused" in m["result"] and "run field 'serial' is required" in m["result"]
+              and m["confirm"], m)
+        script("var e=document.getElementById('prompt-field-0');e.value='SN-42';"
+               "document.getElementById('prompt-field-1').value='Lab 2'")
+        check("the fields are enabled again for a correction",
+              not script("return document.getElementById('prompt-field-0').disabled"))
+        script("document.getElementById('prompt-field-1').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}))")
+        wait_modal(lambda m: not m["open"])
+        sent = stub("answers")["answers"][-1]
+        check("the corrected Start is sent with every field, in order, as ui",
+              sent.get("answered_by") == "ui" and sent.get("answer") == "confirmed"
+              and sent.get("run_fields") == [{"name": "serial", "value": "SN-42"}, {"name": "room", "value": "Lab 2"}], sent)
+
+        # 9. Done renders while sampling, with its text and Confirm only, and confirms
+        stub("start", {"prompt_id": 2, "text": "Recording. Press Done to stop.", "deadline_in_ms": 120000,
+                       "session": {"phase": "done", "run_fields": []}})
+        m = wait_modal(lambda m: m["open"] and "Press Done" in m["text"])
+        f = script("return {n:document.querySelectorAll('#prompt-fields input').length,"
+                   "label:document.getElementById('prompt-confirm').textContent}")
+        check("Done shows its text and a Done button, no fields and no Cancel",
+              m["confirm"] and not m["cancel"] and f["n"] == 0 and f["label"] == "Done", (m, f))
+        script("document.getElementById('prompt-confirm').click()")
+        m = wait_modal(lambda m: not m["open"])
+        sent = stub("answers")["answers"][-1]
+        check("Done is answered confirmed with no run fields",
+              not m["open"] and sent.get("answer") == "confirmed" and "run_fields" not in sent, sent)
         errs = script("return window.__errs || []")
         check("no uncaught JavaScript error", not errs, errs)
     finally:

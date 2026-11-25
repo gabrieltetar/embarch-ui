@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embarch_core_client::{
-    CoreClient, FollowItem, FollowMode, FollowOptions, PendingPrompt, PromptAnswerRequest,
+    CoreClient, FollowItem, FollowMode, FollowOptions, PendingPrompt, PromptAnswerRequest, RunFieldAnswer,
     StudyEvent,
 };
 use crate::trace::{self, ClockAnchor, Projection};
@@ -873,7 +873,7 @@ fn now_utc_ms() -> u64 {
 /// That this process and Core agree on the time is **assumed** — they share a
 /// machine in the usual setup — and not measured.
 fn prompt_json(study_id: &str, p: &PendingPrompt) -> Value {
-    json!({
+    let mut v = json!({
         "study_id": study_id,
         "prompt_id": p.prompt_id,
         "step_name": p.step_name,
@@ -885,7 +885,14 @@ fn prompt_json(study_id: &str, p: &PendingPrompt) -> Value {
         "opened_utc_ms": p.opened_utc_ms,
         "deadline_utc_ms": p.deadline_utc_ms,
         "remaining_ms": p.deadline_utc_ms.saturating_sub(now_utc_ms()),
-    })
+    });
+    // A device study's session prompt (`embarch-core` decision 127) only: a host
+    // study's prompt carries no `session` key at all, so it reaches the browser
+    // byte for byte as before.
+    if let Some(session) = &p.session {
+        v["session"] = json!(session);
+    }
+    v
 }
 
 impl SessionState {
@@ -1879,12 +1886,20 @@ pub struct PromptAnswerBody {
     pub prompt_id: u32,
     /// `confirmed` or `cancelled`.
     pub answer: String,
+    /// A session Start's run field values (`embarch-core` decision 127); absent
+    /// for every other prompt.
+    #[serde(default)]
+    pub run_fields: Vec<RunFieldAnswer>,
 }
 
 /// `POST /api/live/prompt` — the modal's Confirm / Cancel. Relays through
-/// `answer_prompt` as `answered_by: "ui"`. **A `409` is passed on as a `409`
-/// with Core's own text** (the prompt already ended, or someone else answered
-/// first), never turned into a success or a generic failure.
+/// `answer_prompt` as `answered_by: "ui"`, with the person's token (the one
+/// client this process holds, `ui/103`) and a session Start's `run_fields`.
+/// **A `409` is passed on as a `409` with Core's own text** (the prompt already
+/// ended, or someone else answered first), never turned into a success or a
+/// generic failure. **A `400` or `403` is passed on the same way, with Core's
+/// reason alone** (a run field it refused, a token it will not take): the
+/// prompt is still pending in Core, and the modal keeps it open to correct.
 pub async fn api_live_prompt(
     State(state): State<crate::AppState>,
     axum::extract::Json(body): axum::extract::Json<PromptAnswerBody>,
@@ -1897,6 +1912,7 @@ pub async fn api_live_prompt(
         prompt_id: body.prompt_id,
         answer: body.answer,
         answered_by: "ui".to_string(),
+        run_fields: body.run_fields,
     };
     match state.core.answer_prompt(&body.study_id, &req).await {
         Ok(done) => (StatusCode::OK, axum::Json(json!({
@@ -1908,8 +1924,17 @@ pub async fn api_live_prompt(
         .into_response(),
         Err(e) => {
             let text = format!("{e:#}");
-            let code = if text.contains("returned 409") { StatusCode::CONFLICT } else { StatusCode::BAD_GATEWAY };
-            (code, text).into_response()
+            if text.contains("returned 409") {
+                return (StatusCode::CONFLICT, text).into_response();
+            }
+            // Core's own words for a refusal, without the client's "returned 400 ...: " prefix.
+            for (marker, code) in [("returned 400", StatusCode::BAD_REQUEST), ("returned 403", StatusCode::FORBIDDEN)] {
+                if text.contains(marker) {
+                    let reason = text.split_once(": ").map(|(_, r)| r.trim().to_string()).unwrap_or(text);
+                    return (code, reason).into_response();
+                }
+            }
+            (StatusCode::BAD_GATEWAY, text).into_response()
         }
     }
 }
@@ -2491,7 +2516,33 @@ mod tests {
             bench_config: None,
             opened_utc_ms: 1_000,
             deadline_utc_ms: deadline,
+            session: None,
         }
+    }
+
+    #[test]
+    fn a_session_prompt_carries_its_phase_and_run_fields_and_a_host_prompt_carries_no_key() {
+        let far = now_utc_ms() + 60_000;
+        let session = LiveSession::new("abc".to_string());
+        let host: Value = serde_json::from_str(&ingest(&session, FollowItem::Event(prompt_event(1, far))).unwrap()).unwrap();
+        assert!(host["pending"].get("session").is_none(), "{host}");
+
+        let mut event = prompt_event(1, far);
+        if let StudyEvent::PromptPending { session: s, .. } = &mut event {
+            *s = serde_json::from_value(json!({
+                "phase": "start",
+                "run_fields": [{ "name": "serial", "label": "Sensor serial", "required": true }],
+            }))
+            .unwrap();
+        }
+        let session = LiveSession::new("abc".to_string());
+        let v: Value = serde_json::from_str(&ingest(&session, FollowItem::Event(event)).unwrap()).unwrap();
+        assert_eq!(v["pending"]["session"]["phase"], "start");
+        assert_eq!(v["pending"]["session"]["run_fields"][0]["name"], "serial");
+        assert_eq!(v["pending"]["session"]["run_fields"][0]["required"], true);
+        // The snapshot a reloaded page reads carries it too.
+        let snap: Value = serde_json::from_str(&session.snapshot()).unwrap();
+        assert_eq!(snap["pending_prompt"]["session"]["phase"], "start");
     }
 
     #[test]

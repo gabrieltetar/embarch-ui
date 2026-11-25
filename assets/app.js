@@ -10576,11 +10576,56 @@
   }
 
   function pmSetButtons(open) {
+    // A session's Done can only be confirmed (embarch-core decision 127): there
+    // is nothing to cancel, so it has no Cancel.
+    var done = !!(pmCurrent && pmCurrent.p && pmCurrent.p.session && pmCurrent.p.session.phase === "done");
     pmEl("prompt-confirm").style.display = open ? "" : "none";
-    pmEl("prompt-cancel").style.display = open ? "" : "none";
+    pmEl("prompt-cancel").style.display = open && !done ? "" : "none";
     pmEl("prompt-close").style.display = open ? "none" : "";
     pmEl("prompt-confirm").disabled = false;
     pmEl("prompt-cancel").disabled = false;
+  }
+
+  // A session Start's run fields, one input per declared field in declared
+  // order; nothing for any other prompt. Core judges the values, not this page.
+  function pmFields(sess) {
+    var box = pmEl("prompt-fields");
+    box.textContent = "";
+    var fields = sess && sess.phase === "start" ? sess.run_fields || [] : [];
+    box.hidden = fields.length === 0;
+    fields.forEach(function (f, i) {
+      var row = document.createElement("label");
+      row.className = "prompt-field";
+      var label = document.createElement("span");
+      label.className = "prompt-field-label";
+      label.textContent = f.label || f.name;
+      if (f.required) {
+        var star = document.createElement("span");
+        star.className = "prompt-field-required";
+        star.textContent = " *";
+        star.setAttribute("title", "required");
+        label.appendChild(star);
+      }
+      var input = document.createElement("input");
+      input.type = "text";
+      input.id = "prompt-field-" + i;
+      input.setAttribute("data-name", f.name);
+      input.setAttribute("autocomplete", "off");
+      if (f.required) input.setAttribute("aria-required", "true");
+      input.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") pmAnswer("confirmed");
+      });
+      row.appendChild(label);
+      row.appendChild(input);
+      box.appendChild(row);
+    });
+  }
+
+  // Every declared field's value, blanks included, in declared order.
+  function pmFieldValues() {
+    return Array.prototype.map.call(pmEl("prompt-fields").querySelectorAll("input"), function (el) {
+      return { name: el.getAttribute("data-name"), value: el.value };
+    });
   }
 
   function pmShow(p) {
@@ -10593,8 +10638,13 @@
     };
     // The config a step names, as the study wrote it; the section under the
     // text draws the change on the live bench, or says why it cannot.
-    pmEl("prompt-step").textContent = "Step '" + (p.step_name || "") + "'" +
-      (p.bench_config ? " \u2014 bench config '" + p.bench_config + "'" : "");
+    var sess = p.session || null;
+    pmEl("prompt-step").textContent = sess
+      ? "Session \u2014 " + (sess.phase === "done" ? "capture running, press Done to end it" : "Start")
+      : "Step '" + (p.step_name || "") + "'" +
+        (p.bench_config ? " \u2014 bench config '" + p.bench_config + "'" : "");
+    pmEl("prompt-confirm").textContent = sess ? (sess.phase === "done" ? "Done" : "Start") : "Confirm";
+    pmFields(sess);
     pmEl("prompt-text").textContent = p.text || "";
     pmEl("prompt-result").style.display = "none";
     if (pmCarry) {
@@ -10605,7 +10655,8 @@
     pmSetButtons(true);
     pmEl("prompt-backdrop").style.display = "";
     pmEl("prompt-dialog").style.display = "";
-    pmEl("prompt-confirm").focus();
+    var firstField = pmEl("prompt-fields").querySelector("input");
+    (firstField || pmEl("prompt-confirm")).focus();
     document.title = "Prompt waiting - EmbArch";
     if (pmTimer) clearInterval(pmTimer);
     pmTimer = setInterval(pmTick, 500);
@@ -10711,6 +10762,7 @@
     var cur = pmCurrent;
     pmEl("prompt-confirm").disabled = true;
     pmEl("prompt-cancel").disabled = true;
+    Array.prototype.forEach.call(pmEl("prompt-fields").querySelectorAll("input"), function (el) { el.disabled = true; });
     pmPickLock(true);
     cur.answeredHere = true;
     cur.sending = true;
@@ -10719,13 +10771,19 @@
       if (!here()) return;
       pmEl("prompt-confirm").disabled = false;
       pmEl("prompt-cancel").disabled = false;
+      Array.prototype.forEach.call(pmEl("prompt-fields").querySelectorAll("input"), function (el) { el.disabled = false; });
       pmPickLock(false);
     };
     try {
       var resp = await fetch("/api/live/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer }),
+        body: JSON.stringify(
+          // Only a confirmed session Start carries run fields; any other answer is the body it always was.
+          cur.p.session && cur.p.session.phase === "start" && answer === "confirmed"
+            ? { study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer, run_fields: pmFieldValues() }
+            : { study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer }
+        ),
       });
       cur.sending = false;
       if (resp.ok) {
@@ -10763,6 +10821,12 @@
       if (resp.status === 409) {
         // The prompt had already ended: shown, not swallowed.
         pmEnded("Not taken - the prompt had already ended. " + text);
+      } else if (resp.status === 400 || resp.status === 403) {
+        // Core refused the answer and the prompt is still pending there: kept
+        // open, the fields as typed, with Core's reason to correct them by.
+        pmEl("prompt-result").textContent = "embarch-core refused the answer: " + text;
+        pmEl("prompt-result").style.display = "";
+        unlock();
       } else {
         pmEl("prompt-result").textContent = "The answer did not reach embarch-core: " + text;
         pmEl("prompt-result").style.display = "";
