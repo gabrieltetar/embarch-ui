@@ -66,11 +66,24 @@ const MAX_CONSOLE_BYTES: usize = 256 * 1024;
 /// declared as `Text`, and the honest answer is to say so rather than to
 /// grow without bound.
 const MAX_CONSOLE_LINE_BYTES: usize = 8 * 1024;
-/// Per sample tap. Beyond this the series decimates 2:1 and says so — a plot
-/// of 50,000 points is already far past a screen's worth of columns, and
-/// dropping the oldest instead would silently change what "the whole run"
-/// means mid-run.
+/// Per sample tap, drawn one point per sample up to this many. Past it the
+/// series folds into min/max columns (see [`Series`]) rather than dropping
+/// samples, so a burst a few milliseconds long keeps its peak in a run of
+/// 9.6 M samples (5 minutes at 32 ksps). Dropping the oldest instead would
+/// silently change what "the whole run" means mid-run.
 const MAX_SERIES_POINTS: usize = 50_000;
+/// Columns a binned series holds at most. Each is one drawn stroke from its
+/// minimum to its maximum, so this is a bound on what the browser draws and
+/// on a snapshot's size, set above the width of a 4K screen: a column is never
+/// wider than a pixel it could not have drawn anyway.
+const MAX_SERIES_COLUMNS: usize = 4_000;
+/// Resolution assumed for the ADC rails of a `Unit::Raw` series. **Assumed,
+/// not read:** the resolution is in the start header of an analog tap's
+/// record, which Core does not forward to the live view, and a tap's source
+/// declaration carries a rate and a channel but no resolution. Decision 11 of
+/// the analog-capture work says the live view has raw 12-bit codes, and the
+/// only converter this feeds is a 12-bit one.
+const ADC_RESOLUTION_BITS_ASSUMED: u32 = 12;
 /// `embarch-study-designer`'s own `MAX_STEPS_PER_STUDY`. Stated rather than
 /// imported because it bounds a `Vec` here, not a `heapless` buffer.
 const MAX_STEPS: usize = 64;
@@ -231,68 +244,182 @@ impl Console {
     }
 }
 
+/// The ADC rails of a `bits`-bit unsigned converter: code 0 and the top code.
+fn adc_rails(bits: u32) -> [f64; 2] {
+    [0.0, f64::from((1u32 << bits) - 1)]
+}
+
+/// One drawn column of a binned series: the arrival stamp of its first
+/// sample, the extremes of every sample folded into it, and how many that is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Column {
+    x: f64,
+    min: f64,
+    max: f64,
+    n: u32,
+}
+
+impl Column {
+    fn json(&self) -> Value {
+        json!([self.x, self.min, self.max])
+    }
+}
+
 /// One tap's live sample series.
 ///
-/// **Decimated, never truncated.** Dropping the oldest points would make a
-/// plot that silently changes what window it covers as the run goes on; a
-/// 2:1 decimation keeps the whole run on screen and says, in `stride`, that
-/// it is showing one point in N.
+/// **Never truncated, and a peak is never dropped.** Up to
+/// [`MAX_SERIES_POINTS`] every sample is a point. Past it the series is folded
+/// into at most [`MAX_SERIES_COLUMNS`] columns of `per_column` consecutive
+/// samples, each keeping its **minimum and maximum**; when the columns run
+/// out, neighbours merge pairwise and `per_column` doubles. Merging min/max is
+/// exact, so a column's extremes are the extremes of the samples it stands
+/// for, however many times the series has been folded. (The earlier one-in-N
+/// decimation kept about one sample in 200 of a 5-minute 32 ksps series and
+/// lost every burst a few milliseconds long.)
 #[derive(Debug, Default)]
 struct Series {
+    /// Raw points, `[arrival ms, value]`. Empty once the series is binned.
     points: Vec<[f64; 2]>,
+    /// Min/max columns. Empty until `points` passes the cap.
+    columns: Vec<Column>,
     unit: Option<String>,
-    /// One point kept per `stride` arriving. Starts at 1.
-    stride: u32,
-    /// Samples seen since the last one kept.
-    skipped: u32,
-    /// Every sample this tap has produced, kept or not.
+    /// Samples folded into each column. 1 while the series is still points.
+    per_column: u32,
+    /// Every sample this tap has produced.
     total: u64,
     /// Set only for a series fed by `StudyEvent::StructChartValue` — the
     /// layout's declared `chart_field`, so the browser can label the plot
     /// "stream · field" instead of a bare tap name. `None` for an ordinary
     /// `SampleBatch` series, which has no field to name.
     field_name: Option<String>,
+    /// First column a browser has not seen yet. A frame carries only the
+    /// columns from here on.
+    dirty_from: usize,
+    /// The browser's copy is out of step in more than its tail — the series
+    /// just turned into columns, or two columns were merged — so the next
+    /// frame carries all of them.
+    replace: bool,
+    /// ADC rails `[low, high]`, for a series of raw codes only.
+    rails: Option<[f64; 2]>,
+    /// Blocks (one `SampleBatch` each) with at least one sample at a rail.
+    clipped_blocks: u64,
+    /// Samples at a rail, over the whole run.
+    clipped_samples: u64,
 }
 
 impl Series {
-    fn push(&mut self, rx_utc_ms: u64, value: f64, unit: Option<&str>) -> bool {
-        if self.stride == 0 {
-            self.stride = 1;
-        }
-        if self.unit.is_none() {
-            self.unit = unit.map(|u| u.to_string());
-        }
+    fn per_column(&self) -> u32 {
+        self.per_column.max(1)
+    }
+
+    fn is_binned(&self) -> bool {
+        !self.columns.is_empty()
+    }
+
+    /// Takes one sample. Returns the point to append to a browser's copy while
+    /// the series is still points; `None` once it is columns.
+    fn push(&mut self, rx_utc_ms: u64, value: f64) -> Option<[f64; 2]> {
         self.total += 1;
-        if self.skipped + 1 < self.stride {
-            self.skipped += 1;
-            return false;
+        if self.is_binned() {
+            self.push_column(rx_utc_ms as f64, value);
+            return None;
         }
-        self.skipped = 0;
         self.points.push([rx_utc_ms as f64, value]);
         if self.points.len() > MAX_SERIES_POINTS {
-            // Keep every other point and double the stride, so the series
-            // stays evenly sampled across the *whole* run rather than dense
-            // at the start and sparse at the end.
-            let mut keep = Vec::with_capacity(self.points.len() / 2 + 1);
-            for (i, p) in self.points.iter().enumerate() {
-                if i % 2 == 0 {
-                    keep.push(*p);
-                }
-            }
-            self.points = keep;
-            self.stride = self.stride.saturating_mul(2);
+            self.bin();
+            return None;
         }
-        true
+        Some([rx_utc_ms as f64, value])
+    }
+
+    fn push_column(&mut self, x: f64, value: f64) {
+        let per_column = self.per_column();
+        if let Some(last) = self.columns.last_mut() {
+            if last.n < per_column {
+                last.min = last.min.min(value);
+                last.max = last.max.max(value);
+                last.n += 1;
+                self.dirty_from = self.dirty_from.min(self.columns.len() - 1);
+                return;
+            }
+        }
+        self.columns.push(Column { x, min: value, max: value, n: 1 });
+        if self.columns.len() > MAX_SERIES_COLUMNS {
+            self.merge_pairs();
+        }
+    }
+
+    /// Turns the points into columns, the smallest power-of-two width that
+    /// fits [`MAX_SERIES_COLUMNS`].
+    fn bin(&mut self) {
+        let mut per_column = 1u32;
+        while self.points.len().div_ceil(per_column as usize) > MAX_SERIES_COLUMNS {
+            per_column *= 2;
+        }
+        self.per_column = per_column;
+        self.columns = self
+            .points
+            .chunks(per_column as usize)
+            .map(|chunk| Column {
+                x: chunk[0][0],
+                min: chunk.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
+                max: chunk.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max),
+                n: chunk.len() as u32,
+            })
+            .collect();
+        self.points = Vec::new();
+        self.replace = true;
+    }
+
+    fn merge_pairs(&mut self) {
+        self.columns = self
+            .columns
+            .chunks(2)
+            .map(|pair| match pair {
+                [a, b] => Column { x: a.x, min: a.min.min(b.min), max: a.max.max(b.max), n: a.n + b.n },
+                [a] => *a,
+                _ => unreachable!("chunks(2) yields one or two"),
+            })
+            .collect();
+        self.per_column = self.per_column().saturating_mul(2);
+        self.replace = true;
+    }
+
+    /// Counts a block's samples at the rails. Only a series of raw codes has
+    /// rails; the unit is what says so.
+    fn note_block(&mut self, values: &[f64]) -> bool {
+        let Some([lo, hi]) = self.rails else { return false };
+        let at_rail = values.iter().filter(|v| **v <= lo || **v >= hi).count() as u64;
+        self.clipped_samples += at_rail;
+        if at_rail > 0 {
+            self.clipped_blocks += 1;
+        }
+        at_rail > 0
+    }
+
+    /// The columns a browser has not seen, and whether they replace its copy.
+    fn take_columns(&mut self) -> (usize, bool, Vec<Value>) {
+        let from = if self.replace { 0 } else { self.dirty_from.min(self.columns.len()) };
+        let out = self.columns[from..].iter().map(Column::json).collect();
+        let replace = self.replace;
+        self.replace = false;
+        // The last column is still filling, so it is sent again next time.
+        self.dirty_from = self.columns.len().saturating_sub(1);
+        (from, replace, out)
     }
 
     fn to_json(&self, tap: &str) -> Value {
         json!({
             "tap": tap,
             "points": self.points,
+            "columns": self.columns.iter().map(Column::json).collect::<Vec<_>>(),
             "unit": self.unit,
-            "stride": self.stride.max(1),
+            "stride": self.per_column(),
             "total": self.total,
             "field_name": self.field_name,
+            "rails": self.rails,
+            "clipped_blocks": self.clipped_blocks,
+            "clipped_samples": self.clipped_samples,
         })
     }
 }
@@ -1409,17 +1536,34 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
         }
         FollowItem::Event(StudyEvent::SampleBatch { stream_name, samples, .. }) => {
             let series = state.series.entry(stream_name.clone()).or_default();
-            let mut added: Vec<[f64; 2]> = Vec::new();
-            for sample in &samples {
-                let unit = serde_json::to_value(sample.unit)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()));
-                if series.push(sample.rx_utc_ms, f64::from(sample.value), unit.as_deref()) {
-                    added.push([sample.rx_utc_ms as f64, f64::from(sample.value)]);
+            if series.unit.is_none() {
+                // Once per series, not per sample: a 32 ksps tap is 9.6 M
+                // samples in five minutes.
+                if let Some(first) = samples.first() {
+                    series.unit = serde_json::to_value(first.unit)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    if first.unit == embarch_study_designer::Unit::Raw {
+                        series.rails = Some(adc_rails(ADC_RESOLUTION_BITS_ASSUMED));
+                    }
                 }
             }
-            let stride = series.stride.max(1);
+            let mut added: Vec<[f64; 2]> = Vec::new();
+            for sample in &samples {
+                if let Some(point) = series.push(sample.rx_utc_ms, f64::from(sample.value)) {
+                    added.push(point);
+                }
+            }
+            let clipped = {
+                let values: Vec<f64> = samples.iter().map(|s| f64::from(s.value)).collect();
+                series.note_block(&values)
+            };
+            let (from, replace, columns) = series.take_columns();
+            let stride = series.per_column();
             let total = series.total;
+            let clipped_blocks = series.clipped_blocks;
+            let clipped_samples = series.clipped_samples;
+            let rails = series.rails;
             let feed = state.push_feed(
                 "samples",
                 format!("{stream_name}: {} sample(s)", samples.len()),
@@ -1429,8 +1573,15 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
                 json!({
                     "tap": stream_name,
                     "points": added,
+                    "columns": columns,
+                    "columns_from": from,
+                    "columns_replace": replace,
                     "stride": stride,
                     "total": total,
+                    "rails": rails,
+                    "clipped": clipped,
+                    "clipped_blocks": clipped_blocks,
+                    "clipped_samples": clipped_samples,
                     "row": feed,
                 }),
             ))
@@ -1452,9 +1603,9 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
             if series.field_name.is_none() {
                 series.field_name = Some(field_name.clone());
             }
-            let added: Vec<[f64; 2]> =
-                if series.push(core_rx_utc_ms, value, None) { vec![[core_rx_utc_ms as f64, value]] } else { Vec::new() };
-            let stride = series.stride.max(1);
+            let added: Vec<[f64; 2]> = series.push(core_rx_utc_ms, value).into_iter().collect();
+            let (from, replace, columns) = series.take_columns();
+            let stride = series.per_column();
             let total = series.total;
             let feed = state.push_feed(
                 "struct_chart",
@@ -1466,6 +1617,9 @@ fn ingest(session: &LiveSession, item: FollowItem) -> Option<String> {
                     "tap": stream_name,
                     "field_name": field_name,
                     "points": added,
+                    "columns": columns,
+                    "columns_from": from,
+                    "columns_replace": replace,
                     "stride": stride,
                     "total": total,
                     "row": feed,
@@ -1853,31 +2007,180 @@ mod tests {
     }
 
     #[test]
-    fn a_series_past_its_cap_decimates_rather_than_dropping_the_oldest() {
-        // Dropping the oldest would silently change what window the plot
-        // covers as the run goes on. Decimating keeps the whole run and
-        // says, in `stride`, that it is showing one point in N.
+    fn a_series_under_its_cap_keeps_every_sample_as_a_point() {
         let mut series = Series::default();
-        for i in 0..(MAX_SERIES_POINTS + 1) {
-            series.push(i as u64, i as f64, Some("Milliamps"));
+        for i in 0..MAX_SERIES_POINTS {
+            assert_eq!(series.push(i as u64, i as f64), Some([i as f64, i as f64]));
         }
-        assert!(series.points.len() <= MAX_SERIES_POINTS);
-        assert_eq!(series.stride, 2);
-        // The first sample survives — that is the whole difference from
-        // dropping the oldest.
-        assert_eq!(series.points[0], [0.0, 0.0]);
-        assert_eq!(series.total, MAX_SERIES_POINTS as u64 + 1);
+        assert_eq!(series.points.len(), MAX_SERIES_POINTS);
+        assert!(series.columns.is_empty());
+        assert_eq!(series.per_column(), 1);
+        assert_eq!(series.total, MAX_SERIES_POINTS as u64);
     }
 
     #[test]
-    fn a_decimated_series_keeps_sampling_at_its_stride() {
-        let mut series = Series { stride: 4, ..Default::default() };
-        assert!(!series.push(1, 1.0, None));
-        assert!(!series.push(2, 2.0, None));
-        assert!(!series.push(3, 3.0, None));
-        assert!(series.push(4, 4.0, None), "one in four is kept");
-        assert_eq!(series.points.len(), 1);
-        assert_eq!(series.total, 4);
+    fn a_series_past_its_cap_folds_into_min_max_columns_and_drops_nothing() {
+        let mut series = Series::default();
+        for i in 0..(MAX_SERIES_POINTS + 1) {
+            series.push(i as u64, i as f64);
+        }
+        assert!(series.points.is_empty());
+        assert!(series.columns.len() <= MAX_SERIES_COLUMNS);
+        assert_eq!(series.total, MAX_SERIES_POINTS as u64 + 1);
+        // The first sample is the first column's minimum and the last sample
+        // the last column's maximum: nothing at either end was lost.
+        assert_eq!(series.columns[0].min, 0.0);
+        assert_eq!(series.columns.last().unwrap().max, MAX_SERIES_POINTS as f64);
+        let folded: u64 = series.columns.iter().map(|c| u64::from(c.n)).sum();
+        assert_eq!(folded, series.total, "every sample is in exactly one column");
+    }
+
+    /// The reason for the columns: a 5-minute 32 ksps series is 9.6 M samples,
+    /// a burst of a few milliseconds is a few hundred of them, and one point in
+    /// 200 loses every one. Each burst here has a peak of its own, above the
+    /// noise, and each must be a column maximum afterwards.
+    ///
+    /// Run with `--release --nocapture` for the timing in the commit message.
+    #[test]
+    fn every_burst_in_a_five_minute_32_ksps_series_keeps_its_peak() {
+        const RATE_HZ: u64 = 32_000;
+        const SECONDS: u64 = 300;
+        const SAMPLES: u64 = RATE_HZ * SECONDS;
+        const BURSTS: u64 = 60;
+        const BURST_SAMPLES: u64 = 160; // 5 ms
+        const MID: f64 = 2048.0;
+        const BATCH: usize = 512;
+
+        let burst_start = |k: u64| (k + 1) * (SAMPLES / (BURSTS + 1)) + 37 * k;
+        let peak_of = |k: u64| MID + 100.0 + k as f64;
+        let trough_of = |k: u64| MID - 100.0 - k as f64;
+        let mut noise = 0x2545_f491_4f6c_dd1du64;
+        let mut value_at = |i: u64| {
+            noise ^= noise << 13;
+            noise ^= noise >> 7;
+            noise ^= noise << 17;
+            let base = MID + ((noise % 41) as f64 - 20.0);
+            // A burst starts within 37 * BURSTS samples of its even slot, so
+            // only the slots just below `i` can hold it.
+            let slot = i / (SAMPLES / (BURSTS + 1));
+            for k in slot.saturating_sub(2)..slot.min(BURSTS) {
+                let start = burst_start(k);
+                if i >= start && i < start + BURST_SAMPLES {
+                    // One peak and one trough inside the burst, the rest
+                    // swinging at half their size.
+                    return match i - start {
+                        40 => peak_of(k),
+                        80 => trough_of(k),
+                        n if n % 2 == 0 => MID + 50.0,
+                        _ => MID - 50.0,
+                    };
+                }
+            }
+            base
+        };
+
+        let mut series = Series::default();
+        let mut frames = 0u64;
+        let started = std::time::Instant::now();
+        let mut i = 0u64;
+        while i < SAMPLES {
+            for _ in 0..BATCH {
+                // Arrival stamps are the sample's own time in ms.
+                series.push(i * 1_000 / RATE_HZ, value_at(i));
+                i += 1;
+            }
+            series.take_columns();
+            frames += 1;
+        }
+        let ingest = started.elapsed();
+
+        let drawn = std::time::Instant::now();
+        let snapshot = series.to_json("mic").to_string();
+        let snapshot_time = drawn.elapsed();
+        eprintln!(
+            "EMB-476 timing: {SAMPLES} samples in {frames} blocks ingested in {ingest:?}; \
+             {} columns of {} samples, snapshot {} bytes in {snapshot_time:?}",
+            series.columns.len(),
+            series.per_column(),
+            snapshot.len()
+        );
+
+        assert_eq!(series.total, SAMPLES);
+        assert!(series.columns.len() <= MAX_SERIES_COLUMNS);
+        let maxes: Vec<f64> = series.columns.iter().map(|c| c.max).collect();
+        let mins: Vec<f64> = series.columns.iter().map(|c| c.min).collect();
+        for k in 0..BURSTS {
+            assert!(maxes.contains(&peak_of(k)), "burst {k}'s peak is not in any column");
+            assert!(mins.contains(&trough_of(k)), "burst {k}'s trough is not in any column");
+        }
+        // And the columns are in time order, so the picture is not scrambled.
+        assert!(series.columns.windows(2).all(|w| w[0].x <= w[1].x));
+    }
+
+    #[test]
+    fn a_frame_carries_only_the_columns_a_browser_has_not_seen() {
+        let mut series = Series::default();
+        for i in 0..(MAX_SERIES_POINTS + 1) {
+            series.push(i as u64, i as f64);
+        }
+        let (from, replace, all) = series.take_columns();
+        assert!(replace, "turning into columns replaces the browser's points");
+        assert_eq!((from, all.len()), (0, series.columns.len()));
+
+        series.push(1_000_000, 5.0);
+        let (from, replace, tail) = series.take_columns();
+        assert!(!replace);
+        assert_eq!(from, series.columns.len() - 1, "only the still-filling last column is resent");
+        assert_eq!(tail.len(), 1);
+    }
+
+    fn sample_batch(study: &str, values: &[u16]) -> FollowItem {
+        FollowItem::Event(StudyEvent::SampleBatch {
+            study_id: study.to_string(),
+            stream_id: 0,
+            stream_name: "mic".to_string(),
+            samples: values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| embarch_study_designer::Sample {
+                    rx_utc_ms: i as u64,
+                    value: f32::from(*v),
+                    unit: embarch_study_designer::Unit::Raw,
+                    channel_id: 0,
+                })
+                .collect(),
+            core_rx_utc_ms: None,
+        })
+    }
+
+    #[test]
+    fn a_block_with_a_sample_at_an_adc_rail_is_flagged_and_counted() {
+        let session = LiveSession::new("abc".to_string());
+        let top = ((1u32 << ADC_RESOLUTION_BITS_ASSUMED) - 1) as u16;
+        let frame_of = |values: &[u16]| -> Value {
+            serde_json::from_str(&ingest(&session, sample_batch("abc", values)).unwrap()).unwrap()
+        };
+
+        let quiet = frame_of(&[2040, 2048, 2060]);
+        assert_eq!(quiet["clipped"], false);
+        assert_eq!(quiet["clipped_blocks"], 0);
+        assert_eq!(quiet["rails"], json!([0.0, f64::from(top)]));
+
+        let loud = frame_of(&[2048, top, 2100, top, 0]);
+        assert_eq!(loud["clipped"], true);
+        assert_eq!(loud["clipped_blocks"], 1);
+        assert_eq!(loud["clipped_samples"], 3);
+
+        let after = frame_of(&[2050]);
+        assert_eq!(after["clipped"], false, "a clipped block does not flag the next one");
+        assert_eq!(after["clipped_blocks"], 1);
+    }
+
+    #[test]
+    fn a_series_that_is_not_raw_codes_has_no_rails_and_is_never_flagged() {
+        let mut series = Series::default();
+        assert!(!series.note_block(&[0.0, 4095.0]));
+        assert_eq!(series.clipped_blocks, 0);
     }
 
     #[test]
@@ -1903,7 +2206,7 @@ mod tests {
             let console = state.consoles.entry("dev-bench".to_string()).or_default();
             console.push_chunk(&mut seq, 0, 1, "booted\npartial");
             state.seq = seq;
-            state.series.entry("rail".to_string()).or_default().push(1, 1.5, Some("Milliamps"));
+            state.series.entry("rail".to_string()).or_default().push(1, 1.5);
         }
 
         let snapshot: Value = serde_json::from_str(&session.snapshot()).unwrap();

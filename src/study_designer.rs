@@ -858,6 +858,7 @@ fn build_taps(
         decoders: Default::default(),
         record_checks: Default::default(),
         measurements: Default::default(),
+        session: None,
     };
     scratch.validate_stream_subscriptions().map_err(|e| {
         format!(
@@ -4974,7 +4975,9 @@ repeat = [{ name = "green", type = "i32le" }]
         assert_eq!(checks.len(), 1, "only the tap with a magic gets a check");
         assert_eq!(checks[0].stream_id, taps[1].id);
         assert_eq!(checks[0].stream_id, 1);
-        let RecordFraming::MagicPrefixedCrc32Le { magic } = &checks[0].framing;
+        let RecordFraming::MagicPrefixedCrc32Le { magic } = &checks[0].framing else {
+            panic!("a magic-prefixed tap gets a magic-prefixed check");
+        };
         assert_eq!(magic.as_slice(), b"GWF1");
     }
 

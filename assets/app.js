@@ -7274,9 +7274,13 @@
     (frame.series || []).forEach(function (sr) {
       lsLiveSeries[sr.tap] = {
         points: sr.points || [],
+        columns: sr.columns || [],
         stride: sr.stride || 1,
         total: sr.total || 0,
         field_name: sr.field_name || null,
+        rails: sr.rails || null,
+        clipped_blocks: sr.clipped_blocks || 0,
+        clipped_samples: sr.clipped_samples || 0,
       };
       lsDrawLiveSeries(sr.tap);
     });
@@ -7743,7 +7747,11 @@
 
   /// One min/max band per bin. **Min and max, never an average** — an average
   /// hides the spike that is usually the reason somebody is looking.
-  function lsPlotSvg(bins, preview) {
+  ///
+  /// `rails`, when given, is `[low, high]` — the ADC codes at the ends of the
+  /// converter's range. A column that reaches either is drawn in the warning
+  /// colour: the clip indicator, a colour and not a marker line.
+  function lsPlotSvg(bins, preview, rails) {
     if (!bins.length) return '<p class="placeholder-note">nothing to plot yet</p>';
     var w = 600;
     var h = 160;
@@ -7760,17 +7768,20 @@
     var x0 = bins[0].x;
     var x1 = bins[bins.length - 1].x;
     var xspan = x1 - x0 || 1;
-    var path = bins
-      .map(function (b) {
-        var x = ((b.x - x0) / xspan) * (w - 2) + 1;
-        var yTop = h - ((b.max - lo) / (hi - lo)) * (h - 2) - 1;
-        var yBot = h - ((b.min - lo) / (hi - lo)) * (h - 2) - 1;
-        return "M" + x.toFixed(2) + " " + yTop.toFixed(2) + "V" + yBot.toFixed(2);
-      })
-      .join("");
+    var path = "";
+    var clipPath = "";
+    bins.forEach(function (b) {
+      var x = ((b.x - x0) / xspan) * (w - 2) + 1;
+      var yTop = h - ((b.max - lo) / (hi - lo)) * (h - 2) - 1;
+      var yBot = h - ((b.min - lo) / (hi - lo)) * (h - 2) - 1;
+      var stroke = "M" + x.toFixed(2) + " " + yTop.toFixed(2) + "V" + yBot.toFixed(2);
+      if (rails && (b.min <= rails[0] || b.max >= rails[1])) clipPath += stroke;
+      else path += stroke;
+    });
     return (
       '<svg class="ls-plot" viewBox="0 0 ' + w + " " + h + '" preserveAspectRatio="none" style="width:100%; height:' + h + 'px;">' +
       '<path d="' + path + '" stroke="var(--accent)" stroke-width="1.2" fill="none" />' +
+      (clipPath ? '<path d="' + clipPath + '" stroke="var(--warning)" stroke-width="1.6" fill="none" />' : "") +
       "</svg>" +
       '<div class="placeholder-note" style="display:flex; justify-content:space-between;">' +
       "<span>" + escapeHtml(lo.toPrecision(4)) + "</span>" +
@@ -7782,13 +7793,27 @@
   function lsApplySamples(frame) {
     var series = lsLiveSeries[frame.tap];
     if (!series) {
-      series = { points: [], stride: 1, total: 0, field_name: null };
+      series = { points: [], columns: [], stride: 1, total: 0, field_name: null, rails: null, clipped_blocks: 0, clipped_samples: 0 };
       lsLiveSeries[frame.tap] = series;
     }
     (frame.points || []).forEach(function (p) {
       series.points.push(p);
     });
+    // Past the point cap the server sends min/max columns: the tail from
+    // `columns_from`, or all of them when `columns_replace` says the series
+    // has just turned into columns or two columns merged.
+    if (frame.columns && frame.columns.length) {
+      if (frame.columns_replace) {
+        series.points = [];
+        series.columns = frame.columns;
+      } else {
+        series.columns = series.columns.slice(0, frame.columns_from || 0).concat(frame.columns);
+      }
+    }
     series.stride = frame.stride || 1;
+    if (frame.rails) series.rails = frame.rails;
+    series.clipped_blocks = frame.clipped_blocks || series.clipped_blocks;
+    series.clipped_samples = frame.clipped_samples || series.clipped_samples;
     series.total = frame.total || series.total;
     // Present only on a `StructChartValue`-fed series (a `chart_field` point,
     // `embarch-study-designer` decision 52's live half) — an ordinary
@@ -7804,7 +7829,7 @@
   /// ends (`lsOnFinished`), because the file is complete and this is not.
   function lsDrawLiveSeries(tap) {
     var series = lsLiveSeries[tap];
-    if (!series || !series.points.length) return;
+    if (!series || !(series.points.length || series.columns.length)) return;
     var id = lsDataId(tap);
     var host = lsEl(id + "-plot");
     if (!host) {
@@ -7813,9 +7838,13 @@
       // the record arrives, and this plot comes with them.
       return;
     }
-    var bins = series.points.map(function (p) {
-      return { x: p[0], min: p[1], max: p[1], count: 1 };
-    });
+    var bins = series.columns.length
+      ? series.columns.map(function (c) {
+          return { x: c[0], min: c[1], max: c[2] };
+        })
+      : series.points.map(function (p) {
+          return { x: p[0], min: p[1], max: p[1], count: 1 };
+        });
     host.innerHTML =
       '<p class="placeholder-note" style="margin:0 0 6px;">' +
       // A `chart_field` series names itself — "stream · field" — so two
@@ -7827,12 +7856,18 @@
         : "") +
       escapeHtml(
         series.total + " " + (series.field_name ? "value(s)" : "sample(s)") +
-        (series.stride > 1
-          ? " — plotting one in " + series.stride + ", this series is decimated"
+        (series.columns.length
+          ? " — drawn as " + series.columns.length + " column(s) of " + series.stride +
+            " sample(s), each from its lowest to its highest"
           : "")
       ) +
+      (series.rails && series.clipped_blocks
+        ? ' · <span style="color:var(--warning);">' + series.clipped_blocks + " block(s) with " +
+          series.clipped_samples + " sample(s) at the ADC rails (code " + series.rails[0] + " or " +
+          series.rails[1] + "; 12-bit assumed)</span>"
+        : "") +
       "</p>" +
-      lsPlotSvg(bins, true);
+      lsPlotSvg(bins, true, series.rails);
   }
 
   // ---- wiring --------------------------------------------------------------
