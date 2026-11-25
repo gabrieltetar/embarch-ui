@@ -827,6 +827,45 @@ def main():
                   js("return document.getElementById('desk-dialog-status').textContent"))
             js("document.getElementById('desk-dialog-close').click(); return true")
 
+            # Move hours (embarch-desk decision 92): part of the tile's hours
+            # and one of its lines go to another item's tile on the same day,
+            # made there with no session of its own; both wait in the hand.
+            sub = desk("POST", "/items", {"title": "Sub-issue work"}, token)["id"]
+            desk("POST", "/sessions/s1/line", {"text": "Wrote the sub-issue's parser"}, token)
+            tile_id = "%s@%s" % (item, today)
+            until("var b = document.querySelector('#desk-hand [data-open-tile=%s]'); if (b && document.getElementById('desk-dialog').hidden) b.click();"
+                  " var l = document.querySelector('#desk-dialog .desk-lines'); return !!l && l.textContent.indexOf(\"Wrote the sub-issue's parser\") >= 0"
+                  % json.dumps(tile_id))
+            js("document.getElementById('desk-move-open').click(); return true")
+            check("Move hours… opens a form offering the other work items",
+                  js("var s = arguments[0]; return Array.prototype.some.call(document.querySelectorAll('#desk-move-items option'),"
+                     " function (o) { return o.value === s && o.textContent === 'Sub-issue work'; })", sub) is True)
+            line_id = [ln["id"] for t in desk("GET", "/view", token=token)["hand"] if t["id"] == tile_id
+                       for ln in t["lines"] if ln["text"] == "Wrote the sub-issue's parser"][0]
+            type_into("#desk-move-to", sub)
+            type_into("#desk-move-hours", "0.5")
+            real_click('.desk-move-line[value="%s"]' % line_id)
+            real_click("#desk-move-go")
+
+            def hand_by_item():
+                return {t["item_id"]: (t["hours"], [ln["text"] for ln in t["lines"]]) for t in desk("GET", "/view", token=token)["hand"]}
+            moved = None
+            for _ in range(50):
+                moved = hand_by_item()
+                if sub in moved:
+                    break
+                time.sleep(0.2)
+            check("Move takes the hours and the picked line to the other item's tile, and the two still sum to 1h30",
+                  moved.get(item, (None,))[0] == 1.0 and moved.get(sub) == (0.5, ["Wrote the sub-issue's parser"])
+                  and "Wrote the sub-issue's parser" not in moved[item][1], moved)
+            check("the target's tile is dealt into the hand beside the source",
+                  until("return document.querySelectorAll('#desk-hand .desk-tile').length === 2") is True)
+            status = until("return document.getElementById('desk-dialog-status').textContent")
+            check("the dialog says what moved", status and "Moved 0h30 and 1 line(s)" in status, status)
+            desk("POST", "/tiles/%s/discard" % urllib.parse.quote("%s@%s" % (sub, today)), {}, token)
+            js("document.getElementById('desk-dialog-close').click(); return true")
+            until("return document.querySelectorAll('#desk-hand .desk-tile').length === 1")
+
             js("window.confirm = function () { return true; }; document.querySelector('.desk-no').click(); return true")
             settle()
             check("✕ discards the tile and it leaves the hand", js("return document.querySelectorAll('.desk-tile').length") == 0)

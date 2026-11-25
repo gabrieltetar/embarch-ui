@@ -2121,6 +2121,9 @@ table.data-table {
 .desk-label { font-size: 10.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); margin: 10px 0 6px; }
 .desk-lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--text-secondary); }
 .desk-line-src { font: 600 10px var(--font-mono); text-transform: uppercase; color: var(--text-tertiary); margin-right: 4px; }
+.desk-move { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.desk-move .desk-lines label { display: flex; gap: 6px; align-items: baseline; }
+.desk-move-hours { width: 90px; }
 .desk-dialog-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .tab-panel[data-tab="desk"] [hidden] { display: none !important; }
 #desk-dialog-status { flex-basis: 100%; order: 10; }

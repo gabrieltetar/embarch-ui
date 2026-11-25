@@ -41,6 +41,7 @@
   var states = {};           // item id -> [{id, name, type}], loaded on first open of the dropdown
   var targets = null;        // Harvest projects/tasks, loaded when a tile opens
   var openTileId = null;
+  var moveOpen = false;      // the open tile's Move hours form is shown
 
   // ---------------------------------------------------------------- helpers
 
@@ -1422,6 +1423,7 @@
     } else if (h) {
       options += '<option value="' + h.account_id + ":" + h.project_id + ":" + h.task_id + '" selected>' + esc(h.label) + "</option>";
     }
+    var move = moveOpen && !t.more ? moveForm(t) : "";
     dialogEl.innerHTML =
       '<div class="card-title"><span>' + esc(t.key ? t.key + " · " : "") + esc(t.item_title) + " — " + esc(dayLabel(t.date)) + '</span>' +
       '<button class="btn btn-tiny" type="button" id="desk-dialog-close">Close</button></div>' +
@@ -1447,11 +1449,12 @@
           '<select id="desk-target" class="desk-input">' + options + "</select>" +
           '<div class="desk-label">Note</div>' +
           '<textarea id="desk-note" class="desk-input desk-textarea" rows="4" placeholder="Polish drafts this from the lines">' + esc(t.note || "") + "</textarea>") +
-      "</div></div>" +
+      "</div></div>" + move +
       '<div class="desk-dialog-actions">' +
       '<button class="btn" type="button" id="desk-polish">Polish with Claude</button>' +
       '<span class="desk-detail" id="desk-dialog-status"></span>' +
       '<span style="flex:1"></span>' +
+      (t.more || moveOpen ? "" : '<button class="btn" type="button" id="desk-move-open" title="Give part of this tile\'s hours, and lines, to another work item\'s tile on the same day">Move hours…</button>') +
       (later ? '<button class="btn" type="button" id="desk-fold" data-into="' + esc(later.date) + '" title="Its time and lines join ' +
         esc(dayLabel(later.date)) + '\'s tile, sent as one Harvest entry dated that day">Fold into ' + esc(dayLabel(later.date)) + "</button>" : "") +
       '<button class="btn" type="button" id="desk-save">Save</button>' +
@@ -1460,8 +1463,55 @@
       "</div>";
   }
 
+  // Move hours (embarch-desk decision 92): part of this tile's hours, and the
+  // lines picked, go to another item's tile on the same day; both stay open.
+  // The target is any card or hand tile's item, or an issue key typed in.
+  function moveForm(t) {
+    var seen = {};
+    var opts = [];
+    function add(id, key, title) {
+      if (!id || id === t.item_id || seen[id]) return;
+      seen[id] = true;
+      opts.push('<option value="' + esc(key || id) + '">' + esc(title || "") + "</option>");
+    }
+    (view.cards || []).forEach(function (c) { add(c.id, c.issue && c.issue.key, c.title); });
+    (view.hand || []).forEach(function (x) { add(x.item_id, x.key, x.item_title); });
+    var lines = (t.lines || []).map(function (l) {
+      return '<li><label><input type="checkbox" class="desk-move-line" value="' + esc(l.id) + '" /> ' + esc(l.text) + "</label></li>";
+    }).join("");
+    return '<div class="desk-move">' +
+      '<div class="desk-label">Move hours to another work item on ' + esc(dayLabel(t.date)) +
+      ' <span class="desk-detail">(this tile proposes ' + hours(t.hours) + "; both tiles wait for ✓)</span></div>" +
+      '<div class="desk-form">' +
+      '<input id="desk-move-to" class="desk-input" type="text" list="desk-move-items" placeholder="Issue key or card" />' +
+      '<datalist id="desk-move-items">' + opts.join("") + "</datalist>" +
+      '<input id="desk-move-hours" class="desk-input desk-move-hours" type="number" min="0" max="' + esc(t.hours) + '" step="0.25" placeholder="hours" />' +
+      '<button class="btn btn-primary btn-tiny" type="button" id="desk-move-go">Move</button>' +
+      '<button class="btn btn-tiny" type="button" id="desk-move-cancel">Cancel</button>' +
+      "</div>" +
+      (lines ? '<div class="desk-label">Lines that go with them</div><ul class="desk-lines">' + lines + "</ul>" : "") +
+      "</div>";
+  }
+
+  function moveHours(id) {
+    var to = document.getElementById("desk-move-to").value.trim();
+    var h = document.getElementById("desk-move-hours").value;
+    var lines = Array.prototype.map.call(dialogEl.querySelectorAll(".desk-move-line:checked"), function (el) { return el.value; });
+    if (!to) { setDialogStatus("Name the work item that takes the hours."); return; }
+    // The dialog's own edits are saved first, as Polish and Add line do.
+    dialogPatch().then(function () {
+      return api("POST", "/tiles/" + encodeURIComponent(id) + "/move", { to_item: to, hours: h === "" ? 0 : Number(h), lines: lines });
+    }).then(function () {
+      moveOpen = false;
+      return load();
+    }).then(function () {
+      setDialogStatus("Moved " + hours(h === "" ? 0 : Number(h)) + (lines.length ? " and " + lines.length + " line(s)" : "") + " to " + to + ".");
+    }).catch(function (e) { setDialogStatus(e.message); });
+  }
+
   function openDialog(id) {
     openTileId = id;
+    moveOpen = false;
     dialogEl.hidden = false;
     backdropEl.hidden = false;
     renderDialog();
@@ -1886,6 +1936,9 @@
         }).then(load).catch(function (e) { setDialogStatus(e.message); });
         break;
       }
+      case "desk-move-open": moveOpen = true; renderDialog(); break;
+      case "desk-move-cancel": moveOpen = false; renderDialog(); break;
+      case "desk-move-go": moveHours(id); break;
       case "desk-fold":
         api("POST", "/tiles/" + encodeURIComponent(id) + "/fold", { into: t.dataset.into }).then(function () {
           closeDialog();
