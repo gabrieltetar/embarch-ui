@@ -21,6 +21,7 @@ pub mod check;
 pub mod cli;
 pub mod files;
 pub mod live;
+pub mod references;
 pub mod routes;
 #[cfg(test)]
 mod drive_fixture;

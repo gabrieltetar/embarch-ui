@@ -2400,10 +2400,22 @@
   // ---------------------------------------------------------------- config slots
   // Phase 5: a config is a named set of part-to-part cables, added, renamed
   // and deleted from the config row as bench edits — undoable, written by
-  // Save. **Renaming or deleting one is never refused** (owner, 2026-11-01):
-  // a host study names a config by name, and the name is resolved when a
-  // study needs it. A name's shape is the server's: the vocabulary serves
-  // what a host study may write and the sentence a save refuses it in.
+  // Save. **One a saved host study or test names is neither renamed nor
+  // deleted** (decision 120): the server answers who names it, the dialog says
+  // so, and a save refuses it the same way (`config-named`). A name's shape is
+  // the server's: the vocabulary serves what a host study may write and the
+  // sentence a save refuses it in.
+  // Who names `name` on this bench: the studies and tests, listed, or null.
+  // A file the server could not read counts, as it does for the save.
+  function configNamedBy(name) {
+    return api(ROUTE_BENCHES + "/" + encodeURIComponent(bench.slug) + "/config-references?config=" + encodeURIComponent(name))
+      .then(function (r) {
+        var lines = (r.named_by || []).map(function (x) {
+          return x.kind + " " + x.name + " (" + x.file + "): " + (x.by || []).join("; ");
+        }).concat((r.unreadable || []).map(function (u) { return "unreadable, so it might name it: " + u; }));
+        return lines.length ? lines : null;
+      }, function (e) { return ["could not look up who names it: " + errText(e)]; });
+  }
   function inRuns(runs, cp) {
     return (runs || []).some(function (r) { return r && cp >= r[0] && cp <= r[1]; });
   }
@@ -2468,7 +2480,7 @@
     dialog({
       title: "Rename config " + was,
       text: wired ? "It is the live wiring: once the save lands, the live record follows it to the new name, and nothing is sent to Core."
-        : "A host study names a config by name: one naming " + was + " is asked about when it runs.",
+        : "A config a saved host study or test names cannot be renamed: it is refused, naming them.",
       input: { label: "Name", value: was, placeholder: was },
       ok: "Rename",
       onOk: function (value) {
@@ -2476,8 +2488,11 @@
         if (v === was) { to = null; return null; }
         var problem = nameProblem(v, at);
         if (problem) return problem;
-        to = v;
-        return null;
+        return configNamedBy(was).then(function (named) {
+          if (named) return "Config " + was + " is named by:\n" + named.join("\n");
+          to = v;
+          return null;
+        });
       }
     }).then(function (ok) {
       if (!ok || to == null || !bench || !bench.configs || !bench.configs[at] || bench.configs[at].name !== was) return;
@@ -2489,13 +2504,24 @@
     var cur = currentConfig(), at = cfgIx;
     if (!bench || !cur) return;
     var was = cur.name, wired = liveConfigHere() === was;
-    edit(function () {
-      bench.configs = bench.configs.filter(function (_, i) { return i !== at; });
-      cfgIds = cfgIds.filter(function (_, i) { return i !== at; });
-      cfgIx = Math.max(0, Math.min(at, bench.configs.length - 1));
+    configNamedBy(was).then(function (named) {
+      if (named) {
+        dialog({
+          title: "Config " + was + " cannot be deleted",
+          text: "A saved host study or test names it. Stop naming it there first:\n" + named.join("\n"),
+          cancel: "Close"
+        });
+        return;
+      }
+      if (!bench || !bench.configs || !bench.configs[at] || bench.configs[at].name !== was) return;
+      edit(function () {
+        bench.configs = bench.configs.filter(function (_, i) { return i !== at; });
+        cfgIds = cfgIds.filter(function (_, i) { return i !== at; });
+        cfgIx = Math.max(0, Math.min(at, bench.configs.length - 1));
+      });
+      notice("Config " + was + " deleted with its cables" + (wired ? "; it is the live wiring, so once saved the live record names a config the bench lacks" : "") +
+        " — undo brings it back", wired ? "error" : "info");
     });
-    notice("Config " + was + " deleted with its cables" + (wired ? "; it is the live wiring, so once saved the live record names a config the bench lacks" : "") +
-      " — undo brings it back", wired ? "error" : "info");
   }
   cfgAddBtn.addEventListener("click", addConfig);
   cfgRenameBtn.addEventListener("click", renameConfig);

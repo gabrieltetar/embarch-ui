@@ -2529,7 +2529,8 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
    save's 409 asks, and under Core's operator prompt (60/61). */
 #bench-dialog-backdrop { z-index: 55; }
 #bench-dialog { z-index: 56; }
-.bench-dialog-text { margin: 0 0 10px; font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.bench-dialog-text { margin: 0 0 10px; font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; white-space: pre-line; }
+#bench-dialog-error { white-space: pre-line; }
 .bench-dialog-choices { display: flex; flex-direction: column; gap: 6px; }
 .bench-dialog-choices .btn { justify-content: flex-start; font-family: var(--font-mono); }
 .bench-dialog-check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }

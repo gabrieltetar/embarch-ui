@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::files::{self, Bench, LoadError};
+use super::references;
 use super::{
     builtin_clash, builtins, catalog, check, hold_writes, parse_template, parts_dir, template_toml, version_of,
     vocabulary_json, write_in_repo, PartTemplate, WriteError, WriteMode,
@@ -38,7 +39,8 @@ pub(super) fn refuse(status: StatusCode, text: impl Into<String>) -> Response {
 /// again is the way out), `unparseable` (it no longer loads, and is fixed by
 /// hand), `rename` (the name no longer derives the slug), `exists` (a create
 /// found something at the path), `builtin-id` (a repo template took a
-/// built-in's id). The body stays the plain-text sentence every refusal is.
+/// built-in's id), `config-named` (a saved host study or test names a config
+/// the save would rename or delete). The body stays the plain-text sentence every refusal is.
 pub const REFUSAL_HEADER: &str = "x-embarch-refusal";
 
 pub(super) fn refuse_as(status: StatusCode, code: &'static str, text: impl Into<String>) -> Response {
@@ -302,6 +304,9 @@ pub async fn api_put_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>, J
         }
         Err(LoadError::Unreadable(e)) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+    if let Err(resp) = config_edits_allowed(&repo, &slug, &bench) {
+        return *resp;
+    }
     let file = files::file_from_bench(&bench, now_utc_ms());
     if let Err(e) = files::write(&repo, &slug, &file, WriteMode::Replace) {
         return write_refusal(&files::bench_file(&slug), e);
@@ -310,6 +315,47 @@ pub async fn api_put_bench(OpenRepo(repo): OpenRepo, Path(slug): Path<String>, J
         Ok(saved) => Json(saved).into_response(),
         Err(e) => load_refusal(&slug, e),
     }
+}
+
+/// **A config a saved host study or test names is neither renamed nor
+/// deleted** (decision 120): a config the file holds and the bench being saved
+/// lacks is a rename or a delete to the file (the page's ids tell them apart,
+/// the file cannot), and each such name is looked up in the repo's saved
+/// studies and tests. `409` `config-named`, naming each and the prompt that
+/// names the config; a file that does not parse refuses too, listed as such.
+fn config_edits_allowed(repo: &std::path::Path, slug: &str, bench: &Bench) -> Result<(), Box<Response>> {
+    let Ok((current, _)) = files::read_file(repo, slug) else { return Ok(()) };
+    let benches = [slug, current.name.as_str(), bench.name.as_str()];
+    for was in current.configs.iter().filter(|c| bench.config(&c.name).is_none()) {
+        let scan = references::scan(repo, &was.name, &benches);
+        if scan.blocks() {
+            return Err(Box::new(refuse_as(StatusCode::CONFLICT, "config-named", scan.sentence(&was.name))));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigQuery {
+    pub config: String,
+}
+
+/// `GET /api/bench/benches/{slug}/config-references?config=` — who in the repo
+/// names that config of that bench (`named_by`, each study and test with the
+/// prompts that name it; `unreadable`, the files that would not parse), so the
+/// Rename and Delete dialogs say it before an edit is made. The save refuses
+/// the same way (`config-named`) whatever the page did.
+pub async fn api_config_references(
+    OpenRepo(repo): OpenRepo,
+    Path(slug): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ConfigQuery>,
+) -> Response {
+    let slug = match path_slug(&slug) {
+        Ok(s) => s.to_string(),
+        Err(resp) => return *resp,
+    };
+    let name = files::read_file(&repo, &slug).map(|(f, _)| f.name).unwrap_or_default();
+    Json(references::scan(&repo, &q.config, &[slug.as_str(), name.as_str()])).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,6 +419,48 @@ pub async fn api_candidates(OpenRepo(repo): OpenRepo, Json(req): Json<Candidates
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_config_a_saved_study_or_test_names_is_not_renamed_or_deleted() {
+        let repo = std::env::temp_dir().join(format!("ebm-cfgnamed-{}-{}", std::process::id(), now_utc_ms()));
+        let put = |path: &str, text: &str| {
+            let p = repo.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        put("embarch/topologies/b.toml", "name = \"b\"\nparts = []\n[[configs]]\nname = \"A\"\n[[configs]]\nname = \"free\"\n");
+        put("embarch/tests/suites/s/suite.json", r#"{"tests":[{"test_id":"t1","file":"t1/test.json"}]}"#);
+        put("embarch/tests/suites/s/t1/test.json", r#"{"test_id":"t1","bench":{"name":"b","config":"A"}}"#);
+        let read = files::load(&repo, "b").unwrap();
+        // Renamed: refused, naming the test.
+        let mut renamed = read.clone();
+        renamed.configs[0].name = "A2".into();
+        let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(renamed)).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("config-named")));
+        assert!(text(resp).await.contains("test t1"));
+        // Deleted: the same.
+        let mut deleted = read.clone();
+        deleted.configs.remove(0);
+        let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(deleted)).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("config-named")));
+        // A host study's prompt names it too.
+        std::fs::remove_dir_all(repo.join("embarch/tests")).unwrap();
+        put(
+            "embarch/studies/swap.json",
+            r#"{"name":"swap","steps":[{"name":"move","action":{"Prompt":{"text":"t","bench_config":"A"}},"timeout_ms":1}]}"#,
+        );
+        let mut renamed = read.clone();
+        renamed.configs[0].name = "A2".into();
+        let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(renamed)).await;
+        assert_eq!((resp.status(), code(&resp).as_deref()), (StatusCode::CONFLICT, Some("config-named")));
+        assert!(text(resp).await.contains("study swap"));
+        // A config nothing names renames as before, and the named one stays put.
+        let mut free = read.clone();
+        free.configs[1].name = "freed".into();
+        let resp = api_put_bench(OpenRepo(repo.clone()), Path("b".into()), Json(free)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     #[tokio::test]
     async fn each_409_on_a_bench_save_names_which_it_is() {

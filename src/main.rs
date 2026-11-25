@@ -396,6 +396,7 @@ fn app(state: AppState) -> Router {
             "/api/bench/benches/{slug}",
             get(bench::routes::api_bench).put(bench::routes::api_put_bench),
         )
+        .route("/api/bench/benches/{slug}/config-references", get(bench::routes::api_config_references))
         .route("/api/bench/benches/{slug}/live", post(bench::live::api_make_live))
         .route("/api/bench/live", get(bench::live::api_live).delete(bench::live::api_clear_live))
         .route("/api/bench/live/retract", post(bench::live::api_retract))

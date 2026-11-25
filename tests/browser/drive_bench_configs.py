@@ -413,7 +413,8 @@ try:
 
     # --- deleting the live config leaves the record naming it, which the bar says ----------------------
     script("document.getElementById('bench-cfg-delete').click();")
-    check("deleting the live config is never refused, and the notice says it is the live wiring",
+    wait_for("return document.body.textContent.indexOf('live wiring') >= 0;", 4)
+    check("deleting the live config, which no saved study or test names, is not refused, and the notice says it is the live wiring",
           [t[0] for t in tabs()] == ["A"] and "live wiring" in notice(), [tabs(), notice()])
     save()
     gone = wait_for("var l=document.getElementById('bench-live'); return l.textContent === 'live config C is gone' ? l.textContent : '';", 8)
