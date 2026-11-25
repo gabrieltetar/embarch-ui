@@ -39,7 +39,7 @@ const MANIFEST: &str = "tab.toml";
 
 /// The ids a tab may not take: the built-in tabs, and the fragments `app.js`
 /// already sends to another tab, which would make the tab unreachable by link.
-const RESERVED_IDS: [&str; 8] = ["desk", "topology", "study-designer", "live-study", "atlas", "debug", "enroll", "dashboard"];
+const RESERVED_IDS: [&str; 9] = ["desk", "topology", "study-designer", "live-study", "confirm", "atlas", "debug", "enroll", "dashboard"];
 
 // Where the drawn fragments go in `assets/index.html`. Each is a comment, so a
 // page with no tab is the page as it always was.

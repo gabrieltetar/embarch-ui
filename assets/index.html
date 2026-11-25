@@ -65,6 +65,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h3.2l1.6-6 2 10 2.2-8 1.6 4H21"/></svg>
         <span class="nav-label">Live Study</span>
       </button>
+      <button class="nav-item" data-tab="confirm">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M8 9.5l2 2 3.5-4M8 16h8"/></svg>
+        <span class="nav-label">Confirm</span>
+      </button>
       <button class="nav-item" data-tab="atlas">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 21 7.5 12 12 3 7.5Z"/><path d="M3 12l9 4.5 9-4.5"/><path d="M3 16.5 12 21l9-4.5"/></svg>
         <span class="nav-label">Atlas</span>
@@ -1153,6 +1157,21 @@
         </div>
       </section>
 
+      <!-- The Confirm tab: what waits for the engineer's confirmation, as Core
+           recorded it (decision 110). Drawn by confirm.js; every string the agent
+           wrote is set as text. -->
+      <section class="tab-panel" data-tab="confirm">
+        <div class="cf">
+          <div class="cf-bar">
+            <span id="cf-state" class="atlas-state"></span>
+            <span style="flex:1;"></span>
+            <button id="cf-reload" class="btn" type="button">Reload</button>
+            <button id="cf-all" class="btn btn-primary" type="button" disabled>Confirm all shown</button>
+          </div>
+          <div id="cf-list" class="cf-list"></div>
+        </div>
+      </section>
+
       <!-- The Atlas tab: the open project's embarch-atlas as one map. Everything in
            it is drawn by atlas.js from the atlas's graph.json; this is the frame. -->
       <section class="tab-panel" data-tab="atlas">
@@ -1272,6 +1291,7 @@
 
 <script src="/app.js"></script>
 <script src="/atlas.js"></script>
+<script src="/confirm.js"></script>
 <script src="/desk.js"></script>
 <script src="/bench.js"></script>
 <script src="/bench-parts.js"></script>

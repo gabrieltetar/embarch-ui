@@ -13,6 +13,7 @@
 mod atlas;
 mod bench;
 mod config;
+mod confirmations;
 mod desk;
 mod firmware_build;
 mod live_study;
@@ -83,6 +84,8 @@ const APP_JS: &str = include_str!("../assets/app.js");
 /// five tabs, and the map is the one view that is mostly drawing code.
 const ATLAS_JS: &str = include_str!("../assets/atlas.js");
 const DESK_JS: &str = include_str!("../assets/desk.js");
+/// The Confirm tab's card, a file of its own (decision 113).
+const CONFIRM_JS: &str = include_str!("../assets/confirm.js");
 /// The Topology tab's bench canvas, a file of its own like the Atlas map.
 const BENCH_JS: &str = include_str!("../assets/bench.js");
 /// The bench editor's part editor: a dialog of its own over the canvas, in a
@@ -343,6 +346,7 @@ fn app(state: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/atlas.js", get(atlas_js))
         .route("/desk.js", get(desk_js))
+        .route("/confirm.js", get(confirm_js))
         .route("/bench.js", get(bench_js))
         .route("/bench-parts.js", get(bench_parts_js))
         .route("/api/desk-events", get(desk::events))
@@ -408,6 +412,7 @@ fn app(state: AppState) -> Router {
         .route("/api/live/run", post(live_study::api_live_run))
         .route("/api/live/prompt", post(live_study::api_live_prompt))
         .route("/api/live/cancel", post(live_study::api_live_cancel))
+        .route("/api/confirmations", get(confirmations::api_confirmations).post(confirmations::api_confirm))
         .route("/api/prompts/events", get(live_study::api_prompt_events))
         .route("/api/studies", get(studies_api::api_studies))
         .route("/api/studies/{study_id}", get(studies_api::api_study))
@@ -655,6 +660,10 @@ async fn app_js(headers: header::HeaderMap) -> Response {
 
 async fn desk_js(headers: header::HeaderMap) -> Response {
     revalidating_asset(&headers, "text/javascript; charset=utf-8", DESK_JS.as_bytes())
+}
+
+async fn confirm_js(headers: header::HeaderMap) -> Response {
+    revalidating_asset(&headers, "text/javascript; charset=utf-8", CONFIRM_JS.as_bytes())
 }
 
 async fn atlas_js(headers: header::HeaderMap) -> Response {

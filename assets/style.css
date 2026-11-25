@@ -2597,3 +2597,15 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
 .topo-bar .bench-live-wt { padding: 3px 10px; font: 600 11px var(--font-mono); border-radius: 99px; border-color: var(--success); color: var(--success); background: var(--success-soft-bg); }
 .topo-bar .bench-live-wt.bench-live-wt-failed { border-color: var(--warning); color: var(--warning); background: var(--warning-soft-bg); }
 #topo-panel-live:focus { outline: none; }
+
+/* The Confirm tab (decision 110). */
+.cf { display: flex; flex-direction: column; gap: 12px; padding: 4px 0; }
+.cf-bar { display: flex; align-items: center; gap: 8px; }
+.cf-list { display: flex; flex-direction: column; gap: 12px; }
+.cf-card { border: 1px solid var(--border, #444); border-radius: 6px; padding: 12px 14px; }
+.cf-head { display: flex; align-items: center; gap: 8px; }
+.cf-head .cf-name { font-weight: 600; flex: 1; overflow-wrap: anywhere; }
+.cf-quote { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono, monospace); font-size: 12px; margin: 6px 0; padding: 6px 8px; border-left: 3px solid var(--border, #666); }
+.cf-sec { margin-top: 8px; }
+.cf-sec h4 { margin: 0 0 2px; font-size: 12px; opacity: .8; }
+.cf-err { color: var(--danger, #e5534b); margin-top: 6px; }
