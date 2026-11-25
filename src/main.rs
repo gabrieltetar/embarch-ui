@@ -407,6 +407,7 @@ fn app(state: AppState) -> Router {
         .route("/api/live/events", get(live_study::api_live_events))
         .route("/api/live/run", post(live_study::api_live_run))
         .route("/api/live/prompt", post(live_study::api_live_prompt))
+        .route("/api/live/cancel", post(live_study::api_live_cancel))
         .route("/api/prompts/events", get(live_study::api_prompt_events))
         .route("/api/studies", get(studies_api::api_studies))
         .route("/api/studies/{study_id}", get(studies_api::api_study))
@@ -1518,6 +1519,51 @@ mod tests {
             .unwrap();
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
         assert_eq!(seen.lock().unwrap().len(), before);
+    }
+
+    /// Decision 109: the Cancel button's route reaches Core's `/study/{id}/cancel`
+    /// and says `cancelling`; Core's `409` and `404` come back as such with
+    /// Core's reason alone.
+    #[tokio::test]
+    async fn the_cancel_route_relays_and_passes_a_refusal_on() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let stub = axum::Router::new().route(
+            "/study/{id}/cancel",
+            post(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                let log = log.clone();
+                async move {
+                    log.lock().unwrap().push(id.clone());
+                    match id.as_str() {
+                        "done" => (StatusCode::CONFLICT, "study done is not running").into_response(),
+                        "nope" => (StatusCode::NOT_FOUND, "no study nope").into_response(),
+                        _ => (StatusCode::ACCEPTED, axum::Json(serde_json::json!({ "study_id": id, "status": "cancelling" })))
+                            .into_response(),
+                    }
+                }
+            }),
+        );
+        let core = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core_url = format!("http://{}", core.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(core, stub).await.unwrap() });
+        let base = serve_app_over(&core_url).await;
+        let http = reqwest::Client::new();
+        let route = format!("{base}/api/live/cancel");
+
+        let ok = http.post(&route).json(&serde_json::json!({ "study_id": "s1" })).send().await.unwrap();
+        assert_eq!(ok.status(), StatusCode::ACCEPTED);
+        let body: serde_json::Value = ok.json().await.unwrap();
+        assert_eq!(body["study_id"], "s1");
+        assert_eq!(body["status"], "cancelling");
+        assert_eq!(seen.lock().unwrap().as_slice(), ["s1"]);
+
+        let conflict = http.post(&route).json(&serde_json::json!({ "study_id": "done" })).send().await.unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(conflict.text().await.unwrap(), "study done is not running");
+
+        let missing = http.post(&route).json(&serde_json::json!({ "study_id": "nope" })).send().await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.text().await.unwrap(), "no study nope");
     }
 
     /// Decision 128: a session Start's run fields go to Core in the answer as

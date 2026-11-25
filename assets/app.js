@@ -7565,6 +7565,9 @@
     if (text === "running") text += sdRunningStepLabel(status.current_step, status.total_steps);
     badge.className = "badge " + lsStatusBadge(status.status);
     badge.textContent = text;
+    // Cancel is offered while Core says the study is running, and only then.
+    lsEl("ls-cancel").style.display = status.status === "running" ? "" : "none";
+    if (lsIsTerminal(status.status)) lsNote("ls-cancel-note", "");
     if (status.study_name) lsEl("ls-status-name").textContent = status.study_name;
     lsNote("ls-status-reason", status.reason || "");
     // Which transport is in force, said rather than implied: a feed being
@@ -7583,6 +7586,33 @@
       );
     }
     if (status.record_note) lsNote("ls-record-note", status.record_note);
+  }
+
+  async function lsCancel() {
+    var id = lsStudyId;
+    if (!id) return;
+    var btn = lsEl("ls-cancel");
+    btn.disabled = true;
+    lsNote("ls-cancel-note", "");
+    try {
+      var resp = await fetch("/api/live/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ study_id: id }),
+      });
+      var text = await resp.text();
+      if (id !== lsStudyId) return;
+      if (resp.ok) {
+        // Core has been asked; how the study ends is whatever its status frame says.
+        lsNote("ls-cancel-note", "cancel asked of embarch-core — waiting for the study to end");
+      } else {
+        lsNote("ls-cancel-note", "embarch-core refused the cancel: " + text);
+      }
+    } catch (e) {
+      lsNote("ls-cancel-note", "could not reach embarch-core to cancel: " + (e && e.message ? e.message : String(e)));
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   async function lsOnFinished() {
@@ -8130,6 +8160,7 @@
 
     lsEl("ls-studies-refresh").addEventListener("click", lsLoadStudies);
     lsEl("ls-run").addEventListener("click", lsRun);
+    lsEl("ls-cancel").addEventListener("click", lsCancel);
     lsEl("ls-open").addEventListener("click", function () {
       var id = lsEl("ls-open-id").value.trim();
       if (id) lsOpenStudy(id, false);

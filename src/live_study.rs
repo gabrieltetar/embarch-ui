@@ -1940,6 +1940,42 @@ pub async fn api_live_prompt(
 }
 
 #[derive(Debug, serde::Deserialize)]
+pub struct CancelBody {
+    pub study_id: String,
+}
+
+/// `POST /api/live/cancel` — the running study's Cancel button. Relays through
+/// `cancel_study` with the lease this process's one client holds (`embarch-core`
+/// decision 128). Core answers `202 cancelling` at once; the study's end
+/// arrives on the live feed as Core records it, so this route says only that
+/// the stop was asked for. **Core's refusal comes back as its own status with
+/// its own reason** (`404` unknown, `409` not running or a lease held by
+/// another), never a success and never a generic failure.
+pub async fn api_live_cancel(
+    State(state): State<crate::AppState>,
+    axum::extract::Json(body): axum::extract::Json<CancelBody>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    match state.core.cancel_study(&body.study_id).await {
+        Ok(done) => (StatusCode::ACCEPTED, axum::Json(json!({ "study_id": done.study_id, "status": done.status })))
+            .into_response(),
+        Err(e) => {
+            if let Some(held) = e.downcast_ref::<embarch_core_client::LeaseHeldError>() {
+                return (StatusCode::CONFLICT, held.to_string()).into_response();
+            }
+            let text = format!("{e:#}");
+            for (marker, code) in [("returned 404", StatusCode::NOT_FOUND), ("returned 409", StatusCode::CONFLICT)] {
+                if text.contains(marker) {
+                    let reason = text.split_once(": ").map(|(_, r)| r.trim().to_string()).unwrap_or(text);
+                    return (code, reason).into_response();
+                }
+            }
+            (StatusCode::BAD_GATEWAY, text).into_response()
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
 pub struct LiveRunRequest {
     pub slug: String,
     #[serde(default)]
