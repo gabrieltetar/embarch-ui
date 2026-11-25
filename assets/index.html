@@ -473,6 +473,7 @@
               <div class="card-title" style="margin:0;">Streams — what this study records alongside its steps</div>
               <div class="sd-toolbar-actions">
                 <button id="sd-add-gatt-tap" class="btn">+ GATT notify tap</button>
+                <button id="sd-add-analog-tap" class="btn" title="The dev bench's analog input, recorded as CRC-checked sample blocks">+ Analog input tap</button>
                 <button id="sd-add-tap" class="btn">+ Outpost trace tap</button>
               </div>
             </div>
@@ -492,6 +493,19 @@
               </table>
             </div>
             <p id="sd-taps-empty" class="placeholder-note" style="margin-top:10px;">No taps — this study records its steps and nothing else.</p>
+            <!-- The crate's own sentence for a refused analog tap or session;
+                 empty and hidden when they fit together. -->
+            <p id="sd-analog-check" class="sd-error" style="display:none;"></p>
+            </div>
+
+            <div class="sd-panel-section">
+            <div class="sd-toolbar">
+              <div class="card-title" style="margin:0;">Session — what the person sees around a capture</div>
+              <div class="sd-toolbar-actions">
+                <button id="sd-session-toggle" class="btn">+ Add session</button>
+              </div>
+            </div>
+            <div id="sd-session-form"></div>
             </div>
 
 

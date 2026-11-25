@@ -30,6 +30,13 @@ use embarch_study_designer::limits::{
     MAX_DECODERS_PER_STUDY, MAX_FIRMWARE_VERSION_LEN, MAX_RECORD_MAGIC_LEN, MAX_SIGNAL_NAME_LEN,
     MAX_SNIPPETS_PER_BUILD, MAX_SNIPPET_NAME_LEN, MAX_STREAMS_PER_STUDY, MAX_STREAM_NAME_LEN,
 };
+use embarch_study_designer::analog::DEFAULT_SAMPLES_PER_BLOCK;
+use embarch_study_designer::limits::{
+    MAX_ANALOG_CHANNELS, MAX_ANALOG_SAMPLES_PER_BLOCK, MAX_ANALOG_SAMPLE_HZ, MAX_EXPORT_DIR_LEN,
+    MAX_RUN_FIELDS, MAX_RUN_FIELD_LABEL_LEN, MAX_RUN_FIELD_NAME_LEN, MAX_SESSION_MS,
+    MAX_SESSION_PROMPT_LEN,
+};
+use embarch_study_designer::session::{RunField, SessionSpec};
 use embarch_study_designer::eap_repo::RepoProtocols;
 use embarch_study_designer::{DevBenchLogLevel, ProtocolDef, RecordCheck, RecordFraming};
 use embarch_study_designer::{
@@ -694,14 +701,189 @@ pub enum TapInput {
         #[serde(default)]
         record_magic: Vec<u8>,
     },
+    /// The dev bench's analog input, framed as sample blocks
+    /// (`embarch-study-designer` decisions 104 to 106).
+    ///
+    /// **One row authors two things that must agree**: the
+    /// `StreamSource::AnalogInput` tap and the `RecordFraming::AnalogBlocks`
+    /// check that says what its bytes are. They ride on one row for the
+    /// reason a record magic rides on its GATT tap: `build_taps` assigns the
+    /// tap's `id`, so a check minted there cannot name a different stream.
+    /// Encoding (`Raw`) and scope (`WholeStudy`) are not choices offered: the
+    /// crate refuses anything else for an analog input.
+    ///
+    /// `channel` is an index, not a pin; the pin is the board overlay's.
+    /// `channels` is how many channels one block interleaves, which the
+    /// firmware's scan fixes, so it is the framing's and not the source's.
+    AnalogInput {
+        name: String,
+        sample_hz: u32,
+        channel: u8,
+        #[serde(default = "default_analog_channels")]
+        channels: u8,
+        #[serde(default = "default_samples_per_block")]
+        samples_per_block: u16,
+    },
+}
+
+/// Channels per block a new analog tap starts with: one.
+const DEFAULT_ANALOG_CHANNELS: u8 = 1;
+/// The rate a new analog tap starts with, in Hz (the bench owner's decision:
+/// 32 ksps).
+const DEFAULT_ANALOG_SAMPLE_HZ: u32 = 32_000;
+
+fn default_analog_channels() -> u8 {
+    DEFAULT_ANALOG_CHANNELS
+}
+
+fn default_samples_per_block() -> u16 {
+    DEFAULT_SAMPLES_PER_BLOCK
 }
 
 impl TapInput {
     /// The output file's name, whichever kind this is.
     fn name(&self) -> &str {
         match self {
-            TapInput::Outpost { name, .. } | TapInput::GattNotify { name, .. } => name,
+            TapInput::Outpost { name, .. }
+            | TapInput::GattNotify { name, .. }
+            | TapInput::AnalogInput { name, .. } => name,
         }
+    }
+}
+
+/// A run field as the Session form authors it (`SessionSpec::run_fields`).
+/// The JSON shape is the stored one, so a saved study's `session` loads back
+/// into the form unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunFieldInput {
+    name: String,
+    label: String,
+    #[serde(default)]
+    required: bool,
+}
+
+/// The session a study declares, as the Session form authors it: plain
+/// `String`s converted to the `heapless` shape by [`SessionInput::build`], so
+/// an over-long field is a named refusal and never a truncation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInput {
+    start_text: String,
+    #[serde(default)]
+    run_fields: Vec<RunFieldInput>,
+    done_text: String,
+    max_duration_ms: u32,
+    export_dir: String,
+}
+
+impl SessionInput {
+    fn build(&self) -> Result<SessionSpec, String> {
+        fn fit<const N: usize>(what: &str, raw: &str) -> Result<HString<N>, String> {
+            HString::try_from(raw).map_err(|_| {
+                format!(
+                    "the session's {what} is {} characters and a study can carry {N}; it is \
+                     refused rather than cut",
+                    raw.chars().count()
+                )
+            })
+        }
+        let mut run_fields = HVec::new();
+        for (index, field) in self.run_fields.iter().enumerate() {
+            run_fields
+                .push(RunField {
+                    name: fit::<MAX_RUN_FIELD_NAME_LEN>(&format!("run_fields[{index}] name"), &field.name)?,
+                    label: fit::<MAX_RUN_FIELD_LABEL_LEN>(&format!("run_fields[{index}] label"), &field.label)?,
+                    required: field.required,
+                })
+                .map_err(|_| format!("a session carries at most {MAX_RUN_FIELDS} run fields"))?;
+        }
+        Ok(SessionSpec {
+            start_text: fit::<MAX_SESSION_PROMPT_LEN>("start text", &self.start_text)?,
+            run_fields,
+            done_text: fit::<MAX_SESSION_PROMPT_LEN>("done text", &self.done_text)?,
+            max_duration_ms: self.max_duration_ms,
+            export_dir: fit::<MAX_EXPORT_DIR_LEN>("export_dir", &self.export_dir)?,
+        })
+    }
+}
+
+/// Puts the authored session on a built study and runs the crate's own
+/// analog-capture checks (`Study::validate_analog_capture`, which covers
+/// `validate_session`). Not part of `build_authored` for the reason
+/// [`apply_measurements`] is not: the session is host-only and sealed by
+/// neither CRC. Refused with the crate's own sentence, so a form and a run
+/// cannot disagree about why.
+fn apply_session(study: &mut Study, session: Option<&SessionInput>) -> Result<(), (StatusCode, String)> {
+    study.session = session
+        .map(SessionInput::build)
+        .transpose()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    study.validate_analog_capture().map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// The same refusal the Session and analog forms show inline, computed
+/// without the step table. Only the analog taps take part (a GATT tap's own
+/// checks need steps this does not have), and `build_taps` is the one place
+/// they are turned into a `StreamTap` and its `RecordCheck`.
+fn check_analog_capture(taps: &[TapInput], session: Option<&SessionInput>) -> Result<(), String> {
+    let analog: Vec<TapInput> =
+        taps.iter().filter(|t| matches!(t, TapInput::AnalogInput { .. })).cloned().collect();
+    let (streams, _, record_checks) = build_taps(&analog, &[], &StructRegistry::default())?;
+    let mut study = scratch_study(&[], streams);
+    study.record_checks = record_checks;
+    study.session = session.map(SessionInput::build).transpose()?;
+    study.validate_analog_capture().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnalogCheckRequest {
+    #[serde(default)]
+    taps: Vec<TapInput>,
+    #[serde(default)]
+    session: Option<SessionInput>,
+}
+
+/// `POST /api/study-designer/analog-check`: `{ "ok": true }`, or
+/// `{ "ok": false, "reason": <the crate's sentence> }`. A refusal is a normal
+/// answer here, not an HTTP error: the form shows it beside the field.
+pub async fn api_analog_check(Json(req): Json<AnalogCheckRequest>) -> axum::response::Response {
+    match check_analog_capture(&req.taps, req.session.as_ref()) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(reason) => Json(serde_json::json!({ "ok": false, "reason": reason })).into_response(),
+    }
+}
+
+/// What the analog and Session forms need to know about the crate's limits and
+/// defaults, served so the browser restates none of them.
+#[derive(Debug, Serialize)]
+struct AnalogLimits {
+    max_sample_hz: u32,
+    max_channels: u8,
+    max_samples_per_block: u16,
+    max_session_ms: u32,
+    max_prompt_len: usize,
+    max_run_fields: usize,
+    max_run_field_name_len: usize,
+    max_run_field_label_len: usize,
+    max_export_dir_len: usize,
+    default_sample_hz: u32,
+    default_channels: u8,
+    default_samples_per_block: u16,
+}
+
+fn analog_limits() -> AnalogLimits {
+    AnalogLimits {
+        max_sample_hz: MAX_ANALOG_SAMPLE_HZ,
+        max_channels: MAX_ANALOG_CHANNELS,
+        max_samples_per_block: MAX_ANALOG_SAMPLES_PER_BLOCK,
+        max_session_ms: MAX_SESSION_MS,
+        max_prompt_len: MAX_SESSION_PROMPT_LEN,
+        max_run_fields: MAX_RUN_FIELDS,
+        max_run_field_name_len: MAX_RUN_FIELD_NAME_LEN,
+        max_run_field_label_len: MAX_RUN_FIELD_LABEL_LEN,
+        max_export_dir_len: MAX_EXPORT_DIR_LEN,
+        default_sample_hz: DEFAULT_ANALOG_SAMPLE_HZ,
+        default_channels: DEFAULT_ANALOG_CHANNELS,
+        default_samples_per_block: DEFAULT_SAMPLES_PER_BLOCK,
     }
 }
 
@@ -832,6 +1014,30 @@ fn build_taps(
                     scope: StreamScope::WholeStudy,
                 }
             }
+            TapInput::AnalogInput { sample_hz, channel, channels, samples_per_block, .. } => {
+                // The framing check is minted with the tap's own `id`, as the
+                // GATT magic's is. Ranges are the crate's to judge
+                // (`validate_taps`, `validate_record_checks` below), so the
+                // refusal text is the crate's and not a second copy here.
+                record_checks
+                    .push(RecordCheck {
+                        stream_id: id,
+                        framing: RecordFraming::AnalogBlocks {
+                            channels: *channels,
+                            samples_per_block: *samples_per_block,
+                        },
+                    })
+                    .map_err(|_| {
+                        format!("more than {MAX_STREAMS_PER_STUDY} record checks in one study")
+                    })?;
+                StreamTap {
+                    id,
+                    name: tap_name,
+                    source: StreamSource::AnalogInput { sample_hz: *sample_hz, channel: *channel },
+                    encoding: StreamEncoding::Raw,
+                    scope: StreamScope::WholeStudy,
+                }
+            }
         };
 
         out.push(built).map_err(|_| {
@@ -845,21 +1051,7 @@ fn build_taps(
     // The crate computes the check (`Study::validate_stream_subscriptions`),
     // so it runs on a scratch `Study` carrying just these steps and taps;
     // the message keeps this tab's wording and names the tap by its name.
-    let scratch = Study {
-        name: HString::new(),
-        requires: Requirements::any(),
-        steps: steps.iter().cloned().collect(),
-        streams: out.clone(),
-        steps_crc: 0,
-        streams_crc: 0,
-        protocols: Default::default(),
-        protocols_crc: 0,
-        dev_bench_log_level: DevBenchLogLevel::default(),
-        decoders: Default::default(),
-        record_checks: Default::default(),
-        measurements: Default::default(),
-        session: None,
-    };
+    let scratch = scratch_study(steps, out.clone());
     scratch.validate_stream_subscriptions().map_err(|e| {
         format!(
             "stream tap '{}' captures {}, but no step in this study subscribes \
@@ -872,8 +1064,29 @@ fn build_taps(
 
     // The same pre-flight Core runs on submit, run here so an authoring
     // mistake is a message in this tab rather than a `400` from a round trip.
-    validate_taps(&out, steps.len() as u32, decoders.len()).map_err(|e| format!("{e:?}"))?;
+    validate_taps(&out, steps.len() as u32, decoders.len()).map_err(|e| e.to_string())?;
+    embarch_study_designer::validate_record_checks(&record_checks).map_err(|e| e.to_string())?;
     Ok((out, decoders, record_checks))
+}
+
+/// A `Study` carrying just `steps` and `streams`, for the crate's cross-checks
+/// that read a study rather than a slice.
+fn scratch_study(steps: &[Step], streams: StreamList) -> Study {
+    Study {
+        name: HString::new(),
+        requires: Requirements::any(),
+        steps: steps.iter().cloned().collect(),
+        streams,
+        steps_crc: 0,
+        streams_crc: 0,
+        protocols: Default::default(),
+        protocols_crc: 0,
+        dev_bench_log_level: DevBenchLogLevel::default(),
+        decoders: Default::default(),
+        record_checks: Default::default(),
+        measurements: Default::default(),
+        session: None,
+    }
 }
 
 /// The `GattTranscript` tap every study with a monitor step gets, appended
@@ -1078,6 +1291,8 @@ struct ActionsResponse {
     /// `limits::MAX_RECORD_MAGIC_LEN` — the longest record magic a tap may
     /// declare (`embarch-study-designer` decision 70).
     max_record_magic_len: usize,
+    /// The analog and Session forms' limits and defaults.
+    analog: AnalogLimits,
     /// `limits::MAX_STRUCT_FIELDS` — scalars per group in one payload
     /// layout, which is what the layout editor stops at.
     max_struct_fields: usize,
@@ -1407,6 +1622,7 @@ fn actions_response(sd: &StudyDesigner) -> axum::response::Response {
         max_stream_name_len: MAX_STREAM_NAME_LEN,
         max_protocols_per_study: embarch_study_designer::limits::MAX_PROTOCOLS_PER_STUDY,
         max_record_magic_len: MAX_RECORD_MAGIC_LEN,
+        analog: analog_limits(),
         max_struct_fields: embarch_study_designer::limits::MAX_STRUCT_FIELDS,
         scalar_types: embarch_study_designer::ScalarType::ALL.iter().map(|t| t.as_str()).collect(),
         dev_bench_log_levels: DevBenchLogLevel::ALL
@@ -1817,6 +2033,11 @@ pub struct RunRequest {
     /// (`ui` decision 104): this tab does not author them, it keeps them.
     #[serde(default)]
     measurements: Vec<serde_json::Value>,
+    /// The study's session (`embarch-study-designer` decision 106), authored
+    /// by the Session form. Absent is a study with no session, which the
+    /// crate accepts until it has an analog tap.
+    #[serde(default)]
+    session: Option<SessionInput>,
 }
 
 /// Builds, taps, and seals one authored study — everything `run` and `save`
@@ -1913,6 +2134,9 @@ pub async fn api_run(
         Err((code, e)) => return (code, e).into_response(),
     };
     if let Err((code, e)) = apply_measurements(&mut study, &req.measurements) {
+        return (code, e).into_response();
+    }
+    if let Err((code, e)) = apply_session(&mut study, req.session.as_ref()) {
         return (code, e).into_response();
     }
     // **No slug**: this study is the table as it stands, which may never
@@ -2253,6 +2477,9 @@ pub async fn api_preflight(
         Err((code, e)) => return (code, e).into_response(),
     };
     if let Err((code, e)) = apply_measurements(&mut study, &req.measurements) {
+        return (code, e).into_response();
+    }
+    if let Err((code, e)) = apply_session(&mut study, req.session.as_ref()) {
         return (code, e).into_response();
     }
 
@@ -2597,7 +2824,10 @@ fn preflight_saved(study: &Study) -> Result<(), String> {
         study.steps.len() as u32,
         study.decoders.len(),
     )
-    .map_err(|e| format!("{e:?}"))?;
+    .map_err(|e| e.to_string())?;
+    embarch_study_designer::validate_record_checks(&study.record_checks)
+        .map_err(|e| e.to_string())?;
+    study.validate_analog_capture().map_err(|e| e.to_string())?;
 
     for protocol in study.protocols.iter() {
         embarch_study_designer::validate_protocol(protocol)
@@ -3256,6 +3486,11 @@ pub struct SaveStudyRequest {
     /// (`ui` decision 104): this tab does not author them, it keeps them.
     #[serde(default)]
     measurements: Vec<serde_json::Value>,
+    /// The study's session (`embarch-study-designer` decision 106), authored
+    /// by the Session form. Absent is a study with no session, which the
+    /// crate accepts until it has an analog tap.
+    #[serde(default)]
+    session: Option<SessionInput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3282,6 +3517,9 @@ struct LoadedStudy {
     /// The file's `measurements`, verbatim; empty for a file that declares none.
     /// The tab shows their names and hands them back on save (`ui` decision 104).
     measurements: Vec<serde_json::Value>,
+    /// The file's `session`, verbatim: its stored shape is the form's shape.
+    /// `None` for a study that declares none.
+    session: Option<serde_json::Value>,
     /// Protocols the file carries that the repo's `.eap` no longer matches
     /// (decision 68). Advisory: the study still runs what it carries, and a
     /// re-save resolves the current definitions.
@@ -3418,6 +3656,9 @@ pub async fn api_studies_save(
     if let Err((code, e)) = apply_measurements(&mut study, &req.measurements) {
         return (code, e).into_response();
     }
+    if let Err((code, e)) = apply_session(&mut study, req.session.as_ref()) {
+        return (code, e).into_response();
+    }
 
     let mut value = match serde_json::to_value(&study) {
         Ok(serde_json::Value::Object(map)) => map,
@@ -3538,6 +3779,7 @@ pub async fn api_studies_load(
             .and_then(|m| m.as_array())
             .cloned()
             .unwrap_or_default(),
+        session: value.get("session").filter(|s| !s.is_null()).cloned(),
         protocol_divergence: sd
             .protocol_defs()
             .map(|current| divergence_notes(&value, &current))
@@ -3597,6 +3839,37 @@ fn taps_from_streams(value: &serde_json::Value) -> Vec<LoadedTap> {
                 .and_then(|n| n.as_str())
             {
                 return Some(TapInput::Outpost { name, signal: signal.to_string() });
+            }
+            if let Some(analog) = source.get("AnalogInput") {
+                // Off the tap's `AnalogBlocks` check, keyed by `stream_id`,
+                // like the record magic below. A tap with no such check
+                // loads with the crate's defaults, so the next save re-mints one.
+                let blocks = value
+                    .get("record_checks")
+                    .and_then(|c| c.as_array())
+                    .and_then(|checks| {
+                        checks.iter().find_map(|c| {
+                            if c.get("stream_id")?.as_u64()? != index as u64 {
+                                return None;
+                            }
+                            c.get("framing")?.get("AnalogBlocks")
+                        })
+                    });
+                let number = |v: Option<&serde_json::Value>, key: &str| {
+                    v.and_then(|v| v.get(key)).and_then(|n| n.as_u64())
+                };
+                return Some(TapInput::AnalogInput {
+                    name,
+                    sample_hz: number(Some(analog), "sample_hz")
+                        .and_then(|n| u32::try_from(n).ok())?,
+                    channel: number(Some(analog), "channel").and_then(|n| u8::try_from(n).ok())?,
+                    channels: number(blocks, "channels")
+                        .and_then(|n| u8::try_from(n).ok())
+                        .unwrap_or(DEFAULT_ANALOG_CHANNELS),
+                    samples_per_block: number(blocks, "samples_per_block")
+                        .and_then(|n| u16::try_from(n).ok())
+                        .unwrap_or(DEFAULT_SAMPLES_PER_BLOCK),
+                });
             }
             let gatt = source.get("GattNotify")?;
             // The decoder name comes back off `Study.decoders[i].name`,
@@ -3931,6 +4204,7 @@ mod tests {
             max_stream_name_len: MAX_STREAM_NAME_LEN,
             max_protocols_per_study: limits::MAX_PROTOCOLS_PER_STUDY,
             max_record_magic_len: MAX_RECORD_MAGIC_LEN,
+            analog: analog_limits(),
             max_struct_fields: limits::MAX_STRUCT_FIELDS,
             scalar_types: embarch_study_designer::ScalarType::ALL
                 .iter()
@@ -5034,6 +5308,242 @@ repeat = [{ name = "green", type = "i32le" }]
             TapInput::GattNotify { record_magic, .. } => assert_eq!(record_magic, b"GWF1"),
             other => panic!("expected a GattNotify tap, got {other:?}"),
         }
+    }
+
+    // --- analog capture and session (EMB-483) --------------------------------
+
+    fn analog_tap(hz: u32, channel: u8, channels: u8, spb: u16) -> TapInput {
+        TapInput::AnalogInput {
+            name: "mic".to_string(),
+            sample_hz: hz,
+            channel,
+            channels,
+            samples_per_block: spb,
+        }
+    }
+
+    /// What the form's defaults produce: one channel at 32 ksps, framed as
+    /// the owner's 256-sample blocks.
+    fn default_analog_tap() -> TapInput {
+        analog_tap(DEFAULT_ANALOG_SAMPLE_HZ, 0, DEFAULT_ANALOG_CHANNELS, DEFAULT_SAMPLES_PER_BLOCK)
+    }
+
+    fn session_input() -> SessionInput {
+        SessionInput {
+            start_text: "Connect the sensor, then press OK.".to_string(),
+            run_fields: vec![RunFieldInput {
+                name: "sensor".to_string(),
+                label: "Sensor serial".to_string(),
+                required: true,
+            }],
+            done_text: "Recording finished.".to_string(),
+            max_duration_ms: MAX_SESSION_MS,
+            export_dir: "exports/mic".to_string(),
+        }
+    }
+
+    fn authored_with(taps: &[TapInput], session: Option<&SessionInput>) -> Result<Study, String> {
+        let mut study = build_authored(
+            "analog",
+            &[],
+            &RequirementsInput::any(),
+            taps,
+            &ActionRegistry::default(),
+            &StructRegistry::default(),
+            &[],
+            None,
+        )
+        .map_err(|(_, e)| e)?;
+        apply_session(&mut study, session).map_err(|(_, e)| e)?;
+        Ok(study)
+    }
+
+    /// One row authors the source and the framing; the check carries the
+    /// tap's own id, `Raw` and `WholeStudy` are not choices.
+    #[test]
+    fn an_analog_tap_mints_its_source_and_its_block_check() {
+        let (taps, _, checks) =
+            build_taps(&[default_analog_tap()], &[], &StructRegistry::default()).unwrap();
+        assert_eq!(taps[0].source, StreamSource::AnalogInput { sample_hz: 32_000, channel: 0 });
+        assert_eq!(taps[0].encoding, StreamEncoding::Raw);
+        assert_eq!(taps[0].scope, StreamScope::WholeStudy);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].stream_id, taps[0].id);
+        assert_eq!(
+            checks[0].framing,
+            RecordFraming::AnalogBlocks { channels: 1, samples_per_block: DEFAULT_SAMPLES_PER_BLOCK }
+        );
+    }
+
+    /// The acceptance round trip: authored in the UI's shapes, saved as the
+    /// `Study` JSON, read back, and every one of the crate's checks passes on
+    /// what was read back.
+    #[test]
+    fn an_authored_analog_study_round_trips_through_the_crates_validation() {
+        let taps = [default_analog_tap()];
+        let session = session_input();
+        let study = authored_with(&taps, Some(&session)).unwrap();
+
+        let json = serde_json::to_value(&study).unwrap();
+        let back: Study = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, study);
+        assert_eq!(embarch_study_designer::validate_taps(&back.streams, 0, 0), Ok(()));
+        assert_eq!(embarch_study_designer::validate_record_checks(&back.record_checks), Ok(()));
+        assert_eq!(back.validate_analog_capture(), Ok(()));
+        assert_eq!(preflight_saved(&back), Ok(()));
+
+        // The load route hands the session back verbatim, in the form's shape.
+        let loaded: SessionInput = serde_json::from_value(json["session"].clone()).unwrap();
+        assert_eq!(loaded.build().unwrap(), session.build().unwrap());
+        assert_eq!(json["session"]["max_duration_ms"], MAX_SESSION_MS);
+        assert_eq!(json["session"]["run_fields"][0]["name"], "sensor");
+
+        // A file with no tap sidecar still loads its analog tap, framing included.
+        let recovered = taps_from_streams(&json);
+        match &recovered[..] {
+            [TapInput::AnalogInput { sample_hz, channel, channels, samples_per_block, .. }] => {
+                assert_eq!((*sample_hz, *channel, *channels), (32_000, 0, 1));
+                assert_eq!(*samples_per_block, DEFAULT_SAMPLES_PER_BLOCK);
+            }
+            other => panic!("expected one analog tap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_tap_sidecar_keeps_an_analog_tap_and_defaults_its_framing() {
+        let tap = analog_tap(48_000, 3, 2, 512);
+        let back: TapInput = serde_json::from_value(serde_json::to_value(&tap).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap()["kind"], "analog_input");
+        assert!(matches!(
+            back,
+            TapInput::AnalogInput { sample_hz: 48_000, channel: 3, channels: 2, samples_per_block: 512, .. }
+        ));
+        let bare: TapInput = serde_json::from_value(
+            serde_json::json!({ "kind": "analog_input", "name": "m", "sample_hz": 1000, "channel": 0 }),
+        )
+        .unwrap();
+        assert!(matches!(
+            bare,
+            TapInput::AnalogInput { channels: DEFAULT_ANALOG_CHANNELS, samples_per_block: DEFAULT_SAMPLES_PER_BLOCK, .. }
+        ));
+    }
+
+    /// Each refusal carries the crate's own sentence, and the inline check
+    /// route and the save/run path say the same thing.
+    #[test]
+    fn invalid_analog_values_are_refused_with_the_crates_reason() {
+        let ok_session = session_input();
+        let cases: Vec<(TapInput, &str)> = vec![
+            (analog_tap(0, 0, 1, 256), "analog rate"),
+            (analog_tap(MAX_ANALOG_SAMPLE_HZ + 1, 0, 1, 256), "analog rate"),
+            (analog_tap(32_000, MAX_ANALOG_CHANNELS, 1, 256), "channel"),
+            (analog_tap(32_000, 0, 0, 256), "channels"),
+            (analog_tap(32_000, 0, MAX_ANALOG_CHANNELS + 1, 256), "channels"),
+            (analog_tap(32_000, 0, 1, 0), "samples_per_block"),
+            (analog_tap(32_000, 0, 1, MAX_ANALOG_SAMPLES_PER_BLOCK + 1), "samples_per_block"),
+        ];
+        for (tap, needle) in cases {
+            let taps = [tap];
+            let err = authored_with(&taps, Some(&ok_session)).unwrap_err();
+            assert!(err.contains(needle), "{needle}: {err}");
+            assert_eq!(check_analog_capture(&taps, Some(&ok_session)).unwrap_err(), err);
+        }
+    }
+
+    #[test]
+    fn a_second_analog_tap_and_a_missing_session_are_refused() {
+        let mut second = default_analog_tap();
+        if let TapInput::AnalogInput { name, .. } = &mut second {
+            *name = "mic2".to_string();
+        }
+        let two = [default_analog_tap(), second];
+        let err = authored_with(&two, Some(&session_input())).unwrap_err();
+        assert!(err.contains("second analog input"), "{err}");
+
+        let one = [default_analog_tap()];
+        let err = authored_with(&one, None).unwrap_err();
+        assert!(err.contains("must declare a session"), "{err}");
+        assert_eq!(check_analog_capture(&one, None).unwrap_err(), err);
+    }
+
+    #[test]
+    fn an_invalid_session_is_refused_with_the_crates_reason() {
+        let taps = [default_analog_tap()];
+        let mut s = session_input();
+        s.max_duration_ms = MAX_SESSION_MS + 1;
+        let err = authored_with(&taps, Some(&s)).unwrap_err();
+        assert!(err.contains("max_duration_ms") && err.contains("5 minutes"), "{err}");
+
+        let mut s = session_input();
+        s.start_text = "  ".to_string();
+        assert!(authored_with(&taps, Some(&s)).unwrap_err().contains("start text is blank"));
+
+        let mut s = session_input();
+        s.done_text.clear();
+        assert!(authored_with(&taps, Some(&s)).unwrap_err().contains("done text is blank"));
+
+        let mut s = session_input();
+        s.export_dir = "../elsewhere".to_string();
+        assert!(authored_with(&taps, Some(&s)).unwrap_err().contains("export_dir"));
+
+        let mut s = session_input();
+        s.run_fields.push(s.run_fields[0].clone());
+        assert!(authored_with(&taps, Some(&s)).unwrap_err().contains("repeats the name"));
+
+        let mut s = session_input();
+        s.run_fields[0].label.clear();
+        assert!(authored_with(&taps, Some(&s)).unwrap_err().contains("run_fields[0]"));
+    }
+
+    /// Over-long text is refused naming the field, never cut to fit.
+    #[test]
+    fn an_over_long_session_field_is_refused_not_truncated() {
+        let mut s = session_input();
+        s.start_text = "x".repeat(MAX_SESSION_PROMPT_LEN + 1);
+        let err = s.build().unwrap_err();
+        assert!(err.contains("start text") && err.contains(&MAX_SESSION_PROMPT_LEN.to_string()), "{err}");
+
+        let mut s = session_input();
+        for _ in 0..=MAX_RUN_FIELDS {
+            s.run_fields.push(RunFieldInput {
+                name: "n".to_string(),
+                label: "l".to_string(),
+                required: false,
+            });
+        }
+        assert!(s.build().unwrap_err().contains("run fields"));
+    }
+
+    /// A study with no analog tap is untouched: no session is required, one
+    /// may still be declared, and a GATT tap beside an analog one keeps its
+    /// own id and check.
+    #[test]
+    fn analog_authoring_leaves_other_studies_and_taps_alone() {
+        assert!(authored_with(&[], None).is_ok());
+        assert!(authored_with(&[], Some(&session_input())).is_ok());
+
+        let (taps, _, checks) = build_taps(
+            &[gatt_tap_with_magic("framed", b"GWF1"), default_analog_tap()],
+            &monitoring_steps(),
+            &structs_toml(),
+        )
+        .unwrap();
+        assert_eq!(taps.len(), 2);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].stream_id, 0);
+        assert_eq!(checks[1].stream_id, 1);
+        // The inline check looks only at the analog taps, so it works without steps.
+        let mixed = [gatt_tap_with_magic("framed", b"GWF1"), default_analog_tap()];
+        assert_eq!(check_analog_capture(&mixed, Some(&session_input())), Ok(()));
+    }
+
+    #[test]
+    fn the_analog_forms_get_the_crates_limits_and_the_owners_defaults() {
+        let l = analog_limits();
+        assert_eq!(l.max_sample_hz, MAX_ANALOG_SAMPLE_HZ);
+        assert_eq!(l.max_session_ms, MAX_SESSION_MS);
+        assert_eq!((l.default_sample_hz, l.default_channels), (32_000, 1));
+        assert_eq!(l.default_samples_per_block, DEFAULT_SAMPLES_PER_BLOCK);
     }
 
     /// What a saved study's JSON actually carries. `build_authored` is the

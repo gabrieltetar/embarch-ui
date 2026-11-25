@@ -472,6 +472,7 @@ fn app(state: AppState) -> Router {
         .route("/api/study-designer/discover", post(study_designer::api_discover))
         .route("/api/study-designer/run", post(study_designer::api_run))
         .route("/api/study-designer/preflight", post(study_designer::api_preflight))
+        .route("/api/study-designer/analog-check", post(study_designer::api_analog_check))
         .route(
             "/api/study-designer/studies",
             get(study_designer::api_studies_list).post(study_designer::api_studies_save),

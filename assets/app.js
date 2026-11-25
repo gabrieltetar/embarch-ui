@@ -1264,6 +1264,13 @@
   var sdUnparsedEap = [];
   var sdMaxProtocols = null;
   var sdMaxRecordMagicLen = null;
+  /* The analog and Session forms' limits and defaults, as the crate states
+   * them (`/actions` -> `analog`). Null until served: a form with no limits
+   * offers no numbers rather than guessed ones. */
+  var sdAnalog = null;
+  /* The study's session, or null for none. Its shape is the stored
+   * `SessionSpec`'s, so it saves and loads unchanged. */
+  var sdSession = null;
   var sdMaxStructFields = null;
   var sdScalarTypes = [];
   var sdLogLevels = [];
@@ -1547,6 +1554,7 @@
     if (data && typeof data.max_record_magic_len === "number") {
       sdMaxRecordMagicLen = data.max_record_magic_len;
     }
+    sdAnalog = (data && data.analog) || null;
     if (data && typeof data.max_struct_fields === "number") {
       sdMaxStructFields = data.max_struct_fields;
     }
@@ -2518,6 +2526,7 @@
         taps: sdTaps,
         dev_bench_log_level: sdLogLevelPayload(),
         measurements: sdMeasurements,
+        session: sdSession,
       }),
     });
     var text = await resp.text();
@@ -2670,6 +2679,9 @@
     sdLogLevel = loaded.dev_bench_log_level || null;
     renderSdLogLevels();
     sdMeasurements = loaded.measurements || [];
+    // Assigned on every call, like the rest: a new study clears the last one's session.
+    sdSession = loaded.session || null;
+    renderSdSession();
     renderSdBuildOptsSummary();
     sdTaps = (loaded.taps || []).map(function (tap) {
       if (tap.kind !== "gatt_notify") return tap;
@@ -4574,6 +4586,213 @@
     );
   }
 
+  /* --- the analog input tap and the session (`embarch-study-designer`
+   * decisions 104 to 106) -------------------------------------------------
+   *
+   * **A number is typed, never judged here.** The crate owns every range, so
+   * the browser clamps a value only to the width of the field it travels in
+   * (so it still serialises) and the crate's own sentence says what is wrong,
+   * through `/analog-check`. A second copy of a limit in this file would stop
+   * tracking the first. */
+  function sdUint(raw, max) {
+    var n = Math.trunc(Number(raw));
+    if (!isFinite(n) || n < 0) return 0;
+    return Math.min(n, max);
+  }
+  var SD_U8_MAX = 255;
+  var SD_U16_MAX = 65535;
+  var SD_U32_MAX = 4294967295;
+
+  function sdNewAnalogTap() {
+    var a = sdAnalog || {};
+    return {
+      kind: "analog_input",
+      name: "analog",
+      sample_hz: a.default_sample_hz || 0,
+      channel: 0,
+      channels: a.default_channels || 0,
+      samples_per_block: a.default_samples_per_block || 0,
+    };
+  }
+
+  function sdDefaultSession() {
+    var a = sdAnalog || {};
+    return {
+      start_text: "Connect the sensor, then press OK to start recording.",
+      run_fields: [],
+      done_text: "Recording finished. Disconnect the sensor.",
+      max_duration_ms: a.max_session_ms || 0,
+      export_dir: "exports",
+    };
+  }
+
+  function sdNumberInput(attr, i, value, max) {
+    return (
+      '<input class="sd-input mono" type="number" min="0"' +
+      (max != null ? ' max="' + max + '"' : "") + " " + attr + '="' + i + '" value="' + value + '" />'
+    );
+  }
+
+  function sdAnalogTapCells(tap, i) {
+    var a = sdAnalog || {};
+    return (
+      '<td><div class="sd-param">sample rate (Hz)' +
+      sdNumberInput("data-tap-hz", i, tap.sample_hz, a.max_sample_hz) + "</div>" +
+      '<div class="sd-param" style="margin-top:4px;">channel (an index; the pin is the board overlay\'s)' +
+      sdNumberInput("data-tap-channel", i, tap.channel, a.max_channels != null ? a.max_channels - 1 : null) +
+      "</div></td>" +
+      '<td class="mono placeholder-note">Raw · WholeStudy — framed sample blocks, each ' +
+      "checked by its CRC-32, decoded and exported as a WAV after the run</td>"
+    );
+  }
+
+  function sdAnalogFramingCell(tap, i) {
+    var a = sdAnalog || {};
+    return (
+      '<td><div class="sd-param">AnalogBlocks · channels per block' +
+      sdNumberInput("data-tap-channels", i, tap.channels, a.max_channels) + "</div>" +
+      '<div class="sd-param" style="margin-top:4px;">samples per channel per block' +
+      sdNumberInput("data-tap-spb", i, tap.samples_per_block, a.max_samples_per_block) + "</div></td>"
+    );
+  }
+
+  /* Asks the server whether the analog taps and the session fit together, and
+   * shows the crate's reason under the table. Debounced: it runs on every
+   * keystroke of a number field. A refusal is the normal answer, not an error. */
+  var sdAnalogCheckTimer = null;
+  var sdAnalogCheckSeq = 0;
+  function sdScheduleAnalogCheck() {
+    if (sdAnalogCheckTimer) clearTimeout(sdAnalogCheckTimer);
+    sdAnalogCheckTimer = setTimeout(sdRunAnalogCheck, 250);
+  }
+  async function sdRunAnalogCheck() {
+    var box = sdEl("sd-analog-check");
+    if (!box) return;
+    var hasAnalog = sdTaps.some(function (t) { return t.kind === "analog_input"; });
+    if (!hasAnalog && !sdSession) {
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    var seq = ++sdAnalogCheckSeq;
+    try {
+      var resp = await fetch("/api/study-designer/analog-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taps: sdTaps, session: sdSession }),
+      });
+      if (!resp.ok) return;
+      var result = await resp.json();
+      if (seq !== sdAnalogCheckSeq) return; // a newer edit is already being checked
+      box.textContent = result.ok ? "" : result.reason;
+      box.style.display = result.ok ? "none" : "block";
+    } catch (e) {
+      // Unreachable server: say nothing. Save and Run refuse with the same
+      // sentence, so no refusal is lost, only shown later.
+    }
+  }
+
+  function sdRunFieldRows() {
+    var a = sdAnalog || {};
+    return sdSession.run_fields
+      .map(function (f, i) {
+        return (
+          '<div style="display:flex; gap:6px; margin-bottom:4px;">' +
+          '<input class="sd-input mono" style="flex:0 0 160px;" data-sf-name="' + i + '" value="' +
+          escapeHtml(f.name) + '" placeholder="name (the key)" maxlength="' +
+          (a.max_run_field_name_len || "") + '" spellcheck="false" />' +
+          '<input class="sd-input" style="flex:1 1 auto;" data-sf-label="' + i + '" value="' +
+          escapeHtml(f.label) + '" placeholder="what the person is asked" maxlength="' +
+          (a.max_run_field_label_len || "") + '" />' +
+          '<label class="placeholder-note"><input type="checkbox" data-sf-required="' + i + '"' +
+          (f.required ? " checked" : "") + " /> required</label>" +
+          '<button class="sd-icon-btn" data-sf-remove="' + i + '" title="Remove this run field">✕</button></div>'
+        );
+      })
+      .join("");
+  }
+
+  function renderSdSession() {
+    var box = sdEl("sd-session-form");
+    if (!box) return;
+    var toggle = sdEl("sd-session-toggle");
+    if (toggle) toggle.textContent = sdSession ? "Remove session" : "+ Add session";
+    if (!sdSession) {
+      box.innerHTML =
+        '<p class="placeholder-note">No session. An analog input needs one: it carries the ' +
+        "time cap and the export folder.</p>";
+      sdScheduleAnalogCheck();
+      return;
+    }
+    var a = sdAnalog || {};
+    var s = sdSession;
+    box.innerHTML =
+      '<div class="sd-param">Start text — shown before the first step' +
+      '<textarea class="sd-input" rows="2" data-session="start_text" maxlength="' +
+      (a.max_prompt_len || "") + '">' + escapeHtml(s.start_text) + "</textarea></div>" +
+      '<div class="sd-param" style="margin-top:8px;">Run fields — asked at Start, answers recorded with the run' +
+      sdRunFieldRows() +
+      '<button class="btn" id="sd-session-add-field"' +
+      (a.max_run_fields != null && s.run_fields.length >= a.max_run_fields ? " disabled" : "") +
+      ">+ Run field</button></div>" +
+      '<div class="sd-param" style="margin-top:8px;">Done text — shown when the capture ends or the cap is reached' +
+      '<textarea class="sd-input" rows="2" data-session="done_text" maxlength="' +
+      (a.max_prompt_len || "") + '">' + escapeHtml(s.done_text) + "</textarea></div>" +
+      '<div style="display:flex; gap:12px; margin-top:8px;">' +
+      '<div class="sd-param" style="flex:0 0 220px;">Time cap (ms)' +
+      '<input class="sd-input mono" type="number" min="0" data-session="max_duration_ms" value="' +
+      s.max_duration_ms + '" />' +
+      '<span class="placeholder-note">' + (a.max_session_ms ? "at most " + a.max_session_ms + " ms" : "") + "</span></div>" +
+      '<div class="sd-param" style="flex:1 1 auto;">Export folder — relative or absolute, no ".." component' +
+      '<input class="sd-input mono" data-session="export_dir" value="' + escapeHtml(s.export_dir) +
+      '" maxlength="' + (a.max_export_dir_len || "") + '" spellcheck="false" /></div></div>';
+    sdScheduleAnalogCheck();
+  }
+
+  function initSdSession() {
+    var box = sdEl("sd-session-form");
+    var toggle = sdEl("sd-session-toggle");
+    if (!box || !toggle) return;
+    toggle.addEventListener("click", function () {
+      sdSession = sdSession ? null : sdDefaultSession();
+      renderSdSession();
+    });
+    box.addEventListener("input", function (ev) {
+      if (!sdSession) return;
+      var f = ev.target.getAttribute("data-session");
+      if (f !== null) {
+        sdSession[f] = f === "max_duration_ms" ? sdUint(ev.target.value, SD_U32_MAX) : ev.target.value;
+      } else if (ev.target.getAttribute("data-sf-name") !== null) {
+        sdSession.run_fields[Number(ev.target.getAttribute("data-sf-name"))].name = ev.target.value;
+      } else if (ev.target.getAttribute("data-sf-label") !== null) {
+        sdSession.run_fields[Number(ev.target.getAttribute("data-sf-label"))].label = ev.target.value;
+      } else {
+        return;
+      }
+      sdScheduleAnalogCheck();
+    });
+    box.addEventListener("change", function (ev) {
+      var r = ev.target.getAttribute("data-sf-required");
+      if (sdSession && r !== null) {
+        sdSession.run_fields[Number(r)].required = ev.target.checked;
+        sdScheduleAnalogCheck();
+      }
+    });
+    box.addEventListener("click", function (ev) {
+      if (!sdSession) return;
+      if (ev.target.id === "sd-session-add-field") {
+        sdSession.run_fields.push({ name: "", label: "", required: false });
+        renderSdSession();
+        return;
+      }
+      var btn = ev.target.closest("[data-sf-remove]");
+      if (btn) {
+        sdSession.run_fields.splice(Number(btn.getAttribute("data-sf-remove")), 1);
+        renderSdSession();
+      }
+    });
+  }
+
   /* The record-framing cell.
    *
    * **Only a `gatt_notify` tap gets controls.** An outpost trace is a raw
@@ -4588,6 +4807,7 @@
    * which is exactly that function's two modes; a third spelling here would
    * be a second byte grammar in one file. */
   function sdRecordFramingCell(tap, i) {
+    if (tap.kind === "analog_input") return sdAnalogFramingCell(tap, i);
     if (tap.kind !== "gatt_notify") {
       return (
         '<td><span class="placeholder-note">not applicable — an outpost trace is a raw ' +
@@ -4649,7 +4869,11 @@
           "<tr><td>" + (i + 1) + "</td>" +
           '<td><input class="sd-input mono" data-tap-name="' + i + '" value="' +
           escapeHtml(tap.name) + '" spellcheck="false" /></td>' +
-          (isGatt ? sdGattTapCells(tap, i) : sdOutpostTapCells(tap, i)) +
+          (isGatt
+            ? sdGattTapCells(tap, i)
+            : tap.kind === "analog_input"
+              ? sdAnalogTapCells(tap, i)
+              : sdOutpostTapCells(tap, i)) +
           // Emitted here rather than inside each kind's own cell builder, so
           // a column can never be added to one kind and forgotten on the
           // other — which is a row with the wrong number of cells, and a
@@ -4661,6 +4885,7 @@
       })
       .join("");
     sdEl("sd-taps-empty").style.display = sdTaps.length ? "none" : "block";
+    sdScheduleAnalogCheck();
   }
 
   /* Parses one tap's magic out of what was typed, in the mode chosen.
@@ -4728,6 +4953,17 @@
       });
       renderSdTaps();
     });
+    sdEl("sd-add-analog-tap").addEventListener("click", function () {
+      sdTaps.push(sdNewAnalogTap());
+      // An analog input without a session is refused by the crate, so adding
+      // the first one adds the default session beside it; removing the tap
+      // leaves the session for the author to keep or remove.
+      if (!sdSession) {
+        sdSession = sdDefaultSession();
+        renderSdSession();
+      }
+      renderSdTaps();
+    });
     sdEl("sd-add-gatt-tap").addEventListener("click", function () {
       var first = sdSubscribable[0];
       sdTaps.push({
@@ -4770,6 +5006,19 @@
       }
       var m = ev.target.getAttribute("data-tap-magic");
       if (m !== null) sdApplyMagic(sdTaps[Number(m)], ev.target.value);
+      var analog = [
+        ["data-tap-hz", "sample_hz", SD_U32_MAX],
+        ["data-tap-channel", "channel", SD_U8_MAX],
+        ["data-tap-channels", "channels", SD_U8_MAX],
+        ["data-tap-spb", "samples_per_block", SD_U16_MAX],
+      ];
+      analog.forEach(function (a) {
+        var at = ev.target.getAttribute(a[0]);
+        if (at !== null) {
+          sdTaps[Number(at)][a[1]] = sdUint(ev.target.value, a[2]);
+          sdScheduleAnalogCheck();
+        }
+      });
     });
     tbody.addEventListener("change", function (ev) {
       var i = ev.target.getAttribute("data-tap-signal");
@@ -5031,6 +5280,7 @@
           taps: sdTaps,
           dev_bench_log_level: sdLogLevelPayload(),
         measurements: sdMeasurements,
+        session: sdSession,
         }),
       });
     } catch (e) {
@@ -5107,6 +5357,7 @@
           // rejected making the level a property of anything but the study.
           dev_bench_log_level: sdLogLevelPayload(),
         measurements: sdMeasurements,
+        session: sdSession,
           // A run parameter, never a study field: a saved study must not carry
           // a waiver into every later re-read of its own results.
           allow_version_mismatch: !!allowMismatch,
@@ -5448,6 +5699,7 @@
       // being watched on the Live Study tab.
       sdRows = [];
       sdTaps = [];
+      sdSession = null;
       sdMeasurements = [];
       // Read out of the *previous* repo's source, down to the C identifiers
       // behind the names — the server drops its own copy on the same switch.
@@ -5601,6 +5853,7 @@
       sdDispatchRun(sdEl("sd-runcheck-allow").checked);
     });
     initSdTaps();
+    initSdSession();
     sdEl("sd-new-study").addEventListener("click", sdNewStudy);
     sdEl("sd-save").addEventListener("click", sdSaveStudy);
     sdEl("sd-log-level").addEventListener("change", function (e) {
