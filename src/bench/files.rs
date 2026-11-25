@@ -633,7 +633,7 @@ pub fn check_config_name(name: &str) -> Result<(), String> {
         name: PROBE.into(),
         steps: vec![HostStep {
             name: PROBE.into(),
-            action: HostAction::Prompt { text: PROBE.into(), bench_config: Some(name.to_string()) },
+            action: HostAction::Prompt { text: PROBE.into(), bench_config: Some(name.to_string()), kind: None, confirmed_by: None, answer: None },
             timeout_ms: 1,
             continue_on_fail: false,
             delay_before_ms: 0,
