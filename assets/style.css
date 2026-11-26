@@ -2612,3 +2612,8 @@ g.bn-dot rect { fill: currentColor; stroke: none; }
 .cf-sec { margin-top: 8px; }
 .cf-sec h4 { margin: 0 0 2px; font-size: 12px; opacity: .8; }
 .cf-err { color: var(--danger, #e5534b); margin-top: 6px; }
+.gc-bar { margin-top: 18px; }
+.gc-run { min-width: 22em; }
+.gc-table { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.gc-table th, .gc-table td { border: 1px solid var(--border, #555); padding: 2px 6px; text-align: left; overflow-wrap: anywhere; }
+.gc-ok { color: var(--success, #3fb950); margin-top: 6px; }

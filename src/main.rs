@@ -413,6 +413,8 @@ fn app(state: AppState) -> Router {
         .route("/api/live/prompt", post(live_study::api_live_prompt))
         .route("/api/live/cancel", post(live_study::api_live_cancel))
         .route("/api/confirmations", get(confirmations::api_confirmations).post(confirmations::api_confirm))
+        .route("/api/test-runs/{run_id}/card", get(confirmations::api_run_card))
+        .route("/api/test-runs/{run_id}/go", post(confirmations::api_run_go))
         .route("/api/prompts/events", get(live_study::api_prompt_events))
         .route("/api/studies", get(studies_api::api_studies))
         .route("/api/studies/{study_id}", get(studies_api::api_study))

@@ -54,20 +54,58 @@ pub struct ConfirmBody {
 pub async fn api_confirm(State(state): State<crate::AppState>, axum::extract::Json(body): axum::extract::Json<ConfirmBody>) -> Response {
     match state.core.confirm(&body.hash, &body.nonce, Some("ui")).await {
         Ok(done) => (StatusCode::CREATED, axum::Json(done)).into_response(),
-        Err(e) => {
-            let text = format!("{e:#}");
-            for (marker, code) in [
-                ("returned 400", StatusCode::BAD_REQUEST),
-                ("returned 403", StatusCode::FORBIDDEN),
-                ("returned 404", StatusCode::NOT_FOUND),
-                ("returned 409", StatusCode::CONFLICT),
-            ] {
-                if text.contains(marker) {
-                    return (code, reason_of(&text)).into_response();
-                }
-            }
-            (StatusCode::BAD_GATEWAY, text).into_response()
+        Err(e) => refusal(&format!("{e:#}")),
+    }
+}
+
+/// A Core refusal as its own status with its own reason: `400`, `403`, `404`,
+/// `409` and `422` pass through; any other failure is a `502` with the client's text.
+fn refusal(text: &str) -> Response {
+    for (marker, code) in [
+        ("returned 400", StatusCode::BAD_REQUEST),
+        ("returned 403", StatusCode::FORBIDDEN),
+        ("returned 404", StatusCode::NOT_FOUND),
+        ("returned 409", StatusCode::CONFLICT),
+        ("returned 422", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        if text.contains(marker) {
+            return (code, reason_of(text)).into_response();
         }
+    }
+    (StatusCode::BAD_GATEWAY, text.to_string()).into_response()
+}
+
+/// `GET /api/test-runs/{run_id}/card` — Core's go card for a prepared run, as Core
+/// sent it: `{run_id, run_hash, lease_holder, prepared_utc_ms, card, nonce,
+/// expires_utc_ms}`, every agent string still `{"agent_text": ...}` for the page to
+/// draw as text (decision 111). Core's refusal comes back as its own status.
+pub async fn api_run_card(State(state): State<crate::AppState>, axum::extract::Path(run_id): axum::extract::Path<String>) -> Response {
+    match state.core.test_run_card(&run_id).await {
+        Ok(card) => (StatusCode::OK, axum::Json(card)).into_response(),
+        Err(e) => refusal(&format!("{e:#}")),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct GoBody {
+    pub run_hash: String,
+    pub nonce: String,
+}
+
+/// `POST /api/test-runs/{run_id}/go` — the person's go, `{run_hash, nonce}` from the
+/// card the page drew, relayed through the one client with the person's token.
+/// **Core's refusal comes back as its own status with its own reason** (`422`
+/// `mismatched`, `expired` or `replayed`; `409` already started, an input
+/// unconfirmed, or the lease; `403`; `404`), never a success. The route never
+/// retries: the nonce is spent by the attempt, so the page reloads the card.
+pub async fn api_run_go(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    axum::extract::Json(body): axum::extract::Json<GoBody>,
+) -> Response {
+    match state.core.test_run_go(&run_id, &body.run_hash, &body.nonce).await {
+        Ok(done) => (StatusCode::OK, axum::Json(done)).into_response(),
+        Err(e) => refusal(&format!("{e:#}")),
     }
 }
 
@@ -92,6 +130,8 @@ mod tests {
         seen: Vec<(String, String)>,
         confirmed: Vec<Value>,
         refuse: Option<(StatusCode, &'static str)>,
+        /// Every go the fake Core was given, `(run_id, body)`; a go is used once.
+        goes: Vec<(String, Value)>,
     }
     type Shared = Arc<Mutex<Stub>>;
 
@@ -132,6 +172,31 @@ mod tests {
                     (StatusCode::CREATED, axum::Json(json!({ "entry": {}, "hash": "e" }))).into_response()
                 }),
             )
+            .route(
+                "/test-runs/{run_id}/card",
+                get(|S(s): S<Shared>, h: axum::http::HeaderMap, P(run_id): P<String>| async move {
+                    note(&s, "run-card", &h);
+                    axum::Json(json!({
+                        "run_id": run_id, "run_hash": "rh", "lease_holder": null, "prepared_utc_ms": 1,
+                        "card": { "unconfirmed": [{ "kind": "hook", "name": { "agent_text": MARKUP }, "hash": "h9" }] },
+                        "nonce": "go-1", "expires_utc_ms": 2
+                    }))
+                }),
+            )
+            .route(
+                "/test-runs/{run_id}/go",
+                post(|S(s): S<Shared>, h: axum::http::HeaderMap, P(run_id): P<String>, J(v): J<Value>| async move {
+                    note(&s, "go", &h);
+                    let mut s = s.lock().unwrap();
+                    let replayed = !s.goes.is_empty();
+                    s.goes.push((run_id.clone(), v));
+                    if replayed {
+                        return (StatusCode::UNPROCESSABLE_ENTITY, "replayed: this go was already used").into_response();
+                    }
+                    axum::Json(json!({ "run_id": run_id, "run_hash": "rh", "state": "started", "started_utc_ms": 3, "lease_holder": "x" }))
+                        .into_response()
+                }),
+            )
             .fallback(|| async { StatusCode::NOT_FOUND })
             .with_state(stub);
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -147,6 +212,8 @@ mod tests {
         let state = crate::AppState::headless(core, std::env::temp_dir(), None).await;
         let app = axum::Router::new()
             .route("/api/confirmations", get(api_confirmations).post(api_confirm))
+            .route("/api/test-runs/{run_id}/card", get(api_run_card))
+            .route("/api/test-runs/{run_id}/go", post(api_run_go))
             .with_state(state);
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -196,5 +263,36 @@ mod tests {
         let resp = http().post(format!("{ui}/api/confirmations")).json(&json!({ "hash": "h1", "nonce": "old" })).send().await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(resp.text().await.unwrap(), "nonce expired");
+    }
+
+    /// The go is given once with the person's token and the card's own run id, hash
+    /// and nonce; the second is Core's refusal, with Core's status and words, and the
+    /// route never sent it again by itself.
+    #[tokio::test]
+    async fn a_go_is_given_once_and_a_second_is_refused_with_cores_reason() {
+        let stub = Shared::default();
+        let ui = ui_over(&serve(stub.clone()).await).await;
+        let card: Value = http().get(format!("{ui}/api/test-runs/r1/card")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(card["card"]["unconfirmed"][0]["name"]["agent_text"], MARKUP, "an agent string stays data");
+        let body = json!({ "run_hash": card["run_hash"], "nonce": card["nonce"] });
+        let first = http().post(format!("{ui}/api/test-runs/r1/go")).json(&body).send().await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(first.json::<Value>().await.unwrap()["state"], "started");
+        let second = http().post(format!("{ui}/api/test-runs/r1/go")).json(&body).send().await.unwrap();
+        assert_eq!(second.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(second.text().await.unwrap(), "replayed: this go was already used");
+        let s = stub.lock().unwrap();
+        let sent = json!({ "run_id": "r1", "run_hash": "rh", "nonce": "go-1" });
+        assert_eq!(s.goes, vec![("r1".to_string(), sent.clone()), ("r1".to_string(), sent)], "one attempt per click, no retry");
+        assert!(s.seen.iter().all(|(_, a)| a == "Bearer person-x"), "{:?}", s.seen);
+    }
+
+    /// The go button is disabled while the card lists an unconfirmed input and names
+    /// it; the page draws every agent string as text.
+    #[test]
+    fn the_page_disables_the_go_on_an_unconfirmed_input_and_names_it() {
+        let js = include_str!("../assets/confirm.js");
+        assert!(js.contains("unconfirmed") && js.contains("goBtn.disabled"));
+        assert!(js.contains("agent_text"));
     }
 }
