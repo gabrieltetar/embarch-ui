@@ -331,6 +331,14 @@
     }
   }
 
+  function renderCoreIdentity(snapshot) {
+    const el = document.getElementById("core-identity");
+    const id = snapshot.core_identity;
+    if (!el || !id) return;
+    el.textContent = id.text;
+    el.classList.toggle("core-identity-warning", !!id.warning);
+  }
+
   function renderErrorBanner(elId, snapshot) {
     const el = document.getElementById(elId);
     if (!el) return;
@@ -568,6 +576,7 @@
       if (gone.length) publishVerdicts();
     }
     renderStatusChip(snapshot);
+    renderCoreIdentity(snapshot);
     renderTopology(snapshot);
     // The bench canvas (bench.js) is a file of its own and glows from the
     // same snapshot; it hears it here rather than opening a second stream.
