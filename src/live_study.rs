@@ -1913,6 +1913,7 @@ pub async fn api_live_prompt(
         answer: body.answer,
         answered_by: "ui".to_string(),
         run_fields: body.run_fields,
+        value: None,
     };
     match state.core.answer_prompt(&body.study_id, &req).await {
         Ok(done) => (StatusCode::OK, axum::Json(json!({
@@ -2553,6 +2554,8 @@ mod tests {
             opened_utc_ms: 1_000,
             deadline_utc_ms: deadline,
             session: None,
+            observation: None,
+            switched_on: Vec::new(),
         }
     }
 
