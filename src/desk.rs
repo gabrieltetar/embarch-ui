@@ -17,29 +17,11 @@ use axum::response::{IntoResponse, Response};
 use futures_util::stream::Stream;
 use std::convert::Infallible;
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-const DEFAULT_PORT: u16 = 4891;
-
-/// Where embarch-desk keeps its token: the same resolution the desk uses
-/// (`EMBARCH_DESK_CONFIG_DIR`, else `$XDG_CONFIG_HOME/embarch-desk`, else
-/// `~/.config/embarch-desk`). Both run as the same user on the same side.
-fn token_path() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("EMBARCH_DESK_CONFIG_DIR") {
-        return Some(PathBuf::from(d).join("desk-token"));
-    }
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        Some(x) => PathBuf::from(x),
-        None => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
-    };
-    Some(base.join("embarch-desk").join("desk-token"))
-}
-
 fn desk_url(rest: &str) -> String {
-    let port = std::env::var("EMBARCH_DESK_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT);
-    format!("http://127.0.0.1:{port}/{}", rest.trim_start_matches('/'))
+    format!("{}/{}", embarch_core_client::desk_discovery::base_url(), rest.trim_start_matches('/'))
 }
 
 fn client() -> &'static reqwest::Client {
@@ -131,7 +113,7 @@ pub(crate) async fn send(
 const VIEW_EVERY: Duration = Duration::from_secs(10);
 
 fn desk_token() -> Option<String> {
-    token_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+    embarch_core_client::desk_discovery::token_path().ok().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 async fn fetch_view() -> Result<String, String> {
@@ -182,7 +164,10 @@ mod tests {
     #[test]
     fn the_rest_of_the_path_lands_on_the_desks_own_route() {
         assert!(super::desk_url("tiles/w1@2026-10-22/approve").ends_with("/tiles/w1@2026-10-22/approve"));
-        assert!(super::desk_url("/view").ends_with(":4891/view") || std::env::var("EMBARCH_DESK_PORT").is_ok());
+        assert_eq!(
+            super::desk_url("/view"),
+            format!("http://127.0.0.1:{}/view", embarch_core_client::desk_discovery::port())
+        );
     }
 
     fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
