@@ -2606,6 +2606,7 @@ mod tests {
             opened_utc_ms: 1_000,
             deadline_utc_ms: deadline,
             session: None,
+            prompt_kind: None,
             observation: None,
             switched_on: Vec::new(),
         }
