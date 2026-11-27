@@ -45,6 +45,10 @@ embarch-core-client = { path = "../embarch-api/crates/embarch-core-client" }
 # files on disk, and the flash still goes over HTTP to Core like every other
 # hardware-adjacent call this crate makes.
 embarch-firmware-build = { path = "../embarch-api/crates/embarch-firmware-build" }
+# The suite's one systemd user-unit writer (`embarch-desk` decision 94), shared
+# with the desk rather than copied: `service install|uninstall|status` render
+# and manage embarch-ui.service through it. std and anyhow only.
+embarch-user-unit = { path = "../embarch-desk/crates/embarch-user-unit" }
 futures-util = "0.3"
 # `Study.streams`/`Study.requires` are `heapless`-backed, so authoring one
 # means constructing `heapless::String`/`Vec` directly (Phase D's tap and

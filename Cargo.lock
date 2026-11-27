@@ -461,6 +461,7 @@ dependencies = [
  "embarch-core-client",
  "embarch-firmware-build",
  "embarch-study-designer",
+ "embarch-user-unit",
  "futures-util",
  "heapless",
  "reqwest",
@@ -471,6 +472,13 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "embarch-user-unit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

@@ -3,9 +3,9 @@
 //! no VS Code window open. The launcher in `embarch-chat` reads and drives this
 //! unit through `systemctl --user`; it never spawns the binary.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+use embarch_user_unit as user_unit;
 use std::path::PathBuf;
-use std::process::Command;
 
 const UNIT: &str = "embarch-ui.service";
 
@@ -27,54 +27,16 @@ pub fn command(args: &[String]) -> Result<()> {
     }
 }
 
-fn unit_path() -> Result<PathBuf> {
-    let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        Some(x) => PathBuf::from(x),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config"),
-    };
-    Ok(config.join("systemd").join("user").join(UNIT))
-}
-
-/// One word of a unit line, double-quoted so a space stays inside it: `\`
-/// and `"` escaped, `%` doubled because systemd expands specifiers.
-fn quoted(word: &str) -> String {
-    format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"))
-}
-
-/// The unit text, as the desk writes its own: under WSL, `PATH` holds
-/// Windows folders like `/mnt/c/Program Files/…`, and systemd splits an
-/// unquoted assignment at the first space, so every assignment and the
-/// binary's path are quoted; `$` is doubled in ExecStart alone, the one of
-/// the two that expands variables. `PATH` is carried because a build runs
-/// `west` and the Atlas tab `git` and `pdftoppm`, and a user service starts
-/// with systemd's bare default.
+/// The unit this binary installs: no arguments, `PATH` and `CARRIED` from the
+/// installing shell, written by the suite's shared `embarch-user-unit`.
 fn unit_text(exe: &str, path_env: &str, vars: &[(&str, String)]) -> String {
-    let exe = quoted(&exe.replace('$', "$$"));
-    let env: String = std::iter::once(format!("PATH={path_env}"))
-        .chain(vars.iter().map(|(k, v)| format!("{k}={v}")))
-        .map(|e| format!("Environment={}\n", quoted(&e)))
-        .collect();
-    format!(
-        "[Unit]\n\
-         Description=EmbArch UI: the suite's browser UI\n\
-         After=network-online.target\n\n\
-         [Service]\n\
-         ExecStart={exe}\n\
-         {env}\
-         Restart=on-failure\n\
-         RestartSec=5\n\n\
-         [Install]\n\
-         WantedBy=default.target\n"
-    )
-}
-
-fn systemctl(args: &[&str]) -> Result<String> {
-    let out = Command::new("systemctl").arg("--user").args(args).output().context("running systemctl --user")?;
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if !out.status.success() && args[0] != "status" {
-        bail!("systemctl --user {}: {}", args.join(" "), text.trim());
-    }
-    Ok(text)
+    user_unit::unit_text(&user_unit::Unit {
+        description: "EmbArch UI: the suite's browser UI",
+        exe,
+        args: &[],
+        path_env,
+        vars,
+    })
 }
 
 /// Which config the service will read, said at install: the variable the unit
@@ -96,30 +58,20 @@ fn install() -> Result<()> {
     let path_env = std::env::var("PATH").unwrap_or_default();
     let vars: Vec<(&str, String)> =
         CARRIED.iter().filter_map(|&k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k, v))).collect();
-    let p = unit_path()?;
-    std::fs::create_dir_all(p.parent().expect("unit dir"))?;
-    std::fs::write(&p, unit_text(&exe.display().to_string(), &path_env, &vars))?;
-    systemctl(&["daemon-reload"])?;
-    systemctl(&["enable", "--now", UNIT])?;
-    systemctl(&["restart", UNIT])?;
+    let p = user_unit::install(UNIT, &unit_text(&exe.display().to_string(), &path_env, &vars))?;
     println!("installed {} → {}; it starts with your user session", p.display(), exe.display());
     println!("{}", config_note(vars.iter().any(|(k, _)| *k == "EMBARCH_UI_CONFIG"), crate::config::resolve()));
     Ok(())
 }
 
 fn uninstall() -> Result<()> {
-    let _ = systemctl(&["disable", "--now", UNIT]);
-    let p = unit_path()?;
-    if p.exists() {
-        std::fs::remove_file(&p)?;
-    }
-    systemctl(&["daemon-reload"])?;
+    let p = user_unit::uninstall(UNIT)?;
     println!("removed {}", p.display());
     Ok(())
 }
 
 fn status() -> Result<()> {
-    print!("{}", systemctl(&["status", "--no-pager", UNIT])?);
+    print!("{}", user_unit::status(UNIT)?);
     Ok(())
 }
 
@@ -147,6 +99,17 @@ mod tests {
         let u = super::unit_text("/h/bin/embarch-ui", "/usr/bin", &vars);
         assert!(u.contains("Environment=\"PATH=/usr/bin\"\nEnvironment=\"EMBARCH_UI_PORT=4890\"\nEnvironment=\"WSL_DISTRO_NAME=Ubuntu-24.04\"\n"), "{u}");
         assert!(!super::CARRIED.iter().any(|k| k.starts_with("EMBARCH_DESK") || k.starts_with("CLAUDE")));
+    }
+
+    #[test]
+    fn the_unit_text_is_byte_for_byte_what_the_ui_wrote_before_the_shared_crate() {
+        let vars = [("EMBARCH_UI_PORT", "4890".to_string()), ("WSL_DISTRO_NAME", "Ubuntu 24".to_string())];
+        let u = super::unit_text("/h/My Apps/$x/embarch-ui", "/h/bin:/mnt/c/Program Files/Git/cmd", &vars);
+        let want = "[Unit]\nDescription=EmbArch UI: the suite's browser UI\nAfter=network-online.target\n\n\
+[Service]\nExecStart=\"/h/My Apps/$$x/embarch-ui\"\n\
+Environment=\"PATH=/h/bin:/mnt/c/Program Files/Git/cmd\"\nEnvironment=\"EMBARCH_UI_PORT=4890\"\nEnvironment=\"WSL_DISTRO_NAME=Ubuntu 24\"\n\
+Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n";
+        assert_eq!(u, want);
     }
 
     #[test]
