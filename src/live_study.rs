@@ -885,6 +885,13 @@ fn prompt_json(study_id: &str, p: &PendingPrompt) -> Value {
         "opened_utc_ms": p.opened_utc_ms,
         "deadline_utc_ms": p.deadline_utc_ms,
         "remaining_ms": p.deadline_utc_ms.saturating_sub(now_utc_ms()),
+        // A Test run's prompt (`embarch-core` decision 138): its kind (null until
+        // `GET /study/{id}` has been read, `ui/124`), the observation's declared
+        // answer and the outputs Core last switched on. All null or empty
+        // outside a Test run, which the modal draws as before.
+        "kind": p.kind,
+        "observation": p.observation,
+        "switched_on": p.switched_on,
     });
     // A device study's session prompt (`embarch-core` decision 127) only: a host
     // study's prompt carries no `session` key at all, so it reaches the browser
@@ -1255,12 +1262,20 @@ async fn follow(core: Arc<CoreClient>, session: Arc<LiveSession>, prompts: broad
                 &item,
                 FollowItem::Event(StudyEvent::PromptPending { .. } | StudyEvent::PromptResolved { .. })
             );
+            let announced = match &item {
+                FollowItem::Event(StudyEvent::PromptPending { prompt_id, .. }) => Some(*prompt_id),
+                _ => None,
+            };
             let payload = ingest(&session, item);
             if let Some(payload) = payload {
                 if is_prompt {
                     let _ = prompts.send(payload.clone());
                 }
                 session.send(payload);
+            }
+            // The event carries no `kind` (`ui/124`): read it from the study's own record.
+            if let Some(prompt_id) = announced {
+                tokio::spawn(add_prompt_kind(core.clone(), session.clone(), prompts.clone(), prompt_id));
             }
         })
         .await;
@@ -1849,6 +1864,39 @@ pub async fn api_live_run(
     crate::study_designer::run_saved_study(&state, &req.slug, req.allow_version_mismatch).await
 }
 
+/// Sets a pending prompt's kind from what `GET /study/{id}` shows for it, and
+/// says what changed as a `prompt` frame; `None` when that is not the same
+/// prompt, or it has no kind, or the state already holds it.
+fn apply_polled_kind(state: &mut SessionState, study_id: &str, polled: Option<&PendingPrompt>) -> Option<String> {
+    let polled = polled?;
+    let kind = polled.kind?;
+    let held = state.pending_prompt.as_mut().filter(|p| p.prompt_id == polled.prompt_id)?;
+    if held.kind == Some(kind) {
+        return None;
+    }
+    held.kind = Some(kind);
+    let pending = prompt_json(study_id, held);
+    Some(frame("prompt", json!({ "study_id": study_id, "pending": pending, "resolved": null })))
+}
+
+/// A Test run's `PromptPending` event carries no `kind` until Core's EMB-577
+/// lands, so the kind is read from `GET /study/{id}`'s `pending_prompt` and
+/// the modal told again (`ui/124`). A failed read leaves the modal as it was.
+async fn add_prompt_kind(core: Arc<CoreClient>, session: Arc<LiveSession>, prompts: broadcast::Sender<String>, prompt_id: u32) {
+    let Ok(status) = core.get_study_status(&session.study_id).await else { return };
+    let payload = {
+        let mut state = session.state.lock().unwrap();
+        match status.pending_prompt.as_ref().filter(|p| p.prompt_id == prompt_id) {
+            Some(p) => apply_polled_kind(&mut state, &session.study_id, Some(p)),
+            None => None,
+        }
+    };
+    if let Some(payload) = payload {
+        let _ = prompts.send(payload.clone());
+        session.send(payload);
+    }
+}
+
 /// `GET /api/prompts/events` — the page's one stream of operator prompts,
 /// from every study this process follows. First frame is `prompts`, the ones
 /// waiting now; then a `prompt` frame per change. The modal is driven by this
@@ -1890,6 +1938,10 @@ pub struct PromptAnswerBody {
     /// for every other prompt.
     #[serde(default)]
     pub run_fields: Vec<RunFieldAnswer>,
+    /// An observation's answer: one of its declared choices (a string) or a
+    /// number. Core judges it; this page only relays it (`ui/124`).
+    #[serde(default)]
+    pub value: Option<Value>,
 }
 
 /// `POST /api/live/prompt` — the modal's Confirm / Cancel. Relays through
@@ -1913,7 +1965,7 @@ pub async fn api_live_prompt(
         answer: body.answer,
         answered_by: "ui".to_string(),
         run_fields: body.run_fields,
-        value: None,
+        value: body.value,
     };
     match state.core.answer_prompt(&body.study_id, &req).await {
         Ok(done) => (StatusCode::OK, axum::Json(json!({
@@ -2598,6 +2650,43 @@ mod tests {
         let session = LiveSession::new("abc".to_string());
         let v: Value = serde_json::from_str(&ingest(&session, FollowItem::Event(prompt_event(1, far))).unwrap()).unwrap();
         assert!(v["pending"]["bench_config"].is_null(), "{v}");
+    }
+
+    #[test]
+    fn a_polled_kind_reaches_the_pending_prompt_and_its_frame_once() {
+        use embarch_core_client::SwitchedOn;
+        use embarch_study_designer::host_study::PromptKind;
+        let session = LiveSession::new("abc".to_string());
+        let far = now_utc_ms() + 60_000;
+        ingest(&session, FollowItem::Event(prompt_event(1, far)));
+        let mut polled = session.state.lock().unwrap().pending_prompt.clone().unwrap();
+        polled.kind = Some(PromptKind::Observation);
+        polled.observation = Some(json!({ "name": "led", "answers": ["red", "green"] }));
+        polled.switched_on = vec![SwitchedOn { target: "led".into(), line: "on".into(), step: "s1".into() }];
+        let mut state = session.state.lock().unwrap();
+        let v: Value = serde_json::from_str(&apply_polled_kind(&mut state, "abc", Some(&polled)).unwrap()).unwrap();
+        assert_eq!(v["pending"]["kind"], "observation");
+        assert!(v["resolved"].is_null());
+        assert!(apply_polled_kind(&mut state, "abc", Some(&polled)).is_none());
+        // Another prompt's kind, or none at all, changes nothing.
+        let mut other = polled.clone();
+        other.prompt_id = 9;
+        assert!(apply_polled_kind(&mut state, "abc", Some(&other)).is_none());
+        assert!(apply_polled_kind(&mut state, "abc", None).is_none());
+        // Outputs and the observation travel as Core sent them.
+        let json = prompt_json("abc", &polled);
+        assert_eq!(json["switched_on"][0]["target"], "led");
+        assert_eq!(json["observation"]["answers"][1], "green");
+    }
+
+    #[test]
+    fn a_host_prompt_has_a_null_kind_and_no_outputs() {
+        let session = LiveSession::new("abc".to_string());
+        let far = now_utc_ms() + 60_000;
+        let v: Value = serde_json::from_str(&ingest(&session, FollowItem::Event(prompt_event(1, far))).unwrap()).unwrap();
+        assert!(v["pending"]["kind"].is_null());
+        assert!(v["pending"]["observation"].is_null());
+        assert_eq!(v["pending"]["switched_on"], json!([]));
     }
 
     #[test]

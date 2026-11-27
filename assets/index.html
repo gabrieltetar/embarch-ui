@@ -1274,6 +1274,12 @@
   <div class="card-title" id="prompt-heading">A study is waiting for you</div>
   <div id="prompt-step" class="prompt-step"></div>
   <div id="prompt-text" class="prompt-text"></div>
+  <!-- A Test run's prompt (`embarch-ui` decision 113): its kind, the outputs Core
+       last switched on, and an observation's choices or number field. Core's
+       words, drawn as text; empty and hidden for every other prompt. -->
+  <div id="prompt-kind" class="prompt-kind" hidden></div>
+  <ul id="prompt-outputs" class="prompt-outputs" hidden></ul>
+  <div id="prompt-observe" class="prompt-observe" hidden></div>
   <!-- A step that names a bench config (phase 5): the change from the live
        config drawn and listed, or the pick when the live bench lacks it, or
        one line why there is nothing to draw. Filled by app.js; never holds

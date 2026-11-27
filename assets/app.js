@@ -10619,11 +10619,87 @@
     // A session's Done can only be confirmed (embarch-core decision 127): there
     // is nothing to cancel, so it has no Cancel.
     var done = !!(pmCurrent && pmCurrent.p && pmCurrent.p.session && pmCurrent.p.session.phase === "done");
-    pmEl("prompt-confirm").style.display = open ? "" : "none";
+    // An observation's choices are its answers, in place of Confirm (ui decision 113).
+    var choices = !!(pmCurrent && pmCurrent.p && pmObservation(pmCurrent.p) && pmObservation(pmCurrent.p).answers.length);
+    pmEl("prompt-confirm").style.display = open && !choices ? "" : "none";
     pmEl("prompt-cancel").style.display = open && !done ? "" : "none";
     pmEl("prompt-close").style.display = open ? "none" : "";
     pmEl("prompt-confirm").disabled = false;
     pmEl("prompt-cancel").disabled = false;
+  }
+
+  // A Test run's prompt kinds, as the person is told them (`embarch-core`
+  // decision 138). An observation and a clearance are the person's own hand.
+  var PM_KINDS = {
+    setup: "Setup: a claim that the setup is done",
+    action: "Action: a timing mark, confirmed by a measurement",
+    observation: "Observation: only the person answers this",
+    clearance: "Clearance: only the person answers this, for their safety before anything is switched on",
+  };
+
+  // The observation Core declared, or null: `{name, answers: [...]}` or `{name, number: {unit, resolution}}`.
+  function pmObservation(p) {
+    var o = p && p.kind === "observation" ? p.observation : null;
+    if (!o || typeof o !== "object") return null;
+    var answers = Array.isArray(o.answers) ? o.answers.map(String) : [];
+    var number = o.number && typeof o.number === "object" ? o.number : null;
+    return answers.length || number ? { name: String(o.name || ""), answers: answers, number: number } : null;
+  }
+
+  // The kind line, the outputs Core last switched on and the observation's
+  // answer controls. Every string is Core's or the study's: textContent only.
+  function pmKind(p) {
+    var kind = pmEl("prompt-kind");
+    var known = p.kind && PM_KINDS[p.kind];
+    kind.hidden = !known;
+    kind.textContent = known ? PM_KINDS[p.kind] : "";
+    var list = pmEl("prompt-outputs");
+    list.textContent = "";
+    var on = Array.isArray(p.switched_on) ? p.switched_on : [];
+    list.hidden = on.length === 0;
+    on.forEach(function (o) {
+      var li = document.createElement("li");
+      li.textContent = "Switched on: " + o.target + " (" + o.line + ", step " + o.step + ")";
+      list.appendChild(li);
+    });
+    var box = pmEl("prompt-observe");
+    box.textContent = "";
+    var obs = pmObservation(p);
+    box.hidden = !obs;
+    if (!obs) return;
+    if (obs.answers.length) {
+      obs.answers.forEach(function (a) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn btn-primary";
+        b.textContent = a;
+        b.addEventListener("click", function () { pmAnswer("confirmed", a); });
+        box.appendChild(b);
+      });
+      return;
+    }
+    var label = document.createElement("label");
+    label.textContent = (obs.name ? obs.name + ": " : "");
+    var input = document.createElement("input");
+    input.type = "number";
+    input.step = obs.number.resolution > 0 ? String(obs.number.resolution) : "any";
+    input.setAttribute("autocomplete", "off");
+    label.appendChild(input);
+    var unit = document.createElement("span");
+    unit.textContent = obs.number.unit || "";
+    box.appendChild(label);
+    box.appendChild(unit);
+  }
+
+  // The observation's number as typed, or null when it is not one.
+  function pmNumber() {
+    var el = pmEl("prompt-observe").querySelector("input");
+    if (!el || el.value.trim() === "" || !isFinite(Number(el.value))) return null;
+    return Number(el.value);
+  }
+
+  function pmObserveLock(on) {
+    Array.prototype.forEach.call(pmEl("prompt-observe").querySelectorAll("button, input"), function (el) { el.disabled = !!on; });
   }
 
   // A session Start's run fields, one input per declared field in declared
@@ -10685,6 +10761,7 @@
         (p.bench_config ? " \u2014 bench config '" + p.bench_config + "'" : "");
     pmEl("prompt-confirm").textContent = sess ? (sess.phase === "done" ? "Done" : "Start") : "Confirm";
     pmFields(sess);
+    pmKind(p);
     pmEl("prompt-text").textContent = p.text || "";
     pmEl("prompt-result").style.display = "none";
     if (pmCarry) {
@@ -10695,7 +10772,7 @@
     pmSetButtons(true);
     pmEl("prompt-backdrop").style.display = "";
     pmEl("prompt-dialog").style.display = "";
-    var firstField = pmEl("prompt-fields").querySelector("input");
+    var firstField = pmEl("prompt-fields").querySelector("input") || pmEl("prompt-observe").querySelector("input, button");
     (firstField || pmEl("prompt-confirm")).focus();
     document.title = "Prompt waiting - EmbArch";
     if (pmTimer) clearInterval(pmTimer);
@@ -10737,11 +10814,21 @@
     r.style.display = "";
     pmSetButtons(false);
     pmPickLock(true);
+    pmObserveLock(true);
     pmEl("prompt-close").focus();
   }
 
   function pmAdd(p, announce) {
-    if (pmCurrent && pmCurrent.study_id === p.study_id && pmCurrent.prompt_id === p.prompt_id) return;
+    if (pmCurrent && pmCurrent.study_id === p.study_id && pmCurrent.prompt_id === p.prompt_id) {
+      // The same prompt again, now with its kind (read from Core's study record): drawn in place,
+      // never while an answer is on its way or the prompt has ended.
+      if (!pmCurrent.resolved && !pmCurrent.sending && p.kind && p.kind !== pmCurrent.p.kind) {
+        pmCurrent.p = p;
+        pmKind(p);
+        pmSetButtons(true);
+      }
+      return;
+    }
     if (pmCurrent && !pmCurrent.resolved) {
       if (!pmQueue.some(function (q) { return q.study_id === p.study_id && q.prompt_id === p.prompt_id; })) pmQueue.push(p);
       return;
@@ -10797,13 +10884,25 @@
     }
   }
 
-  async function pmAnswer(answer) {
+  async function pmAnswer(answer, choice) {
     if (!pmCurrent || pmCurrent.resolved) return;
     var cur = pmCurrent;
+    // An observation's value rides with Confirm only (a Cancel carries none);
+    // a number field left empty or not a number is not sent.
+    var value;
+    if (answer === "confirmed" && pmObservation(cur.p)) {
+      value = choice !== undefined ? choice : pmNumber();
+      if (value === null || value === undefined) {
+        pmEl("prompt-result").textContent = "Enter the number you read before confirming.";
+        pmEl("prompt-result").style.display = "";
+        return;
+      }
+    }
     pmEl("prompt-confirm").disabled = true;
     pmEl("prompt-cancel").disabled = true;
     Array.prototype.forEach.call(pmEl("prompt-fields").querySelectorAll("input"), function (el) { el.disabled = true; });
     pmPickLock(true);
+    pmObserveLock(true);
     cur.answeredHere = true;
     cur.sending = true;
     var here = function () { return pmCurrent === cur; };
@@ -10813,16 +10912,19 @@
       pmEl("prompt-cancel").disabled = false;
       Array.prototype.forEach.call(pmEl("prompt-fields").querySelectorAll("input"), function (el) { el.disabled = false; });
       pmPickLock(false);
+      pmObserveLock(false);
     };
     try {
       var resp = await fetch("/api/live/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
-          // Only a confirmed session Start carries run fields; any other answer is the body it always was.
+          // Only a confirmed session Start carries run fields, and only a confirmed observation a value; any other answer is the body it always was.
           cur.p.session && cur.p.session.phase === "start" && answer === "confirmed"
             ? { study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer, run_fields: pmFieldValues() }
-            : { study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer }
+            : value !== undefined
+              ? { study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer, value: value }
+              : { study_id: cur.study_id, prompt_id: cur.prompt_id, answer: answer }
         ),
       });
       cur.sending = false;
@@ -11187,6 +11289,7 @@
     pmEl("prompt-countdown").textContent = "";
     pmSetButtons(false);
     pmPickLock(true);
+    pmObserveLock(true);
     pmEl("prompt-close").focus();
     var next = pmQueue.shift();
     if (next) pmShow(next);
@@ -11206,6 +11309,7 @@
     }
     pmSetButtons(false);
     pmPickLock(true);
+    pmObserveLock(true);
     pmEl("prompt-close").focus();
     var next = pmQueue.shift();
     if (next) {
