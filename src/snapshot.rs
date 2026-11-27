@@ -74,11 +74,11 @@ impl CoreIdentity {
 
     /// The line for what the client's `attestation()` reported.
     ///
-    /// `service` or `development` is read from whether the Core's key is the
-    /// installed one: `embarch-core-client`'s `StatusResponse` drops the
-    /// `mode` Core reports, so the UI cannot read that field itself. A Core
-    /// that gave no fingerprint says its mode is unknown.
-    pub fn from_attestation(a: &Attestation) -> CoreIdentity {
+    /// The mode half is the `mode` Core reported in `/status` (`reported_mode`),
+    /// `None` reading as unknown, never `service`. The match against the
+    /// installed fingerprint decides only the verdict half and the warning.
+    /// A Core that gave no fingerprint says its mode is unknown.
+    pub fn from_attestation(a: &Attestation, reported_mode: Option<&str>) -> CoreIdentity {
         let Some(fp) = a.fingerprint.as_deref() else {
             return match (&a.error, a.mode) {
                 (Some(e), _) => CoreIdentity {
@@ -93,10 +93,11 @@ impl CoreIdentity {
             };
         };
         let shown: String = fp.chars().take(FINGERPRINT_SHOWN).collect();
-        let (mode, verdict, warning) = match a.matches {
-            Some(true) => ("service", "matches the installed fingerprint", false),
-            Some(false) => ("development", "does not match", true),
-            None => ("mode unknown", "no attested install on this machine", false),
+        let mode = reported_mode.unwrap_or("mode unknown");
+        let (verdict, warning) = match a.matches {
+            Some(true) => ("matches the installed fingerprint", false),
+            Some(false) => ("does not match", true),
+            None => ("no attested install on this machine", false),
         };
         CoreIdentity { text: format!("Core: {mode}, {shown}, {verdict}"), warning }
     }
@@ -150,6 +151,7 @@ pub async fn poll(core: &CoreClient) -> Snapshot {
     // process listening, a bad token), so surfacing one clear cause beats
     // concatenating five near-identical ones.
     let error = status.as_ref().err().map(|e| format!("{e:#}"));
+    let reported_mode = status.as_ref().ok().and_then(|s| s.mode.clone());
 
     Snapshot {
         core_reachable,
@@ -171,7 +173,7 @@ pub async fn poll(core: &CoreClient) -> Snapshot {
             _ => None,
         },
         serial_ports: serial_ports.unwrap_or_default(),
-        core_identity: CoreIdentity::from_attestation(&attestation),
+        core_identity: CoreIdentity::from_attestation(&attestation, reported_mode.as_deref()),
     }
 }
 
@@ -194,39 +196,52 @@ mod tests {
 
     #[test]
     fn a_service_core_reads_service_with_sixteen_hex_and_a_match() {
-        let id = CoreIdentity::from_attestation(&att(TokenMode::Matched, Some(SERVICE_FP), Some(SERVICE_FP), Some(true), None));
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Matched, Some(SERVICE_FP), Some(SERVICE_FP), Some(true), None), Some("service"));
         assert_eq!(id.text, "Core: service, 0123456789abcdef, matches the installed fingerprint");
         assert!(!id.warning);
     }
 
     #[test]
     fn a_development_core_reads_development_and_is_a_warning() {
-        let id = CoreIdentity::from_attestation(&att(TokenMode::Development, Some(DEV_FP), Some(SERVICE_FP), Some(false), None));
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Development, Some(DEV_FP), Some(SERVICE_FP), Some(false), None), Some("development"));
         assert_eq!(id.text, "Core: development, fedcba9876543210, does not match");
         assert!(id.warning);
     }
 
     #[test]
     fn a_refused_foreign_core_is_still_a_mismatch_warning() {
-        let id = CoreIdentity::from_attestation(&att(TokenMode::Refused, Some(DEV_FP), Some(SERVICE_FP), Some(false), Some("no development token")));
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Refused, Some(DEV_FP), Some(SERVICE_FP), Some(false), Some("no development token")), Some("development"));
         assert!(id.warning);
         assert!(id.text.contains("does not match"), "{}", id.text);
     }
 
     #[test]
     fn no_installed_fingerprint_says_no_attested_install_and_is_not_a_warning() {
-        let id = CoreIdentity::from_attestation(&att(TokenMode::Unattested, None, None, None, None));
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Unattested, None, None, None, None), None);
         assert!(id.text.contains("no attested install on this machine"), "{}", id.text);
         assert!(!id.warning);
-        let id = CoreIdentity::from_attestation(&att(TokenMode::Explicit, Some(SERVICE_FP), None, None, None));
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Explicit, Some(SERVICE_FP), None, None, None), None);
         assert!(id.text.contains("no attested install on this machine"), "{}", id.text);
     }
 
     #[test]
     fn a_core_that_reports_no_mode_gets_a_line_saying_so() {
-        let id = CoreIdentity::from_attestation(&att(TokenMode::Refused, None, Some(SERVICE_FP), None, Some("404 on /auth/challenge")));
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Refused, None, Some(SERVICE_FP), None, Some("404 on /auth/challenge")), None);
         assert!(id.text.contains("did not report a mode or fingerprint"), "{}", id.text);
         assert!(id.text.contains("404"), "{}", id.text);
         assert!(id.warning);
+    }
+
+    #[test]
+    fn a_development_core_whose_key_is_the_installed_one_still_reads_development() {
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Matched, Some(SERVICE_FP), Some(SERVICE_FP), Some(true), None), Some("development"));
+        assert_eq!(id.text, "Core: development, 0123456789abcdef, matches the installed fingerprint");
+        assert!(!id.warning);
+    }
+
+    #[test]
+    fn a_core_that_reports_no_mode_reads_unknown_not_service() {
+        let id = CoreIdentity::from_attestation(&att(TokenMode::Matched, Some(SERVICE_FP), Some(SERVICE_FP), Some(true), None), None);
+        assert_eq!(id.text, "Core: mode unknown, 0123456789abcdef, matches the installed fingerprint");
     }
 }
